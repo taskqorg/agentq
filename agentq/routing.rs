@@ -1,7 +1,7 @@
 //! Loopback routing (agentq.md § 4, § 5): fixed ports in `data/config.json`, headroom workers owned by the service,
 //! per-agent routing state and drift.
 //!
-//! ponytail: Codex only. Claude Code and Hermes stay direct until their routing and the OTLP intake land.
+//! ponytail: Codex only. Claude Code and Hermes stay direct until their routing lands; Hermes telemetry stays on its own Langfuse exporter.
 //! ponytail: one worker per port, respawned each pass; the § 5 engine-pin worker swap joins with the next pin change.
 
 use coreq::write_atomic;
