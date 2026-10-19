@@ -53,6 +53,7 @@ pub fn project(installation: &str, runtime: &str, status: Option<&Value>, resour
         "runtime": runtime,
         "version": s["version"].as_str(),
         "status_at": at,
+        "release": crate::release::project(&s["release"], now),
         "service": service,
         "update": {"available": s["update"].as_str(), "error": s["error"].is_string()},
         "routing": agents,
@@ -362,6 +363,30 @@ mod tests {
         for leak in ["alice", "/Users", "/tmp", "/bin", "sk-secret", "prompt", "model "] {
             assert!(!text.contains(leak), "{leak} in {text}");
         }
+    }
+
+    /// #141 A2: selected/running differ without implying health; stale and future observations cannot be healthy.
+    #[test]
+    fn release_observation() {
+        let mut s = status();
+        s["release"] = json!({"at": 1000, "selected": "2.0.0", "running": "1.0.0", "coreq_version": "0.11.0",
+            "lifecycle": "waiting_for_activation", "reason": "selection_changed",
+            "health": {"state": "verified", "scope": "status_written", "version": "1.0.0", "at": 990}});
+        let p = project("inst", "macos", Some(&s), None, 1030);
+        assert_eq!(p["release"]["selected"], "2.0.0");
+        assert_eq!(p["release"]["lifecycle"], "waiting_for_activation");
+        assert_eq!(p["release"]["health"]["version"], "1.0.0");
+        for now in [999, 1091] {
+            let p = project("inst", "macos", Some(&s), None, now);
+            assert_eq!(p["release"]["health"]["state"], "unknown");
+            assert_eq!(p["release"]["lifecycle"], "unknown");
+            assert_eq!(p["release"]["selected"], "2.0.0");
+        }
+        s["release"]["selected"] = json!("/private/secret");
+        s["release"]["reason"] = json!("secret");
+        let p = project("inst", "macos", Some(&s), None, 1030);
+        assert!(!p["release"].to_string().contains("secret"));
+        assert_eq!(project("inst", "macos", None, None, 1030)["release"]["reason"], "not_reported");
     }
 
     /// A2, A3: missing status and fields, a stale status, counter reset, warmup and an unsupported probe stay explicit.

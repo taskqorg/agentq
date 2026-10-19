@@ -18,6 +18,7 @@ mod onboard;
 mod profile;
 mod profiles;
 mod resource;
+mod release;
 mod routing;
 mod snapshot;
 mod telemetry;
@@ -830,6 +831,7 @@ fn serve(t: &Tool) -> ! {
             }
         }
         let mut s = status::common(t, &host(), PROJECT, now(), error.clone(), None);
+        s["release"] = release::observe(t, now());
         s["queue"] = telemetry::status(&t.install.join("data"), now());
         s["agents"] = routing::agents(&t.install.join("data"));
         s["engines"] = engines::status(&t.install);
