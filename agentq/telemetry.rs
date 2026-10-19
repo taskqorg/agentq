@@ -352,10 +352,12 @@ fn problems(p: Vec<String>) -> String {
 /// its problem summary; `agentq.hooks` per hook with its last failure.
 fn heartbeat(install: &Path, data: &Path, now: u64, agents: Value) -> Value {
     let q = status(data, now);
+    let observed: Value = std::fs::read_to_string(install.join("status.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
     let rtk = if crate::engines::rtk_path(install).exists() { crate::engines::RTK } else { "unavailable" };
     json!({"agentq.rtk_version": rtk, "agentq.headroom_pin": crate::engines::HEADROOM, "agentq.queue_pending": q["pending"], "agentq.queue_dropped": q["dropped"],
         "agentq.routing_problems": problems(crate::routing::problems(&agents)), "agentq.routing": agents,
         "agentq.hook_failures": problems(crate::executor::hook_failures(data)), "agentq.hooks": crate::executor::hooks(data),
+        "agentq.release": crate::release::project(&observed["release"], now),
         "agentq.ids_unknown": "an installation event has no session"})
 }
 
@@ -468,7 +470,13 @@ mod tests {
         let agents = json!({"codex": {"routing": "direct", "reason": "config.toml selects no agentq provider", "intended": "routed", "intended_reason": "onboarded"},
             "claude": {"routing": "direct", "reason": "no ANTHROPIC_BASE_URL", "intended": "direct", "intended_reason": "routing not shipped"}});
         let beat = |agents: &Value| span("agentq.installation", "heartbeat", heartbeat(&d, &d, 0, agents.clone()), 0, "inst", "h");
+        // #141 A2: actual status -> heartbeat OTLP JSON preserves the source time and selection.
+        let release = json!({"at": 0, "selected": "2.0.0", "running": "1.0.0", "coreq_version": "0.11.0", "lifecycle": "waiting_for_activation", "reason": "selection_changed"});
+        std::fs::write(d.join("status.json"), json!({"release": release}).to_string()).unwrap();
         let s = beat(&agents);
+        let projected: Value = serde_json::from_str(attr(&s, "agentq.release")["stringValue"].as_str().unwrap()).unwrap();
+        assert_eq!(projected, crate::release::project(&release, 0));
+        assert_eq!(projected["selected"], "2.0.0");
         let routing: Value = serde_json::from_str(attr(&s, "agentq.routing")["stringValue"].as_str().unwrap()).unwrap();
         assert_eq!(routing, agents);
         assert_eq!(attr(&s, "agentq.routing_problems")["stringValue"], "codex direct (config.toml selects no agentq provider)");
