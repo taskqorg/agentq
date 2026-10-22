@@ -1,4 +1,5 @@
-﻿//! Model calls: Claude's from the native transcript at the `Stop` hook, Hermes's from its `post_api_request` hook (agentq.md Â§ 6 Model calls).
+//! Model calls: Claude's native transcript at the `Stop` hook, Codex responses seen by the loopback provider and
+//! Hermes's `post_api_request` hook (agentq.md § 6 Model calls).
 use ring::digest;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Seek, SeekFrom};
@@ -9,7 +10,7 @@ const SOURCE: &str = "claude_transcript";
 /// One batch: one local transaction, one queue prune and one saved offset.
 const BATCH_LINES: usize = 512;
 const BATCH_BYTES: usize = 4 << 20;
-/// A hook pass starts no batch after this, inside the 5 s hook budget (Â§ 1 `hook`); the rest waits as backlog.
+/// A hook pass starts no batch after this, inside the 5 s hook budget (§ 1 `hook`); the rest waits as backlog.
 const HOOK_PASS: Duration = Duration::from_secs(3);
 
 /// Same installation and call ID, same event: a duplicate counts once and a later reading replaces it.
@@ -106,6 +107,39 @@ pub fn observe_hermes(data: &Path, input: &Value) -> Result<(), String> {
     let (key, at, mut attrs) = hermes_call(input);
     attrs["agentq.event_id"] = json!(event_id(&crate::telemetry::installation(data), &key));
     crate::telemetry::emit_at(data, "agentq.model", "call", attrs, at.unwrap_or_else(crate::telemetry::now_ns)).map(|_| ()).ok_or_else(|| "model call not queued".into())
+}
+
+/// One finished Codex Responses call as the loopback provider saw it: `{session, id, model, usage, created_at}`
+/// (§ 6 Model calls, Codex). Tokens keep the Claude meaning: input excludes cache reads.
+pub fn codex_call(input: &Value) -> (String, Option<u128>, Value) {
+    let (u, unknown) = (&input["usage"], "not in response");
+    let cached = u["input_tokens_details"]["cached_tokens"].as_u64();
+    let mut a = Map::new();
+    a.insert("agentq.agent".into(), json!("codex"));
+    a.insert("agentq.model.source".into(), json!("codex_provider"));
+    if let Some(s) = input["session"].as_str() { a.insert("agentq.session".into(), json!(s)); }
+    for (key, value, reason) in [
+        ("name", input["model"].clone(), unknown),
+        ("call_id", input["id"].clone(), unknown),
+        ("input_tokens", u["input_tokens"].as_u64().zip(cached).and_then(|(i, c)| i.checked_sub(c)).map_or(Value::Null, |n| json!(n)), unknown),
+        ("output_tokens", u["output_tokens"].clone(), unknown),
+        ("cache_read_tokens", cached.map_or(Value::Null, |n| json!(n)), unknown),
+        ("cache_creation_tokens", Value::Null, "not reported"),
+        ("cost", Value::Null, "not reported"),
+    ] {
+        if value.is_string() || value.is_u64() { a.insert(format!("agentq.model.{key}"), value); } else { a.insert(format!("agentq.model.{key}_unknown"), json!(reason)); }
+    }
+    let key = input["id"].as_str().map_or_else(|| crate::resource::hex(digest::digest(&digest::SHA256, input.to_string().as_bytes()).as_ref()), String::from);
+    (key, input["created_at"].as_u64().map(|s| s as u128 * 1_000_000_000), Value::Object(a))
+}
+
+/// `agentq model codex`: queue one `agentq.model` span unless the Codex integration is disabled.
+pub fn codex(data: &Path, input: &str) -> Result<(), String> {
+    if crate::control::disabled(data, "codex")? { return Ok(()); }
+    let v: Value = serde_json::from_str(input).map_err(|e| format!("model call JSON: {e}"))?;
+    let (key, at, mut attrs) = codex_call(&v);
+    attrs["agentq.event_id"] = json!(event_id(&crate::telemetry::installation(data), &key));
+    crate::telemetry::emit_at(data, "agentq.model", "call", attrs, at.unwrap_or_else(crate::telemetry::now_ns)).map(|_| ()).ok_or_else(|| "queue write failed".into())
 }
 
 /// Read offset per transcript (`data/model/<hash>`): its path, the next byte and the bytes left when a pass stopped.
@@ -278,6 +312,31 @@ mod tests {
         let b = &c[1].2;
         assert_eq!((b["agentq.model.cost"].as_f64(), b["agentq.model.cost_currency"].as_str(), b["agentq.model.cost_source"].as_str(), b["agentq.model.cache_read_tokens"].as_u64()), (Some(0.25), Some("USD"), Some(SOURCE), Some(0)));
         assert!(c[1].1.is_none(), "a missing source time is unknown");
+    }
+
+    #[test]
+    fn codex_responses_keep_claude_token_meaning_and_count_once() {
+        let r = json!({"session": "t1", "id": "resp_a", "model": "gpt-5.5-codex", "created_at": 1_792_398_731u64,
+            "usage": {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 800}, "output_tokens": 50, "output_tokens_details": {"reasoning_tokens": 20}}});
+        let (key, at, a) = codex_call(&r);
+        assert_eq!((key.as_str(), at), ("resp_a", Some(1_792_398_731_000_000_000)));
+        assert_eq!((a["agentq.agent"].as_str(), a["agentq.session"].as_str(), a["agentq.model.name"].as_str(), a["agentq.model.call_id"].as_str()), (Some("codex"), Some("t1"), Some("gpt-5.5-codex"), Some("resp_a")));
+        assert_eq!((a["agentq.model.input_tokens"].as_u64(), a["agentq.model.cache_read_tokens"].as_u64(), a["agentq.model.output_tokens"].as_u64()), (Some(200), Some(800), Some(50)), "input excludes cache reads, as for Claude");
+        assert_eq!((a["agentq.model.cache_creation_tokens_unknown"].as_str(), a["agentq.model.cost_unknown"].as_str()), (Some("not reported"), Some("not reported")));
+        let (bare_key, bare_at, b) = codex_call(&json!({"usage": {"input_tokens": 5}}));
+        for f in ["name", "call_id", "input_tokens", "output_tokens", "cache_read_tokens"] {
+            assert!(b.get(format!("agentq.model.{f}")).is_none());
+            assert_eq!(b[format!("agentq.model.{f}_unknown")], "not in response", "{f}: unknown is never zero");
+        }
+        assert!(bare_at.is_none() && bare_key.len() == 64, "no id keys on a hash of the entry");
+        let d = std::env::temp_dir().join(format!("agentq-model-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let ids = |d: &Path| crate::telemetry::entries(&crate::telemetry::queue(d)).len();
+        codex(&d, &r.to_string()).unwrap();
+        codex(&d, &r.to_string()).unwrap();
+        assert_eq!(ids(&d), 1, "a resent response replaces its queued event");
+        assert!(codex(&d, "not json").is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

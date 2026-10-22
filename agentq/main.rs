@@ -89,6 +89,10 @@ fn main() {
             Ok(v)=>println_code(&v.to_string()),
             Err(e)=>fail(&e,"send one JSON object with adapter, tool and text; preserve the native result on failure"),
         },
+        ["model", "codex"] => match std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string()).and_then(|s| model::codex(&t.install.join("data"), &s)) {
+            Ok(()) => 0,
+            Err(e) => fail(&e, "send one finished Codex response's id, model, usage and created_at as JSON"),
+        },
         ["stats", "--records"] => match local::snapshot(&t.install.join("data")) {
             Ok(v) => {
                 let mut errors = vec![];
