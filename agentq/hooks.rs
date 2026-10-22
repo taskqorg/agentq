@@ -6,6 +6,11 @@ fn quote(s: &str) -> String { format!("'{}'", s.replace('\'', "'\"'\"'")) }
 
 pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Value, String> {
     let empty = || json!({});
+    if agent == "claude" && event == "Stop" {
+        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
+        crate::model::observe(&exe.parent().ok_or("hook launcher has no install root")?.join("data"), &v)?;
+        return Ok(empty());
+    }
     if agent != "claude" || !["PreToolUse", "PostToolUse"].contains(&event) { return Ok(empty()); }
     let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
     if v["tool_name"] != "Bash" { return Ok(empty()); }

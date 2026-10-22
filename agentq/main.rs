@@ -13,6 +13,7 @@ mod executor;
 mod legacy;
 mod local;
 mod mcp;
+mod model;
 mod names;
 mod onboard;
 mod profile;
