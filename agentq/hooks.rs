@@ -11,6 +11,11 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
         crate::model::observe(&exe.parent().ok_or("hook launcher has no install root")?.join("data"), &v)?;
         return Ok(empty());
     }
+    if agent == "hermes" && event == "post_api_request" {
+        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
+        crate::model::observe_hermes(&exe.parent().ok_or("hook launcher has no install root")?.join("data"), &v)?;
+        return Ok(empty());
+    }
     if agent != "claude" || !["PreToolUse", "PostToolUse"].contains(&event) { return Ok(empty()); }
     let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
     if v["tool_name"] != "Bash" { return Ok(empty()); }
