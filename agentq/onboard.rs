@@ -131,6 +131,17 @@ fn read_config(path: &Path) -> Result<Option<String>, String> {
 
 /// File by file: a conflict leaves that file untouched; every edit is journaled before the write. Repeat is safe.
 pub fn apply(wants: &[Want], journal: &Path) -> Result<Vec<String>, String> {
+    // An owned plugin file still holding the bytes this journal wrote follows the release; journal first.
+    let mut j = load(journal);
+    for w in wants.iter().filter(|w| w.key == ["$file"]) {
+        let (Some(old), Some(wanted)) = (read_config(&w.file)?, w.value.as_str()) else { continue };
+        let file = w.file.display().to_string();
+        let Some(e) = j.iter_mut().rev().find(|e| e["file"] == file && e["key"] == json!(["$file"]) && e["kind"] == "file") else { continue };
+        if old == wanted || e["after"] != old.as_str() { continue; }
+        e["after"] = wanted.into();
+        save(journal, &j)?;
+        write_atomic(&w.file, wanted)?;
+    }
     // Do not enable a plugin whose source files cannot be installed safely.
     for w in wants.iter().filter(|w| w.key == ["$file"]) {
         let old = read_config(&w.file)?;
@@ -803,6 +814,29 @@ mod tests {
         restore(&journal, false, None).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("config.yaml")).unwrap(), before);
         assert!(!d.join("plugins/agentq/__init__.py").exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// #163: an existing Hermes plugin without the model-call hook would read as foreign and never gain it.
+    #[test]
+    fn owned_plugin_file_follows_the_release_and_still_restores() {
+        let d = std::env::temp_dir().join(format!("agentq-plugin-upgrade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d); std::fs::create_dir_all(&d).unwrap();
+        let journal = d.join("owned.json");
+        let mut old = wants("hermes", &d, &d.join("unused"), Path::new("/agentq"));
+        for w in old.iter_mut().filter(|w| w.key == ["$file"]) { w.value = json!("previous release\n"); }
+        apply(&old, &journal).unwrap();
+        let source = d.join("plugins/agentq/__init__.py");
+        let new = wants("hermes", &d, &d.join("unused"), Path::new("/agentq"));
+        let out = apply(&new, &journal).unwrap();
+        assert!(out.iter().all(|l| !l.starts_with("conflict:")), "{out:?}");
+        assert!(std::fs::read_to_string(&source).unwrap().contains("post_api_request"));
+        restore(&journal, false, None).unwrap();
+        assert!(!source.exists(), "the upgraded owned file is still removed on restore");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "edited later\n").unwrap();
+        apply(&old, &journal).unwrap_err();
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "edited later\n", "a foreign edit is never upgraded");
         std::fs::remove_dir_all(d).unwrap();
     }
 

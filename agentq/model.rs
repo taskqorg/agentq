@@ -1,4 +1,4 @@
-﻿//! Claude model calls read from the native transcript at the `Stop` hook (agentq.md Â§ 6 Model calls).
+﻿//! Model calls: Claude's from the native transcript at the `Stop` hook, Hermes's from its `post_api_request` hook (agentq.md Â§ 6 Model calls).
 use ring::digest;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Seek, SeekFrom};
@@ -71,6 +71,41 @@ pub fn calls(text: &str) -> Vec<(String, Option<u128>, Value, usize)> {
         }
     }
     out
+}
+
+/// One Hermes `post_api_request` (one provider call): its key, source time and attributes without event ID. Hermes
+/// normalizes usage to integer buckets and reports no cost in this hook.
+pub fn hermes_call(v: &Value) -> (String, Option<u128>, Value) {
+    let mut a = Map::new();
+    a.insert("agentq.agent".into(), json!("hermes"));
+    a.insert("agentq.model.source".into(), json!("hermes_hook"));
+    for (key, field) in [("agentq.session", "session_id"), ("agentq.turn", "turn_id")] {
+        if let Some(s) = v[field].as_str().filter(|s| !s.is_empty()) { a.insert(key.into(), json!(s)); }
+    }
+    let call = v["api_request_id"].as_str().filter(|s| !s.is_empty());
+    let u = &v["usage"];
+    for (key, value) in [
+        ("name", if v["response_model"].is_string() { v["response_model"].clone() } else { v["model"].clone() }),
+        ("call_id", call.map_or(Value::Null, |c| json!(c))),
+        ("input_tokens", u["input_tokens"].clone()),
+        ("output_tokens", u["output_tokens"].clone()),
+        ("cache_read_tokens", u["cache_read_tokens"].clone()),
+        ("cache_creation_tokens", u["cache_write_tokens"].clone()),
+    ] {
+        if value.as_str().is_some_and(|s| !s.is_empty()) || value.is_u64() { a.insert(format!("agentq.model.{key}"), value); } else { a.insert(format!("agentq.model.{key}_unknown"), json!("not reported")); }
+    }
+    a.insert("agentq.model.cost_unknown".into(), json!("not reported"));
+    // ponytail: a call without its ID keys on session, turn and end time; a resend of it counts once only when those match.
+    let key = call.map_or_else(|| format!("hermes:{}:{}:{}", v["session_id"], v["turn_id"], v["ended_at"]), String::from);
+    let at = v["ended_at"].as_f64().filter(|s| s.is_finite() && *s > 0.0).map(|s| (s * 1e9) as u128);
+    (key, at, Value::Object(a))
+}
+
+/// Queue the `agentq.model` span of one Hermes call; an unwritten event is a recorded hook failure.
+pub fn observe_hermes(data: &Path, input: &Value) -> Result<(), String> {
+    let (key, at, mut attrs) = hermes_call(input);
+    attrs["agentq.event_id"] = json!(event_id(&crate::telemetry::installation(data), &key));
+    crate::telemetry::emit_at(data, "agentq.model", "call", attrs, at.unwrap_or_else(crate::telemetry::now_ns)).map(|_| ()).ok_or_else(|| "model call not queued".into())
 }
 
 /// Read offset per transcript (`data/model/<hash>`): its path, the next byte and the bytes left when a pass stopped.
@@ -273,6 +308,33 @@ mod tests {
         observe(&data, &input).unwrap();
         assert_eq!(queued(&data).len(), 3, "a lost offset resends the same event IDs");
         assert!(observe(&data, &json!({})).is_err(), "a Stop input without transcript is a recorded hook failure");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #163: Hermes calls report the same fields as Claude's; a missing field is unknown, a repeat counts once.
+    #[test]
+    fn hermes_calls_carry_identity_usage_and_unknowns() {
+        let full = json!({"api_request_id": "r1", "session_id": "s1", "turn_id": "t1", "model": "gpt-5", "response_model": "gpt-5-2026",
+            "ended_at": 1_792_398_731.5, "usage": {"input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 0, "cache_write_tokens": 4}});
+        let (key, at, a) = hermes_call(&full);
+        assert_eq!((key.as_str(), at), ("r1", Some(1_792_398_731_500_000_000)));
+        assert_eq!((a["agentq.model.name"].as_str(), a["agentq.model.call_id"].as_str(), a["agentq.model.cache_read_tokens"].as_u64(), a["agentq.model.cache_creation_tokens"].as_u64(), a["agentq.turn"].as_str()),
+            (Some("gpt-5-2026"), Some("r1"), Some(0), Some(4), Some("t1")));
+        assert_eq!(a["agentq.model.cost_unknown"], "not reported", "Hermes reports no cost: unknown, never zero");
+        let (key, at, a) = hermes_call(&json!({"session_id": "s1", "model": "gpt-5", "usage": null}));
+        assert!(at.is_none() && key.starts_with("hermes:"));
+        for f in ["call_id", "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"] {
+            assert!(a.get(format!("agentq.model.{f}")).is_none());
+            assert_eq!(a[format!("agentq.model.{f}_unknown")], "not reported", "{f}");
+        }
+        assert_eq!(a["agentq.model.name"], "gpt-5", "the requested model when the response names none");
+        let d = std::env::temp_dir().join(format!("agentq-model-hermes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        observe_hermes(&d, &full).unwrap();
+        observe_hermes(&d, &full).unwrap();
+        let q: Vec<String> = crate::telemetry::entries(&crate::telemetry::queue(&d)).into_iter().map(|e| std::fs::read_to_string(e.1).unwrap()).collect();
+        assert_eq!(q.len(), 1, "a repeated call ID counts once");
+        assert!(q[0].contains("\"agentq.model\"") && q[0].contains("hermes_hook"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
