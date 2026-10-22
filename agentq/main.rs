@@ -13,6 +13,7 @@ mod executor;
 mod legacy;
 mod local;
 mod mcp;
+mod model;
 mod names;
 mod onboard;
 mod profile;
@@ -833,6 +834,7 @@ fn serve(t: &Tool) -> ! {
         let mut s = status::common(t, &host(), PROJECT, now(), error.clone(), None);
         s["release"] = release::observe(t, now());
         s["queue"] = telemetry::status(&t.install.join("data"), now());
+        s["model_backlog"] = model::backlog(&t.install.join("data"));
         s["agents"] = routing::agents(&t.install.join("data"));
         s["engines"] = engines::status(&t.install);
         s["configuration"] = profiles::status(&t.install.join("data"), now());

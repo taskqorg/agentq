@@ -79,6 +79,7 @@ pub fn wants(agent: &str, root: &Path, claude_json: &Path, exe: &Path) -> Vec<Wa
             w(root.join("settings.json"), &["hooks", "SessionStart"], json!({"hooks": [hook("SessionStart")]}), true),
             w(root.join("settings.json"), &["hooks", "PreToolUse"], json!({"matcher": "Bash", "hooks": [hook("PreToolUse")]}), true),
             w(root.join("settings.json"), &["hooks", "PostToolUse"], json!({"matcher": "Bash", "hooks": [hook("PostToolUse")]}), true),
+            w(root.join("settings.json"), &["hooks", "Stop"], json!({"hooks": [hook("Stop")]}), true),
             w(claude_json.into(), &["mcpServers", "agentq"], json!({"type": "stdio", "command": exe, "args": ["mcp", "claude"]}), false),
         ],
         // Desktop Chat is MCP-only (CONFIGURATION A1), with its own control identity.
@@ -757,7 +758,7 @@ mod tests {
 
         let out = apply(&all(), &journal).unwrap();
         assert!(out.iter().all(|l| l.starts_with("edited:")), "{out:?}");
-        assert_eq!(load(&journal).len(), 11, "one journal entry per edit, including Claude PostToolUse");
+        assert_eq!(load(&journal).len(), 12, "one journal entry per edit, including Claude PostToolUse and Stop");
         #[cfg(unix)]
         assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&journal).unwrap().permissions()) & 0o777, 0o600);
         let toml = std::fs::read_to_string(codex.join("config.toml")).unwrap();
@@ -770,12 +771,13 @@ mod tests {
         assert_eq!(settings["hooks"]["SessionStart"].as_array().unwrap().len(), 2, "foreign hook kept");
         assert_eq!(settings["hooks"]["PreToolUse"][0]["matcher"], "Bash");
         assert_eq!(settings["hooks"]["PostToolUse"][0]["matcher"], "Bash");
+        assert!(settings["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().ends_with(" hook claude Stop"), "Stop reads model calls");
         let hooks: Value = serde_json::from_str(&std::fs::read_to_string(codex.join("hooks.json")).unwrap()).unwrap();
         assert!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().ends_with(" hook codex Stop"));
 
         let edited = snapshot(&files);
         assert!(apply(&all(), &journal).unwrap().iter().all(|l| l.starts_with("kept:")), "repeat is safe");
-        assert_eq!(load(&journal).len(), 11);
+        assert_eq!(load(&journal).len(), 12);
         assert_eq!(snapshot(&files), edited);
 
         assert!(restore(&journal, true, None).unwrap().iter().all(|l| l.starts_with("would restore:")));

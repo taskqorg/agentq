@@ -822,40 +822,59 @@ pub fn samples(data: &Path) -> Result<serde_json::Map<String, Value>, String> {
 
 /// Existing producer events outlive optional queue delivery; compression already has its canonical stats record.
 pub fn event(data: &Path, span: &Value, at: u64) -> Result<(), String> {
-    let payload = span.to_string();
-    if payload.len() > RECORD_MAX {
-        return Err("local telemetry record exceeds 64 KiB".into());
-    }
-    let id = span["traceId"].as_str().ok_or("event missing trace ID")?;
-    let _lock = crate::executor::lock(data)?;
-    let mut db = open(data)?;
-    maintain(&mut db, crate::now(), payload.len(), u64::MAX)?;
-    if span["name"] == "agentq.compress" {
-        let held: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM events WHERE kind='stats' AND id=?1)",
-                [id],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if held {
-            return Ok(());
+    events_at(data, &[(span, at)])
+}
+
+/// `event` for many spans under one lock, maintenance pass, transaction and checkpoint (Claude model calls arrive by
+/// the thousand). An oversized record is skipped and named; the others are kept.
+pub fn events_at(data: &Path, spans: &[(&Value, u64)]) -> Result<(), String> {
+    let mut rows = vec![];
+    let mut skipped = None;
+    for (span, at) in spans {
+        let payload = span.to_string();
+        if payload.len() > RECORD_MAX {
+            skipped = Some("local telemetry record exceeds 64 KiB".to_string());
+            continue;
         }
+        let id = span["traceId"].as_str().ok_or("event missing trace ID")?.to_string();
+        rows.push((id, *at, payload, span["name"] == "agentq.compress"));
     }
-    let previous: Option<String> = db
-        .query_row(
-            "SELECT payload FROM events WHERE kind='event' AND id=?1",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    if previous.as_deref() == Some(payload.as_str()) {
-        return Ok(());
+    if !rows.is_empty() {
+        let _lock = crate::executor::lock(data)?;
+        let mut db = open(data)?;
+        maintain(&mut db, crate::now(), rows.iter().map(|r| r.2.len()).sum(), u64::MAX)?;
+        let tx = db.transaction().map_err(|e| e.to_string())?;
+        for (id, at, payload, compress) in &rows {
+            if *compress {
+                let held: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM events WHERE kind='stats' AND id=?1)",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if held {
+                    continue;
+                }
+            }
+            let previous: Option<String> = tx
+                .query_row(
+                    "SELECT payload FROM events WHERE kind='event' AND id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if previous.as_deref() == Some(payload.as_str()) {
+                continue;
+            }
+            tx.execute("INSERT INTO events(kind,id,time,day,payload) VALUES('event',?1,?2,?3,?4) ON CONFLICT(kind,id) DO UPDATE SET time=excluded.time,day=excluded.day,payload=excluded.payload",
+                params![id,(*at).min(i64::MAX as u64) as i64,crate::date(*at),payload]).map_err(|e|e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        checkpoint(&db)?;
     }
-    db.execute("INSERT INTO events(kind,id,time,day,payload) VALUES('event',?1,?2,?3,?4) ON CONFLICT(kind,id) DO UPDATE SET time=excluded.time,day=excluded.day,payload=excluded.payload",
-        params![id,at.min(i64::MAX as u64) as i64,crate::date(at),payload]).map_err(|e|e.to_string())?;
-    checkpoint(&db)
+    skipped.map_or(Ok(()), Err)
 }
 
 pub fn export(data: &Path) -> Result<Value, String> {
