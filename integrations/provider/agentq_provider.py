@@ -13,6 +13,7 @@ import time
 
 LOG = logging.getLogger('agentq.provider')
 LIMIT = 64 * 1024 * 1024
+FINISHED = ('response.completed', 'response.incomplete', 'response.failed')
 
 
 def digest(value):
@@ -92,6 +93,9 @@ class State:
     def observe(self, session, obj):
         if not session or len(session)>256 or not isinstance(obj, dict):
             return
+        finished = obj.get('response') if obj.get('type') in FINISHED else obj if obj.get('object') == 'response' and obj.get('status') in ('completed', 'incomplete', 'failed') else None
+        if isinstance(finished, dict):
+            self.account(session, finished)
         item = obj.get('item', obj)
         if isinstance(item,dict) and item.get('type') == 'custom_tool_call' and item.get('name') == 'exec':
             command = code_mode_command(item.get('input'))
@@ -121,6 +125,18 @@ class State:
         if isinstance(response, dict) and isinstance(response.get('output'), list):
             for item in response['output']:
                 self.observe(session, item)
+
+    def account(self, session, response):
+        """Model accounting: only call identity, model and token counts leave; the stream is never delayed."""
+        payload = dict(session=session, **{k: response[k] for k in ('id', 'model', 'usage', 'created_at') if k in response})
+        def run():
+            try:
+                proc = subprocess.run([self.binary, 'model', 'codex'], input=json.dumps(payload), text=True, capture_output=True,
+                                      timeout=10, env=dict(os.environ, AGENTQ_INSTALL=str(self.install)))
+                if proc.returncode != 0: LOG.warning('model call not recorded: %s', proc.stdout.strip()[:200])
+            except (OSError, subprocess.TimeoutExpired):
+                LOG.warning('model call not recorded; agentq unavailable')
+        threading.Thread(target=run, daemon=True).start()
 
     def transform(self, session, body):
         if isinstance(body,dict) and isinstance(body.get('response'),dict):

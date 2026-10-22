@@ -164,6 +164,36 @@ class ProviderChain(unittest.TestCase):
         asyncio.run(exercise('http'))
         asyncio.run(exercise('websocket'))
 
+    def test_finished_responses_send_only_accounting_fields(self):
+        """U3b: one `agentq model codex` per finished response, without content; the stream stays byte-identical."""
+        usage = dict(input_tokens=1000, input_tokens_details=dict(cached_tokens=800), output_tokens=50)
+        done = dict(id='resp_a', object='response', status='completed', model='gpt-5.5-codex', created_at=1792398731, usage=usage,
+                    output=[dict(type='message', content=[dict(type='output_text', text='SECRET answer')])], instructions='SECRET prompt')
+        frames = [('http', b'data: ' + json.dumps(dict(type='response.output_text.delta', delta='SECRET')).encode() + b'\n\ndata: '
+                   + json.dumps(dict(type='response.completed', response=done)).encode() + b'\n\n'),
+                  ('websocket', json.dumps(dict(type='response.incomplete', response=done))),
+                  ('http', json.dumps(done).encode())]
+        class Now:
+            def __init__(self, target, daemon): self.target = target
+            def start(self): self.target()
+        for transport, frame in frames:
+            with self.subTest(transport=transport, frame=frame[:40]):
+                sent = []
+                async def receive(): return dict(type='http.disconnect')
+                async def send(event): sent.append(event)
+                async def app(scope, receive, send):
+                    await send(dict(type='websocket.send', text=frame) if transport == 'websocket' else dict(type='http.response.body', body=frame))
+                scope = dict(type='websocket' if transport == 'websocket' else 'http', path='/v1/responses', headers=[(b'thread-id', b'native-session')])
+                with patch.object(p.threading, 'Thread', Now), patch.object(p.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as core:
+                    asyncio.run(p.Adapter(app, self.state)(scope, receive, send))
+                accounting = [c for c in core.call_args_list if c.args[0][1:] == ['model', 'codex']]
+                self.assertEqual(len(accounting), 1)
+                self.assertEqual(json.loads(accounting[0].kwargs['input']), dict(session='native-session', id='resp_a', model='gpt-5.5-codex', created_at=1792398731, usage=usage))
+                self.assertNotIn('SECRET', accounting[0].kwargs['input'])
+                self.assertEqual(sent[0].get('text', sent[0].get('body')), frame)
+        with patch.object(p.threading, 'Thread', Now), patch.object(p.subprocess, 'run', side_effect=OSError('gone')):
+            self.state.observe('native-session', dict(type='response.completed', response=done))
+
 
 if __name__ == '__main__':
     unittest.main()
