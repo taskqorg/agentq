@@ -1,10 +1,16 @@
 //! Claude model calls read from the native transcript at the `Stop` hook (agentq.md § 6 Model calls).
 use ring::digest;
 use serde_json::{Map, Value, json};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const SOURCE: &str = "claude_transcript";
+/// One batch: one local transaction, one queue prune and one saved offset.
+const BATCH_LINES: usize = 512;
+const BATCH_BYTES: usize = 4 << 20;
+/// A hook pass starts no batch after this, inside the 5 s hook budget (§ 1 `hook`); the rest waits as backlog.
+const HOOK_PASS: Duration = Duration::from_secs(3);
 
 /// Same installation and call ID, same event: a duplicate counts once and a later reading replaces it.
 fn event_id(installation: &str, call: &str) -> String {
@@ -66,22 +72,62 @@ pub fn calls(text: &str) -> Vec<(String, Option<u128>, Value)> {
     out
 }
 
-/// Bytes from `offset` up to the last complete line; a shorter file was rewritten and reads from the start.
-fn tail(path: &Path, offset: u64) -> Result<(String, u64), String> {
-    let mut f = std::fs::File::open(path).map_err(|e| format!("transcript: {e}"))?;
-    let len = f.metadata().map_err(|e| format!("transcript: {e}"))?.len();
-    let start = if offset > len { 0 } else { offset };
-    f.seek(SeekFrom::Start(start)).map_err(|e| format!("transcript: {e}"))?;
-    let mut b = vec![];
-    f.take(len - start).read_to_end(&mut b).map_err(|e| format!("transcript: {e}"))?;
-    let end = b.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
-    b.truncate(end);
-    Ok((String::from_utf8_lossy(&b).into_owned(), start + end as u64))
+/// Read offset per transcript (`data/model/<hash>`): its path, the next byte and the bytes left when a pass stopped.
+fn mark(state: &Path, file: &Path) -> PathBuf {
+    state.join(&event_id("transcript", &file.to_string_lossy())[..16])
 }
 
-/// Queue one `agentq.model` span per new call of the session transcript and its subagent transcripts. A read offset
-/// per transcript (`data/model/<hash>`, 7 days) keeps each pass incremental; a lost offset only resends the same IDs.
+/// Process `file` in batches from its saved offset to its last complete line. A batch starts only before `deadline`,
+/// or as the first batch of a pass (`progressed` false), so every pass makes progress. A shorter file was rewritten
+/// and reads from the start. The mark records the bytes left; returns them.
+fn drain_file(data: &Path, installation: &str, file: &Path, deadline: Instant, progressed: &mut bool) -> Result<u64, String> {
+    let err = |e: std::io::Error| format!("transcript: {e}");
+    let mark = mark(&data.join("model"), file);
+    let saved: Value = std::fs::read_to_string(&mark).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+    let mut f = std::fs::File::open(file).map_err(err)?;
+    let len = f.metadata().map_err(err)?.len();
+    let mut offset = saved["offset"].as_u64().unwrap_or(0);
+    if offset > len { offset = 0; }
+    f.seek(SeekFrom::Start(offset)).map_err(err)?;
+    let mut r = std::io::BufReader::new(f);
+    let save = |offset: u64, left: u64| coreq::write_atomic(&mark, &json!({"path": file, "offset": offset, "left": left}).to_string()).map_err(|e| format!("model state: {e}"));
+    loop {
+        if *progressed && Instant::now() >= deadline {
+            let left = len.saturating_sub(offset);
+            if saved["offset"] != offset || saved["left"] != left { save(offset, left)?; }
+            return Ok(left);
+        }
+        let (mut text, mut line, mut lines) = (vec![], vec![], 0);
+        while lines < BATCH_LINES && text.len() < BATCH_BYTES {
+            line.clear();
+            r.read_until(b'\n', &mut line).map_err(err)?;
+            // An unterminated last line is still being written: it waits for the next pass.
+            if line.last() != Some(&b'\n') { break; }
+            text.extend_from_slice(&line);
+            lines += 1;
+        }
+        if text.is_empty() {
+            if saved["offset"] != offset || saved["left"] != 0 { save(offset, 0)?; }
+            return Ok(0);
+        }
+        let events = calls(&String::from_utf8_lossy(&text)).into_iter().map(|(key, at, mut attrs)| {
+            attrs["agentq.event_id"] = json!(event_id(installation, &key));
+            (attrs, at.unwrap_or_else(crate::telemetry::now_ns))
+        });
+        crate::telemetry::emit_all(data, "agentq.model", "call", events.collect());
+        offset += text.len() as u64;
+        *progressed = true;
+        save(offset, len.saturating_sub(offset))?;
+    }
+}
+
+/// Queue one `agentq.model` span per new call of the session transcript and its subagent transcripts, bounded by
+/// `HOOK_PASS`. Leftover bytes stay in the marks as backlog for the next pass or the service (`drain`).
 pub fn observe(data: &Path, input: &Value) -> Result<(), String> {
+    observe_until(data, input, Instant::now() + HOOK_PASS)
+}
+
+fn observe_until(data: &Path, input: &Value, deadline: Instant) -> Result<(), String> {
     let Some(main) = input["transcript_path"].as_str().map(PathBuf::from) else { return Err("Stop hook has no transcript_path".into()) };
     let mut files = vec![main.clone()];
     if let Ok(dir) = std::fs::read_dir(main.with_extension("").join("subagents")) {
@@ -89,25 +135,59 @@ pub fn observe(data: &Path, input: &Value) -> Result<(), String> {
         subs.sort();
         files.extend(subs);
     }
-    let state = data.join("model");
-    std::fs::create_dir_all(&state).map_err(|e| format!("model state: {e}"))?;
+    std::fs::create_dir_all(data.join("model")).map_err(|e| format!("model state: {e}"))?;
     let installation = crate::telemetry::installation(data);
+    let mut progressed = false;
     for file in files {
-        let mark = state.join(&event_id("transcript", &file.to_string_lossy())[..16]);
-        let offset = std::fs::read_to_string(&mark).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-        let (text, end) = tail(&file, offset)?;
-        if end == offset { continue; }
-        for (key, at, mut attrs) in calls(&text) {
-            attrs["agentq.event_id"] = json!(event_id(&installation, &key));
-            crate::telemetry::emit_at(data, "agentq.model", "call", attrs, at.unwrap_or_else(crate::telemetry::now_ns));
-        }
-        coreq::write_atomic(&mark, &end.to_string()).map_err(|e| format!("model state: {e}"))?;
+        drain_file(data, &installation, &file, deadline, &mut progressed)?;
     }
-    let week = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86400);
-    for e in std::fs::read_dir(&state).into_iter().flatten().flatten() {
+    expire(data);
+    Ok(())
+}
+
+/// Marks untouched for 7 days go, a backlog of a deleted transcript included.
+fn expire(data: &Path) {
+    let week = std::time::SystemTime::now() - Duration::from_secs(7 * 86400);
+    for e in std::fs::read_dir(data.join("model")).into_iter().flatten().flatten() {
         if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < week) { let _ = std::fs::remove_file(e.path()); }
     }
-    Ok(())
+}
+
+/// Saved marks: (transcript, bytes left), or the read error of an unreadable mark.
+fn marks(data: &Path) -> Vec<Result<(PathBuf, u64), String>> {
+    std::fs::read_dir(data.join("model")).into_iter().flatten().flatten().filter(|e| !e.file_name().to_string_lossy().ends_with(".tmp")).map(|e| {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(e.path()).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        // A bare offset (unreleased first format) records no backlog; its next pass rereads the file by event ID.
+        if v.is_u64() { return Ok((PathBuf::new(), 0)); }
+        Ok((PathBuf::from(v["path"].as_str().ok_or("mark has no path")?), v["left"].as_u64().ok_or("mark has no left")?))
+    }).collect()
+}
+
+/// The service's pass over transcripts a hook pass left unfinished (a session that ended mid-backlog included).
+pub fn drain(data: &Path, deadline: Instant) {
+    let installation = crate::telemetry::installation(data);
+    let mut progressed = false;
+    for (file, _) in marks(data).into_iter().flatten().filter(|m| m.1 > 0) {
+        if let Err(e) = drain_file(data, &installation, &file, deadline, &mut progressed) {
+            eprintln!("agentq: model calls of a transcript unknown: {e}");
+        }
+    }
+    expire(data);
+}
+
+/// `status.json` `model_backlog` and the heartbeat: transcripts with unread calls and their bytes; unreadable marks
+/// make the backlog unknown, never zero.
+pub fn backlog(data: &Path) -> Value {
+    let (mut transcripts, mut bytes, mut unreadable) = (0, 0, 0);
+    for m in marks(data) {
+        match m {
+            Ok((_, left)) if left > 0 => { transcripts += 1; bytes += left; }
+            Ok(_) => {}
+            Err(_) => unreadable += 1,
+        }
+    }
+    if unreadable > 0 { return json!({"state": "unknown", "reason": format!("{unreadable} unreadable read offsets")}); }
+    json!({"state": if transcripts > 0 { "pending" } else { "none" }, "transcripts": transcripts, "bytes": bytes})
 }
 
 #[cfg(test)]
@@ -187,6 +267,52 @@ mod tests {
         observe(&data, &input).unwrap();
         assert_eq!(queued(&data).len(), 3, "a lost offset resends the same event IDs");
         assert!(observe(&data, &json!({})).is_err(), "a Stop input without transcript is a recorded hook failure");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #161 review: a 4008-call transcript took 115 s in one pass, was killed by the 5 s hook timeout and lost the rest.
+    #[test]
+    fn thousands_of_calls_drain_across_bounded_passes_once_each() {
+        let d = std::env::temp_dir().join(format!("agentq-model-bulk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let t = d.join("s2.jsonl");
+        let usage = json!({"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4});
+        // Claude repeats each call once per content block; a user line sits between calls.
+        let mut text = String::new();
+        for i in 0..4008 {
+            let at = format!("2026-10-19T08:{:02}:{:02}Z", i / 60 % 60, i % 60);
+            for _ in 0..2 { text += &(line(Some(&format!("req_{i}")), usage.clone(), &at) + "\n"); }
+            text += &(json!({"type": "user", "message": {"content": "x".repeat(200)}}).to_string() + "\n");
+        }
+        std::fs::write(&t, &text).unwrap();
+        let data = d.join("data");
+        let input = json!({"transcript_path": t});
+        let ids = |data: &Path| -> Vec<String> {
+            crate::telemetry::entries(&crate::telemetry::queue(data)).into_iter().map(|e| std::fs::read_to_string(e.1).unwrap()).filter(|s| s.contains("\"agentq.model\"")).map(|s| {
+                let v: Value = serde_json::from_str(&s).unwrap();
+                v["attributes"].as_array().unwrap().iter().find(|a| a["key"] == "agentq.model.call_id").unwrap()["value"]["stringValue"].as_str().unwrap().to_string()
+            }).collect()
+        };
+        // An expired deadline still runs one batch, so each pass makes progress and leaves the rest as backlog.
+        observe_until(&data, &input, Instant::now()).unwrap();
+        assert_eq!(ids(&data).len(), BATCH_LINES / 3 + 1, "one batch of lines per expired pass");
+        let b = backlog(&data);
+        assert_eq!((b["state"].as_str(), b["transcripts"].as_u64()), (Some("pending"), Some(1)), "leftover calls are exposed: {b}");
+        assert!(b["bytes"].as_u64().unwrap() > 0);
+        let start = Instant::now();
+        observe(&data, &input).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(5), "a hook pass ends inside the hook budget: {:?}", start.elapsed());
+        // The service finishes what hook passes left, even after the session ended.
+        while backlog(&data)["state"] == "pending" { drain(&data, Instant::now()); }
+        let mut got = ids(&data);
+        got.sort();
+        let mut want: Vec<String> = (0..4008).map(|i| format!("req_{i}")).collect();
+        want.sort();
+        assert_eq!(got, want, "each call ID exactly once");
+        assert_eq!(backlog(&data), json!({"state": "none", "transcripts": 0, "bytes": 0}));
+        std::fs::write(mark(&data.join("model"), &t), "not json").unwrap();
+        assert_eq!(backlog(&data)["state"], "unknown", "an unreadable offset is unknown backlog, never none");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

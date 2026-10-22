@@ -85,23 +85,40 @@ pub fn emit(data: &Path, name: &str, stage: &str, attrs: Value) -> Option<String
 
 /// `emit` at a given time; a queued event with the same ID is replaced, so the queue keeps one file per ID.
 pub fn emit_at(data: &Path, name: &str, stage: &str, attrs: Value, ns: u128) -> Option<String> {
-    let s = span(name, stage, attrs, ns, &installation(data), &crate::host());
-    let id = s["traceId"].as_str()?.to_string();
-    if name!="agentq.compress" {
-        if let Err(e)=crate::local::event(data,&s,(ns/1_000_000_000).min(u64::MAX as u128) as u64) {
+    emit_all(data, name, stage, vec![(attrs, ns)]).pop()
+}
+
+/// `emit_at` for many events: one local transaction and one queue prune for the batch, one file per event. Returns
+/// the IDs written.
+pub fn emit_all(data: &Path, name: &str, stage: &str, events: Vec<(Value, u128)>) -> Vec<String> {
+    let (inst, host) = (installation(data), crate::host());
+    let secs = |ns: u128| (ns / 1_000_000_000).min(u64::MAX as u128) as u64;
+    let spans: Vec<(Value, u128)> = events.into_iter().map(|(a, ns)| (span(name, stage, a, ns, &inst, &host), ns)).collect();
+    if name != "agentq.compress" {
+        let rows: Vec<(&Value, u64)> = spans.iter().map(|(s, ns)| (s, secs(*ns))).collect();
+        if let Err(e) = crate::local::events_at(data, &rows) {
             eprintln!("agentq: local event unknown: {e}");
         }
     }
     let q = queue(data);
-    std::fs::create_dir_all(&q).ok()?;
-    let file = q.join(format!("{}-{id}.json", ns / 1_000_000_000));
-    write_atomic(&file, &s.to_string()).ok()?;
-    for (_, p, _) in prune(&q, (ns / 1_000_000_000) as u64) {
-        if p != file && p.to_string_lossy().ends_with(&format!("-{id}.json")) {
+    if spans.is_empty() || std::fs::create_dir_all(&q).is_err() {
+        return vec![];
+    }
+    let mut written = std::collections::HashMap::new();
+    for (s, ns) in &spans {
+        let Some(id) = s["traceId"].as_str() else { continue };
+        let file = q.join(format!("{}-{id}.json", secs(*ns)));
+        if write_atomic(&file, &s.to_string()).is_ok() {
+            written.insert(id.to_string(), file);
+        }
+    }
+    for (_, p, _) in prune(&q, spans.iter().map(|s| secs(s.1)).max().unwrap_or(0)) {
+        let id = p.file_name().and_then(|n| n.to_str()?.strip_suffix(".json")?.split_once('-').map(|x| x.1.to_string()));
+        if id.and_then(|i| written.get(&i)).is_some_and(|f| *f != p) {
             let _ = std::fs::remove_file(p);
         }
     }
-    Some(id)
+    written.into_keys().collect()
 }
 
 /// Queued events oldest first: (unix seconds, path, bytes).
@@ -357,7 +374,7 @@ fn heartbeat(install: &Path, data: &Path, now: u64, agents: Value) -> Value {
     json!({"agentq.rtk_version": rtk, "agentq.headroom_pin": crate::engines::HEADROOM, "agentq.queue_pending": q["pending"], "agentq.queue_dropped": q["dropped"],
         "agentq.routing_problems": problems(crate::routing::problems(&agents)), "agentq.routing": agents,
         "agentq.hook_failures": problems(crate::executor::hook_failures(data)), "agentq.hooks": crate::executor::hooks(data),
-        "agentq.release": crate::release::project(&observed["release"], now),
+        "agentq.release": crate::release::project(&observed["release"], now), "agentq.model_backlog": crate::model::backlog(data),
         "agentq.ids_unknown": "an installation event has no session"})
 }
 
@@ -381,6 +398,9 @@ pub fn sender(install: &Path, every: u64) -> ! {
             continue;
         }
         sampler.tick(&data);
+        if crate::control::disabled(&data, "claude") == Ok(false) {
+            crate::model::drain(&data, std::time::Instant::now() + Duration::from_secs(10));
+        }
         let now = crate::now();
         crate::connect::pass(&data, now, &mut dashq);
         if now >= beat + HEARTBEAT {
