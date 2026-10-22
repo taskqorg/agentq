@@ -88,37 +88,53 @@ pub fn emit_at(data: &Path, name: &str, stage: &str, attrs: Value, ns: u128) -> 
     emit_all(data, name, stage, vec![(attrs, ns)]).pop()
 }
 
-/// `emit_at` for many events: one local transaction and one queue prune for the batch, one file per event. Returns
-/// the IDs written.
+/// Events per local transaction in `emit_until`: the most a pass runs past its deadline.
+pub(crate) const EMIT_CHUNK: usize = 32;
+
+/// `emit_at` for many events: one queue prune for the batch, one file per event. Returns the IDs written.
 pub fn emit_all(data: &Path, name: &str, stage: &str, events: Vec<(Value, u128)>) -> Vec<String> {
+    emit_until(data, name, stage, events, None).1
+}
+
+/// `emit_all` in chunks of `EMIT_CHUNK` events, one local transaction each; after the first chunk, none starts past
+/// `deadline`. Returns how many leading events were handled and the IDs written.
+pub fn emit_until(data: &Path, name: &str, stage: &str, events: Vec<(Value, u128)>, deadline: Option<std::time::Instant>) -> (usize, Vec<String>) {
     let (inst, host) = (installation(data), crate::host());
     let secs = |ns: u128| (ns / 1_000_000_000).min(u64::MAX as u128) as u64;
     let spans: Vec<(Value, u128)> = events.into_iter().map(|(a, ns)| (span(name, stage, a, ns, &inst, &host), ns)).collect();
-    if name != "agentq.compress" {
-        let rows: Vec<(&Value, u64)> = spans.iter().map(|(s, ns)| (s, secs(*ns))).collect();
-        if let Err(e) = crate::local::events_at(data, &rows) {
-            eprintln!("agentq: local event unknown: {e}");
-        }
-    }
     let q = queue(data);
-    if spans.is_empty() || std::fs::create_dir_all(&q).is_err() {
-        return vec![];
+    if spans.is_empty() {
+        return (0, vec![]);
     }
-    let mut written = std::collections::HashMap::new();
-    for (s, ns) in &spans {
-        let Some(id) = s["traceId"].as_str() else { continue };
-        let file = q.join(format!("{}-{id}.json", secs(*ns)));
-        if write_atomic(&file, &s.to_string()).is_ok() {
-            written.insert(id.to_string(), file);
+    // An unwritable queue still keeps the local copy; its file writes fail one by one.
+    let _ = std::fs::create_dir_all(&q);
+    let (mut handled, mut written) = (0, std::collections::HashMap::new());
+    for chunk in spans.chunks(EMIT_CHUNK) {
+        if handled > 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            break;
         }
+        if name != "agentq.compress" {
+            let rows: Vec<(&Value, u64)> = chunk.iter().map(|(s, ns)| (s, secs(*ns))).collect();
+            if let Err(e) = crate::local::events_at(data, &rows) {
+                eprintln!("agentq: local event unknown: {e}");
+            }
+        }
+        for (s, ns) in chunk {
+            let Some(id) = s["traceId"].as_str() else { continue };
+            let file = q.join(format!("{}-{id}.json", secs(*ns)));
+            if write_atomic(&file, &s.to_string()).is_ok() {
+                written.insert(id.to_string(), file);
+            }
+        }
+        handled += chunk.len();
     }
-    for (_, p, _) in prune(&q, spans.iter().map(|s| secs(s.1)).max().unwrap_or(0)) {
+    for (_, p, _) in prune(&q, spans[..handled].iter().map(|s| secs(s.1)).max().unwrap_or(0)) {
         let id = p.file_name().and_then(|n| n.to_str()?.strip_suffix(".json")?.split_once('-').map(|x| x.1.to_string()));
         if id.and_then(|i| written.get(&i)).is_some_and(|f| *f != p) {
             let _ = std::fs::remove_file(p);
         }
     }
-    written.into_keys().collect()
+    (handled, written.into_keys().collect())
 }
 
 /// Queued events oldest first: (unix seconds, path, bytes).

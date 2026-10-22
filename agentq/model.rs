@@ -1,4 +1,4 @@
-//! Claude model calls read from the native transcript at the `Stop` hook (agentq.md § 6 Model calls).
+﻿//! Claude model calls read from the native transcript at the `Stop` hook (agentq.md Â§ 6 Model calls).
 use ring::digest;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Seek, SeekFrom};
@@ -9,7 +9,7 @@ const SOURCE: &str = "claude_transcript";
 /// One batch: one local transaction, one queue prune and one saved offset.
 const BATCH_LINES: usize = 512;
 const BATCH_BYTES: usize = 4 << 20;
-/// A hook pass starts no batch after this, inside the 5 s hook budget (§ 1 `hook`); the rest waits as backlog.
+/// A hook pass starts no batch after this, inside the 5 s hook budget (Â§ 1 `hook`); the rest waits as backlog.
 const HOOK_PASS: Duration = Duration::from_secs(3);
 
 /// Same installation and call ID, same event: a duplicate counts once and a later reading replaces it.
@@ -34,10 +34,11 @@ fn time_ns(s: &str) -> Option<u128> {
 }
 
 /// One call per native call ID, in transcript order; the last line of a call wins (Claude repeats a call per content
-/// block and may correct its usage). Each value: (call key, source time, attributes without event ID).
-pub fn calls(text: &str) -> Vec<(String, Option<u128>, Value)> {
-    let mut out: Vec<(String, Option<u128>, Value)> = vec![];
-    for line in text.lines() {
+/// block and may correct its usage). Each value: (call key, source time, attributes without event ID, index of the
+/// call's first line).
+pub fn calls(text: &str) -> Vec<(String, Option<u128>, Value, usize)> {
+    let mut out: Vec<(String, Option<u128>, Value, usize)> = vec![];
+    for (n, line) in text.lines().enumerate() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let m = &v["message"];
         // `<synthetic>` marks a client-made message, not a model call.
@@ -63,9 +64,9 @@ pub fn calls(text: &str) -> Vec<(String, Option<u128>, Value)> {
             None => { a.insert("agentq.model.cost_unknown".into(), json!("not reported")); }
         }
         let key = call.or(v["uuid"].as_str()).unwrap_or_default().to_string();
-        let entry = (key, v["timestamp"].as_str().and_then(time_ns), Value::Object(a));
+        let entry = (key, v["timestamp"].as_str().and_then(time_ns), Value::Object(a), n);
         match out.iter_mut().find(|c| !entry.0.is_empty() && c.0 == entry.0) {
-            Some(c) => *c = entry,
+            Some(c) => *c = (entry.0, entry.1, entry.2, c.3),
             None => out.push(entry),
         }
     }
@@ -78,8 +79,9 @@ fn mark(state: &Path, file: &Path) -> PathBuf {
 }
 
 /// Process `file` in batches from its saved offset to its last complete line. A batch starts only before `deadline`,
-/// or as the first batch of a pass (`progressed` false), so every pass makes progress. A shorter file was rewritten
-/// and reads from the start. The mark records the bytes left; returns them.
+/// or as the first batch of a pass (`progressed` false); inside a batch no event chunk but the first starts past
+/// `deadline`, so every pass makes progress, and the offset stops at the first line of the first call left. A shorter file was
+/// rewritten and reads from the start. The mark records the bytes left; returns them.
 fn drain_file(data: &Path, installation: &str, file: &Path, deadline: Instant, progressed: &mut bool) -> Result<u64, String> {
     let err = |e: std::io::Error| format!("transcript: {e}");
     let mark = mark(&data.join("model"), file);
@@ -97,25 +99,29 @@ fn drain_file(data: &Path, installation: &str, file: &Path, deadline: Instant, p
             if saved["offset"] != offset || saved["left"] != left { save(offset, left)?; }
             return Ok(left);
         }
-        let (mut text, mut line, mut lines) = (vec![], vec![], 0);
-        while lines < BATCH_LINES && text.len() < BATCH_BYTES {
+        // `starts`: byte offset of each line in `text`.
+        let (mut text, mut line, mut starts) = (vec![], vec![], vec![]);
+        while starts.len() < BATCH_LINES && text.len() < BATCH_BYTES {
             line.clear();
             r.read_until(b'\n', &mut line).map_err(err)?;
             // An unterminated last line is still being written: it waits for the next pass.
             if line.last() != Some(&b'\n') { break; }
+            starts.push(text.len() as u64);
             text.extend_from_slice(&line);
-            lines += 1;
         }
         if text.is_empty() {
             if saved["offset"] != offset || saved["left"] != 0 { save(offset, 0)?; }
             return Ok(0);
         }
-        let events = calls(&String::from_utf8_lossy(&text)).into_iter().map(|(key, at, mut attrs)| {
+        let found = calls(&String::from_utf8_lossy(&text));
+        let firsts: Vec<usize> = found.iter().map(|c| c.3).collect();
+        let events = found.into_iter().map(|(key, at, mut attrs, _)| {
             attrs["agentq.event_id"] = json!(event_id(installation, &key));
             (attrs, at.unwrap_or_else(crate::telemetry::now_ns))
         });
-        crate::telemetry::emit_all(data, "agentq.model", "call", events.collect());
-        offset += text.len() as u64;
+        let (handled, _) = crate::telemetry::emit_until(data, "agentq.model", "call", events.collect(), Some(deadline));
+        // A call already sent whose correction lies past the cut is sent again under its own event ID.
+        offset += firsts.get(handled).map_or(text.len() as u64, |&n| starts[n]);
         *progressed = true;
         save(offset, len.saturating_sub(offset))?;
     }
@@ -288,15 +294,16 @@ mod tests {
         std::fs::write(&t, &text).unwrap();
         let data = d.join("data");
         let input = json!({"transcript_path": t});
+        // Queued event IDs from file names (`<secs>-<id>.json`): reading thousands of files is slow on Windows CI.
         let ids = |data: &Path| -> Vec<String> {
-            crate::telemetry::entries(&crate::telemetry::queue(data)).into_iter().map(|e| std::fs::read_to_string(e.1).unwrap()).filter(|s| s.contains("\"agentq.model\"")).map(|s| {
-                let v: Value = serde_json::from_str(&s).unwrap();
-                v["attributes"].as_array().unwrap().iter().find(|a| a["key"] == "agentq.model.call_id").unwrap()["value"]["stringValue"].as_str().unwrap().to_string()
-            }).collect()
+            crate::telemetry::entries(&crate::telemetry::queue(data)).into_iter().filter_map(|e| Some(e.1.file_stem()?.to_str()?.split_once('-')?.1.to_string())).collect()
         };
-        // An expired deadline still runs one batch, so each pass makes progress and leaves the rest as backlog.
+        // An expired deadline still runs one event chunk, so each pass makes progress and leaves the rest as backlog.
+        // #161 CI: a whole 512-line batch after the deadline took a Windows hook pass to 6.25 s.
         observe_until(&data, &input, Instant::now()).unwrap();
-        assert_eq!(ids(&data).len(), BATCH_LINES / 3 + 1, "one batch of lines per expired pass");
+        assert_eq!(ids(&data).len(), crate::telemetry::EMIT_CHUNK, "one event chunk per expired pass, cut inside the batch");
+        observe_until(&data, &input, Instant::now()).unwrap();
+        assert_eq!(ids(&data).len(), 2 * crate::telemetry::EMIT_CHUNK, "the next pass resumes at the first call left");
         let b = backlog(&data);
         assert_eq!((b["state"].as_str(), b["transcripts"].as_u64()), (Some("pending"), Some(1)), "leftover calls are exposed: {b}");
         assert!(b["bytes"].as_u64().unwrap() > 0);
@@ -304,10 +311,11 @@ mod tests {
         observe(&data, &input).unwrap();
         assert!(start.elapsed() < Duration::from_secs(5), "a hook pass ends inside the hook budget: {:?}", start.elapsed());
         // The service finishes what hook passes left, even after the session ended.
-        while backlog(&data)["state"] == "pending" { drain(&data, Instant::now()); }
+        while backlog(&data)["state"] == "pending" { drain(&data, Instant::now() + Duration::from_secs(10)); }
         let mut got = ids(&data);
         got.sort();
-        let mut want: Vec<String> = (0..4008).map(|i| format!("req_{i}")).collect();
+        let installation = crate::telemetry::installation(&data);
+        let mut want: Vec<String> = (0..4008).map(|i| event_id(&installation, &format!("req_{i}"))).collect();
         want.sort();
         assert_eq!(got, want, "each call ID exactly once");
         assert_eq!(backlog(&data), json!({"state": "none", "transcripts": 0, "bytes": 0}));
