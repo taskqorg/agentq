@@ -76,7 +76,8 @@ struct Machine<'a>(&'a mut dyn Wire, Option<&'a Path>);
 
 impl Wire for Machine<'_> {
     fn post(&mut self, destination: &str, route: &str, auth: Option<&str>, body: &Value) -> Result<(u16, Value), String> {
-        if self.1.is_some_and(|data| crate::control::host_disabled(data) != Ok(false)) { return Err("integration_disabled: export suspended".into()); }
+        // Host disable (§ 4): only snapshot records (`/ingest`) still travel, so DashQ can name the host disabled.
+        if route != "/ingest" && self.1.is_some_and(|data| crate::control::host_disabled(data) != Ok(false)) { return Err("integration_disabled: export suspended".into()); }
         self.0.post(destination, &format!("/machine{route}"), auth, body)
     }
     fn now(&self) -> u64 {
@@ -92,12 +93,11 @@ impl Wire for Machine<'_> {
 
 /// One service pass over HTTPS.
 pub fn pass(data: &Path, now: u64, s: &mut Sender) {
-    if crate::control::host_disabled(data) != Ok(false) { return; }
     pass_with(data, now, s, &mut enroll::Https { browser: false });
 }
 
 /// Retry queued revokes, queue a snapshot every 60 s while connected, deliver grant-bound records. Never enrolled:
-/// nothing.
+/// nothing. Host disable (§ 4): snapshots only, no revoke retry and no operation.
 // ponytail: offline revokes take one 10 s try each per pass, at most 16; skip them for a while if passes run late
 fn pass_with(data: &Path, now: u64, s: &mut Sender, wire: &mut dyn Wire) {
     let wire = &mut Machine(wire, Some(data));
@@ -105,14 +105,17 @@ fn pass_with(data: &Path, now: u64, s: &mut Sender, wire: &mut dyn Wire) {
     if !d.join("connection.json").exists() {
         return;
     }
-    let _ = enroll::retry_revokes(&d, wire);
+    let disabled = crate::control::host_disabled(data) != Ok(false);
+    if !disabled {
+        let _ = enroll::retry_revokes(&d, wire);
+    }
     if now >= s.snapshot_at + HEARTBEAT && queue_snapshot(data, now).is_ok() {
         s.snapshot_at = now;
     }
     if now >= s.wait_until {
         deliver(data, now, s, wire);
     }
-    if now >= s.wait_until {
+    if !disabled && now >= s.wait_until {
         operate(data, now, s, wire);
     }
 }
@@ -562,6 +565,24 @@ mod tests {
         // a repeat to the same destination reuses the grant and verifies a new snapshot
         enroll_with(&d, "https://dash.example", &mut w).unwrap();
         assert_eq!(w.generation, 1);
+        let _ = std::fs::remove_dir_all(d.parent().unwrap());
+    }
+
+    /// #169: a host disable keeps the DashQ snapshot (and only it) flowing, so DashQ can name the host disabled
+    /// instead of reading a silent host; operations and revoke retries stay off.
+    #[test]
+    fn host_disable_keeps_only_snapshots() {
+        let d = data("disabled");
+        let mut w = Dash { now: 1000, approve: vec![configure::CAPABILITY], ..Dash::default() };
+        enroll_with(&d, "https://dash.example", &mut w).unwrap();
+        crate::control::save(&d, "integration.json", &json!({"schema": 1, "generation": 1, "host_disabled": true, "profiles": {}})).unwrap();
+        queue_op(&mut w, "d0000000000000000000000000000009", "plan", 1, json!([]), None);
+        let (sent, events) = (w.sent.len(), w.events.len());
+        w.now += HEARTBEAT;
+        pass_with(&d, w.now, &mut Sender::default(), &mut w);
+        let routes: Vec<_> = w.sent[sent..].iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(routes, ["https://dash.example/machine/ingest"], "snapshot only, no operation pull");
+        assert_eq!((w.events.len(), records(&d)), (events + 1, 0), "a new snapshot is accepted and deleted");
         let _ = std::fs::remove_dir_all(d.parent().unwrap());
     }
 

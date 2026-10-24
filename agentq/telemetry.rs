@@ -410,6 +410,8 @@ pub fn sender(install: &Path, every: u64) -> ! {
     let mut dashq = crate::connect::Sender::default();
     loop {
         if crate::control::host_disabled(&data) != Ok(false) {
+            // § 4: the DashQ snapshot alone keeps sending, so DashQ names the host disabled (#169)
+            crate::connect::pass(&data, crate::now(), &mut dashq);
             std::thread::sleep(Duration::from_secs(every));
             continue;
         }
