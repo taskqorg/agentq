@@ -121,6 +121,18 @@ pub fn output(c: &mut Command) -> Result<Output, String> {
     coreq::quiet(c).output().map_err(|e| log(c, &e.to_string()))
 }
 
+/// `output` for a tool fed `input` on stdin, e.g. curl reading credentials from `-K -`; the caller sets stdout and
+/// stderr. Only the command is logged, never `input`.
+pub fn feed(c: &mut Command, input: &[u8]) -> Result<Output, String> {
+    let mut p = coreq::quiet(c).stdin(std::process::Stdio::piped()).spawn().map_err(|e| log(c, &e.to_string()))?;
+    let wrote = p.stdin.take().ok_or_else(|| "no stdin".to_string()).and_then(|mut s| std::io::Write::write_all(&mut s, input).map_err(|e| e.to_string()));
+    let o = p.wait_with_output().map_err(|e| log(c, &e.to_string()))?;
+    match wrote {
+        Err(e) if o.status.success() => Err(log(c, &format!("stdin: {e}"))),
+        _ => Ok(o),
+    }
+}
+
 /// Output of one host tool call that must exit 0; a failed start or exit is logged and returned as `Err`.
 pub fn run(c: &mut Command) -> Result<Output, String> {
     run_allow(c, &[0])
@@ -142,8 +154,13 @@ pub fn failed(c: &Command, o: &Output, error: &str) -> String {
 }
 
 fn exit(c: &Command, o: &Output) -> String {
+    log(c, &status(o))
+}
+
+/// `<exit status>: <last stderr line>`, or `no error output`: a failed exit never reads as empty.
+pub fn status(o: &Output) -> String {
     let err = String::from_utf8_lossy(&o.stderr);
-    log(c, &format!("{}: {}", o.status, err.trim().lines().last().unwrap_or("no error output")))
+    format!("{}: {}", o.status, err.trim().lines().last().unwrap_or("no error output"))
 }
 
 /// Logs `agentq: `<command>`: <error>` to stderr (the service log under `service run`) and returns the message.

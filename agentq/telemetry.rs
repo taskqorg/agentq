@@ -293,7 +293,7 @@ pub fn read_keys() -> Result<Keys, String> {
         }
         let echo = |on: bool| {
             if hide && tty && cfg!(unix) {
-                let _ = Command::new("stty").arg(if on { "echo" } else { "-echo" }).status();
+                let _ = crate::host::run(Command::new("stty").arg(if on { "echo" } else { "-echo" }).stdin(Stdio::inherit()));
             }
         };
         echo(false);
@@ -311,13 +311,22 @@ pub fn read_keys() -> Result<Keys, String> {
 
 /// curl with the credentials in its stdin config, never in argv (§ 6).
 fn curl(config: &str, k: &Keys) -> Result<String, String> {
-    let mut c = Command::new("curl");
-    c.args(["-sS", "--fail", "--max-time", "30", "-K", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut p = coreq::quiet(&mut c).spawn().map_err(|e| format!("curl: {e}"))?;
-    let cfg = format!("{config}user = {}\n", quote(&format!("{}:{}", k.public, k.secret)));
-    p.stdin.take().ok_or("curl: no stdin")?.write_all(cfg.as_bytes()).map_err(|e| format!("curl: {e}"))?;
-    let o = p.wait_with_output().map_err(|e| format!("curl: {e}"))?;
-    if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(format!("Langfuse: {}", String::from_utf8_lossy(&o.stderr).trim())) }
+    request(&mut Command::new("curl"), config, k)
+}
+
+/// One curl call through the host tool wrapper (agentq.md § 5): a failure is logged with its command and never reads
+/// as an empty error.
+fn request(c: &mut Command, config: &str, k: &Keys) -> Result<String, String> {
+    c.args(["-sS", "--fail", "--max-time", "30", "-K", "-"]).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let cfg = format!("{config}user = {}
+", quote(&format!("{}:{}", k.public, k.secret)));
+    let o = crate::host::feed(c, cfg.as_bytes()).map_err(|e| format!("curl: {e}"))?;
+    if o.status.success() {
+        return Ok(String::from_utf8_lossy(&o.stdout).into_owned());
+    }
+    let err = String::from_utf8_lossy(&o.stderr);
+    let err = if err.trim().is_empty() { format!("curl {}, no error output", o.status) } else { err.trim().to_string() };
+    Err(crate::host::failed(c, &o, &format!("Langfuse: {err}")))
 }
 
 fn quote(s: &str) -> String {
@@ -695,6 +704,32 @@ mod tests {
         let k = Keys::parse(&format!("{url} pk sk")).unwrap();
         let id = verify(&d, &k, 1, Duration::ZERO).unwrap();
         assert_eq!(id.len(), 32);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// #172 A4: a curl that fails without stderr, or is missing, names its command and never reads as an empty
+    /// `Langfuse: ` error; the secret stays out of the message.
+    #[test]
+    fn failed_curl_names_command_and_error() {
+        let k = Keys { host: "http://127.0.0.1:9".into(), public: "pk-lf-test".into(), secret: "sk-lf-invented".into() };
+        let d = dir("curl-fake");
+        let mut c = if cfg!(windows) {
+            std::fs::create_dir_all(&d).unwrap();
+            let p = d.join("curl-silent.cmd");
+            std::fs::write(&p, "@exit /b 7
+").unwrap();
+            Command::new(p)
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "cat >/dev/null; exit 7"]);
+            c
+        };
+        let e = request(&mut c, "url = \"http://127.0.0.1:9/\"
+", &k).unwrap_err();
+        assert!(e.starts_with("Langfuse: curl ") && e.contains('7') && e.contains("no error output") && !e.contains("sk-lf"), "{e}");
+        assert_eq!(crate::profile::class(&e), "network");
+        let e = request(&mut Command::new(d.join("agentq-no-such-curl")), "", &k).unwrap_err();
+        assert!(e.starts_with("curl: `") && e.contains("agentq-no-such-curl") && !e.contains("sk-lf"), "{e}");
         let _ = std::fs::remove_dir_all(d);
     }
 }
