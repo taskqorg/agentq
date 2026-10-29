@@ -280,11 +280,10 @@ pub fn integrations(
 /// Native executable inventory, without command arguments or environment values.
 pub fn dependencies(ignore: &[u32]) -> Result<std::collections::BTreeMap<String, usize>, String> {
     #[cfg(unix)]
-    let output = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,comm="]).output().map_err(|_| "process inventory unavailable")?;
+    let output = crate::host::run(std::process::Command::new("ps").args(["-axo", "pid=,ppid=,comm="])).map_err(|_| "process inventory unavailable")?;
     #[cfg(windows)]
-    let output = coreq::quiet(std::process::Command::new("powershell").args(["-NoProfile", "-Command",
-        "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId,$_.ParentProcessId,$_.Name }"])).output().map_err(|_| "process inventory unavailable")?;
-    if !output.status.success() { return Err("process inventory unavailable".into()); }
+    let output = crate::host::run(std::process::Command::new("powershell").args(["-NoProfile", "-Command",
+        "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId,$_.ParentProcessId,$_.Name }"])).map_err(|_| "process inventory unavailable")?;
     let listing = std::str::from_utf8(&output.stdout).map_err(|_| "process inventory unreadable")?;
     inventory(listing, ignore)
 }
@@ -419,9 +418,9 @@ pub fn process_alive(pid: u32) -> Result<bool, String> {
     #[cfg(windows)]
     {
         let query = format!("if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ 'alive' }} else {{ 'gone' }}");
-        let output = coreq::quiet(std::process::Command::new("powershell").args(["-NoProfile", "-Command", &query])).output().map_err(|_| "process identity unavailable")?;
-        match (output.status.success(), String::from_utf8_lossy(&output.stdout).trim()) {
-            (true, "alive") => Ok(true), (true, "gone") => Ok(false), _ => Err("process identity unavailable".into()),
+        let output = crate::host::run(std::process::Command::new("powershell").args(["-NoProfile", "-Command", &query])).map_err(|_| "process identity unavailable")?;
+        match String::from_utf8_lossy(&output.stdout).trim() {
+            "alive" => Ok(true), "gone" => Ok(false), _ => Err("process identity unavailable".into()),
         }
     }
 }

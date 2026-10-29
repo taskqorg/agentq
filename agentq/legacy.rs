@@ -200,8 +200,12 @@ fn monitor(home: &Path, dry: bool, run: Run) -> Vec<String> {
         return vec![format!("{would}: task {TASK}")];
     }
     let (unit, stop): (PathBuf, Vec<String>) = if cfg!(target_os = "macos") {
-        let uid = std::process::Command::new("id").arg("-u").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-        (home.join(format!("Library/LaunchAgents/{LABEL}.plist")), vec!["launchctl".into(), "bootout".into(), format!("gui/{uid}/{LABEL}")])
+        let unit = home.join(format!("Library/LaunchAgents/{LABEL}.plist"));
+        let uid = match crate::host::run(std::process::Command::new("id").arg("-u")) {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            Err(e) => return if unit.exists() { vec![format!("kept: {}; {e}", unit.display())] } else { vec![] },
+        };
+        (unit, vec!["launchctl".into(), "bootout".into(), format!("gui/{uid}/{LABEL}")])
     } else {
         let u = "agent-context-monitor.service";
         (home.join(".config/systemd/user").join(u), vec!["systemctl".into(), "--user".into(), "disable".into(), "--now".into(), u.into()])

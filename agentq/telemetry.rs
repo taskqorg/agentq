@@ -217,33 +217,41 @@ impl Keys {
     }
 }
 
-/// stdout of a command fed `input` on stdin, when it succeeds.
-fn feed(c: &mut Command, input: &str) -> Option<String> {
-    let mut p = coreq::quiet(c).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-    p.stdin.take()?.write_all(input.as_bytes()).ok()?;
-    let o = p.wait_with_output().ok()?;
-    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+/// stdout of a command fed `input` on stdin, when it succeeds; else its start error or exit status. Its stderr is
+/// dropped: a key store may echo the secret input there.
+fn feed(c: &mut Command, input: &str) -> Result<String, String> {
+    let mut p = coreq::quiet(c).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    p.stdin.take().ok_or("no stdin")?.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
+    let o = p.wait_with_output().map_err(|e| e.to_string())?;
+    if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(o.status.to_string()) }
 }
 
+/// The optional key store; a miss or a missing tool falls back to the file without a log line (agentq.md § 5).
 fn os_read() -> Option<String> {
     if cfg!(target_os = "macos") {
-        feed(Command::new("security").args(["find-generic-password", "-s", STORE, "-a", "agentq", "-w"]), "")
+        feed(Command::new("security").args(["find-generic-password", "-s", STORE, "-a", "agentq", "-w"]), "").ok()
     } else if cfg!(target_os = "linux") {
-        feed(Command::new("secret-tool").args(["lookup", "service", STORE]), "")
+        feed(Command::new("secret-tool").args(["lookup", "service", STORE]), "").ok()
     } else {
         None
     }
 }
 
+/// A failed write is logged with its command; the caller falls back to the file.
 fn os_write(line: &str) -> Option<&'static str> {
-    if cfg!(target_os = "macos") {
+    let (mut c, input, store) = if cfg!(target_os = "macos") {
         // `security -i` reads the command from stdin: the secret stays out of argv
-        feed(Command::new("security").arg("-i"), &format!("add-generic-password -U -s {STORE} -a agentq -w \"{line}\"\n")).map(|_| "Keychain")
+        let mut c = Command::new("security");
+        c.arg("-i");
+        (c, format!("add-generic-password -U -s {STORE} -a agentq -w \"{line}\"\n"), "Keychain")
     } else if cfg!(target_os = "linux") {
-        feed(Command::new("secret-tool").args(["store", "--label=agentq Langfuse", "service", STORE]), line).map(|_| "Secret Service")
+        let mut c = Command::new("secret-tool");
+        c.args(["store", "--label=agentq Langfuse", "service", STORE]);
+        (c, line.to_string(), "Secret Service")
     } else {
-        None
-    }
+        return None;
+    };
+    feed(&mut c, &input).map_err(|e| crate::host::log(&c, &e)).ok().map(|_| store)
 }
 
 // ponytail: Windows uses the per-user file; add a Credential Manager binding (CredRead) when Windows hosts need it.
