@@ -56,7 +56,7 @@ The transition preserves native login, model, permissions, sandbox, compression 
 - `agentq langfuse` reads the Langfuse host and keys from hidden stdin into protected storage. `agentq telemetry status|verify` shows the queue and checks delivery.
 - `agentq service status`, `agentq update [--check]`, `agentq selftest` check the install.
 - `agentq setup-path` repairs the current user's command registration.
-- `agentq doctor` reads installation, service, routing intent, engines and local telemetry health. Intentional detach is distinct from drift; runtime verification remains separate.
+- `agentq doctor` reads installation, host tools with their minimum versions, service, routing intent, engines and local telemetry health. A missing or old host tool fails with its found version, minimum and fix. Intentional detach is distinct from drift; runtime verification remains separate.
 - `agentq uninstall --dry-run`, then `agentq uninstall`, restores owned edits and removes the service and install folder.
 
 Releases: [taskqorg/agentq releases](https://github.com/taskqorg/agentq/releases), one `agentq-<ver>-<os>-<arch>` binary per platform plus `SHA256SUMS`. Check a download with `sha256sum -c SHA256SUMS --ignore-missing`; trace it to the workflow run that built it with `gh attestation verify <file> --repo taskqorg/agentq`.

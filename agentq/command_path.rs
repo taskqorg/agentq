@@ -75,12 +75,13 @@ fn remove_link(link: &Path, exe: &Path) -> Result<(), String> {
 fn windows(install: &Path, action: &str) -> Result<(), String> {
     if install.to_string_lossy().contains(';') { return Err("install path contains a PATH separator".into()); }
     let script = format!("{}\n$key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment'); try {{ Set-AgentQPath $key $env:AGENTQ_COMMAND_DIR ($env:AGENTQ_COMMAND_ACTION -eq 'remove') }} finally {{ $key.Dispose() }}", include_str!("command_path.ps1"));
-    let out = coreq::quiet(std::process::Command::new("powershell.exe")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
-        .env("AGENTQ_COMMAND_DIR", install).env("AGENTQ_COMMAND_ACTION", action))
-        .output().map_err(|e| format!("user PATH: {e}"))?;
-    if !out.status.success() { return Err(format!("user PATH: {}", String::from_utf8_lossy(&out.stderr))); }
-    Ok(())
+    let mut c = std::process::Command::new("powershell.exe");
+    c.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script]).env("AGENTQ_COMMAND_DIR", install).env("AGENTQ_COMMAND_ACTION", action);
+    let out = crate::host::output(&mut c).map_err(|e| format!("user PATH: {e}"))?;
+    if out.status.success() { return Ok(()); }
+    // A PowerShell error spans several lines; keep them all, or the exit status when there are none.
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(crate::host::failed(&c, &out, &format!("user PATH: {}", if err.is_empty() { crate::host::status(&out) } else { err })))
 }
 
 #[cfg(all(test, windows))]

@@ -147,9 +147,11 @@ pub fn open_connections(ports: &[u16]) -> Result<usize, String> {
         ["/proc/net/tcp", "/proc/net/tcp6"].iter().map(|p| std::fs::read_to_string(p).map_err(|_| "connection list unavailable".to_string())).collect::<Result<Vec<_>, _>>()?.concat()
     } else {
         let (cmd, args) = if cfg!(target_os = "macos") { ("lsof", &["-nP", "-iTCP", "-sTCP:ESTABLISHED"][..]) } else { ("netstat", &["-an"][..]) };
-        let o = coreq::quiet(Command::new(cmd).args(args)).output().map_err(|e| format!("{cmd}: {e}"))?;
+        let mut c = Command::new(cmd);
+        c.args(args);
+        let o = crate::host::output(&mut c).map_err(|e| format!("{cmd}: {e}"))?;
         // lsof exits 1 with no output when nothing matches.
-        if empty_connections(cmd, o.status.code(), &o.stdout, &o.stderr)? {
+        if empty_connections(cmd, o.status.code(), &o.stdout, &o.stderr).map_err(|e| crate::host::failed(&c, &o, &e))? {
             return Ok(0);
         }
         String::from_utf8_lossy(&o.stdout).into_owned()

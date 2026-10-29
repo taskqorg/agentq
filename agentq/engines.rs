@@ -36,15 +36,9 @@ fn venv_bin(dir: &Path, name: &str) -> PathBuf {
     dir.join(if cfg!(windows) { "Scripts" } else { "bin" }).join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// stdout of a command that must succeed.
+/// stdout of a command that must succeed; a failure is logged with its command (agentq.md § 5 Host requirements).
 fn output(c: &mut Command) -> Result<String, String> {
-    let o = coreq::quiet(c).output().map_err(|e| format!("{}: {e}", c.get_program().to_string_lossy()))?;
-    if o.status.success() {
-        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
-    } else {
-        let err = String::from_utf8_lossy(&o.stderr);
-        Err(format!("{} failed: {}", c.get_program().to_string_lossy(), err.trim().lines().last().unwrap_or("")))
-    }
+    crate::host::run(c).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 fn check_version(exe: &Path, want: &str) -> Result<(), String> {
@@ -116,24 +110,30 @@ pub fn install_rtk(install: &Path) -> Result<PathBuf, String> {
     check_version(&exe, &want).map(|_| exe)
 }
 
-/// Python 3.11-3.13 with venv: `AGENTQ_PYTHON`, else the first one found on PATH.
-fn python() -> Result<Vec<String>, String> {
-    let probe = "import sys, venv, ensurepip; assert (3, 11) <= sys.version_info[:2] < (3, 14)";
-    let found: Vec<Vec<String>> = match std::env::var("AGENTQ_PYTHON") {
+/// Python candidates in finder order: `AGENTQ_PYTHON`, else the usual names on PATH.
+pub fn python_candidates() -> Vec<Vec<String>> {
+    match std::env::var("AGENTQ_PYTHON") {
         Ok(p) => vec![vec![p]],
         Err(_) => {
             let py = if cfg!(windows) { vec!["py -3.13", "py -3.12", "py -3.11"] } else { vec![] };
             py.into_iter().chain(["python3.13", "python3.12", "python3.11", "python3", "python"]).map(|c| c.split(' ').map(String::from).collect()).collect()
         }
-    };
+    }
+}
+
+/// Python 3.11-3.13 with venv: the first candidate that passes the probe. Probes are discovery, not logged failures.
+pub fn python() -> Result<Vec<String>, String> {
+    let probe = "import sys, venv, ensurepip; assert (3, 11) <= sys.version_info[:2] < (3, 14)";
+    let found = python_candidates();
     found
-        .into_iter()
-        .find(|c| output(py(c).args(["-c", probe])).is_ok())
-        .ok_or("no Python 3.11-3.13 with venv; install one or set AGENTQ_PYTHON".into())
+        .iter()
+        .find(|c| coreq::quiet(py(c).args(["-c", probe])).output().is_ok_and(|o| o.status.success()))
+        .cloned()
+        .ok_or_else(|| format!("no Python 3.11-3.13 with venv among `{}`; install one or set AGENTQ_PYTHON", found.iter().map(|c| c.join(" ")).collect::<Vec<_>>().join("`, `")))
 }
 
 /// Isolated mode (`-I`) from a fixed folder: no PYTHON* env, user site or planted module from the caller's folder.
-fn py<S: AsRef<std::ffi::OsStr>>(c: &[S]) -> Command {
+pub fn py<S: AsRef<std::ffi::OsStr>>(c: &[S]) -> Command {
     let mut cmd = Command::new(&c[0]);
     cmd.args(&c[1..]).arg("-I").env("OPENBLAS_NUM_THREADS", "1").env("OMP_NUM_THREADS", "1").current_dir(std::env::temp_dir());
     cmd

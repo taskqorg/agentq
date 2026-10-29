@@ -9,6 +9,7 @@ mod connect;
 mod control;
 mod engines;
 mod hooks;
+mod host;
 mod executor;
 mod legacy;
 mod local;
@@ -252,6 +253,7 @@ fn doctor(t: &Tool) -> i32 {
         Some(v) => line(true, format!("install: {} current {v}", t.install.display())),
         None => line(false, format!("install: none at {}; run `agentq onboard --yes`", t.install.display())),
     }
+    for (good, l) in host::check() { line(good, l); }
     let report = control_report(t);
     let service = &report["service"];
     line(matches!(service["state"].as_str(), Some("running" | "stopped")), format!("service: {} ({})", service["state"].as_str().unwrap_or("unknown"), service["reason"].as_str().unwrap_or("fresh process and status readback")));
@@ -289,7 +291,7 @@ fn doctor(t: &Tool) -> i32 {
     let pids = legacy_pids(&old);
     let installed = legacy::installed(&old);
     let locked = legacy::locked(&old);
-    line(!installed && pids.is_empty() && locked.is_empty(), format!("legacy: {}{}", if installed { "installed; run `agentq uninstall --legacy`" } else { "removed" }, running(&pids)));
+    line(!installed && pids.as_ref().is_ok_and(Vec::is_empty) && locked.is_empty(), format!("legacy: {}{}", if installed { "installed; run `agentq uninstall --legacy`" } else { "removed" }, running(&pids)));
     for f in &locked {
         println!("legacy: locked {}; stop the legacy processes, then delete {}", f.display(), old.display());
     }
@@ -429,14 +431,16 @@ fn unit_loaded(t: &Tool) -> Result<bool, String> {
         c.args(["--user", "show", &label, "--property=LoadState,UnitFileState,ActiveState,ExecStart"]);
         (c, label, "linux")
     };
-    let o = coreq::quiet(&mut command).output().map_err(|_| "service registration inventory unavailable")?;
-    if !o.status.success() || !o.stderr.is_empty() { return Err("service registration inventory failed".into()); }
+    let o = host::output(&mut command).map_err(|_| "service registration inventory unavailable")?;
+    if !o.status.success() || !o.stderr.is_empty() { return Err(host::failed(&command, &o, "service registration inventory failed")); }
     let listing = std::str::from_utf8(&o.stdout).map_err(|_| "service registration inventory unreadable")?;
     let loaded = unit_loaded_in(platform, listing, &label)?;
     if !loaded || platform == "windows" { return Ok(loaded); }
     let registration = if platform == "macos" {
-        let o = Command::new("launchctl").args(["print", &u.unload[0][2]]).output().map_err(|_| "service registration inventory unavailable")?;
-        if !o.status.success() || !o.stderr.is_empty() { return Err("service registration inventory failed".into()); }
+        let mut c = Command::new("launchctl");
+        c.args(["print", &u.unload[0][2]]);
+        let o = host::output(&mut c).map_err(|_| "service registration inventory unavailable")?;
+        if !o.status.success() || !o.stderr.is_empty() { return Err(host::failed(&c, &o, "service registration inventory failed")); }
         String::from_utf8(o.stdout).map_err(|_| "service registration inventory unreadable")?
     } else { listing.into() };
     if !unit_owned_in(platform, &registration, &launcher) { return Err("foreign_service".into()); }
@@ -563,8 +567,9 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// `hostname`; a failed call is logged and reads `unknown`, never empty (agentq.md § 5 Host requirements).
 fn host() -> String {
-    Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+    host::run(&mut Command::new("hostname")).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).ok().filter(|h| !h.is_empty()).unwrap_or_else(|| "unknown".into())
 }
 
 /// agentq.md § 5: `<install>/status.json`, not coreq's `<root>/.<name>/`.
@@ -619,10 +624,10 @@ fn service_cmd(t: &Tool, cmd: &str) -> i32 {
     }
 }
 
-/// `service install` before the unit: the release, then its engines.
+/// `service install` before the unit: the release, each failing host requirement with its fix, then the engines.
 fn install_release(t: &Tool) -> Result<(), String> {
     names::migrate(&integration_host(t), false, false).and_then(|_| install_self(t)).and_then(|_| command_path::register(&t.install))
-        .map(|_| engines::ensure(&t.install).iter().for_each(|l| println!("{l}")))
+        .map(|_| host::problems().iter().chain(&engines::ensure(&t.install)).for_each(|l| println!("{l}")))
 }
 
 /// Writes the unit and (re)starts it.
@@ -704,8 +709,10 @@ fn copy_unless_same(me: &Path, dst: &Path) -> Result<bool, String> {
 fn end_tree(t: &Tool) -> Result<(), String> {
     if cfg!(windows) {
         for pid in service_runs(t)? {
-            let o = coreq::quiet(Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"])).output().map_err(|_| "service process stop unavailable")?;
-            if !o.status.success() && control::process_alive(pid)? { return Err(format!("service process {pid} could not be stopped")); }
+            let mut c = Command::new("taskkill");
+            c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+            let o = host::output(&mut c).map_err(|_| "service process stop unavailable")?;
+            if !o.status.success() && control::process_alive(pid)? { return Err(host::failed(&c, &o, &format!("service process {pid} could not be stopped"))); }
         }
     }
     Ok(())
@@ -728,14 +735,17 @@ fn one_service_run(t: &Tool) -> Result<(), String> {
 
 /// Live `service run` processes of this install (agentq.md § 5).
 fn service_listing(t: &Tool) -> Result<String, String> {
-    let out = if cfg!(windows) {
+    let mut c = if cfg!(windows) {
         let ps = format!("[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process -Filter \"Name='{}'\" | ForEach-Object {{ \"$($_.ProcessId) $($_.CommandLine)\" }}", t.exe_name());
-        coreq::quiet(Command::new("powershell").args(["-NoProfile", "-Command", &ps])).output()
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-Command", &ps]);
+        c
     } else {
-        Command::new("ps").args(["-axo", "pid=,args="]).output()
+        let mut c = Command::new("ps");
+        c.args(["-axo", "pid=,args="]);
+        c
     };
-    let out = out.map_err(|_| "service process inventory unavailable")?;
-    if !out.status.success() { return Err("service process inventory unavailable".into()); }
+    let out = host::run(&mut c).map_err(|_| "service process inventory unavailable")?;
     let listing = std::str::from_utf8(&out.stdout).map_err(|_| "service process inventory unreadable")?;
     if !cfg!(windows) && listing.trim().is_empty() { return Err("empty service process inventory".into()); }
     Ok(listing.into())
@@ -785,9 +795,12 @@ fn serve(t: &Tool) -> ! {
     names::migrate(&integration_host(t), false, false).unwrap_or_else(|e| fail(&e, "resolve the name migration conflict before restarting the service"));
     // a release with a new engine pin installs it here; status keeps its 30 s pace meanwhile
     let install = t.install.clone();
-    if control::host_disabled(&install.join("data")) == Ok(false) {
-        std::thread::spawn(move || engines::ensure(&install).iter().for_each(|l| eprintln!("agentq: {l}")));
-    }
+    let maintain = control::host_disabled(&install.join("data")) == Ok(false);
+    // each start, so each update, names a host requirement the new release lacks (agentq.md § 5 Host requirements)
+    std::thread::spawn(move || {
+        host::problems().iter().for_each(|l| eprintln!("agentq: {l}"));
+        if maintain { engines::ensure(&install).iter().for_each(|l| eprintln!("agentq: {l}")); }
+    });
     let install = t.install.clone();
     std::thread::spawn(move || telemetry::sender(&install, PASS));
     // CONFIGURATION "Host executor": an operation interrupted by the last stop resolves before anything else
@@ -920,6 +933,8 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
         println!("legacy: removed{pids}");
     }
     if !yes {
+        // `--yes` reports them during the release install below
+        host::problems().iter().for_each(|l| println!("{l}"));
         return 0;
     }
     let selected = if picked.is_empty() { &ready } else { &picked };
@@ -1079,7 +1094,8 @@ fn legacy(dir: &Path, dry: bool) -> i32 {
         println!("legacy: already removed{}", running(&legacy_pids(dir)));
         return 0;
     }
-    let run = |cmd: &str, args: &[&str]| coreq::quiet(Command::new(cmd).args(args)).output().is_ok_and(|o| o.status.success());
+    // a nonzero exit is an answer here (no such task, process gone); a failed start is logged
+    let run = |cmd: &str, args: &[&str]| host::output(Command::new(cmd).args(args)).is_ok_and(|o| o.status.success());
     match legacy::remove(dir, dry, &date(now()), &run) {
         Ok(lines) => {
             lines.iter().for_each(|l| println!("{l}"));
@@ -1103,19 +1119,24 @@ fn date(secs: u64) -> String {
 /// Pids of processes whose command line holds `<legacy>/`, as the legacy launcher, proxies and MCP servers do.
 /// Windows: PowerShell `Win32_Process`, case-insensitive. ponytail: pids per folder, not per file; Restart Manager
 /// (`RmGetList`) names the holder of each file if a host needs it.
-fn legacy_pids(dir: &Path) -> Vec<String> {
+fn legacy_pids(dir: &Path) -> Result<Vec<String>, String> {
     let needle = format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR);
     let o = if cfg!(windows) {
         let ps = format!("Get-CimInstance Win32_Process | ? {{ $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.ToLower().Contains('{}') }} | % ProcessId", needle.to_lowercase().replace('\'', "''"));
-        coreq::quiet(Command::new("powershell").args(["-NoProfile", "-Command", &ps])).output()
+        host::run(Command::new("powershell").args(["-NoProfile", "-Command", &ps]))
     } else {
-        Command::new("pgrep").arg("-f").arg(needle).output()
+        // pgrep exits 1 when nothing matches
+        host::run_allow(Command::new("pgrep").arg("-f").arg(needle), &[0, 1])
     };
-    o.map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().map(String::from).collect()).unwrap_or_default()
+    o.map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().map(String::from).collect())
 }
 
-fn running(pids: &[String]) -> String {
-    if pids.is_empty() { String::new() } else { format!("; legacy processes still running: pids {}", pids.join(" ")) }
+fn running(pids: &Result<Vec<String>, String>) -> String {
+    match pids {
+        Ok(p) if p.is_empty() => String::new(),
+        Ok(p) => format!("; legacy processes still running: pids {}", p.join(" ")),
+        Err(e) => format!("; legacy processes unknown ({e})"),
+    }
 }
 
 #[cfg(test)]
@@ -1225,11 +1246,11 @@ mod tests {
         std::fs::create_dir_all(d.join("incidents")).unwrap();
         std::fs::write(d.join("machine-id.json"), "{}").unwrap();
         let mut p = Command::new("sh").args(["-c", "sleep 30; true"]).arg(d.join("launcher.mjs")).spawn().unwrap();
-        assert_eq!(legacy_pids(&d), vec![p.id().to_string()]);
+        assert_eq!(legacy_pids(&d).unwrap(), vec![p.id().to_string()]);
         assert_eq!(legacy(&d, false), 0, "no launcher: nothing to uninstall");
         let _ = p.kill();
         let _ = p.wait();
-        assert!(legacy_pids(&d).is_empty());
+        assert!(legacy_pids(&d).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }
