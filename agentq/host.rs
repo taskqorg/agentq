@@ -159,22 +159,17 @@ pub fn log(c: &Command, error: &str) -> String {
 mod tests {
     use super::*;
 
-    /// A fake tool that prints `line` for any arguments.
-    fn fake(dir: &Path, name: &str, line: &str) -> PathBuf {
-        std::fs::create_dir_all(dir).unwrap();
+    /// `r` checked against a fake tool that prints `line`: a `.cmd` file on Windows, `sh -c` elsewhere (a freshly
+    /// written script can fail with ETXTBSY while parallel tests fork).
+    fn fake(dir: &Path, name: &str, r: Req, line: &str) -> (bool, String) {
         if cfg!(windows) {
+            std::fs::create_dir_all(dir).unwrap();
             let p = dir.join(format!("{name}.cmd"));
             std::fs::write(&p, format!("@echo {line}\r\n")).unwrap();
-            p
+            versioned(&r, &p)
         } else {
-            let p = dir.join(name);
-            std::fs::write(&p, format!("#!/bin/sh\necho '{line}'\n")).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            p
+            let script: &'static str = Box::leak(format!("echo '{line}'").into_boxed_str());
+            versioned(&Req { args: Box::leak(vec!["-c", script].into_boxed_slice()), ..r }, Path::new("sh"))
         }
     }
 
@@ -184,15 +179,15 @@ mod tests {
     fn old_or_missing_tool_fails_with_fix() {
         let d = std::env::temp_dir().join(format!("agentq-host-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let (ok, l) = versioned(&CURL, &fake(&d, "curl-old", "curl 7.50.0 (x86_64-pc-linux-gnu) libcurl/7.50.0"));
+        let (ok, l) = fake(&d, "curl-old", CURL, "curl 7.50.0 (x86_64-pc-linux-gnu) libcurl/7.50.0");
         assert!(!ok && l.contains("curl: 7.50.0 below minimum 7.55.1; install curl"), "{l}");
-        let (ok, l) = versioned(&CURL, &fake(&d, "curl-min", "curl 7.55.1 (Windows) libcurl/7.55.1 WinSSL"));
+        let (ok, l) = fake(&d, "curl-min", CURL, "curl 7.55.1 (Windows) libcurl/7.55.1 WinSSL");
         assert!(ok && l.contains("7.55.1 ok"), "{l}");
-        let (ok, l) = versioned(&TAR, &fake(&d, "tar-old", "tar (GNU tar) 1.28"));
+        let (ok, l) = fake(&d, "tar-old", TAR, "tar (GNU tar) 1.28");
         assert!(!ok && l.contains("1.28 below minimum 1.29"), "{l}");
-        let (ok, l) = versioned(&TAR, &fake(&d, "tar-bsd", "bsdtar 3.3.2 - libarchive 3.3.2 zlib/1.2.5.f-ipp"));
+        let (ok, l) = fake(&d, "tar-bsd", TAR, "bsdtar 3.3.2 - libarchive 3.3.2 zlib/1.2.5.f-ipp");
         assert!(ok && l.contains("3.3.2 ok"), "{l}");
-        let (ok, l) = versioned(&TAR, &fake(&d, "tar-other", "busybox tar"));
+        let (ok, l) = fake(&d, "tar-other", TAR, "busybox tar");
         assert!(!ok && l.contains("unrecognized version") && l.contains("bsdtar 3.3.2 or GNU tar 1.29"), "{l}");
         let (ok, l) = versioned(&CURL, &d.join("agentq-no-such-curl"));
         assert!(!ok && l.contains("curl: not found or not runnable, minimum 7.55.1; install curl") && l.contains("agentq-no-such-curl"), "{l}");
