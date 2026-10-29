@@ -147,9 +147,11 @@ fn exit(c: &Command, o: &Output) -> String {
 }
 
 /// Logs `agentq: `<command>`: <error>` to stderr (the service log under `service run`) and returns the message.
+/// The program path stays whole so the log names the binary that failed; only long arguments are shortened.
 pub fn log(c: &Command, error: &str) -> String {
     let short = |s: &str| if s.chars().count() > 80 { format!("{}...", s.chars().take(77).collect::<String>()) } else { s.to_string() };
-    let cmd: Vec<String> = std::iter::once(c.get_program()).chain(c.get_args()).map(|a| short(&a.to_string_lossy())).collect();
+    let cmd: Vec<String> =
+        std::iter::once(c.get_program().to_string_lossy().into_owned()).chain(c.get_args().map(|a| short(&a.to_string_lossy()))).collect();
     let m = format!("`{}`: {error}", cmd.join(" "));
     eprintln!("agentq: {m}");
     m
@@ -205,6 +207,10 @@ mod tests {
         let e = run(Command::new(sh).args(fail)).unwrap_err();
         assert!(e.contains("boom") && e.contains('3'), "{e}");
         assert!(run_allow(Command::new(sh).args(fail), &[3]).is_ok());
+        // A long program path (macOS temp dirs) stays whole; only long arguments are shortened.
+        let program = format!("/{}/agentq-no-such-curl", "t".repeat(100));
+        let l = log(Command::new(&program).arg("a".repeat(100)), "e");
+        assert!(l.starts_with(&format!("`{program} {}...`", "a".repeat(77))), "{l}");
     }
 
     #[test]
