@@ -30,4 +30,4 @@ Qualify a real supported client path against local stats and delivered events wi
 
 ## Published schema
 
-`agentq.accounting/1`. Producer: the agentq.md § 3 stats record and its `agentq.compress` span. Aggregate: `agentq/accounting.rs`, also `agentq stats --accounting`. Input, output and conformance cases: [accounting-fixtures.json](accounting-fixtures.json); a consumer conforms when every case's `expect` holds. Additive keys keep the version; a changed meaning takes a new one. Qualification record: [VERIFICATION](VERIFICATION.md#accounting-qualification).
+`agentq.accounting/1`. Producer: the [stats record](COMPRESSION.md#stats-record) of agentq.md § 3 and its `agentq.compress` span. Aggregate: `agentq/accounting.rs`, also `agentq stats --accounting`. Input, output and conformance cases: [accounting-fixtures.json](accounting-fixtures.json); a consumer conforms when every case's `expect` holds. Additive keys keep the version; a changed meaning takes a new one. Qualification record: [VERIFICATION](VERIFICATION.md#accounting-qualification).

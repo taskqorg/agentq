@@ -1,6 +1,6 @@
 {
   "schema": "agentq.accounting/1",
-  "contract": "docs/spec/ACCOUNTING.md O1-O4; producer record agentq.md § 3 Stats record; aggregate agentq/accounting.rs",
+  "contract": "docs/spec/ACCOUNTING.md O1-O4; producer record docs/spec/COMPRESSION.md Stats record; aggregate agentq/accounting.rs",
   "rules": [
     "A case record that is an object without `attributes` is `base_record` overlaid with its keys; a value \"$absent\" removes that key. Other records (spans, strings) are used as written.",
     "`expect` is a subset of the aggregate: each listed object key matches recursively; an array matches in length and element by element; scalars match exactly.",

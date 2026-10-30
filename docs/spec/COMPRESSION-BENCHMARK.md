@@ -7,7 +7,7 @@ R3/R4: a smaller result must preserve the task answer and recover the exact orig
 - [Public methodology before the Rust rewrite](https://github.com/taskqorg/agentq/blob/b41638%5E/docs/spec/PUBLIC-BENCHMARKS.md): paired quality, native protocol fixtures and stress are separate evidence. A vendor score cannot qualify a client integration.
 - [Tokenade evaluation](https://github.com/taskqorg/agentq/tree/90d5e28%5E/benchmarks/tokenade): noisy-output savings did not prove complete JSON handling or Codex integration. Do not compress complete JSON or add a second history optimizer.
 - [Public-context screen](https://github.com/taskqorg/agentq/tree/90d5e28%5E/benchmarks/public-methodology): context-mode inflated code context in the small screen. Source code, constraints and short results stay unchanged.
-- Current engine decision: [agentq.md §3](../../agentq.md#3-engines). Qualified RTK capture replay, Headroom transport, native Claude PreToolUse; no paid compression engine. No rewriting signed reasoning, tool schemas, IDs, user text or transmitted results.
+- Current engine decision: [agentq.md §3](../../agentq.md#3-managed-engines). Qualified RTK capture replay, Headroom transport, native Claude PreToolUse; no paid compression engine. No rewriting signed reasoning, tool schemas, IDs, user text or transmitted results.
 
 ## Repeatable checks
 
@@ -19,6 +19,16 @@ R3/R4: a smaller result must preserve the task answer and recover the exact orig
 | `python3 scripts/check-client-compression.py both --output <empty-dir>` | Paid, opt-in native clients using current settings/auth: ordinary shell -> automatic compression -> model quotes real ref/error -> exact original recovery and session-correlated stats. No manual wrapper in the prompt. |
 
 The benchmark writes per-scenario bytes, duration, fixture hash, recovery and verdict. A protected unchanged result is PASS, not a failure to force reduction. Native success must retain `180 passed` and no false failure; failure must retain the error marker and failure count. Original captures execute once before replay. No settings are weakened globally; Claude's test-only allowlist permits exactly its audited cargo wrapper and does not change hook permission decisions.
+
+## Native client check rules
+
+Binding detail of `agentq check compression` ([agentq.md § 3](../../agentq.md#3-managed-engines)).
+
+- Use native CLI events, or that exact session's local Codex transcript when code-mode tool events are absent from stdout.
+- Pytest reads a fixture without cache writes for read-only clients; never change native permissions.
+- Require native execution, local event correlation, a model-visible ref and complete recovery. Missing clients, permissions or transcripts are unknown. Record exact versions; Desktop needs its own real turn.
+- The intentional Cargo fixture failure may surface as 101 or shell-normalized 1 (PowerShell); retain the observed shell exit. Both need the unique fixture marker and complete original output. An exit code alone never proves fixture execution.
+- Native code-mode output may be a typed text array: require one structured command result; ambiguous output stays unknown.
 
 ## Evidence boundaries
 

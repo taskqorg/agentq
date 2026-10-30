@@ -3,6 +3,17 @@ on: [push, pull_request, workflow_dispatch, merge_group]
 permissions:
   contents: read
 jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: taskqorg/specq
+          ref: 7e9adf57287553176d8b3be61c2b22565543dc51
+          path: .specq
+      - run: python3 .specq/engineering/scripts/contract_lint.py agentq.md
   rust:
     strategy:
       fail-fast: false
