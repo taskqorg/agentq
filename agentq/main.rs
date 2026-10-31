@@ -43,7 +43,19 @@ const PROXY_START: Duration = Duration::from_secs(60);
 const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | migrate-names [--dry-run|--rollback] | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--legacy] [--dry-run] | --version";
 
 fn tool() -> Tool {
-    Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION)
+    let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
+    t.install = plain_path(&t.install);
+    t
+}
+
+/// coreq 0.12+ roots the install at the canonical executable path, on Windows `\\?\C:\...`; process command lines,
+/// the unit and client configurations name the plain path, so a verbatim root matched no service run.
+fn plain_path(p: &Path) -> PathBuf {
+    let Some(text) = p.to_str() else { return p.into() };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    text.strip_prefix(r"\\?\").map_or_else(|| p.into(), PathBuf::from)
 }
 
 fn fail(problem: &str, next: &str) -> ! {
@@ -1142,6 +1154,20 @@ fn running(pids: &Result<Vec<String>, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// coreq 0.15 roots a Windows install at `\\?\C:\...`; the service-run inventory compares plain command lines, so
+    /// the 0.15 bump read a running service as unknown (release CI service lifecycle). The plain root matches again.
+    #[test]
+    fn verbatim_install_root_is_plain() {
+        let verbatim = r"\\?\C:\Users\u\AppData\Local\agentq";
+        assert_eq!(plain_path(Path::new(verbatim)), Path::new(r"C:\Users\u\AppData\Local\agentq"));
+        assert_eq!(plain_path(Path::new(r"\\?\UNC\srv\share\agentq")), Path::new(r"\\srv\share\agentq"));
+        assert_eq!(plain_path(Path::new("/home/u/.local/share/agentq")), Path::new("/home/u/.local/share/agentq"));
+        let list = concat!(r"4188 C:\Users\u\AppData\Local\agentq\releases\1.0.0\agentq.exe service run", "\n");
+        let root = plain_path(Path::new(verbatim));
+        assert_eq!(service_runs_in(list, Path::new(&format!(r"{}\releases", root.display()))), [4188]);
+        assert!(service_runs_in(list, Path::new(&format!(r"{verbatim}\releases"))).is_empty());
+    }
 
     /// Published status fixture (SERVICE.md § Status file fields), read by TaskQ instead of its own copy. Risk: a
     /// change to the written coreq keys that consumers of the fixture would not see. Version and pid vary per run.
