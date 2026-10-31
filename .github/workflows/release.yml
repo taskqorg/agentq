@@ -69,6 +69,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -86,6 +87,9 @@ jobs:
               if name.startswith(f'agentq-{ver}-'):
                   files[name[len(f'agentq-{ver}-'):].removesuffix('.exe')] = name
           json.dump({'version': ver, 'files': files}, open('latest.json', 'w'), indent=1)
+          status = json.load(open('../tests/fixtures/status.json'))
+          status['version'] = ver
+          json.dump(status, open('status.json', 'w'), indent=1)
           PY
           cat latest.json SHA256SUMS
       - name: Attest

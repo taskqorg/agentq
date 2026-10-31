@@ -3,7 +3,7 @@ use coreq::Tool;
 use serde_json::{Value, json};
 use std::time::UNIX_EPOCH;
 
-const COREQ_VERSION: &str = "0.11.0";
+const COREQ_VERSION: &str = "0.15.0";
 
 fn version(v: Option<&str>) -> Option<&str> {
     v.filter(|s| !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)) && *s != "." && *s != "..")

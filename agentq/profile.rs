@@ -1,6 +1,6 @@
 //! Profiling (agentq.md § 6 Profiling): always-on samples of named operations from installation-local SQLite, a bounded trace switch and one report ranked against the budgets. Names, numbers and class codes only.
 
-use coreq::write_atomic;
+use coreq::{profile, write_atomic};
 use serde_json::{Map, Value, json};
 use std::path::Path;
 use std::time::Duration;
@@ -17,7 +17,6 @@ const PROXY: &str = "headroom proxy serves model requests; agentq records none";
 const WINDOW: u64 = 7 * 86400;
 /// Export samples retained per operation.
 pub(crate) const KEEP: usize = 256;
-const UNSTABLE_CV: f64 = 1.0;
 const TRACE_DEFAULT: u64 = 15;
 const TRACE_MAX: u64 = 60;
 pub(crate) const TRACE_DAY_BYTES: u64 = 1 << 20;
@@ -130,33 +129,19 @@ fn round(x: f64) -> f64 {
     (x * 1000.0).round() / 1000.0
 }
 
-/// Nearest rank over sorted durations.
-fn rank(sorted: &[u64], q: f64) -> u64 {
-    sorted[((q * sorted.len() as f64).ceil() as usize).max(1) - 1]
-}
-
-/// Calls, failures and their classes, p50/p95/max, mean, standard deviation, cv and the over-budget verdict.
-fn summary(op: &str, samples: &[(u64, Option<String>)], p95_budget: Option<u64>, fail_budget: f64) -> Value {
-    let mut d: Vec<u64> = samples.iter().map(|s| s.0).collect();
-    d.sort_unstable();
-    let n = d.len() as f64;
-    let mean = d.iter().map(|&x| x as f64).sum::<f64>() / n;
-    let sd = (d.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n).sqrt();
-    let cv = if mean > 0.0 { sd / mean } else { 0.0 };
+/// Calls, failures and their classes with coreq's statistics and budget verdict; the unrounded score ranks.
+fn summary(op: &str, samples: &[(u64, Option<String>)], p95_budget: Option<u64>, fail_budget: f64) -> (Value, f64) {
     let mut classes = Map::new();
     for c in samples.iter().filter_map(|s| s.1.as_deref()) {
         let k = classes.entry(c).or_insert(json!(0));
         *k = json!(k.as_u64().unwrap_or(0) + 1);
     }
     let failed: u64 = classes.values().filter_map(Value::as_u64).sum();
-    let rate = failed as f64 / n;
-    let p95 = rank(&d, 0.95);
-    let ratios = [("time", p95_budget.map(|b| p95 as f64 / b.max(1) as f64)), ("failures", Some(rate / fail_budget)), ("unstable", Some(cv / UNSTABLE_CV))];
-    let over: Vec<&str> = ratios.iter().filter(|r| r.1.is_some_and(|x| x > 1.0)).map(|r| r.0).collect();
-    let score = ratios.iter().filter_map(|r| r.1).fold(0.0, f64::max);
-    json!({"op": op, "state": "measured", "calls": d.len(), "failed": failed, "failure_rate": round(rate), "classes": classes,
-        "p50_ms": rank(&d, 0.5), "p95_ms": p95, "max_ms": d[d.len() - 1], "mean_ms": round(mean), "stddev_ms": round(sd), "cv": round(cv),
-        "budget": {"p95_ms": p95_budget, "failure_rate": fail_budget}, "over": over, "score": round(score)})
+    let d: Vec<u64> = samples.iter().map(|s| s.0).collect();
+    let s = profile::summarize(&d, failed, p95_budget, fail_budget).expect("samples");
+    (json!({"op": op, "state": "measured", "calls": d.len(), "failed": failed, "failure_rate": round(s.failure), "classes": classes,
+        "p50_ms": s.p50, "p95_ms": s.p95, "max_ms": s.max, "mean_ms": round(s.mean), "stddev_ms": round(s.stddev), "cv": round(s.cv),
+        "budget": {"p95_ms": p95_budget, "failure_rate": fail_budget}, "over": s.over, "score": round(s.score)}), s.score)
 }
 
 fn unknown(op: &str, reason: &str) -> Value {
@@ -200,7 +185,7 @@ fn steps(data: &Path, cutoff: u64, now: u64) -> Result<Map<String, Value>, Strin
         s.sort_unstable_by_key(|x| x.0);
         let d: Vec<u64> = s.iter().map(|x| x.0).collect();
         let e = out.entry(op).or_insert(json!([]));
-        e.as_array_mut().expect("array").push(json!({"step": step, "calls": d.len(), "failed": failed, "p95_ms": rank(&d, 0.95)}));
+        e.as_array_mut().expect("array").push(json!({"step": step, "calls": d.len(), "failed": failed, "p95_ms": profile::pct(&d, 0.95)}));
     }
     Ok(out)
 }
@@ -229,18 +214,18 @@ pub fn report(data: &Path, now: u64) -> Value {
         match samples {
             Ok(s) if s.is_empty() => unknowns.push(unknown(op, "no samples in window")),
             Ok(s) => {
-                let mut v = summary(op, &s, p95, fail);
+                let (mut v, score) = summary(op, &s, p95, fail);
                 if let Some(st) = steps.get(op) {
                     v["steps"] = st.clone();
                 }
-                known.push(v);
+                known.push((v, score));
             }
             Err(e) => unknowns.push(unknown(op, &e)),
         }
     }
     unknowns.push(unknown("proxy.request", PROXY));
-    known.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
-    known.extend(unknowns);
+    profile::rank(&mut known, |k| k.1);
+    let known: Vec<Value> = known.into_iter().map(|k| k.0).chain(unknowns).collect();
     let mut trace = trace_state(data, now);
     if let Some(e) = trace_unknown {
         trace["unknown"] = json!(e);

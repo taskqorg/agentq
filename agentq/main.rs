@@ -1143,6 +1143,17 @@ fn running(pids: &Result<Vec<String>, String>) -> String {
 mod tests {
     use super::*;
 
+    /// Published status fixture (SERVICE.md § Status file fields), read by TaskQ instead of its own copy. Risk: a
+    /// change to the written coreq keys that consumers of the fixture would not see. Version and pid vary per run.
+    #[test]
+    fn status_fixture_matches_the_written_status() {
+        let f: Value = serde_json::from_str(include_str!("../tests/fixtures/status.json")).unwrap();
+        let mut s = status::common(&tool(), "host-name", PROJECT, 1767225600, None, None);
+        s["version"] = f["version"].clone();
+        s["pid"] = f["pid"].clone();
+        assert_eq!(s, f);
+    }
+
     /// #137 A2: `onboard --yes` starts the service only after the port and the Codex edits exist, so the service's
     /// first pass starts the proxy and doctor right after onboard reads codex routed. Fails with the 0.5.9 order
     /// (service started first: its pass finds no port and starts no proxy).
