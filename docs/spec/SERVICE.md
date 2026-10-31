@@ -26,7 +26,7 @@ Binding detail of [agentq.md § 5](../../agentq.md#5-install-layout-and-service)
 
 ## Status file fields
 
-`<install>/status.json` adds to the coreq keys:
+`<install>/status.json` holds the coreq keys (`host`, `version`, `pid`, `at`, `project`, `error`, `update`), published as [tests/fixtures/status.json](../../tests/fixtures/status.json) and as release asset `status.json` with the release version; a test keeps the fixture equal to the written keys. It adds:
 
 - `agents`: per agent with a config root its `routing` (routed, direct, bypassed, unknown) and `reason`, `intended` and `intended_reason`.
 - `intended` is `routed` for an agent with shipped routing, onboarded (an owned edit under its root) and not `agentq direct`; else `direct`. `intended_reason` is `onboarded`, `routing not shipped`, `` `agentq direct` `` or `not onboarded`.
@@ -56,8 +56,8 @@ agentq runs these external tools on a host ([specq host requirements](https://gi
 
 ## Release observation fields
 
-- `selected`: CoreQ 0.11.0 `Tool::current()` reads `<install>/current`; only a bounded release identifier crosses. Missing, unreadable or invalid selection is null with `selection_unknown`.
-- `running`: the producer binary's `Tool.version`; `coreq_version`: the Cargo.lock pin, 0.11.0. No dependency upgrade or capture integration is required.
+- `selected`: CoreQ `Tool::current()` reads `<install>/current`; only a bounded release identifier crosses. Missing, unreadable or invalid selection is null with `selection_unknown`.
+- `running`: the producer binary's `Tool.version`; `coreq_version`: the Cargo.lock pin, 0.15.0. No dependency upgrade or capture integration is required.
 - `health`: the running release's existing `releases/<version>/healthy` regular-file marker, consumed by CoreQ launcher rollback. A readable empty marker with a nonfuture modification time yields `state=verified`, `scope=status_written`, `version` and source `at`. Missing, unreadable, nonempty or future markers remain unknown.
 - `lifecycle`: `waiting_for_activation` when selected differs from running (the update drain rule still governs activation); `healthy` only for equal versions with this receipt; otherwise `starting` or `unknown`. Host disable intent yields `pending_disable`; unreadable lifecycle state yields `unknown`.
 - Snapshot and heartbeat reuse the status observation, allowlist fields and codes, and set current health/lifecycle unknown when the status time is missing, future or older than 90 s. Historical versions and receipt time remain explicitly last-known. Older producers report `not_reported`.
