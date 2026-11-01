@@ -119,3 +119,7 @@ Hermes onboarding ships the §4 `agent-context` transform plugin through the exi
 ## Shared worker runtime
 
 PRODUCT R13 and agentq.md M12.1–M12.7: `cargo test --locked -p agentq-runtime` runs deterministic Claude/Codex clients on each CI platform. It retains CLI/background/app/app-server, Remote Control, input/terminal recovery, dynamic tools, private drafts, catalogue, account/policy and idempotent attributable usage protection from CoreQ v0.18.0. JSON turns need no optimizer installation; launch intent and host-disable tests preserve native output and prior replay bytes. The external consumer in `examples/runtime-consumer` builds from a published immutable runtime revision and runs both fake clients. These checks do not qualify a consumer's native installation or UI; adoption and rollback remain [consumer-owned](RUNTIME.md#adoption-and-rollback).
+
+## Antigravity and worker benchmark candidate
+
+PRODUCT R13, agentq.md § 12: regression checks cover native hook `toolCall.args`, permission delegation, start/resume arguments, transcript boundaries and partial records, terminal tool-call handling, usage deduplication, missing counters, limits and configuration attachment. Benchmark smoke histories are protocol checks only. Native Antigravity cancellation, account isolation, usage semantics and installed compression remain unqualified until observed with the caller's native environment. The HTML viewer requires visual inspection at desktop and narrow widths; fixture scores do not qualify native quality or savings.

@@ -23,7 +23,11 @@ The caller builds the base command: the client executable from `agent::executabl
 - `<args>` are the caller's client arguments in this position: TaskQ passes `--permission-mode <mode> --settings <json>` to Claude, sandbox arguments to Codex, and optional `--model=<flash_lite|flash|pro>` / `--profile=<profile>` / `--title=<title>` flags to Antigravity.
 - `agent::which` resolves a name on `PATH`; on Windows it also tries `<name>.exe` and the npm shim `<name>.cmd`. `agent::user_bin_path` appends `~/.local/bin` when `PATH` lacks it.
 - `agent::codex_native` replaces an npm `codex.js` launcher with its native executor on macOS and Linux, so a kill reaches the client. It never scans other installations.
-- For `Client::Antigravity` (`"antigravity"`, alias `"agy"`), `agent::executable` resolves `ANTIGRAVITY_AGENTAPI_EXE` when set, else `agentapi` on `PATH`, else `<home>/bin/agentapi` (`~/.gemini/antigravity/bin/agentapi`), else `agy` on `PATH`. When `Turn::start` runs the native `agentapi` / `language_server` binary directly, it passes the prompt text as the final argument (and discovers `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` from the running `language_server` process when absent from the environment), then tails new steps from `<home>/brain/<session>/.system_generated/logs/transcript.jsonl` (using `transcript_full.jsonl` when `truncated_fields` is present) into the caller log until the turn's terminal `PLANNER_RESPONSE` completes.
+- For `Client::Antigravity` (`"antigravity"`, alias `"agy"`), `agent::executable` resolves `ANTIGRAVITY_AGENTAPI_EXE` when set, else `agentapi` on `PATH`, else `<home>/bin/agentapi`, else `agy` on `PATH`. A caller-selected `command` remains authoritative. Native `agentapi` takes the prompt as its final argument; stream wrappers take `-` and stdin. The caller supplies the existing server address, credentials, project and account environment; the runtime never discovers another running server or changes its configuration. [Native command reference](https://antigravity.google/docs/sidecars).
+- Native `agentapi` submission exit is not turn completion. The runtime tails complete new records from `<home>/brain/<session>/.system_generated/logs/transcript.jsonl`; a resumed turn captures its boundary before submission. Partial records wait, malformed records, file replacement, truncation and changed consumed prefixes fail observation. Each poll reads at most 8 MiB of new bytes; truncated records wait for the corresponding complete `transcript_full.jsonl` step. Session IDs used as locators contain only ASCII letters, digits and hyphens.
+- `kill` and a deadline stop the owned submission process and observation. They do not prove that server-side execution stopped; callers retain native cancellation and capacity ownership until their own readback. A submission without a session or terminal remains unknown. Native platform/account qualification remains open until a real caller-owned turn is observed.
+- Antigravity hooks use `toolCall.args.CommandLine`, `conversationId` and `stepIdx`; the response shallow-merges `overwrite.CommandLine` and delegates to native permissions with `decision: "allow"` (never `auto_approve`). Only qualified simple commands are wrapped; shell composition and Windows command shells remain native. [Hook schema](https://antigravity.google/docs/hooks).
+
 
 ## End of a turn
 
@@ -54,7 +58,7 @@ A reached limit returns `Report::reached`: the reported reset in unix seconds, o
 
 - Claude: each `assistant` message ID counts once, because one message spans several lines. Uncached input is `input_tokens`, cache read `cache_read_input_tokens`, cache write `cache_creation_input_tokens`, output `output_tokens`. The model is the one of most calls.
 - Codex: each `turn.completed` counts. Its `input_tokens` include `cached_input_tokens`, so uncached input is the difference. Codex reports no cache writes (0), no call count and no model in `exec --json` output.
-- Antigravity: each `PLANNER_RESPONSE` step (`step_index` deduplicated) counts as one model call. Uncached input is `input_tokens`, cache read `cache_read_tokens`, cache write `cache_write_tokens` (0 when omitted), output `output_tokens`, and `model` is read from `model` when reported.
+- Antigravity: each completed `PLANNER_RESPONSE` step counts once, using the latest record for its `step_index`. Uncached input is `input_tokens`, cache read `cache_read_tokens`, cache write `cache_write_tokens`, output `output_tokens`, and model is `model`. Missing counters stay unknown; no usage or model is inferred from the requested model. Native counter formats need platform qualification.
 - A counted call without a value makes that sum unknown, never smaller. No counted call: every count is null with reason `no-usage`.
 - A model ID is a code of at most 64 characters from `[A-Za-z0-9._:-]`; any other value is not reported.
 
@@ -135,7 +139,7 @@ The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `start
 | 5 | `compression.enabled` false | `off` | `host_off` |
 | 6 | `compression.agents.<client>` false | `off` | `agent_off` |
 | 7 | No client home known | `unknown` | `no_client_home` |
-| 8 | Codex `config.toml` top-level `model_provider = "agentq"` (inline comments allowed), Claude `settings.json` has a compression hook command, Antigravity `hooks.json` (`<home>/hooks.json` or `~/.gemini/config/hooks.json`) has a `PreToolUse` command calling `hook antigravity` | `on` | `configured` |
+| 8 | Codex `config.toml` top-level `model_provider = "agentq"` (inline comments allowed), Claude `settings.json` has a compression hook command, Antigravity `hooks.json` (`<home>/hooks.json` or `<home>/../config/hooks.json`) has an enabled named group with a `PreToolUse` command calling `hook antigravity PreToolUse` | `on` | `configured` |
 | 9 | Client configuration unreadable | `unknown` | `unreadable_client_config` |
 | 10 | Otherwise | `off` | `not_attached` |
 

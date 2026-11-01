@@ -8,8 +8,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 fn main() {
+    if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
     let tests: &[(&str, fn())] = &[
+        ("antigravity_native_submission_tails_and_resumes", antigravity_native_submission_tails_and_resumes),
         ("claude_starts_and_resumes_one_session", claude_starts_and_resumes_one_session),
         ("codex_resumes_its_thread_in_the_account_home", codex_resumes_its_thread_in_the_account_home),
         ("lingering_process_is_stopped_after_its_turn_ends", lingering_process_is_stopped_after_its_turn_ends),
@@ -562,7 +564,7 @@ fn deadline_stops_a_turn_that_never_ends() {
 fn json_turns_run_plain_without_the_optimizer() {
     // A worker that runs these tests may itself carry a launcher marker; the child would inherit it.
     // SAFETY: this harness runs its tests one at a time on the main thread.
-    unsafe { std::env::remove_var("TASKQ_TASK"); std::env::remove_var("AGENTQ_LAUNCHER"); }
+    unsafe { std::env::remove_var("TASKQ_TASK"); std::env::remove_var("AGENTQ_LAUNCHER"); std::env::remove_var("AGENTQ_OPTIMIZATION"); }
     let root = scratch("json");
     let install = root.join("no-install");
     let exe = std::env::current_exe().unwrap();
@@ -624,4 +626,44 @@ fn off_reaches_codex_queue_and_app_server() {
     assert_eq!(args[0], "app-server");
     assert!(args.iter().any(|s| s.contains("x-agentq-optimization")));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// M12.1/M12.3: agentapi acknowledges submission before terminal transcript evidence; resume consumes only new steps.
+// Risk: exit 0 is mistaken for completed work, stale history counts twice, or the caller's prompt/args are lost.
+fn antigravity_native_submission_tails_and_resumes() {
+    let root = scratch("native-agentapi");
+    let bin = root.join(if cfg!(windows) { "agentapi.exe" } else { "agentapi" });
+    std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
+    let mut spec = Spec {client:Client::Antigravity,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.join("home")),env:vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into())]};
+    let log = root.join("turns.log");
+    let mut turn = Turn::start(Command::new(&bin), &spec, &log, "first").unwrap();
+    // The double exits after receipt. Supply the terminal later, as a separately owned server would.
+    let until = Instant::now()+Duration::from_secs(5);
+    while !std::fs::read_to_string(&log).unwrap_or_default().contains("native-conv") {
+        assert!(Instant::now()<until); std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(turn.poll().unwrap().is_none(), "submission is not completion");
+    let history = spec.home.as_ref().unwrap().join("brain/native-conv/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"first done","input_tokens":3,"cache_read_tokens":2,"cache_write_tokens":0,"output_tokens":1,"tool_calls":[]})]);
+    turn.wait(soon()).unwrap(); let report=turn.report();
+    assert_eq!((report.outcome,report.text.as_deref(),report.session.as_deref()),("ok",Some("first done"),Some("native-conv")));
+    spec.session=report.session.unwrap();spec.resume=true;
+    let mut turn=Turn::start(Command::new(&bin),&spec,&log,"second").unwrap();
+    assert!(turn.poll().unwrap().is_none());
+    append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"second done","input_tokens":7,"cache_read_tokens":4,"cache_write_tokens":0,"output_tokens":2})]);
+    turn.wait(soon()).unwrap();let report=turn.report();
+    assert_eq!((report.outcome,report.usage.input,report.usage.calls,report.text.as_deref()),("ok",Some(7),Some(1),Some("second done")));
+    let mut turn=Turn::start(Command::new(&bin),&spec,&log,"timeout").unwrap();
+    turn.wait(Some(Instant::now()+Duration::from_millis(100))).unwrap();
+    assert_eq!((turn.report().outcome,turn.report().error),("cancelled","timeout"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn fake_agentapi() {
+    let args:Vec<String>=std::env::args().skip(1).collect();
+    assert!(matches!(args.first().map(String::as_str),Some("new-conversation" | "send-message")));
+    assert!(matches!(args.last().map(String::as_str),Some("first" | "second" | "timeout")),"native prompt is argv, not '-' or stdin");
+    if args[0]=="send-message" {assert_eq!(args[1],"native-conv");}
+    println!("{}",serde_json::to_string_pretty(&json!({"response":{"newConversation":{"conversationId":"native-conv"}}})).unwrap());
 }

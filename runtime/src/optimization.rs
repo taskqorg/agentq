@@ -135,12 +135,11 @@ fn antigravity_attached(home: &Path) -> Result<bool, ()> {
         let Some(text) = read(&path)? else { continue };
         let settings: Value = serde_json::from_str(&text).map_err(|_| ())?;
         let object = settings.as_object().ok_or(())?;
-        let Some(hooks) = object.get("hooks") else { continue };
-        let hooks = hooks.as_object().ok_or(())?;
-        let attached = ["PreToolUse", "PostToolUse"].iter().any(|event| {
-            hooks.get(*event).and_then(Value::as_array).is_some_and(|groups| {
-                groups.iter().filter_map(|g| g["hooks"].as_array()).flatten().any(|hook| {
-                    hook["command"].as_str().is_some_and(|s| s.contains(" hook antigravity "))
+        let attached = object.values().filter(|group| group["enabled"] != false).any(|group| {
+            group["PreToolUse"].as_array().is_some_and(|groups| {
+                groups.iter().filter(|g| g["matcher"].as_str().is_none_or(|m| matches!(m, "" | "*" | "run_command")))
+                    .filter_map(|g| g["hooks"].as_array()).flatten().any(|hook| {
+                    hook["command"].as_str().is_some_and(|s| s.contains(" hook antigravity PreToolUse"))
                 })
             })
         });
@@ -217,11 +216,13 @@ mod tests {
         assert_eq!(seen(Intent::On, Client::Codex), ("off", "not_attached"));
         std::fs::write(home.join("config.toml"), "model = \"x\"\nmodel_provider = \"agentq\"\n[model_providers.agentq]\n").unwrap();
         std::fs::write(home.join("settings.json"), r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"/i/agentq hook claude PreToolUse"}]}]}}"#).unwrap();
-        std::fs::write(home.join("hooks.json"), r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"/i/agentq hook antigravity PreToolUse"}]}]}}"#).unwrap();
+        std::fs::write(home.join("hooks.json"), r#"{"agentq":{"PreToolUse":[{"matcher":"run_command","hooks":[{"command":"/i/agentq hook antigravity PreToolUse"}]}]}}"#).unwrap();
         assert_eq!((seen(Intent::Inherit, Client::Codex), seen(Intent::On, Client::Claude)), (("on", "configured"), ("on", "configured")));
         assert_eq!(seen(Intent::On, Client::Antigravity), ("on", "configured"));
         assert_eq!(seen(Intent::Off, Client::Claude), ("off", "launch_off"));
         assert_eq!(seen(Intent::Off, Client::Antigravity), ("off", "launch_off"));
+        std::fs::write(home.join("hooks.json"), r#"{"agentq":{"enabled":false,"PreToolUse":[{"hooks":[{"command":"/i/agentq hook antigravity PreToolUse"}]}]}}"#).unwrap();
+        assert_eq!(seen(Intent::On, Client::Antigravity), ("off", "not_attached"), "disabled hooks cannot prove attachment");
         std::fs::write(install.join("data/config.json"), r#"{"compression":{"agents":{"codex":false}}}"#).unwrap();
         assert_eq!((seen(Intent::On, Client::Codex), seen(Intent::On, Client::Claude)), (("off", "agent_off"), ("on", "configured")));
         std::fs::write(install.join("data/config.json"), r#"{"compression":{"enabled":false}}"#).unwrap();
