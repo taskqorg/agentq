@@ -5,27 +5,29 @@ This page holds the binding detail of [agentq.md § 12](../../agentq.md#12-agent
 ## Session model
 
 - One native session belongs to one conversation or one task attempt.
-- A new start passes a caller-chosen session ID to Claude (`agent::new_session` gives a UUID v4). Codex names its thread in the first `thread.started` event; `new_session` gives `-` until then.
-- Each turn is one client process. The process reads the turn text from stdin and exits when the turn ends. The next turn resumes the same session ID.
+- A new start passes a caller-chosen session ID to Claude (`agent::new_session` gives a UUID v4). Codex names its thread in the first `thread.started` event and Antigravity names its conversation in `conversation.started` (or `response.newConversation.conversationId`); `new_session` gives `-` until then.
+- Each turn is one client process. The process reads the turn text from stdin (or for native `agentapi`, receives the prompt argument and tails `<home>/brain/<session>/.system_generated/logs/transcript.jsonl`) and exits when the turn ends. The next turn resumes the same session ID.
 - The client compacts its own context. For Claude, the caller passes `agent::claude_settings(Some(hook), env)` in `--settings`: a `SessionStart` hook on `compact` runs the caller's command, which prints the rules again. The settings `env` survives resume.
 - Output of every turn appends to one caller log per session. A turn reads only the bytes it appended.
 
 ## Arguments
 
-The caller builds the base command: the client executable from `agent::executable`, or a sandbox wrapper around it. `agent::command` appends the arguments, sets the project root as working directory, removes `CLAUDE_CODE_SESSION_ID` and `CODEX_THREAD_ID`, adds the caller's environment and sets the account home.
+The caller builds the base command: the client executable from `agent::executable`, or a sandbox wrapper around it. `agent::command` appends the arguments, sets the project root as working directory, removes `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID` and `ANTIGRAVITY_CONVERSATION_ID`, adds the caller's environment and sets the account home.
 
 | Client | Start | Resume |
 |---|---|---|
 | Claude | `-p --output-format stream-json --verbose <args> --session-id <id>` | `-p --output-format stream-json --verbose <args> --resume <id>` |
 | Codex | `exec --json <args> -C <root> -` | `exec --json <args> resume <thread> -` |
+| Antigravity | `new-conversation <args> -` | `send-message <args> <session> -` |
 
-- `<args>` are the caller's client arguments in this position: TaskQ passes `--permission-mode <mode> --settings <json>` to Claude and its sandbox arguments to Codex.
+- `<args>` are the caller's client arguments in this position: TaskQ passes `--permission-mode <mode> --settings <json>` to Claude, sandbox arguments to Codex, and optional `--model=<flash_lite|flash|pro>` / `--profile=<profile>` / `--title=<title>` flags to Antigravity.
 - `agent::which` resolves a name on `PATH`; on Windows it also tries `<name>.exe` and the npm shim `<name>.cmd`. `agent::user_bin_path` appends `~/.local/bin` when `PATH` lacks it.
 - `agent::codex_native` replaces an npm `codex.js` launcher with its native executor on macOS and Linux, so a kill reaches the client. It never scans other installations.
+- For `Client::Antigravity` (`"antigravity"`, alias `"agy"`), `agent::executable` resolves `ANTIGRAVITY_AGENTAPI_EXE` when set, else `agentapi` on `PATH`, else `<home>/bin/agentapi` (`~/.gemini/antigravity/bin/agentapi`), else `agy` on `PATH`. When `Turn::start` runs the native `agentapi` / `language_server` binary directly, it passes the prompt text as the final argument (and discovers `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` from the running `language_server` process when absent from the environment), then tails new steps from `<home>/brain/<session>/.system_generated/logs/transcript.jsonl` (using `transcript_full.jsonl` when `truncated_fields` is present) into the caller log until the turn's terminal `PLANNER_RESPONSE` completes.
 
 ## End of a turn
 
-- A turn ends at a Claude `result` event or a Codex `turn.completed` or `turn.failed` event.
+- A turn ends at a Claude `result` event, a Codex `turn.completed` or `turn.failed` event, or an Antigravity `PLANNER_RESPONSE` step with `status: "DONE"` and no `tool_calls` (or `status: "ERROR"` / `"CANCELLED"`).
 - A process that is still running after its turn-end event is stopped: Codex on Windows kept running after its turn ended.
 - `Turn::wait(deadline)` stops the process at the deadline; the turn then reads `cancelled` with error `timeout`.
 - `Turn::poll` serves a caller loop that does not block.
@@ -40,18 +42,19 @@ The caller builds the base command: the client executable from `agent::executabl
 | Limit reached before work started | `refused` | `usage-limit` |
 | Codex login rejected (refresh token or 401) | `failed` | `auth-rejected` |
 | Codex `turn.failed` naming model capacity | `failed` | `model-capacity` |
-| Codex `turn.failed` | `failed` | `turn-failed` |
+| Codex `turn.failed` or Antigravity `PLANNER_RESPONSE` `status: "ERROR"` | `failed` | `turn-failed` |
 | Claude `result` with `is_error: true` | `failed` | `client-error` |
 | Turn-end event | `ok` | `none` |
 | No turn-end event, nonzero exit | `failed` | `exit` |
 | No turn-end event, exit 0 | `unknown` | `no-end` |
 
-A reached limit returns `Report::reached`: the reported reset in unix seconds, or none. Claude reports it on the first `assistant` event (`apiError: usage_limit_reached` or `quotaLimits.status: rejected`, reset `quotaLimits.resetsAt` or `apiErrorParams.rate_limit_info.resetsAt`). Codex reports it as `error` or `turn.failed` text containing `usage limit`, without a reset. A limit after work started is not a start refusal.
+A reached limit returns `Report::reached`: the reported reset in unix seconds, or none. Claude reports it on the first `assistant` event (`apiError: usage_limit_reached` or `quotaLimits.status: rejected`, reset `quotaLimits.resetsAt` or `apiErrorParams.rate_limit_info.resetsAt`). Codex and Antigravity report it as `error` or `turn.failed` / step error text containing `usage limit` or `quota exceeded`, without a reset. A limit after work started is not a start refusal.
 
 ## Usage
 
 - Claude: each `assistant` message ID counts once, because one message spans several lines. Uncached input is `input_tokens`, cache read `cache_read_input_tokens`, cache write `cache_creation_input_tokens`, output `output_tokens`. The model is the one of most calls.
 - Codex: each `turn.completed` counts. Its `input_tokens` include `cached_input_tokens`, so uncached input is the difference. Codex reports no cache writes (0), no call count and no model in `exec --json` output.
+- Antigravity: each `PLANNER_RESPONSE` step (`step_index` deduplicated) counts as one model call. Uncached input is `input_tokens`, cache read `cache_read_tokens`, cache write `cache_write_tokens` (0 when omitted), output `output_tokens`, and `model` is read from `model` when reported.
 - A counted call without a value makes that sum unknown, never smaller. No counted call: every count is null with reason `no-usage`.
 - A model ID is a code of at most 64 characters from `[A-Za-z0-9._:-]`; any other value is not reported.
 
@@ -81,7 +84,7 @@ A reached limit returns `Report::reached`: the reported reset in unix seconds, o
 - An empty list is one enabled `default` account. A label is 1-32 of `[a-z0-9-]`, not starting with `-`.
 - A limit ends at its reported reset, else `PROBE` (1800 s) after it was seen.
 - `pick`: the first enabled account whose limit has ended, else the first enabled account; none when all are disabled. `spare`: the account a limit moves to, only with more than one account. `hold`: the earliest live limit end of an enabled account and whether it was reported.
-- Homes: `default` keeps the caller's own home (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, else `~/.claude` / `~/.codex`; a Windows service uses `USERPROFILE`). Any other account is `<home>/<tool>-accounts/<label>`, with `<tool>` the consumer's `Tool.name`. `command` sets the home variable for the child.
+- Homes: `default` keeps the caller's own home (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `ANTIGRAVITY_HOME`, else `~/.claude` / `~/.codex` / `~/.gemini/antigravity`; a Windows service uses `USERPROFILE`). Any other account is `<home>/<tool>-accounts/<label>`, with `<tool>` the consumer's `Tool.name`. `command` sets the home variable for the child.
 
 ## Compatibility sessions
 
@@ -106,7 +109,7 @@ Fake clients verify these boundaries on Linux, macOS and Windows. Native consume
 
 | Request field | Meaning |
 |---|---|
-| `client` | `claude` or `codex` (required) |
+| `client` | `claude`, `codex` or `antigravity` (`agy`) (required) |
 | `root`, `log` | Absolute project root and caller log; output of every turn appends to the log (required) |
 | `session`, `resume` | Native session; null starts a new one (`new_session`); a resume names it |
 | `args`, `env`, `home` | Caller client arguments, child environment (strings) and account home, as in `Spec` |
@@ -132,7 +135,7 @@ The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `start
 | 5 | `compression.enabled` false | `off` | `host_off` |
 | 6 | `compression.agents.<client>` false | `off` | `agent_off` |
 | 7 | No client home known | `unknown` | `no_client_home` |
-| 8 | Codex `config.toml` top-level `model_provider = "agentq"` (inline comments allowed), Claude `settings.json` has a compression hook command | `on` | `configured` |
+| 8 | Codex `config.toml` top-level `model_provider = "agentq"` (inline comments allowed), Claude `settings.json` has a compression hook command, Antigravity `hooks.json` (`<home>/hooks.json` or `~/.gemini/config/hooks.json`) has a `PreToolUse` command calling `hook antigravity` | `on` | `configured` |
 | 9 | Client configuration unreadable | `unknown` | `unreadable_client_config` |
 | 10 | Otherwise | `off` | `not_attached` |
 

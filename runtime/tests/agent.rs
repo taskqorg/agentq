@@ -206,6 +206,14 @@ fn fake(client: &str) {
             assert_eq!(&args[..4], ["-p", "--output-format", "stream-json", "--verbose"], "claude print mode");
             match (after("--session-id"), after("--resume")) { (Some(s), None) => (s, false), (None, Some(s)) => (s, true), _ => panic!("claude session flag") }
         }
+        "antigravity" => {
+            assert_eq!(args.last().map(String::as_str), Some("-"), "antigravity reads stdin");
+            match args.first().map(String::as_str) {
+                Some("new-conversation") => (format!("ag-{}", std::process::id()), false),
+                Some("send-message") => (args[args.len() - 2].clone(), true),
+                _ => panic!("antigravity subcommand"),
+            }
+        }
         _ => {
             assert_eq!(&args[..2], ["exec", "--json"], "codex exec");
             assert_eq!(args.last().map(String::as_str), Some("-"), "codex reads stdin");
@@ -218,8 +226,10 @@ fn fake(client: &str) {
     sessions[&session] = json!(turn);
     std::fs::write(&store, sessions.to_string()).unwrap();
     // The record lets the test read argv, stdin and environment the child got.
-    let record = json!({"args": args, "input": input, "home": std::env::var(if client == "claude" { "CLAUDE_CONFIG_DIR" } else { "CODEX_HOME" }).ok(),
-        "inherited": std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() || std::env::var("CODEX_THREAD_ID").is_ok(), "extra": std::env::var("FAKE_EXTRA").ok(),
+    let home_var = match client { "claude" => "CLAUDE_CONFIG_DIR", "antigravity" => "ANTIGRAVITY_HOME", _ => "CODEX_HOME" };
+    let record = json!({"args": args, "input": input, "home": std::env::var(home_var).ok(),
+        "inherited": std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() || std::env::var("CODEX_THREAD_ID").is_ok() || std::env::var("ANTIGRAVITY_CONVERSATION_ID").is_ok(),
+        "extra": std::env::var("FAKE_EXTRA").ok(),
         "optimization": std::env::var("AGENTQ_OPTIMIZATION").ok(), "launcher": std::env::var("AGENTQ_LAUNCHER").ok()});
     std::fs::write(format!("fake-turn-{turn}.json"), record.to_string()).unwrap();
     if client == "claude" {
@@ -228,6 +238,14 @@ fn fake(client: &str) {
             "usage": {"input_tokens": 3, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20, "output_tokens": 7}}}));
         emit(json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1792386000u64, "rateLimitType": "five_hour", "utilization": 0.25}}));
         emit(json!({"type": "result", "subtype": "success", "is_error": false, "result": format!("turn {turn}"), "session_id": session}));
+    } else if client == "antigravity" {
+        if resumed {
+            emit(json!({"response": {"sendMessage": {"recipientId": session, "content": input}}}));
+        } else {
+            emit(json!({"response": {"newConversation": {"conversationId": session, "prompt": input}}}));
+        }
+        emit(json!({"step_index": turn, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.1-pro",
+            "input_tokens": 12, "cache_read_tokens": 60, "output_tokens": 8, "content": format!("turn {turn}")}));
     } else {
         if !resumed { emit(json!({"type": "thread.started", "thread_id": session})); }
         if let Ok(home) = std::env::var("CODEX_HOME") {
@@ -548,7 +566,7 @@ fn json_turns_run_plain_without_the_optimizer() {
     let root = scratch("json");
     let install = root.join("no-install");
     let exe = std::env::current_exe().unwrap();
-    for (client, intent) in [(Client::Claude, "off"), (Client::Codex, "inherit")] {
+    for (client, intent) in [(Client::Claude, "off"), (Client::Codex, "inherit"), (Client::Antigravity, "off")] {
         let dir = root.join(client.code());
         std::fs::create_dir_all(&dir).unwrap();
         let mut request = json!({"client": client.code(), "root": dir, "log": dir.join("turns.log"), "input": "brief", "timeout_s": 30,

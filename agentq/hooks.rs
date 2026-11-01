@@ -24,6 +24,24 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
         crate::model::session_start(&data()?, &v, launched(), std::env::current_dir().ok().as_deref())?;
         return Ok(empty());
     }
+    if agent == "antigravity" && event == "PreToolUse" {
+        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
+        let tool = v["toolCall"]["name"].as_str().or(v["tool_name"].as_str()).unwrap_or_default();
+        if tool != "run_command" { return Ok(empty()); }
+        let Some(command) = v["toolCall"]["arguments"]["CommandLine"].as_str().or(v["tool_input"]["CommandLine"].as_str()) else {
+            return Ok(empty());
+        };
+        if command.contains([';', '&', '|', '<', '>', '\n', '$', '`']) { return Ok(empty()); }
+        let words: Vec<String> = command.split_ascii_whitespace().map(String::from).collect();
+        if !crate::engines::qualified(&words) { return Ok(empty()); }
+        let mut env = String::from("AGENTQ_AGENT=antigravity ");
+        if let Some(session) = v["conversationId"].as_str().or(v["session_id"].as_str()) {
+            env += &format!("AGENTQ_SESSION={} ", quote(session));
+        }
+        let path = exe.display().to_string();
+        let path = if cfg!(windows) { path.replace('\\', "/") } else { path };
+        return Ok(json!({"overwrite": {"CommandLine": format!("{env}{} run -- {command}", quote(&path))}}));
+    }
     if agent != "claude" || !["PreToolUse", "PostToolUse"].contains(&event) { return Ok(empty()); }
     let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
     if v["tool_name"] != "Bash" { return Ok(empty()); }
@@ -75,5 +93,9 @@ mod tests {
             let mut v=v.clone();v["tool_input"]["command"]=json!(command);
             assert_eq!(response("claude","PreToolUse",&v.to_string(),Path::new("agentq")).unwrap(),json!({}));
         }
+        let ag = json!({"toolCall":{"name":"run_command","arguments":{"CommandLine":"cargo test --color never"}},"conversationId":"ag-conv-1"});
+        let r_ag = response("antigravity", "PreToolUse", &ag.to_string(), Path::new("/a b/agentq")).unwrap();
+        assert!(r_ag["overwrite"]["CommandLine"].as_str().unwrap().ends_with("'/a b/agentq' run -- cargo test --color never"));
+        assert!(r_ag["overwrite"]["CommandLine"].as_str().unwrap().contains("AGENTQ_SESSION='ag-conv-1'"));
     }
 }

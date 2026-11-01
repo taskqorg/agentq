@@ -302,6 +302,31 @@ impl NativeTurn {
                         }
                     }
                 }
+                Client::Antigravity => {
+                    if matches!(v["type"].as_str(), Some("USER_INPUT" | "SYSTEM_MESSAGE")) {
+                        let content = v["content"].as_str().unwrap_or_default();
+                        if content == self.input || content.contains(&self.input) {
+                            if self.accepted { return Err("native input appears more than once".into()); }
+                            self.accepted = true;
+                        } else if !content.is_empty() && self.accepted && !self.ended {
+                            return Err("another input superseded the native turn".into());
+                        }
+                    } else if self.accepted {
+                        if v["type"] == "PLANNER_RESPONSE" {
+                            self.events.push(v.clone());
+                            if v["status"] == "CANCELLED" {
+                                self.ended = true;
+                                self.aborted = true;
+                            } else if v["status"] == "ERROR" || (v["status"] == "DONE" && !v["tool_calls"].is_array()) {
+                                self.ended = true;
+                            } else {
+                                self.ended = false;
+                            }
+                        } else if v["type"] == "TOOL_RESPONSE" {
+                            self.ended = false;
+                        }
+                    }
+                }
             }
             self.cursor+=size as u64;consumed+=size;
         }

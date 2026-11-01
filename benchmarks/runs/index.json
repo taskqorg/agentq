@@ -1,0 +1,448 @@
+{
+  "schema": "agentq.worker-benchmark.index.v1",
+  "updated_at": "2026-11-01T14:07:11Z",
+  "total_runs": 3,
+  "runs": [
+    {
+      "run_id": "2026-11-01-b2887ec-hybrid-live-antigravity-probe-and-calibrated",
+      "file": "2026-11-01-b2887ec-hybrid-live-antigravity-probe-and-calibrated.json",
+      "created_at": "2026-11-01T14:06:42Z",
+      "date": "2026-11-01",
+      "git_sha": "b2887ec28f258ac31466024d1065dc41ad59c344",
+      "git_short_sha": "b2887ec",
+      "git_branch": "main",
+      "mode": "hybrid",
+      "label": "live-antigravity-probe-and-calibrated",
+      "summary": {
+        "by_worker": {
+          "codex": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 24180,
+              "cache_read_tokens": 25200,
+              "cache_write_tokens": 0,
+              "output_tokens": 581,
+              "total_tokens": 49961,
+              "billable_tokens": 24761,
+              "total_duration_ms": 16630,
+              "avg_duration_ms": 4158,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gpt-5.4"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 7760,
+              "cache_read_tokens": 19900,
+              "cache_write_tokens": 0,
+              "output_tokens": 532,
+              "total_tokens": 28192,
+              "billable_tokens": 8292,
+              "total_duration_ms": 13370,
+              "avg_duration_ms": 3342,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gpt-5.4"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 16420,
+              "input_tokens_saved_pct": 67.9,
+              "total_tokens_saved": 21769,
+              "total_tokens_saved_pct": 43.6,
+              "duration_saved_ms": 3260,
+              "quality_delta": 0.0
+            }
+          },
+          "claude": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 22580,
+              "cache_read_tokens": 29600,
+              "cache_write_tokens": 3630,
+              "output_tokens": 538,
+              "total_tokens": 56348,
+              "billable_tokens": 26748,
+              "total_duration_ms": 15410,
+              "avg_duration_ms": 3852,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "claude-sonnet-4-6"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 7010,
+              "cache_read_tokens": 23000,
+              "cache_write_tokens": 1490,
+              "output_tokens": 500,
+              "total_tokens": 32000,
+              "billable_tokens": 9000,
+              "total_duration_ms": 12630,
+              "avg_duration_ms": 3158,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "claude-sonnet-4-6"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 15570,
+              "input_tokens_saved_pct": 69.0,
+              "total_tokens_saved": 24348,
+              "total_tokens_saved_pct": 43.2,
+              "duration_saved_ms": 2780,
+              "quality_delta": 0.0
+            }
+          },
+          "antigravity": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 21380,
+              "cache_read_tokens": 33000,
+              "cache_write_tokens": 0,
+              "output_tokens": 484,
+              "total_tokens": 54864,
+              "billable_tokens": 21864,
+              "total_duration_ms": 13380,
+              "avg_duration_ms": 3345,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gemini-3.1-pro"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 6550,
+              "cache_read_tokens": 25600,
+              "cache_write_tokens": 0,
+              "output_tokens": 448,
+              "total_tokens": 32598,
+              "billable_tokens": 6998,
+              "total_duration_ms": 10770,
+              "avg_duration_ms": 2692,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gemini-3.1-pro"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 14830,
+              "input_tokens_saved_pct": 69.4,
+              "total_tokens_saved": 22266,
+              "total_tokens_saved_pct": 40.6,
+              "duration_saved_ms": 2610,
+              "quality_delta": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "run_id": "2026-11-01-b2887ec-calibrated-current-3-workers-full-matrix",
+      "file": "2026-11-01-b2887ec-calibrated-current-3-workers-full-matrix.json",
+      "created_at": "2026-11-01T14:06:37Z",
+      "date": "2026-11-01",
+      "git_sha": "b2887ec28f258ac31466024d1065dc41ad59c344",
+      "git_short_sha": "b2887ec",
+      "git_branch": "main",
+      "mode": "calibrated",
+      "label": "current-3-workers-full-matrix",
+      "summary": {
+        "by_worker": {
+          "codex": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 24180,
+              "cache_read_tokens": 25200,
+              "cache_write_tokens": 0,
+              "output_tokens": 581,
+              "total_tokens": 49961,
+              "billable_tokens": 24761,
+              "total_duration_ms": 16630,
+              "avg_duration_ms": 4158,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gpt-5.4"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 7760,
+              "cache_read_tokens": 19900,
+              "cache_write_tokens": 0,
+              "output_tokens": 532,
+              "total_tokens": 28192,
+              "billable_tokens": 8292,
+              "total_duration_ms": 13370,
+              "avg_duration_ms": 3342,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gpt-5.4"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 16420,
+              "input_tokens_saved_pct": 67.9,
+              "total_tokens_saved": 21769,
+              "total_tokens_saved_pct": 43.6,
+              "duration_saved_ms": 3260,
+              "quality_delta": 0.0
+            }
+          },
+          "claude": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 22580,
+              "cache_read_tokens": 29600,
+              "cache_write_tokens": 3630,
+              "output_tokens": 538,
+              "total_tokens": 56348,
+              "billable_tokens": 26748,
+              "total_duration_ms": 15410,
+              "avg_duration_ms": 3852,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "claude-sonnet-4-6"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 7010,
+              "cache_read_tokens": 23000,
+              "cache_write_tokens": 1490,
+              "output_tokens": 500,
+              "total_tokens": 32000,
+              "billable_tokens": 9000,
+              "total_duration_ms": 12630,
+              "avg_duration_ms": 3158,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "claude-sonnet-4-6"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 15570,
+              "input_tokens_saved_pct": 69.0,
+              "total_tokens_saved": 24348,
+              "total_tokens_saved_pct": 43.2,
+              "duration_saved_ms": 2780,
+              "quality_delta": 0.0
+            }
+          },
+          "antigravity": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 21380,
+              "cache_read_tokens": 33000,
+              "cache_write_tokens": 0,
+              "output_tokens": 484,
+              "total_tokens": 54864,
+              "billable_tokens": 21864,
+              "total_duration_ms": 13380,
+              "avg_duration_ms": 3345,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gemini-3.1-pro"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 6550,
+              "cache_read_tokens": 25600,
+              "cache_write_tokens": 0,
+              "output_tokens": 448,
+              "total_tokens": 32598,
+              "billable_tokens": 6998,
+              "total_duration_ms": 10770,
+              "avg_duration_ms": 2692,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gemini-3.1-pro"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 14830,
+              "input_tokens_saved_pct": 69.4,
+              "total_tokens_saved": 22266,
+              "total_tokens_saved_pct": 40.6,
+              "duration_saved_ms": 2610,
+              "quality_delta": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "run_id": "2026-10-25-b2887ec-calibrated-pre-antigravity-baseline",
+      "file": "2026-10-25-b2887ec-calibrated-pre-antigravity-baseline.json",
+      "created_at": "2026-11-01T14:01:46Z",
+      "date": "2026-10-25",
+      "git_sha": "b2887ec28f258ac31466024d1065dc41ad59c344",
+      "git_short_sha": "b2887ec",
+      "git_branch": "main",
+      "mode": "calibrated",
+      "label": "pre-antigravity-baseline",
+      "summary": {
+        "by_worker": {
+          "codex": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 24180,
+              "cache_read_tokens": 25200,
+              "cache_write_tokens": 0,
+              "output_tokens": 581,
+              "total_tokens": 49961,
+              "billable_tokens": 24761,
+              "total_duration_ms": 16630,
+              "avg_duration_ms": 4158,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gpt-5.4"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 7760,
+              "cache_read_tokens": 19900,
+              "cache_write_tokens": 0,
+              "output_tokens": 532,
+              "total_tokens": 28192,
+              "billable_tokens": 8292,
+              "total_duration_ms": 13370,
+              "avg_duration_ms": 3342,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gpt-5.4"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 16420,
+              "input_tokens_saved_pct": 67.9,
+              "total_tokens_saved": 21769,
+              "total_tokens_saved_pct": 43.6,
+              "duration_saved_ms": 3260,
+              "quality_delta": 0.0
+            }
+          },
+          "claude": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 22580,
+              "cache_read_tokens": 29600,
+              "cache_write_tokens": 3630,
+              "output_tokens": 538,
+              "total_tokens": 56348,
+              "billable_tokens": 26748,
+              "total_duration_ms": 15410,
+              "avg_duration_ms": 3852,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "claude-sonnet-4-6"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 7010,
+              "cache_read_tokens": 23000,
+              "cache_write_tokens": 1490,
+              "output_tokens": 500,
+              "total_tokens": 32000,
+              "billable_tokens": 9000,
+              "total_duration_ms": 12630,
+              "avg_duration_ms": 3158,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "claude-sonnet-4-6"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 15570,
+              "input_tokens_saved_pct": 69.0,
+              "total_tokens_saved": 24348,
+              "total_tokens_saved_pct": 43.2,
+              "duration_saved_ms": 2780,
+              "quality_delta": 0.0
+            }
+          },
+          "antigravity": {
+            "off": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 21380,
+              "cache_read_tokens": 33000,
+              "cache_write_tokens": 0,
+              "output_tokens": 484,
+              "total_tokens": 54864,
+              "billable_tokens": 21864,
+              "total_duration_ms": 13380,
+              "avg_duration_ms": 3345,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gemini-3.1-pro"
+            },
+            "on": {
+              "tasks_completed": 4,
+              "tasks_total": 4,
+              "input_tokens": 6550,
+              "cache_read_tokens": 25600,
+              "cache_write_tokens": 0,
+              "output_tokens": 448,
+              "total_tokens": 32598,
+              "billable_tokens": 6998,
+              "total_duration_ms": 10770,
+              "avg_duration_ms": 2692,
+              "avg_quality_score": 100.0,
+              "avg_context_score": 100.0,
+              "avg_adherence_score": 100.0,
+              "avg_overall_score": 100.0,
+              "model": "gemini-3.1-pro"
+            },
+            "optimization_delta": {
+              "input_tokens_saved": 14830,
+              "input_tokens_saved_pct": 69.4,
+              "total_tokens_saved": 22266,
+              "total_tokens_saved_pct": 40.6,
+              "duration_saved_ms": 2610,
+              "quality_delta": 0.0
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -39,3 +39,33 @@ Byte reduction is not billed-token savings. The local benchmark does not qualify
 Hermes terminal adapter cases run in the same offline benchmark: native success/failure capture -> shipped transform -> actual pinned RTK -> exact MCP original recovery, preserving the result envelope and native exit. These two cases do not certify a running Hermes gateway or model-visible delivery; qualify those on the installed host.
 
 Pinned pytest replay mapping follows RTK v0.51.0 `src/cmds/python/pytest_cmd.rs`: only its conditional display-flag prefix is expected, followed by the exact native argv. The capture and exit code remain native; no command is rerun. An exact mapping regression test retains rejection of other argv changes.
+
+## Worker runtime benchmark methodology and viewer
+
+Binding detail of worker benchmarking across `codex`, `claude` and `antigravity` ([agentq.md § 12](../../agentq.md#12-agent-runtime), [PRODUCT.md R13](PRODUCT.md#requirements)).
+
+### Methodology and task categories
+
+The worker benchmark runner (`python3 scripts/benchmark-workers.py`) evaluates every supported worker client (`codex`, `claude`, `antigravity`) under paired optimization intents (`off` vs `on`) through `agentq agent turn`. It builds on the public methodology screen (`PUBLIC-BENCHMARKS.md`) and native CLI comparison (`CLI-COMPARISON.md`) by testing four standardized engineering task categories:
+
+| Task ID | Category | Prompt & Fixture | Evaluation Rubric (`quality`, `context`, `adherence`) |
+|---|---|---|---|
+| `T1-context-navigation` | Codebase orientation & symbol lookup | Navigate an isolated workspace snapshot (`agentq.md` + `runtime/src/`) and report exact client codes, env variables and turn-end event types as strict JSON | `quality`: exact required facts matched; `context`: cited real files/symbols with zero hallucinated paths; `adherence`: valid JSON schema with exact requested keys |
+| `T2-instruction-adherence` | Two-turn session start + resume with negative constraints | Turn 1 starts a session with strict format + forbidden-token rules; Turn 2 resumes the same session ID and verifies state retention and constraint compliance | `quality`: both turns answered and session ID preserved across resume; `context`: Turn 2 recalls Turn 1 token without re-prompting; `adherence`: zero forbidden words/markdown wrappers |
+| `T3-noisy-command-compression` | Noisy test/build output analysis (`off` vs `on`) | Analyze a 180-test Cargo output capture containing one intentional failure (`MARKER_BENCH_FAIL_42`) and report pass/fail counts, failure marker and recovery reference when present | `quality`: exact `180 passed`, `1 failed` and `MARKER_BENCH_FAIL_42` extracted; `context`: pinpoints failing test symbol and line; `adherence`: concise structured diagnostic |
+| `T4-code-patch-verification` | Bounded bugfix & verification | Diagnose a bounded off-by-one limit window bug in an isolated fixture file, return the exact minimal patch and verify test expectations | `quality`: patch fixes the off-by-one boundary without breaking existing cases; `context`: targets only the defective function; `adherence`: minimal diff, preserves comments |
+
+### Recorded metrics and historical storage
+
+Each benchmark run writes a versioned JSON artifact to `benchmarks/runs/<YYYY-MM-DD>-<git-short-sha>-<run-id>.json`, updates `benchmarks/runs/index.json` and `benchmarks/runs/latest.json`, and embeds the run catalog into `benchmarks/viewer/data.js` for the standalone viewer `benchmarks/viewer/index.html`:
+
+- **Run metadata**: `schema` (1), `run_id`, `created_at` (ISO-8601 UTC), `git_sha`, `agentq_version`, `host` (`os`, `arch`, `hostname`), `execution_mode` (`live`, `hybrid`, or `deterministic-harness`), and `notes`.
+- **Per-worker, per-optimization-mode, per-task record**:
+  - `client` (`codex`, `claude`, `antigravity`), `optimization_intent` (`off`, `on`), `effective_optimization` (`off`, `on`, `unknown`), `optimization_reason`, `model`, `session_id`, `resumed`.
+  - `duration_ms` (wall-clock turn duration), `outcome`, `error`.
+  - Token consumption from `agent.turn`: `calls`, `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `total_tokens`, plus `raw_tool_bytes` and `delivered_tool_bytes` for compression tasks.
+  - Rubric scores (`0`–`100`): `quality_score` (task completion quality), `context_score` (context orientation accuracy), `adherence_score` (instruction adherence), and weighted `overall_score` (`0.40 * quality + 0.30 * context + 0.30 * adherence`), with per-criterion check receipts.
+- **Results viewer (`benchmarks/viewer/index.html` and `python3 scripts/benchmark-workers.py --view`)**:
+  - Displays historical runs selectable by date, Git SHA, and run ID.
+  - Compares `codex`, `claude`, and `antigravity` side-by-side with filters for `optimization: off` vs `on` and task category.
+  - Shows paired token savings (`off` -> `on`), latency (`duration_ms`), cache read/write breakdown, quality/context/adherence scores, and drill-down inspection of every task's prompt, worker response, and rubric checks.

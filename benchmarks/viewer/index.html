@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentQ Worker Runtime Benchmarks — Codex · Claude · Antigravity</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --surface: #131a27;
+      --surface-alt: #1a2333;
+      --border: #28344b;
+      --text: #e6edf7;
+      --muted: #8b9bb4;
+      --accent: #38bdf8;
+      --codex: #10b981;
+      --claude: #f59e0b;
+      --antigravity: #8b5cf6;
+      --good: #22c55e;
+      --warn: #eab308;
+      --bad: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      background: linear-gradient(180deg, #131b2e 0%, #0b0f17 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 20px 32px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+    .brand p {
+      margin: 4px 0 0;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .control-group label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    select, button {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    select:focus, button:focus {
+      outline: 1px solid var(--accent);
+    }
+    main {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px 32px 64px;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+    .run-meta-bar {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 24px;
+      align-items: center;
+      font-size: 13px;
+    }
+    .run-meta-item span {
+      color: var(--muted);
+      margin-right: 6px;
+    }
+    .run-meta-item code {
+      background: var(--surface-alt);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--accent);
+    }
+    .worker-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 20px;
+    }
+    .worker-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      position: relative;
+      overflow: hidden;
+    }
+    .worker-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 4px;
+    }
+    .worker-card.codex::before { background: var(--codex); }
+    .worker-card.claude::before { background: var(--claude); }
+    .worker-card.antigravity::before { background: var(--antigravity); }
+    .worker-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .worker-title {
+      font-size: 18px;
+      font-weight: 700;
+      text-transform: capitalize;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .dot.codex { background: var(--codex); }
+    .dot.claude { background: var(--claude); }
+    .dot.antigravity { background: var(--antigravity); }
+    .worker-model {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .savings-pill {
+      background: rgba(34, 197, 94, 0.14);
+      color: #4ade80;
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .opt-comparison {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .opt-box {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .opt-box.on {
+      border-color: rgba(56, 189, 248, 0.4);
+    }
+    .opt-box-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .opt-box.on .opt-box-title {
+      color: var(--accent);
+    }
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      margin: 4px 0;
+    }
+    .metric-row .label { color: var(--muted); }
+    .metric-row .val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 600;
+    }
+    .score-bars {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-top: 6px;
+      border-top: 1px solid var(--border);
+    }
+    .bar-row {
+      display: grid;
+      grid-template-columns: 140px 1fr 48px;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+    .bar-track {
+      height: 8px;
+      background: var(--surface-alt);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+    .section-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+    }
+    .section-card h2 {
+      margin: 0 0 6px;
+      font-size: 17px;
+      font-weight: 700;
+    }
+    .section-card p.sub {
+      margin: 0 0 18px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: var(--surface-alt);
+    }
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .num {
+      text-align: right;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .status-ok {
+      color: var(--good);
+      font-weight: 600;
+    }
+    .opt-tag {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .opt-tag.on {
+      background: rgba(56, 189, 248, 0.16);
+      color: var(--accent);
+    }
+    .opt-tag.off {
+      background: rgba(139, 155, 180, 0.15);
+      color: var(--muted);
+    }
+    .methodology-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+      gap: 14px;
+    }
+    .task-card {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .task-card h3 {
+      margin: 0 0 6px;
+      font-size: 14px;
+      color: var(--accent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .task-card .task-title {
+      font-weight: 600;
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+    .task-card p {
+      margin: 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .diff-positive { color: #4ade80; }
+    .diff-negative { color: #f87171; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>
+        AgentQ Worker Runtime Benchmarks
+        <span class="badge">agentq-runtime v0.1.0</span>
+      </h1>
+      <p>Сравнение воркеров Codex · Claude · Antigravity (с включенной и отключенной оптимизацией токенов)</p>
+    </div>
+    <div class="controls">
+      <div class="control-group">
+        <label for="runSelect">Версия / Дата запуска (Run)</label>
+        <select id="runSelect"></select>
+      </div>
+      <div class="control-group">
+        <label for="compareSelect">Сравнить с запуском (Baseline)</label>
+        <select id="compareSelect">
+          <option value="">— Без сравнения —</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <label for="filterWorker">Фильтр воркера</label>
+        <select id="filterWorker">
+          <option value="all">Все воркеры (Codex, Claude, Antigravity)</option>
+          <option value="codex">Codex</option>
+          <option value="claude">Claude</option>
+          <option value="antigravity">Antigravity</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="runMetaBar" class="run-meta-bar"></div>
+
+    <div id="workerCards" class="worker-grid"></div>
+
+    <div id="compareSection" class="section-card" style="display:none;">
+      <h2>Сравнение с выбранной исторической версией (Run Diff)</h2>
+      <p class="sub" id="compareSub"></p>
+      <div style="overflow-x:auto;">
+        <table id="compareTable">
+          <thead>
+            <tr>
+              <th>Воркер</th>
+              <th>Оптимизация</th>
+              <th class="num">Input токены (было → стало)</th>
+              <th class="num">Всего токенов (было → стало)</th>
+              <th class="num">Время (было → стало)</th>
+              <th class="num">Общий балл (было → стало)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section-card">
+      <h2>Детальные результаты по задачам (Per-Task Matrix)</h2>
+      <p class="sub">Показатели времени выполнения, расхода токенов, качества, ориентации в контексте и следования инструкциям для каждого запуска.</p>
+      <div style="overflow-x:auto;">
+        <table id="resultsTable">
+          <thead>
+            <tr>
+              <th>Задача</th>
+              <th>Воркер</th>
+              <th>Оптимизация</th>
+              <th>Режим</th>
+              <th>Модель</th>
+              <th class="num">Время (мс)</th>
+              <th class="num">Input ток.</th>
+              <th class="num">Cache Read</th>
+              <th class="num">Output ток.</th>
+              <th class="num">Качество</th>
+              <th class="num">Контекст</th>
+              <th class="num">Инструкции</th>
+              <th class="num">Итог</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section-card">
+      <h2>Методология тестирования воркеров (Benchmark Methodology)</h2>
+      <p class="sub">Спецификация: <code>docs/spec/COMPRESSION-BENCHMARK.md § Worker runtime benchmark methodology and viewer</code></p>
+      <div id="methodologyGrid" class="methodology-grid"></div>
+    </div>
+  </main>
+
+  <script src="data.js"></script>
+  <script>
+    (function () {
+      const data = window.AGENTQ_BENCHMARK_DATA || { runs: [], tasks: [] };
+      const runs = data.runs || [];
+      const runSelect = document.getElementById("runSelect");
+      const compareSelect = document.getElementById("compareSelect");
+      const filterWorker = document.getElementById("filterWorker");
+
+      function fmtNum(n) {
+        return (n ?? 0).toLocaleString("ru-RU");
+      }
+
+      function populateSelectors() {
+        runs.forEach((r, idx) => {
+          const opt = document.createElement("option");
+          opt.value = r.run_id;
+          opt.textContent = `${r.date} · ${r.git.short_sha} · ${r.mode} (${r.label || r.run_id})`;
+          if (idx === 0) opt.selected = true;
+          runSelect.appendChild(opt);
+
+          const cOpt = document.createElement("option");
+          cOpt.value = r.run_id;
+          cOpt.textContent = `${r.date} · ${r.git.short_sha} · ${r.mode} (${r.run_id})`;
+          if (idx === 1) cOpt.selected = true;
+          compareSelect.appendChild(cOpt);
+        });
+      }
+
+      function renderMethodology(run) {
+        const grid = document.getElementById("methodologyGrid");
+        grid.innerHTML = "";
+        const tasks = (run && run.methodology && run.methodology.tasks) || data.tasks || [];
+        tasks.forEach(t => {
+          const div = document.createElement("div");
+          div.className = "task-card";
+          div.innerHTML = `
+            <h3>${t.id}</h3>
+            <div class="task-title">${t.title}</div>
+            <p>${t.description}</p>
+          `;
+          grid.appendChild(div);
+        });
+      }
+
+      function render() {
+        const currentId = runSelect.value;
+        const compareId = compareSelect.value;
+        const workerFilter = filterWorker.value;
+        const run = runs.find(r => r.run_id === currentId) || runs[0];
+        if (!run) return;
+
+        // Meta bar
+        document.getElementById("runMetaBar").innerHTML = `
+          <div class="run-meta-item"><span>Run ID:</span><code>${run.run_id}</code></div>
+          <div class="run-meta-item"><span>Дата (UTC):</span><strong>${run.created_at}</strong></div>
+          <div class="run-meta-item"><span>Git SHA:</span><code>${run.git.short_sha}</code> (${run.git.branch})</div>
+          <div class="run-meta-item"><span>Режим:</span><code>${run.mode}</code></div>
+          <div class="run-meta-item"><span>Описание:</span>${run.label || "—"}</div>
+        `;
+
+        // Worker summary cards
+        const cardsEl = document.getElementById("workerCards");
+        cardsEl.innerHTML = "";
+        const clients = ["codex", "claude", "antigravity"].filter(c => workerFilter === "all" || c === workerFilter);
+
+        clients.forEach(client => {
+          const w = (run.summary && run.summary.by_worker && run.summary.by_worker[client]) || {};
+          const off = w.off || {};
+          const on = w.on || {};
+          const delta = w.optimization_delta || {};
+          const card = document.createElement("div");
+          card.className = `worker-card ${client}`;
+          card.innerHTML = `
+            <div class="worker-header">
+              <div>
+                <div class="worker-title"><span class="dot ${client}"></span>${client}</div>
+                <div class="worker-model">Модель: ${on.model || off.model || "—"}</div>
+              </div>
+              <div class="savings-pill">
+                Экономия input: -${delta.input_tokens_saved_pct ?? 0}% (${fmtNum(delta.input_tokens_saved ?? 0)} ток.)
+              </div>
+            </div>
+            <div class="opt-comparison">
+              <div class="opt-box off">
+                <div class="opt-box-title"><span>Optimization: OFF</span><span>${off.tasks_completed || 0}/${off.tasks_total || 0} OK</span></div>
+                <div class="metric-row"><span class="label">Input токены:</span><span class="val">${fmtNum(off.input_tokens)}</span></div>
+                <div class="metric-row"><span class="label">Cache Read:</span><span class="val">${fmtNum(off.cache_read_tokens)}</span></div>
+                <div class="metric-row"><span class="label">Output токены:</span><span class="val">${fmtNum(off.output_tokens)}</span></div>
+                <div class="metric-row"><span class="label">Общее время:</span><span class="val">${fmtNum(off.total_duration_ms)} мс</span></div>
+              </div>
+              <div class="opt-box on">
+                <div class="opt-box-title"><span>Optimization: ON</span><span>${on.tasks_completed || 0}/${on.tasks_total || 0} OK</span></div>
+                <div class="metric-row"><span class="label">Input токены:</span><span class="val">${fmtNum(on.input_tokens)}</span></div>
+                <div class="metric-row"><span class="label">Cache Read:</span><span class="val">${fmtNum(on.cache_read_tokens)}</span></div>
+                <div class="metric-row"><span class="label">Output токены:</span><span class="val">${fmtNum(on.output_tokens)}</span></div>
+                <div class="metric-row"><span class="label">Общее время:</span><span class="val">${fmtNum(on.total_duration_ms)} мс</span></div>
+              </div>
+            </div>
+            <div class="score-bars">
+              <div class="bar-row">
+                <span>Качество выполнения</span>
+                <div class="bar-track"><div class="bar-fill" style="width:${on.avg_quality_score || 0}%"></div></div>
+                <span class="num">${on.avg_quality_score || 0}/100</span>
+              </div>
+              <div class="bar-row">
+                <span>Ориентация в контексте</span>
+                <div class="bar-track"><div class="bar-fill" style="width:${on.avg_context_score || 0}%"></div></div>
+                <span class="num">${on.avg_context_score || 0}/100</span>
+              </div>
+              <div class="bar-row">
+                <span>Следование инструкциям</span>
+                <div class="bar-track"><div class="bar-fill" style="width:${on.avg_adherence_score || 0}%"></div></div>
+                <span class="num">${on.avg_adherence_score || 0}/100</span>
+              </div>
+            </div>
+          `;
+          cardsEl.appendChild(card);
+        });
+
+        // Comparison table if a second run is selected
+        const compSec = document.getElementById("compareSection");
+        const baseRun = runs.find(r => r.run_id === compareId);
+        if (baseRun && baseRun.run_id !== run.run_id) {
+          compSec.style.display = "block";
+          document.getElementById("compareSub").textContent =
+            `Базовый запуск: ${baseRun.run_id} (${baseRun.created_at}, git ${baseRun.git.short_sha}) → Текущий: ${run.run_id} (${run.created_at}, git ${run.git.short_sha})`;
+          const tbody = document.querySelector("#compareTable tbody");
+          tbody.innerHTML = "";
+          clients.forEach(c => {
+            ["off", "on"].forEach(opt => {
+              const a = ((baseRun.summary.by_worker || {})[c] || {})[opt];
+              const b = ((run.summary.by_worker || {})[c] || {})[opt];
+              if (!a || !b) return;
+              const dIn = b.input_tokens - a.input_tokens;
+              const dTot = b.total_tokens - a.total_tokens;
+              const dDur = b.total_duration_ms - a.total_duration_ms;
+              const dScore = (b.avg_overall_score - a.avg_overall_score).toFixed(1);
+              const tr = document.createElement("tr");
+              tr.innerHTML = `
+                <td><strong>${c}</strong></td>
+                <td><span class="opt-tag ${opt}">${opt.toUpperCase()}</span></td>
+                <td class="num">${fmtNum(a.input_tokens)} → ${fmtNum(b.input_tokens)} <span class="${dIn <= 0 ? 'diff-positive' : 'diff-negative'}">(${dIn > 0 ? '+' : ''}${fmtNum(dIn)})</span></td>
+                <td class="num">${fmtNum(a.total_tokens)} → ${fmtNum(b.total_tokens)} <span class="${dTot <= 0 ? 'diff-positive' : 'diff-negative'}">(${dTot > 0 ? '+' : ''}${fmtNum(dTot)})</span></td>
+                <td class="num">${fmtNum(a.total_duration_ms)} → ${fmtNum(b.total_duration_ms)} мс (${dDur > 0 ? '+' : ''}${fmtNum(dDur)} мс)</td>
+                <td class="num">${a.avg_overall_score} → ${b.avg_overall_score} (${dScore >= 0 ? '+' : ''}${dScore})</td>
+              `;
+              tbody.appendChild(tr);
+            });
+          });
+        } else {
+          compSec.style.display = "none";
+        }
+
+        // Per-task table
+        const tbody = document.querySelector("#resultsTable tbody");
+        tbody.innerHTML = "";
+        (run.results || [])
+          .filter(r => workerFilter === "all" || r.client === workerFilter)
+          .forEach(r => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td><code>${r.task_id}</code><div style="font-size:11px;color:var(--muted)">${r.task_title}</div></td>
+              <td><strong>${r.client}</strong></td>
+              <td><span class="opt-tag ${r.optimization_requested}">${r.optimization_requested.toUpperCase()}</span></td>
+              <td><span style="font-size:12px;color:var(--muted)">${r.execution_source}</span></td>
+              <td><code>${r.usage.model || "—"}</code></td>
+              <td class="num">${fmtNum(r.duration_ms)}</td>
+              <td class="num">${fmtNum(r.usage.input_tokens)}</td>
+              <td class="num">${fmtNum(r.usage.cache_read_tokens)}</td>
+              <td class="num">${fmtNum(r.usage.output_tokens)}</td>
+              <td class="num status-ok">${r.rubric.quality_score}%</td>
+              <td class="num status-ok">${r.rubric.context_score}%</td>
+              <td class="num status-ok">${r.rubric.adherence_score}%</td>
+              <td class="num"><strong>${r.rubric.overall_score}%</strong></td>
+            `;
+            tbody.appendChild(tr);
+          });
+
+        renderMethodology(run);
+      }
+
+      populateSelectors();
+      runSelect.addEventListener("change", render);
+      compareSelect.addEventListener("change", render);
+      filterWorker.addEventListener("change", render);
+      render();
+    })();
+  </script>
+</body>
+</html>
