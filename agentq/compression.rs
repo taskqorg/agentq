@@ -390,7 +390,8 @@ fn config(data: &Path) -> Result<Value, String> {
 
 pub(crate) fn policy(data: &Path, agent: &str) -> Result<Value, String> {
     let mut c = config(data)?;
-    if crate::control::disabled(data, agent)? {
+    // § 12 M12.7: a launch with optimization `off` disables compression for its session only.
+    if crate::control::disabled(data, agent)? || std::env::var(agentq_runtime::optimization::ENV).is_ok_and(|v| v == "off") {
         if c.is_null() { c = json!({}); }
         c["enabled"] = false.into();
     }

@@ -1,14 +1,14 @@
 # agentq contract
 
-agentq installs, routes and observes context optimization for Codex, Claude Code and Hermes on one host. It is one static binary on [coreq](https://github.com/taskqorg/coreq) with no server, relay or dashboard of its own. This file holds every agentq decision; its linked detail files hold binding detail.
+agentq installs, routes and observes context optimization for Codex, Claude Code and Hermes on one host, and owns the reusable Codex/Claude worker runtime that other products launch turns through (§ 12). It is one static binary and one runtime library on [coreq](https://github.com/taskqorg/coreq) with no server, relay or dashboard of its own. This file holds every agentq decision; its linked detail files hold binding detail.
 
-It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 2; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
+It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 3; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
 
 ## Principles
 - **P1 Never break the agent.** Any agentq failure keeps the original tool output and the client's own login, model, approvals and sandbox.
 - **P2 Unverified means unknown.** Configured is not verified. Stale or missing values say so with a reason, never zero or success.
 - **P3 Spec first.** A change that alters a decision edits this file or its linked detail first; code, README and INSTALL follow. Only the owner accepts a decision change. AGENTS.md points here.
-- **P4 One static binary.** `agentq`, built from an empty Rust codebase (PRODUCT R11). No Node, npm or toolchain on the host. Python only for the headroom engine (§ 3).
+- **P4 One static binary, one runtime library.** `agentq`, built from an empty Rust codebase (PRODUCT R11), and the Rust library `agentq-runtime` (§ 12) in this repository. No Node, npm or toolchain on the host. Python only for the headroom engine (§ 3).
 - **P5 Client only.** The client holds no relay, GitHub App, gateway server, serviceq panel or dashboard. Server duties belong to [dashq](https://github.com/taskqorg/dashq) (§ 6, § 8).
 
 ## 1. Commands
@@ -23,6 +23,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 | `agentq onboard --yes [agent..]` | Install the release and engines, apply § 4 for the selected agents, then (re)start the service unit so its first pass starts the proxy on each fixed port. Wait up to 60 s for each routed proxy; a silent one gets one `agentq service restart` and another 60 s, else the line names it. Then run `doctor` and print what to verify by a real turn. Repeat is safe. |
 | `agentq enroll <https url> [--headless]` | DashQ provider-backed browser approval (headless: link and code only); protected observation grant and projected snapshot receipt (§ 6). Released before qualification #95. |
 | `agentq connection status [--json]`, `agentq disconnect`, `agentq langfuse` | Connection, projection, export and revocation state with the next action; disconnect stops sending at once and retries the revoke. Released before qualification #95. `langfuse`: standalone mode, reads Langfuse host and keys from hidden stdin into protected storage (§ 6). |
+| `agentq agent turn` | Run one Codex or Claude turn through `agentq-runtime` from a JSON request on stdin; prints the JSON report (§ 12). Needs no service, engine, MCP server or install. |
 | `agentq run -- <cmd> [args..]` | Run a native command through RTK when qualified, else unchanged (§ 3). Exit code and stderr preserved. |
 | `agentq compress <agent>`, `agentq stats [--json]`, `agentq stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>]` | Compression core entry, its local stats, and the read-only ACCOUNTING O1–O3 aggregate of local stats or of exported `agentq.compress` events at `<path>` (§ 3). |
 | `agentq mcp <agent>`, `agentq hook <agent> <event>`, `agentq model codex` | Stdio MCP server `agentq` (§ 2); hook handler for § 4 events, JSON on stdin and stdout (M1.2); loopback provider entry for one finished Codex model call, JSON on stdin, queues `agentq.model` (§ 6). |
@@ -155,7 +156,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 ### Model calls
 - **M6.5** One `agentq.model` span per native model call of a session no launcher records (M6.9), stage `call`, schema 1, additive. Event ID = first 32 hex of SHA-256 of `<installation>:model:<call id>`, so a duplicate counts once and a later reading of the same call replaces it in the queue and in Langfuse.
 - **M6.6** Model calls export only model name, IDs and integers; no prompt, output, tool input or path. agentq computes no price: only a client-reported cost sets `agentq.model.cost`, else `agentq.model.cost_unknown` is `not reported`. The span is a Langfuse `SPAN`, not a `GENERATION`, so Langfuse infers no price. A disabled integration reads and queues nothing.
-- **M6.9** Each agent turn is counted once. CoreQ `agent` records the turns of sessions that TaskQ or PilotQ launch (`agent.turn`). agentq queues no `agentq.model` span for such a launched session.
+- **M6.9** Each agent turn is counted once. `agentq-runtime` (§ 12), or the frozen CoreQ `agent` during adoption, records the turns of sessions that TaskQ, PilotQ or another launcher start (`agent.turn`). agentq queues no `agentq.model` span for such a launched session.
 - A session is launched when its client environment carries a non-empty `TASKQ_TASK` (TaskQ) or `AGENTQ_LAUNCHER` (any other launcher, PilotQ included). Compression and its `agentq.compress` records continue for every session.
 - **M6.10** A span of a session no launcher records (desktop, PM or manual sessions) carries `agentq.project`, the `owner/name` code of the nearest `taskq.json` `repo` at or above the session's working directory. Without such a project it sets `agentq.project_unknown` to a short reason. No path is exported (M6.2).
 - Producers ([TELEMETRY.md](docs/spec/TELEMETRY.md#model-calls)): Claude Code's `Stop` hook reads transcripts from a saved offset in bounded passes inside the hook budget and the service drains the rest; Hermes's `post_api_request` passes one allowlisted record per call; the Codex provider passes each finished response's usage in the background and keeps the stream byte-identical.
@@ -194,7 +195,20 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - Kept: R3 (§ 3; one compression core for every agent, only built-in qualified lists per adapter, others pass as `not_qualified`), R4 (§ 1 `direct`, § 3), R5 (§ 1 `onboard`, `enroll`, § 4; device enrollment served by dashq), R7 (§ 9, § 10), R9 (§ 6), R11 (Principles, § 5), R12 (Principles; this file is the approved spec revision).
 - Mapped: R1 (§ 1, § 4, § 5; Desktop Chat: MCP only), R8 (§ 8, § 6; SQLite/WAL for local telemetry, other state stays files), R10 (§ 6, § 8; accounting kept, dashboard dropped from agentq, owned by dashq).
 - Changed: R2 (§ 2, § 3; built-in search replaces context-mode, tool names unchanged); R6 (§ 5; coreq release trust, HTTPS and tags, replaces signatures; no staged rollout; worker swap kept for headroom).
+- Added: R13 (§ 12; runtime library and `agentq agent turn`, optional optimization per launch).
 - Not provided: relay and GitHub App (§ 7 posts through the user's login); gateway server, serviceq panel and dashboard (dashq owns them); SuperCompress, provider selection and Headroom compression (local tools replace them, no paid key); Ed25519 recipe signing and staged rollout (coreq trust, one release repo).
+
+## 12. Agent runtime
+- **M12.1** `agentq-runtime` (folder `runtime/`, Rust library `agentq_runtime`) starts, resumes, cancels and observes Codex CLI and Claude Code turns: normal CLI turns, Claude background jobs, Codex app and app-server sessions, Remote Control, session recovery, dynamic tools, private drafts, the model catalogue and account selection.
+- **M12.2** It depends only on CoreQ primitives (process, telemetry store, `quiet`); never on TaskQ, PilotQ or the optimizer modules of `agentq`. CoreQ never depends on it.
+- **M12.3** A plain turn needs no service, engine, MCP server or installation; the library and `agentq agent turn` never write the installation. Callers keep grants, permissions, model, effort, input files, storage, process ownership, stop authority and UI.
+- **M12.4** Each finished turn appends exactly one attributable `agent.turn` observation to the caller's CoreQ store; recovery and repeated observation never count it twice. The child gets `AGENTQ_LAUNCHER` unless `TASKQ_TASK` or `AGENTQ_LAUNCHER` is set, so § 6 M6.9 holds.
+- **M12.5** Each launch states optimization intent `inherit`, `off` or `on` and gets the effective state `on`, `off` or `unknown` with a reason, read from the installation without writing it. Host and agent switches and disable win; `on` never enables anything.
+- **M12.6** A launch never edits global or client configuration, previously transmitted replay bytes, provider or model. `off` reaches the optimizer only through the child: env `AGENTQ_OPTIMIZATION=off`, and for a Codex profile routed through agentq the per-launch header override `x-agentq-optimization: off`.
+- **M12.7** Every compression adapter treats `off` as disabled for that session. An absent or failed optimizer keeps native output (P1); a runtime failure stays a runtime failure.
+- It moved unchanged from CoreQ v0.18.0 `agent` with its contract tests; TaskQ's argument order and parsers stay unchanged.
+- Effective `on` means configured at launch, not verified (P2); the session's `agentq.compress` records prove actual compression. Resolution order, reasons, JSON contract and fake-client traces: [RUNTIME.md](docs/spec/RUNTIME.md).
+- During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime tag through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](docs/spec/RUNTIME.md#adoption-and-rollback)).
 
 ## Linked detail
 - [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): product outcomes R1–R12.
@@ -208,3 +222,4 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - [docs/spec/SERVICE.md](docs/spec/SERVICE.md): command registration, Windows service processes, update, status fields, host tools and release observation fields.
 - [docs/spec/TELEMETRY.md](docs/spec/TELEMETRY.md): heartbeat attributes, model call mapping, resource probes and profiling.
 - [docs/spec/LEGACY.md](docs/spec/LEGACY.md): namespace cutover procedure and legacy Node removal.
+- [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md): agent runtime arguments, end detection, usage, limits, accounts, compatibility modes, the `agentq agent` JSON contract, optimization intent, consumer inventory and adoption boundaries.

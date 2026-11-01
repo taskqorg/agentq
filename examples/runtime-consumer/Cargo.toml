@@ -1,0 +1,12 @@
+# Minimal consumer outside the agentq workspace (agentq.md § 12). A real consumer pins the immutable tag instead:
+# agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v0.1.0" }
+[package]
+name = "runtime-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+agentq-runtime = { path = "../../runtime" }
+
+[workspace]

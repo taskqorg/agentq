@@ -40,7 +40,7 @@ const UPDATE_EVERY: u64 = 3600;
 const DRAIN: u64 = 900;
 /// `onboard --yes` waits this long for a started proxy to answer, before and after one restart (#137).
 const PROXY_START: Duration = Duration::from_secs(60);
-const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | migrate-names [--dry-run|--rollback] | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--legacy] [--dry-run] | --version";
+const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | agent turn | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | migrate-names [--dry-run|--rollback] | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--legacy] [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -98,6 +98,10 @@ fn main() {
             Err(e) => fail(&e, "resolve the command registration error and run `agentq setup-path` again"),
         },
         ["run", "--", cmd @ ..] if !cmd.is_empty() => engines::run(&t.install, &args[2..]),
+        ["agent", "turn"] => match std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string()).and_then(|s| agentq_runtime::cli::turn(&s, Some(&t.install))) {
+            Ok(v) => println_code(&v.to_string()),
+            Err(e) => fail(&e, "send one JSON turn request on stdin (docs/spec/RUNTIME.md § JSON command)"),
+        },
         ["compress", agent] => match std::io::read_to_string(std::io::stdin()).map_err(|e|e.to_string()).and_then(|s|compression::compress(&t.install.join("data"),agent,&s)) {
             Ok(v)=>println_code(&v.to_string()),
             Err(e)=>fail(&e,"send one JSON object with adapter, tool and text; preserve the native result on failure"),

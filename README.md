@@ -117,6 +117,10 @@ Claude auto mode compresses successful Bash output through PostToolUse without c
 
 Qualification: Mac Codex/Claude CLI controls and isolated Linux systemd lifecycle/retention have native evidence. Desktop, native Mac/Windows reboot/logon and Codex originally routed service-baseline restoration are tracked separately; an unrun check remains unknown. See the [qualification record](docs/spec/INTEGRATION-CONTROL-PLAN.md#implementation-candidate-and-remaining-qualification) and [control contract](agentq.md#temporary-controls).
 
+## Run agent turns from other products
+
+`agentq-runtime` (folder `runtime/`) runs Codex and Claude worker turns for TaskQ, PilotQ and other products; a plain turn needs no optimizer installation. Rust callers pin the tag `runtime-v<version>`; other callers send one JSON request to `agentq agent turn` on stdin. Each launch states optimization `inherit`, `off` or `on` and gets the effective state back. Contract: [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md).
+
 ## Check installed client compression
 
 With Python 3.9+, cargo, the installed client and its usual login:
