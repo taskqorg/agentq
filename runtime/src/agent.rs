@@ -14,7 +14,7 @@ mod app;
 mod protected;
 pub use native::{BackgroundJob, NativeTurn, background_command, background_launch, background_jobs, background_stop, app_queue};
 pub use app::{AppServer, AppSession, app_server_command};
-pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedAppServer};
+pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
 type Res<T> = Result<T, String>;
 

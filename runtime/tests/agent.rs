@@ -30,6 +30,8 @@ fn main() {
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("protected_launch_refuses_tampering_and_preserves_native_transport", protected::protected_launch_refuses_tampering_and_preserves_native_transport),
+        ("protected_frontend_is_not_scope_supervisor", protected::protected_frontend_is_not_scope_supervisor),
+        ("protected_preparation_and_completion_recover_original_operation", protected::protected_preparation_and_completion_recover_original_operation),
         ("json_turns_run_plain_without_the_optimizer", json_turns_run_plain_without_the_optimizer),
         ("off_reaches_codex_queue_and_app_server", off_reaches_codex_queue_and_app_server),
         ("external_consumer_builds_and_plans_turns", external_consumer_builds_and_plans_turns),
