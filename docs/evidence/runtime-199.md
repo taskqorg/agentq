@@ -40,6 +40,16 @@ Host crash/descendant/counter models and native output-pipe protection remain in
 
 Development gate: `cargo test --locked -p agentq-runtime --test agent -- protected_ app_transport_ off_reaches_` passes the affected scenarios. Workflow-pinned contract lint uses specq `7e9adf57287553176d8b3be61c2b22565543dc51`, script blob `29609754df6067ed504621ed4fc11f5a4a6dd995`; existing contract headroom warnings remain. The candidate gate and immutable source readback are recorded below after freezing.
 
+### Frozen candidate checks
+
+Immutable runtime source is `33cd5046c234dacf25c2ad47f350acf35b9eebdf`. The required single pre-first-push rebase on `origin/main` completed without changes. The full candidate gate ran once with `AGENT_CONTEXT_HOME` and `npm_config_prefix` isolated in OS temporary storage and `AGENTQ_SELFTEST_OFFLINE=1`; `TASKQ_ATTEMPT` was retained.
+
+`cargo test --locked` is **sandbox-blocked**, not PASS: 117 root tests passed and the unchanged `legacy::tests::edited_after_journal_is_stripped_not_refused` fixture failed at its temporary-file write (`agentq/legacy.rs:473`, `PermissionDenied`, `Operation not permitted`). Build and root execution took 90.951 seconds. No legacy fixture, guard, path or configuration was weakened; the full gate was not retried.
+
+Because that root failure prevented the runtime suite from executing, `cargo test --locked -p agentq-runtime` selected the affected crate. Its 15 unit checks and 16 process scenarios passed, including all three protected cases, both Antigravity cases, ordinary transport, optimization and JSON turns. Its unchanged final `external_consumer_builds_and_plans_turns` scenario is **sandbox-blocked** while Cargo writes `find-msvc-tools`/`shlex` dependency files under `target/runtime-consumer`; it is not a successful external-consumer build. These permission failures do not establish their TCC cause and do not qualify another platform.
+
+Offline `cargo run --locked -- selftest` passed on macOS arm64 (0.872 seconds). The four workflow Python suites passed: client compression 7 passed/1 skipped, provider 11, Hermes 2, telemetry qualification 4. Workflow-pinned contract lint passed with 0 errors and existing headroom warnings (233 lines, longest 396 characters). Changed document file links and `git diff --check` passed. `git diff --exit-code 33cd5046c234dacf25c2ad47f350acf35b9eebdf -- runtime/ Cargo.toml Cargo.lock` confirms later evidence edits retain identical runtime source, tests and dependencies. Green merge-result CI remains required; local permission failures are not waived or relabeled PASS (R12/TaskQ §7).
+
 ## Native gate and upstream finding
 
 Reuse the accepted composed AssetQ `05476e88c53f5232cc17f37bd664aad0ba103a79` PASS. Do not repeat its handshake/boundary workload, a model/paid turn or the accepted crate. No new grant, Full fallback, ordinary installation, account/model/capacity change, `TASKQ_ATTEMPT` stripping or slot-CLI refusal bypass is performed or authorized here. Private host paths, PIDs, release keys and raw receipts stay off public boards.
