@@ -16,7 +16,7 @@ select { font: inherit; max-width: 100%; padding: 8px; } :focus-visible { outlin
 th,td { border-bottom: 1px solid var(--border); padding: 10px; text-align: left; vertical-align: top; }
 th { white-space: nowrap; } td small { display: block; } details { margin: 12px 0; border: 1px solid var(--border); padding: 12px; border-radius: 6px; }
 summary { cursor: pointer; font-weight: 600; } pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
-@media(max-width:650px) {body {padding: 12px;} h1 {font-size:1.45rem;} .filters {grid-template-columns:1fr;} th,td {padding:8px;} }
+@media(max-width:650px) {body {padding: 12px;} h1 {font-size:1.45rem;} .filters {grid-template-columns:minmax(0,1fr);} th,td {padding:8px;} }
 </style>
 <h1>Worker benchmark history</h1>
 <p>Claude, Codex and Antigravity · optimization off / on · isolated engineering fixtures.</p>
