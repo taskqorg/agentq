@@ -97,7 +97,7 @@ def validate_contract_lint(path):
 def fixture(root, task=None, contract_lint=None):
     (root / "src").mkdir()
     files = {"contract.txt": CONTRACT, "src/worker.txt": WORKER, "window.py": WINDOW, "verify.py": VERIFY,
-             "Cargo.toml": '[package]\nname="worker-fixture"\nversion="0.0.0"\nedition="2021"\n', "src/lib.rs": RUST}
+             "Cargo.toml": '[package]\nname="worker-fixture"\nversion="0.0.0"\nedition="2021"\n\n[workspace]\n', "src/lib.rs": RUST}
     if task == SDD_TASK:
         files = {"fixture.md": SDD_CONTRACT, "src/lib.rs": SDD_CODE + SDD_TESTS,
                  "Cargo.toml": files["Cargo.toml"], "sdd_check.py": SDD_CHECK,
@@ -414,7 +414,9 @@ def selftest():
     assert correlate_compression({"errors": [], "records": [receipt]}, "antigravity", {"own"})[0][0]["bytes_in"] == 100
     assert not correlate_compression({"errors": [], "records": [receipt]}, "antigravity", {"foreign"})[0]
     assert not correlate_compression({"errors": ["corrupt"], "records": [receipt]}, "antigravity", {"own"})[0]
-    with tempfile.TemporaryDirectory() as tmp:
+    scratch = ROOT / "benchmarks/.tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=scratch) as tmp:
         root = Path(tmp)
         fixture(root)
         assert evaluate("T4-code-patch-verification", [{"outcome": "ok", "text": json.dumps(EXPECTED["T4-code-patch-verification"])}], root)["quality"] == 0
