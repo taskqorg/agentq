@@ -182,7 +182,7 @@ fn validate_receipt(r: &Value, request: &Value, expected: &ProtectedIdentity, ho
         || a["saved"]["revision"] != request["policy_revision"] || a["saved"]["grant"]["by"] != expected.approver
         || a["saved"]["grant"]["mode"] != "workspace" || a["saved"]["grant"]["runtime"] != "codex"
         || a["saved"]["grant"]["project"] != b["root"] || a["saved"]["grant"]["at"].as_u64().is_none_or(|n| n == 0)
-        || !nonempty(&a["requested"]) || a["resolved"]["mode"] != "workspace"
+        || !nonempty(&a["requested"]) || a["resolved"]["effective"] != "workspace"
         || effective["state"] != "verified-effective" || !nonempty(&effective["scope"])
         || effective["workspace_write"] != true || !effective["protected_write_create_unlink_denied"].as_array().is_some_and(|v| !v.is_empty())
         || launch["verified_effective"] != *effective { return Err("protected authority missing, unknown or mismatched; no native input".into()); }
