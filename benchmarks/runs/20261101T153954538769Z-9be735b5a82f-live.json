@@ -1,0 +1,529 @@
+{
+  "schema": 1,
+  "run_id": "20261101T153954538769Z-9be735b5a82f-live",
+  "created_at": "2026-11-01T15:39:54.538769+00:00",
+  "git_sha": "9be735b5a82f5a526cd8b1757196387956c3b5d0",
+  "dirty": true,
+  "binary_sha256": "91bcff407229d1d47d357096e18f83ecd854ef0271eb39b416e8165ccf7276cb",
+  "runner_sha256": "44bc86dfe36c0d15bd97004d3fe7039f5f4fbed97109f406de206c072f5cb29d",
+  "agentq_version": "agentq 0.0.0-dev",
+  "host": {
+    "os": "Darwin",
+    "arch": "arm64",
+    "python": "3.14.8"
+  },
+  "mode": "live",
+  "label": "190 native SDD off-on attempt",
+  "scenario": "sdd",
+  "client_args": {
+    "codex": [
+      "--skip-git-repo-check"
+    ]
+  },
+  "cells": [
+    {
+      "client": "claude",
+      "optimization": "off",
+      "task": "T5-sdd-adherence",
+      "source": "live",
+      "fixture_sha256": "d78b188f175ce09cb58a42dbeb76e18b131322d500b7b3695441a60742a66a23",
+      "prompts": [
+        "Read fixture.md first. This owner request authorizes changing R1: expired(now, reset) must be true at reset and later, false before. Follow R2-R5.\n1. Run python3 sdd_check.py before and observe the intentional boundary failure before any edit.\n2. Edit only R1 in fixture.md to say \"A window expires at reset and later.\" Then run python3 sdd_check.py spec while src/lib.rs is still unchanged.\n3. Fix only the comparison in src/lib.rs. Do not change tests, scripts, lint, or other files. Do not edit, delete or forge .sdd-events.jsonl; it is generated only by sdd_check.py.\n4. Run python3 sdd_check.py lint and python3 sdd_check.py after. Then run cargo test --offline --color never directly so the native compression adapter can observe the output.\n5. Return ONLY JSON with keys rules (array of the five R IDs you applied), before_exit (observed integer), after_exit (observed integer), lint_exit (observed integer). Do not commit, install anything, access the network, read outside this fixture, or edit client/global configuration."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "656d3965-fffe-44db-baa3-d1c0cdba0f35",
+          "outcome": "failed",
+          "error": "client-error",
+          "text": "Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator.",
+          "exit": -1,
+          "started_ms": 1793547594584,
+          "duration_us": 9100451,
+          "usage": {
+            "calls": 1,
+            "input": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "output": 0,
+            "model": null,
+            "unknown": null
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 9128
+        }
+      ],
+      "usage": {
+        "input": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0,
+        "total": 0,
+        "model": null
+      },
+      "wall_ms": 9128,
+      "rubric": {
+        "checks": {
+          "spec_first": false,
+          "rule_citations": false,
+          "contract_lint": false,
+          "before_after": false,
+          "scope": true,
+          "behavior": false,
+          "native_outcome": false
+        },
+        "quality": 0,
+        "context": null,
+        "adherence": null,
+        "overall": null,
+        "sdd": {
+          "clauses": {
+            "spec_first": null,
+            "rule_citations": null,
+            "contract_lint": null,
+            "before_after": null,
+            "scope": null,
+            "behavior": null
+          },
+          "unknown": "no-native-sdd-execution",
+          "checkpoints": [],
+          "independent_checks": {}
+        }
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "unreadable-compression-records",
+      "compression_evidence": null
+    },
+    {
+      "client": "claude",
+      "optimization": "on",
+      "task": "T5-sdd-adherence",
+      "source": "live",
+      "fixture_sha256": "d78b188f175ce09cb58a42dbeb76e18b131322d500b7b3695441a60742a66a23",
+      "prompts": [
+        "Read fixture.md first. This owner request authorizes changing R1: expired(now, reset) must be true at reset and later, false before. Follow R2-R5.\n1. Run python3 sdd_check.py before and observe the intentional boundary failure before any edit.\n2. Edit only R1 in fixture.md to say \"A window expires at reset and later.\" Then run python3 sdd_check.py spec while src/lib.rs is still unchanged.\n3. Fix only the comparison in src/lib.rs. Do not change tests, scripts, lint, or other files. Do not edit, delete or forge .sdd-events.jsonl; it is generated only by sdd_check.py.\n4. Run python3 sdd_check.py lint and python3 sdd_check.py after. Then run cargo test --offline --color never directly so the native compression adapter can observe the output.\n5. Return ONLY JSON with keys rules (array of the five R IDs you applied), before_exit (observed integer), after_exit (observed integer), lint_exit (observed integer). Do not commit, install anything, access the network, read outside this fixture, or edit client/global configuration."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "f9b351d3-d0b4-4494-b4d8-e3dcf2310e57",
+          "outcome": "failed",
+          "error": "client-error",
+          "text": "Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator.",
+          "exit": -1,
+          "started_ms": 1793547603717,
+          "duration_us": 7227289,
+          "usage": {
+            "calls": 1,
+            "input": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "output": 0,
+            "model": null,
+            "unknown": null
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "on",
+            "reason": "configured"
+          },
+          "wall_ms": 7239
+        }
+      ],
+      "usage": {
+        "input": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0,
+        "total": 0,
+        "model": null
+      },
+      "wall_ms": 7239,
+      "rubric": {
+        "checks": {
+          "spec_first": false,
+          "rule_citations": false,
+          "contract_lint": false,
+          "before_after": false,
+          "scope": true,
+          "behavior": false,
+          "native_outcome": false
+        },
+        "quality": 0,
+        "context": null,
+        "adherence": null,
+        "overall": null,
+        "sdd": {
+          "clauses": {
+            "spec_first": null,
+            "rule_citations": null,
+            "contract_lint": null,
+            "before_after": null,
+            "scope": null,
+            "behavior": null
+          },
+          "unknown": "no-native-sdd-execution",
+          "checkpoints": [],
+          "independent_checks": {}
+        }
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "unreadable-compression-records",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "off",
+      "task": "T5-sdd-adherence",
+      "source": "live",
+      "fixture_sha256": "d78b188f175ce09cb58a42dbeb76e18b131322d500b7b3695441a60742a66a23",
+      "prompts": [
+        "Read fixture.md first. This owner request authorizes changing R1: expired(now, reset) must be true at reset and later, false before. Follow R2-R5.\n1. Run python3 sdd_check.py before and observe the intentional boundary failure before any edit.\n2. Edit only R1 in fixture.md to say \"A window expires at reset and later.\" Then run python3 sdd_check.py spec while src/lib.rs is still unchanged.\n3. Fix only the comparison in src/lib.rs. Do not change tests, scripts, lint, or other files. Do not edit, delete or forge .sdd-events.jsonl; it is generated only by sdd_check.py.\n4. Run python3 sdd_check.py lint and python3 sdd_check.py after. Then run cargo test --offline --color never directly so the native compression adapter can observe the output.\n5. Return ONLY JSON with keys rules (array of the five R IDs you applied), before_exit (observed integer), after_exit (observed integer), lint_exit (observed integer). Do not commit, install anything, access the network, read outside this fixture, or edit client/global configuration."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "01a197c4-ac16-7352-8348-65497c5cf6b6",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"rules\":[],\"before_exit\":null,\"after_exit\":null,\"lint_exit\":null}",
+          "exit": -1,
+          "started_ms": 1793547610986,
+          "duration_us": 23485642,
+          "usage": {
+            "calls": null,
+            "input": 30035,
+            "cache_read": 42240,
+            "cache_write": 0,
+            "output": 399,
+            "model": null,
+            "unknown": null
+          },
+          "limit": {
+            "used_percent": 88,
+            "resets_at": 1793774205,
+            "window": "10080m",
+            "unknown": null
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 23499
+        }
+      ],
+      "usage": {
+        "input": 30035,
+        "cache_read": 42240,
+        "cache_write": 0,
+        "output": 399,
+        "total": 72674,
+        "model": null
+      },
+      "wall_ms": 23499,
+      "rubric": {
+        "checks": {
+          "spec_first": false,
+          "rule_citations": false,
+          "contract_lint": false,
+          "before_after": false,
+          "scope": true,
+          "behavior": false,
+          "native_outcome": true
+        },
+        "quality": 0,
+        "context": 0,
+        "adherence": 16.7,
+        "overall": 16.7,
+        "sdd": {
+          "clauses": {
+            "spec_first": 0,
+            "rule_citations": 0,
+            "contract_lint": 0,
+            "before_after": 0,
+            "scope": 100,
+            "behavior": 0
+          },
+          "unknown": null,
+          "checkpoints": [],
+          "independent_checks": {}
+        }
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "unreadable-compression-records",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "on",
+      "task": "T5-sdd-adherence",
+      "source": "live",
+      "fixture_sha256": "d78b188f175ce09cb58a42dbeb76e18b131322d500b7b3695441a60742a66a23",
+      "prompts": [
+        "Read fixture.md first. This owner request authorizes changing R1: expired(now, reset) must be true at reset and later, false before. Follow R2-R5.\n1. Run python3 sdd_check.py before and observe the intentional boundary failure before any edit.\n2. Edit only R1 in fixture.md to say \"A window expires at reset and later.\" Then run python3 sdd_check.py spec while src/lib.rs is still unchanged.\n3. Fix only the comparison in src/lib.rs. Do not change tests, scripts, lint, or other files. Do not edit, delete or forge .sdd-events.jsonl; it is generated only by sdd_check.py.\n4. Run python3 sdd_check.py lint and python3 sdd_check.py after. Then run cargo test --offline --color never directly so the native compression adapter can observe the output.\n5. Return ONLY JSON with keys rules (array of the five R IDs you applied), before_exit (observed integer), after_exit (observed integer), lint_exit (observed integer). Do not commit, install anything, access the network, read outside this fixture, or edit client/global configuration."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "01a197c5-0895-7442-9a67-7e90b509bb36",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"rules\":[],\"before_exit\":null,\"after_exit\":null,\"lint_exit\":null,\"error\":\"Sandbox не позволил прочитать fixture.md. Файлы не изменены; проверки не выполнены, результат не подтверждён.\"}",
+          "exit": -1,
+          "started_ms": 1793547634537,
+          "duration_us": 37758834,
+          "usage": {
+            "calls": null,
+            "input": 34644,
+            "cache_read": 67840,
+            "cache_write": 0,
+            "output": 701,
+            "model": null,
+            "unknown": null
+          },
+          "limit": {
+            "used_percent": 88,
+            "resets_at": 1793774205,
+            "window": "10080m",
+            "unknown": null
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "on",
+            "reason": "configured"
+          },
+          "wall_ms": 37787
+        }
+      ],
+      "usage": {
+        "input": 34644,
+        "cache_read": 67840,
+        "cache_write": 0,
+        "output": 701,
+        "total": 103185,
+        "model": null
+      },
+      "wall_ms": 37787,
+      "rubric": {
+        "checks": {
+          "spec_first": false,
+          "rule_citations": false,
+          "contract_lint": false,
+          "before_after": false,
+          "scope": true,
+          "behavior": false,
+          "native_outcome": true
+        },
+        "quality": 0,
+        "context": 0,
+        "adherence": 16.7,
+        "overall": 16.7,
+        "sdd": {
+          "clauses": {
+            "spec_first": 0,
+            "rule_citations": 0,
+            "contract_lint": 0,
+            "before_after": 0,
+            "scope": 100,
+            "behavior": 0
+          },
+          "unknown": null,
+          "checkpoints": [],
+          "independent_checks": {}
+        }
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "unreadable-compression-records",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "off",
+      "task": "T5-sdd-adherence",
+      "source": "live",
+      "fixture_sha256": "d78b188f175ce09cb58a42dbeb76e18b131322d500b7b3695441a60742a66a23",
+      "prompts": [
+        "Read fixture.md first. This owner request authorizes changing R1: expired(now, reset) must be true at reset and later, false before. Follow R2-R5.\n1. Run python3 sdd_check.py before and observe the intentional boundary failure before any edit.\n2. Edit only R1 in fixture.md to say \"A window expires at reset and later.\" Then run python3 sdd_check.py spec while src/lib.rs is still unchanged.\n3. Fix only the comparison in src/lib.rs. Do not change tests, scripts, lint, or other files. Do not edit, delete or forge .sdd-events.jsonl; it is generated only by sdd_check.py.\n4. Run python3 sdd_check.py lint and python3 sdd_check.py after. Then run cargo test --offline --color never directly so the native compression adapter can observe the output.\n5. Return ONLY JSON with keys rules (array of the five R IDs you applied), before_exit (observed integer), after_exit (observed integer), lint_exit (observed integer). Do not commit, install anything, access the network, read outside this fixture, or edit client/global configuration."
+      ],
+      "reports": [
+        {
+          "outcome": "unavailable",
+          "error": "runtime-command-failed",
+          "detail": "Error: antigravity agentapi cannot propagate optimization off to an existing server; use agy\nNext: send one JSON turn request on stdin (docs/spec/RUNTIME.md § JSON command)\n",
+          "wall_ms": 9
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 9,
+      "rubric": {
+        "checks": {
+          "spec_first": false,
+          "rule_citations": false,
+          "contract_lint": false,
+          "before_after": false,
+          "scope": true,
+          "behavior": false,
+          "native_outcome": false
+        },
+        "quality": 0,
+        "context": null,
+        "adherence": null,
+        "overall": null,
+        "sdd": {
+          "clauses": {
+            "spec_first": null,
+            "rule_citations": null,
+            "contract_lint": null,
+            "before_after": null,
+            "scope": null,
+            "behavior": null
+          },
+          "unknown": "no-native-sdd-execution",
+          "checkpoints": [],
+          "independent_checks": {}
+        }
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "unreadable-compression-records",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "on",
+      "task": "T5-sdd-adherence",
+      "source": "live",
+      "fixture_sha256": "d78b188f175ce09cb58a42dbeb76e18b131322d500b7b3695441a60742a66a23",
+      "prompts": [
+        "Read fixture.md first. This owner request authorizes changing R1: expired(now, reset) must be true at reset and later, false before. Follow R2-R5.\n1. Run python3 sdd_check.py before and observe the intentional boundary failure before any edit.\n2. Edit only R1 in fixture.md to say \"A window expires at reset and later.\" Then run python3 sdd_check.py spec while src/lib.rs is still unchanged.\n3. Fix only the comparison in src/lib.rs. Do not change tests, scripts, lint, or other files. Do not edit, delete or forge .sdd-events.jsonl; it is generated only by sdd_check.py.\n4. Run python3 sdd_check.py lint and python3 sdd_check.py after. Then run cargo test --offline --color never directly so the native compression adapter can observe the output.\n5. Return ONLY JSON with keys rules (array of the five R IDs you applied), before_exit (observed integer), after_exit (observed integer), lint_exit (observed integer). Do not commit, install anything, access the network, read outside this fixture, or edit client/global configuration."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": null,
+          "outcome": "failed",
+          "error": "exit",
+          "text": null,
+          "exit": 1,
+          "started_ms": 1793547672341,
+          "duration_us": 379299,
+          "usage": {
+            "calls": null,
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "model": null,
+            "unknown": "no-usage"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_attached"
+          },
+          "wall_ms": 387
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 387,
+      "rubric": {
+        "checks": {
+          "spec_first": false,
+          "rule_citations": false,
+          "contract_lint": false,
+          "before_after": false,
+          "scope": true,
+          "behavior": false,
+          "native_outcome": false
+        },
+        "quality": 0,
+        "context": null,
+        "adherence": null,
+        "overall": null,
+        "sdd": {
+          "clauses": {
+            "spec_first": null,
+            "rule_citations": null,
+            "contract_lint": null,
+            "before_after": null,
+            "scope": null,
+            "behavior": null
+          },
+          "unknown": "no-native-sdd-execution",
+          "checkpoints": [],
+          "independent_checks": {}
+        }
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "unreadable-compression-records",
+      "compression_evidence": null
+    }
+  ],
+  "contract_lint_sha256": "97f2cb3974d4f4ba9b9d3f650aa0a56061b989247e2338c21c0818259418dec8",
+  "deltas": [
+    {
+      "client": "claude",
+      "task": "T5-sdd-adherence",
+      "input_saved": null,
+      "unknown": "no-session-correlated-compression-evidence"
+    },
+    {
+      "client": "codex",
+      "task": "T5-sdd-adherence",
+      "input_saved": null,
+      "unknown": "no-session-correlated-compression-evidence"
+    },
+    {
+      "client": "antigravity",
+      "task": "T5-sdd-adherence",
+      "input_saved": null,
+      "unknown": "no-session-correlated-compression-evidence"
+    }
+  ]
+}

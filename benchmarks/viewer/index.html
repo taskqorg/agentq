@@ -63,7 +63,8 @@ function renderRun(run) {
     node('td',reports.map(r=>r.optimization ? `${r.optimization.effective}: ${r.optimization.reason}` : 'Unknown: no report').join('; '),row);
     node('td',['input','cache_read','cache_write','output'].map(k=>number(cell.usage[k])).join(' / '),row);
     node('td',`${number(cell.wall_ms)} ms${cell.source==='smoke' ? ' (harness)' : ''}`,row);
-    node('td',`${cell.rubric.quality} / ${cell.rubric.context} / ${cell.rubric.adherence}${cell.source==='smoke' ? ' (synthetic)' : ''}`,row);
+    const scores=node('td',`${number(cell.rubric.quality)} / ${number(cell.rubric.context)} / ${number(cell.rubric.adherence)}${cell.source==='smoke' ? ' (synthetic)' : ''}`,row);
+    if(cell.rubric.sdd) for(const [clause,score] of Object.entries(cell.rubric.sdd.clauses)) node('small',`${clause}: ${number(score)}`,scores);
   }
   node('h2','Paired savings',section);
   for (const delta of run.deltas.filter(d=>(!el('client').value || d.client===el('client').value) && (!el('task').value || d.task===el('task').value))) {
@@ -74,10 +75,10 @@ function renderRun(run) {
     const details=node('details',undefined,section); node('summary',`${cell.client} / ${cell.optimization} · ${cell.task} · ${cell.source}`,details);
     node('h3','Prompts',details); node('pre',cell.prompts.join('\n\nNext turn:\n'),details);
     node('h3','Reports and responses',details); node('pre',JSON.stringify(cell.reports,null,2),details);
-    node('h3','Rubric and fixture',details); node('pre',JSON.stringify({fixture_sha256:cell.fixture_sha256,...cell.rubric,tool_bytes:cell.tool_bytes,tool_bytes_unknown:cell.tool_bytes_unknown},null,2),details);
+    node('h3','Rubric and fixture',details); node('pre',JSON.stringify({fixture_sha256:cell.fixture_sha256,...cell.rubric,tool_bytes:cell.tool_bytes,tool_bytes_unknown:cell.tool_bytes_unknown,compression_evidence:cell.compression_evidence},null,2),details);
   }
   const details=node('details',undefined,section); node('summary','Run provenance',details);
-  node('pre',JSON.stringify({binary_sha256:run.binary_sha256,host:run.host,client_args:run.client_args},null,2),details);
+  node('pre',JSON.stringify({binary_sha256:run.binary_sha256,runner_sha256:run.runner_sha256,contract_lint_sha256:run.contract_lint_sha256,scenario:run.scenario,host:run.host,client_args:run.client_args},null,2),details);
 }
 function render() {
   el('results').replaceChildren();

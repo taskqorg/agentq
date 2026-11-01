@@ -24,6 +24,43 @@ RUNS = ROOT / "benchmarks/runs"
 VIEWER = ROOT / "benchmarks/viewer"
 CLIENTS = ("claude", "codex", "antigravity")
 COUNTERS = ("input", "cache_read", "cache_write", "output")
+SDD_TASK = "T5-sdd-adherence"
+SDD_CONTRACT = """# Fixture contract
+
+The fixture defines when a reset window expires.
+
+## Rules
+
+- R1: A window expires strictly after reset.
+- R2: Change the rule and record a spec checkpoint before changing code.
+- R3: Record a failing check before the fix, a passing check after it, and contract lint.
+- R4: Edit only fixture.md and src/lib.rs. Preserve every test and all other files.
+- R5: Cite R1, R2, R3, R4 and R5 in the final JSON and report observed check exits.
+"""
+SDD_FIXED_CONTRACT = SDD_CONTRACT.replace("strictly after reset", "at reset and later")
+SDD_CODE = 'pub fn expired(now: u64, reset: u64) -> bool { now > reset }\n'
+SDD_FIXED_CODE = SDD_CODE.replace("now > reset", "now >= reset")
+SDD_TESTS = '\n'.join(f'#[test] fn case_{n}() {{ assert!(!expired(9, 10)); assert!(expired(11, 10)); }}' for n in range(180)) + '\n#[test] fn boundary() { assert!(expired(10, 10), "MARKER_SDD_BOUNDARY"); }\n'
+SDD_CHECK = '''import json, pathlib, subprocess, sys
+root = pathlib.Path(__file__).resolve().parent
+phase = sys.argv[1]
+assert phase in ("before", "spec", "lint", "after")
+row = {"phase": phase, "contract": (root / "fixture.md").read_text(), "code": (root / "src/lib.rs").read_text()}
+command = [sys.executable, "contract_lint.py", "fixture.md"] if phase == "lint" else ["cargo", "test", "--offline", "--color", "never"]
+if phase != "spec":
+    result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=60)
+    row.update(command=command[1:] if phase == "lint" else command, exit=result.returncode, output=result.stdout + result.stderr)
+with (root / ".sdd-events.jsonl").open("a") as out:
+    out.write(json.dumps(row) + "\\n")
+print(row.get("output", "Spec checkpoint recorded"))
+sys.exit(row.get("exit", 0))
+'''
+SDD_PROMPT = '''Read fixture.md first. This owner request authorizes changing R1: expired(now, reset) must be true at reset and later, false before. Follow R2-R5.
+1. Run python3 sdd_check.py before and observe the intentional boundary failure before any edit.
+2. Edit only R1 in fixture.md to say "A window expires at reset and later." Then run python3 sdd_check.py spec while src/lib.rs is still unchanged.
+3. Fix only the comparison in src/lib.rs. Do not change tests, scripts, lint, or other files. Do not edit, delete or forge .sdd-events.jsonl; it is generated only by sdd_check.py.
+4. Run python3 sdd_check.py lint and python3 sdd_check.py after. Then run cargo test --offline --color never directly so the native compression adapter can observe the output.
+5. Return ONLY JSON with keys rules (array of the five R IDs you applied), before_exit (observed integer), after_exit (observed integer), lint_exit (observed integer). Do not commit, install anything, access the network, read outside this fixture, or edit client/global configuration.'''
 TASKS = {
     "T1-context-navigation": 'Read contract.txt and src/worker.txt. Return ONLY JSON with keys clients, home_vars, end_events using their exact values.',
     "T2-instruction-adherence": 'Remember orbit-73 for the next turn. Return ONLY {"remembered":true}. Do not write any file or use markdown.',
@@ -48,13 +85,85 @@ def total(values):
     return sum(values) if values and all(type(v) is int and v >= 0 for v in values) else None
 
 
-def fixture(root):
+def fixture(root, task=None, contract_lint=None):
     (root / "src").mkdir()
     files = {"contract.txt": CONTRACT, "src/worker.txt": WORKER, "window.py": WINDOW, "verify.py": VERIFY,
              "Cargo.toml": '[package]\nname="worker-fixture"\nversion="0.0.0"\nedition="2021"\n', "src/lib.rs": RUST}
+    if task == SDD_TASK:
+        files = {"fixture.md": SDD_CONTRACT, "src/lib.rs": SDD_CODE + SDD_TESTS,
+                 "Cargo.toml": files["Cargo.toml"], "sdd_check.py": SDD_CHECK,
+                 "contract_lint.py": contract_lint.read_text(encoding="utf-8")}
     for name, content in files.items():
         (root / name).write_text(content, encoding="utf-8")
     return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+
+
+def sdd_tree(root):
+    # Build artifacts are not source; all other writes remain inside the scope check.
+    return {str(p.relative_to(root)): (None if p.is_symlink() else p.read_bytes())
+            for p in root.rglob("*") if (p.is_file() or p.is_symlink()) and p != root / "turn.log"
+            and (p.is_symlink() or (p.relative_to(root).parts[0] != "target" and p != root / "Cargo.lock"))}
+
+
+def public_evidence(value, root):
+    """Only fixture-relative evidence is published; native logs can name canonical temp paths."""
+    if isinstance(value, str):
+        for path, label in ((root.resolve(), "<fixture>"), (root, "<fixture>"),
+                            (root.parent.resolve(), "<temporary>"), (root.parent, "<temporary>"),
+                            (Path.home(), "<home>")):
+            value = value.replace(str(path), label)
+        return value
+    if isinstance(value, list):
+        return [public_evidence(v, root) for v in value]
+    if isinstance(value, dict):
+        return {k: public_evidence(v, root) for k,v in value.items()}
+    return value
+
+
+def evaluate_sdd(reports, root, before):
+    """A1/P3: prose claims cannot substitute for executable, source-bound checkpoints."""
+    try:
+        events = [json.loads(line) for line in (root / ".sdd-events.jsonl").read_text().splitlines()]
+        assert all(isinstance(e, dict) and all(isinstance(e.get(k, ""), str) for k in ("phase", "contract", "code", "output")) for e in events)
+    except (OSError, ValueError, AssertionError):
+        events = []
+    tree = sdd_tree(root)
+    original, fixed = SDD_CODE + SDD_TESTS, SDD_FIXED_CODE + SDD_TESTS
+    phases = [e.get("phase") for e in events]
+    sequence = phases == ["before", "spec", "lint", "after"]
+    first, spec, lint, after = events if sequence else ({}, {}, {}, {})
+    try:
+        answer = json.loads(reports[-1].get("text") or "")
+        if not isinstance(answer, dict):
+            answer = {}
+    except (ValueError, IndexError):
+        answer = {}
+    scope = all(v is not None for v in tree.values()) and all(tree.get(k) == v for k,v in before.items() if k not in ("fixture.md", "src/lib.rs")) and all(k in before or k == ".sdd-events.jsonl" for k in tree)
+    observed = {}
+    # Do not execute worker-edited verification scripts, manifests or symlinks.
+    if scope and tree.get("src/lib.rs") == fixed.encode() and tree.get("fixture.md") == SDD_FIXED_CONTRACT.encode():
+        for name, command in (("lint", [sys.executable, "contract_lint.py", "fixture.md"]), ("after", ["cargo", "test", "--offline", "--color", "never"])):
+            try:
+                result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=60)
+                observed[name] = {"exit": result.returncode, "output": result.stdout + result.stderr}
+            except (OSError, subprocess.TimeoutExpired) as error:
+                observed[name] = {"exit": None, "unknown": type(error).__name__}
+    checks = {
+        "spec_first": sequence and first.get("contract") == SDD_CONTRACT and first.get("code") == original and spec.get("contract") == SDD_FIXED_CONTRACT and spec.get("code") == original and all(e.get("contract") == SDD_FIXED_CONTRACT and e.get("code") == fixed for e in (lint, after)),
+        "rule_citations": isinstance(answer.get("rules"), list) and len(answer["rules"]) == 5 and set(str(r) for r in answer["rules"]) == {"R1", "R2", "R3", "R4", "R5"},
+        "contract_lint": lint.get("command") == ["contract_lint.py", "fixture.md"] and lint.get("exit") == 0 and "0 errors" in lint.get("output", "") and observed.get("lint", {}).get("exit") == 0,
+        "before_after": sequence and first.get("exit") == 101 and "180 passed; 1 failed" in first.get("output", "") and "MARKER_SDD_BOUNDARY" in first.get("output", "") and after.get("exit") == 0 and "181 passed; 0 failed" in after.get("output", "") and all(type(answer.get(k)) is int and answer[k] == v for k,v in (("before_exit", 101), ("after_exit", 0), ("lint_exit", 0))),
+        "scope": scope,
+        "behavior": tree.get("src/lib.rs") == fixed.encode() and tree.get("fixture.md") == SDD_FIXED_CONTRACT.encode() and observed.get("after", {}).get("exit") == 0,
+    }
+    native = bool(reports) and all(r.get("outcome") == "ok" for r in reports)
+    unknown = not native and not events
+    clauses = {k: None if unknown else (100 if v else 0) for k,v in checks.items()}
+    score = None if unknown else round(sum(clauses.values()) / len(clauses), 1)
+    return {"checks": {**checks, "native_outcome": native}, "quality": 100 if native and all(checks.values()) else 0,
+            "context": clauses["rule_citations"], "adherence": score, "overall": score,
+            "sdd": {"clauses": clauses, "unknown": "no-native-sdd-execution" if unknown else None,
+                    "checkpoints": events, "independent_checks": observed}}
 
 
 def snapshot(root):
@@ -103,6 +212,9 @@ def run_turn(binary, client, opt, prompt, root, args, mode, task, session=None):
     if mode == "smoke":
         request.update(command=[sys.executable, str(Path(__file__).resolve()), "--fake-client", client],
                        home=str(root.parent / "home"), env={"BENCH_TASK": task, "BENCH_MEMORY": str(root.parent / "home/memory"), "COREQ_FAKE_AGENT": client, "HOME": str(root / "home"), "USERPROFILE": str(root / "home")})
+        # The synthetic client home is empty; offline Cargo still needs the caller's installed toolchain.
+        for key, folder in (("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")):
+            request["env"][key] = os.environ.get(key, str(Path.home() / folder))
     environment = os.environ.copy()
     if mode == "smoke":
         environment.update(HOME=str(root / "home"), USERPROFILE=str(root / "home"), LOCALAPPDATA=str(root / "home"), APPDATA=str(root / "home"))
@@ -132,21 +244,21 @@ def correlate_compression(payload, client, sessions):
     return rows, None if rows else "no-session-correlated-compression-evidence"
 
 
-def run_cell(binary, client, opt, task, mode, args):
+def run_cell(binary, client, opt, task, mode, args, contract_lint=None):
     with tempfile.TemporaryDirectory(prefix="agentq-worker-bench-") as tmp:
         root = Path(tmp) / "fixture"
         root.mkdir()
         (Path(tmp) / "home").mkdir()
-        digest = fixture(root)
-        before = snapshot(root)
-        prompts = [TASKS[task]]
+        digest = fixture(root, task, contract_lint)
+        before = sdd_tree(root) if task == SDD_TASK else snapshot(root)
+        prompts = [SDD_PROMPT if task == SDD_TASK else TASKS[task]]
         reports = [run_turn(binary, client, opt, prompts[0], root, args, mode, task)]
         snapshots = [snapshot(root)]
         if task == "T2-instruction-adherence" and reports[0].get("outcome") == "ok" and reports[0].get("session"):
             prompts.append('Recall the token from the previous turn. Return ONLY {"token":"<remembered token>"}. Do not write files or use markdown.')
             reports.append(run_turn(binary, client, opt, prompts[-1], root, args, mode, task, reports[0]["session"]))
             snapshots.append(snapshot(root))
-        rubric = evaluate(task, reports, root, before, snapshots)
+        rubric = evaluate_sdd(reports, root, before) if task == SDD_TASK else evaluate(task, reports, root, before, snapshots)
         usage = {k: total([r.get("usage", {}).get(k) for r in reports]) for k in COUNTERS}
         usage["total"] = total([usage[k] for k in COUNTERS])
         models = {r.get("usage", {}).get("model") for r in reports}
@@ -165,10 +277,10 @@ def run_cell(binary, client, opt, task, mode, args):
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 evidence_unknown = "unreadable-compression-records"
         measured = {"raw": total([r["bytes_in"] for r in rows]), "delivered": total([r["bytes_out"] for r in rows])} if rows else None
-        return {"client": client, "optimization": opt, "task": task, "source": mode, "fixture_sha256": digest,
+        return public_evidence({"client": client, "optimization": opt, "task": task, "source": mode, "fixture_sha256": digest,
                 "prompts": prompts, "reports": reports, "usage": usage, "wall_ms": total([r["wall_ms"] for r in reports]),
                 "rubric": rubric, "tool_bytes": measured, "tool_bytes_unknown": evidence_unknown,
-                "compression_evidence": rows or None}
+                "compression_evidence": rows or None}, root)
 
 
 def paired_delta(off, on):
@@ -227,7 +339,15 @@ def fake(client):
     elif task == "T2-instruction-adherence":
         answer = {"token": Path(os.environ["BENCH_MEMORY"]).read_text()}
     else:
-        answer = EXPECTED[task]
+        answer = EXPECTED.get(task)
+    if task == SDD_TASK:
+        subprocess.run([sys.executable, "sdd_check.py", "before"], capture_output=True, check=False)
+        Path("fixture.md").write_text(SDD_FIXED_CONTRACT)
+        subprocess.run([sys.executable, "sdd_check.py", "spec"], capture_output=True, check=True)
+        Path("src/lib.rs").write_text(SDD_FIXED_CODE + SDD_TESTS)
+        for phase in ("lint", "after"):
+            subprocess.run([sys.executable, "sdd_check.py", phase], capture_output=True, check=True)
+        answer = {"rules": ["R1", "R2", "R3", "R4", "R5"], "before_exit": 101, "after_exit": 0, "lint_exit": 0}
     if task == "T4-code-patch-verification":
         Path("window.py").write_text(WINDOW.replace("now > reset", "now >= reset"))
     text = json.dumps(answer, separators=(",", ":"))
@@ -291,7 +411,42 @@ def selftest():
     assert paired_delta(live, on)["input_saved"] == 40
     on["usage"]["input"] = None
     assert paired_delta(live, on)["input_saved"] is None
-    print("PASS: unknown usage, no synthetic fallback/savings, executable rubric, immutable history")
+    # A1/P3: citations alone, code-first checkpoints and edited guards cannot earn SDD credit.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "fixture"; root.mkdir()
+        stub = Path(tmp) / "lint.py"
+        stub.write_text('print("invented selftest linter: 0 errors")\n')
+        fixture(root, SDD_TASK, stub)
+        before = sdd_tree(root)
+        report = [{"outcome": "ok", "text": json.dumps({"rules": ["R1", "R2", "R3", "R4", "R5"], "before_exit": 101, "after_exit": 0, "lint_exit": 0})}]
+        assert evaluate_sdd(report, root, before)["quality"] == 0
+        assert evaluate_sdd([{"outcome": "unavailable"}], root, before)["sdd"]["clauses"]["spec_first"] is None
+        for phase in ("before", "spec", "lint", "after"):
+            if phase == "spec": (root / "fixture.md").write_text(SDD_FIXED_CONTRACT)
+            if phase == "lint": (root / "src/lib.rs").write_text(SDD_FIXED_CODE + SDD_TESTS)
+            result = subprocess.run([sys.executable, "sdd_check.py", phase], cwd=root, capture_output=True)
+            assert result.returncode == (101 if phase == "before" else 0)
+        assert evaluate_sdd(report, root, before)["quality"] == 100
+        evidence = root / ".sdd-events.jsonl"
+        saved = evidence.read_text()
+        events = [json.loads(line) for line in saved.splitlines()]
+        events[1]["code"] = SDD_FIXED_CODE + SDD_TESTS
+        evidence.write_text("\n".join(json.dumps(e) for e in events))
+        assert not evaluate_sdd(report, root, before)["checks"]["spec_first"]
+        evidence.write_text(saved.replace("MARKER_SDD_BOUNDARY", "missing-marker"))
+        assert not evaluate_sdd(report, root, before)["checks"]["before_after"]
+        evidence.write_text(saved)
+        assert not evaluate_sdd([{**report[0], "text": '{}'}], root, before)["checks"]["rule_citations"]
+        (root / "sdd_check.py").write_text("raise SystemExit('guard changed')\n")
+        rubric = evaluate_sdd(report, root, before)
+        assert not rubric["checks"]["scope"] and rubric["sdd"]["independent_checks"] == {}
+        (root / "src/lib.rs").unlink()
+        assert not evaluate_sdd(report, root, before)["checks"]["behavior"]
+        assert "<fixture>/file" == public_evidence(str(root.resolve() / "file"), root)
+        (root / "nested").mkdir()
+        (root / "nested/Cargo.lock").write_text("forbidden")
+        assert not evaluate_sdd(report, root, before)["checks"]["scope"]
+    print("PASS: unknown usage, no synthetic fallback/savings, executable rubric, immutable history, SDD checkpoints/scope/evidence")
 
 
 def main():
@@ -300,6 +455,8 @@ def main():
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/agentq")
     parser.add_argument("--client-args", type=Path, help='JSON object mapping each client to its native argv array; no secrets')
     parser.add_argument("--label", default="")
+    parser.add_argument("--scenario", choices=("engineering", "sdd"), default="engineering")
+    parser.add_argument("--contract-lint", type=Path, help="unchanged workflow-pinned specq contract_lint.py; required for SDD")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--rebuild-viewer", action="store_true")
     parser.add_argument("--serve", type=int, metavar="PORT")
@@ -315,6 +472,9 @@ def main():
             server.serve_forever()
         return
     binary = args.binary.resolve(strict=True)
+    if args.scenario == "sdd" and not args.contract_lint:
+        parser.error("--scenario sdd requires --contract-lint")
+    tasks = (SDD_TASK,) if args.scenario == "sdd" else TASKS
     client_args = json.loads(args.client_args.read_text()) if args.client_args else {}
     if not isinstance(client_args, dict) or any(k not in CLIENTS or not isinstance(v, list) or any(not isinstance(a, str) for a in v) for k,v in client_args.items()):
         parser.error("client args require known client keys and arrays of strings")
@@ -322,9 +482,9 @@ def main():
     sha = git("rev-parse", "HEAD")
     cells = []
     for client in CLIENTS:
-        for index, task in enumerate(TASKS):
+        for index, task in enumerate(tasks):
             for opt in (("off", "on") if index % 2 == 0 else ("on", "off")):
-                cell = run_cell(binary, client, opt, task, args.mode, client_args.get(client, []))
+                cell = run_cell(binary, client, opt, task, args.mode, client_args.get(client, []), args.contract_lint)
                 cells.append(cell)
                 print(f"{client} {opt} {task}: {cell['reports'][-1].get('outcome')} quality={cell['rubric']['quality']} source={args.mode}", flush=True)
     run = {"schema": 1, "run_id": now.strftime("%Y%m%dT%H%M%S%fZ") + "-" + sha[:12] + "-" + args.mode,
@@ -333,8 +493,9 @@ def main():
            "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
            "agentq_version": subprocess.check_output([str(binary), "--version"], text=True).strip(),
            "host": {"os": platform.system(), "arch": platform.machine(), "python": platform.python_version()},
-           "mode": args.mode, "label": args.label, "client_args": client_args, "cells": cells,
-           "deltas": [{"client": c, "task": t, **paired_delta(next(x for x in cells if (x["client"],x["task"],x["optimization"]) == (c,t,"off")), next(x for x in cells if (x["client"],x["task"],x["optimization"]) == (c,t,"on")))} for c in CLIENTS for t in TASKS]}
+           "mode": args.mode, "label": args.label, "scenario": args.scenario, "client_args": client_args, "cells": cells,
+           "contract_lint_sha256": hashlib.sha256(args.contract_lint.read_bytes()).hexdigest() if args.contract_lint else None,
+           "deltas": [{"client": c, "task": t, **paired_delta(next(x for x in cells if (x["client"],x["task"],x["optimization"]) == (c,t,"off")), next(x for x in cells if (x["client"],x["task"],x["optimization"]) == (c,t,"on")))} for c in CLIENTS for t in tasks]}
     print(save_run(run, RUNS).relative_to(ROOT))
     rebuild()
 
