@@ -13,11 +13,14 @@ pub struct AppServer {
 
 impl AppServer {
     pub fn start(base:Command,spec:&Spec,private_log:&Path)->Res<Self> {
+        Self::spawn(app_server_command(base,spec)?,private_log)
+    }
+
+    pub(super) fn spawn(mut command:Command,private_log:&Path)->Res<Self> {
         let mut options=File::options();options.create(true).append(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(private_log).map_err(|e|format!("app-server log: {e}"))?;
         let mut diagnostics=log.try_clone().map_err(|e|format!("app-server log: {e}"))?;
-        let mut command=app_server_command(base,spec)?;
         crate::telemetry::capture::inherit_context(&mut command);
         let mut child=command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log).spawn().map_err(|e|format!("app-server spawn: {e}"))?;
         let mut stdin=child.stdin.take().ok_or("app-server stdin unavailable")?;
