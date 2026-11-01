@@ -8,9 +8,14 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 fn main() {
+    let wrapper: Vec<_> = std::env::args_os().skip(1).collect();
+    if wrapper.first().is_some_and(|s| s == "--wrap") {
+        std::process::exit(Command::new(&wrapper[1]).args(&wrapper[2..]).status().unwrap().code().unwrap_or(1));
+    }
     if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
     let tests: &[(&str, fn())] = &[
+        ("antigravity_wrapped_submission_keeps_prompt_and_tail", antigravity_wrapped_submission_keeps_prompt_and_tail),
         ("antigravity_native_submission_tails_and_resumes", antigravity_native_submission_tails_and_resumes),
         ("claude_starts_and_resumes_one_session", claude_starts_and_resumes_one_session),
         ("codex_resumes_its_thread_in_the_account_home", codex_resumes_its_thread_in_the_account_home),
@@ -185,6 +190,7 @@ fn fake(client: &str) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
+    if client == "antigravity" { input = serde_json::from_str::<Value>(&input).unwrap()["message"]["content"].as_str().unwrap().to_string(); }
     if std::env::var("COREQ_FAKE_CONTROL").is_ok() {
         let record=json!({"args":args,"home":std::env::var(if client=="claude" {"CLAUDE_CONFIG_DIR"} else {"CODEX_HOME"}).ok()});
         std::fs::write("native-control.json",record.to_string()).unwrap();
@@ -209,12 +215,8 @@ fn fake(client: &str) {
             match (after("--session-id"), after("--resume")) { (Some(s), None) => (s, false), (None, Some(s)) => (s, true), _ => panic!("claude session flag") }
         }
         "antigravity" => {
-            assert_eq!(args.last().map(String::as_str), Some("-"), "antigravity reads stdin");
-            match args.first().map(String::as_str) {
-                Some("new-conversation") => (format!("ag-{}", std::process::id()), false),
-                Some("send-message") => (args[args.len() - 2].clone(), true),
-                _ => panic!("antigravity subcommand"),
-            }
+            assert_eq!(&args[..4], ["--input-format", "stream-json", "--output-format", "stream-json"]);
+            match after("--conversation") {Some(s)=>(s,true),None=>(format!("ag-{}",std::process::id()),false)}
         }
         _ => {
             assert_eq!(&args[..2], ["exec", "--json"], "codex exec");
@@ -241,13 +243,9 @@ fn fake(client: &str) {
         emit(json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1792386000u64, "rateLimitType": "five_hour", "utilization": 0.25}}));
         emit(json!({"type": "result", "subtype": "success", "is_error": false, "result": format!("turn {turn}"), "session_id": session}));
     } else if client == "antigravity" {
-        if resumed {
-            emit(json!({"response": {"sendMessage": {"recipientId": session, "content": input}}}));
-        } else {
-            emit(json!({"response": {"newConversation": {"conversationId": session, "prompt": input}}}));
-        }
-        emit(json!({"step_index": turn, "type": "PLANNER_RESPONSE", "status": "DONE", "model": "gemini-3.1-pro",
-            "input_tokens": 12, "cache_read_tokens": 60, "output_tokens": 8, "content": format!("turn {turn}")}));
+        emit(json!({"event":"init", "conversation_id":session, "init":{}}));
+        emit(json!({"event":"step_update", "step_update":{"step_index":turn,"step_type":"agent_response","state":"DONE", "usage":{"input_tokens":12,"cache_read_tokens":60,"output_tokens":8}}}));
+        emit(json!({"event":"result", "result":{"conversation_id":session,"status":"SUCCESS","response":format!("turn {turn}")}}));
     } else {
         if !resumed { emit(json!({"type": "thread.started", "thread_id": session})); }
         if let Ok(home) = std::env::var("CODEX_HOME") {
@@ -628,6 +626,25 @@ fn off_reaches_codex_queue_and_app_server() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// M12.1/M12.6: a caller-owned executable wrapper must preserve agentapi prompt/tailing and reject server off.
+fn antigravity_wrapped_submission_keeps_prompt_and_tail() {
+    let root = scratch("wrapped-agentapi");
+    let bin = root.join(if cfg!(windows) {"agentapi.exe"} else {"agentapi"});
+    std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
+    let mut spec = Spec {client:Client::Antigravity,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.join("home")),env:vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("AGENTQ_OPTIMIZATION".into(),"inherit".into())]};
+    let base = || {let mut c=Command::new(std::env::current_exe().unwrap());c.arg("--wrap").arg(&bin);c};
+    let log = root.join("turn.log");
+    let mut turn = Turn::start(base(), &spec, &log, "first").unwrap();
+    let history = spec.home.as_ref().unwrap().join("brain/native-conv/.system_generated/logs/transcript.jsonl");
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    append(&history, &[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"wrapper answer"})]);
+    turn.wait(soon()).unwrap();
+    assert_eq!((turn.report().outcome,turn.report().text.as_deref()),("ok",Some("wrapper answer")));
+    spec.env.push(("AGENTQ_OPTIMIZATION".into(),"off".into()));
+    assert!(Turn::start(base(), &spec, &log, "first").is_err(),"submission env cannot suppress existing server hooks");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 // M12.1/M12.3: agentapi acknowledges submission before terminal transcript evidence; resume consumes only new steps.
 // Risk: exit 0 is mistaken for completed work, stale history counts twice, or the caller's prompt/args are lost.
 fn antigravity_native_submission_tails_and_resumes() {
@@ -638,10 +655,7 @@ fn antigravity_native_submission_tails_and_resumes() {
     let log = root.join("turns.log");
     let mut turn = Turn::start(Command::new(&bin), &spec, &log, "first").unwrap();
     // The double exits after receipt. Supply the terminal later, as a separately owned server would.
-    let until = Instant::now()+Duration::from_secs(5);
-    while !std::fs::read_to_string(&log).unwrap_or_default().contains("native-conv") {
-        assert!(Instant::now()<until); std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_agentapi_receipt(&mut turn, &log, "first");
     assert!(turn.poll().unwrap().is_none(), "submission is not completion");
     let history = spec.home.as_ref().unwrap().join("brain/native-conv/.system_generated/logs/transcript.jsonl");
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
@@ -650,6 +664,7 @@ fn antigravity_native_submission_tails_and_resumes() {
     assert_eq!((report.outcome,report.text.as_deref(),report.session.as_deref()),("ok",Some("first done"),Some("native-conv")));
     spec.session=report.session.unwrap();spec.resume=true;
     let mut turn=Turn::start(Command::new(&bin),&spec,&log,"second").unwrap();
+    wait_agentapi_receipt(&mut turn, &log, "second");
     assert!(turn.poll().unwrap().is_none());
     append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"second done","input_tokens":7,"cache_read_tokens":4,"cache_write_tokens":0,"output_tokens":2})]);
     turn.wait(soon()).unwrap();let report=turn.report();
@@ -660,10 +675,24 @@ fn antigravity_native_submission_tails_and_resumes() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+fn wait_agentapi_receipt(turn: &mut Turn, log: &Path, prompt: &str) {
+    let until = Instant::now()+Duration::from_secs(5);
+    loop {
+        assert!(turn.poll().unwrap().is_none(), "receipt alone is not a terminal");
+        if std::fs::read_to_string(log).unwrap_or_default().contains(&format!("\"prompt\":\"{prompt}\"")) {break;}
+        assert!(Instant::now()<until); std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn fake_agentapi() {
     let args:Vec<String>=std::env::args().skip(1).collect();
     assert!(matches!(args.first().map(String::as_str),Some("new-conversation" | "send-message")));
     assert!(matches!(args.last().map(String::as_str),Some("first" | "second" | "timeout")),"native prompt is argv, not '-' or stdin");
     if args[0]=="send-message" {assert_eq!(args[1],"native-conv");}
-    println!("{}",serde_json::to_string_pretty(&json!({"response":{"newConversation":{"conversationId":"native-conv"}}})).unwrap());
+    use std::io::Write;
+    let receipt = serde_json::to_string_pretty(&json!({"response":{"newConversation":{"conversationId":"native-conv"}},"prompt":args.last()})).unwrap();
+    let half=receipt.len()/2;
+    print!("{}",&receipt[..half]); std::io::stdout().flush().unwrap();
+    std::thread::sleep(Duration::from_millis(40));
+    print!("{}",&receipt[half..]); std::io::stdout().flush().unwrap();
 }

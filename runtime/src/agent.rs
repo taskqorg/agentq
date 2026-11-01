@@ -93,6 +93,8 @@ fn antigravity_executable() -> PathBuf {
     if let Some(path) = std::env::var_os("ANTIGRAVITY_AGENTAPI_EXE").filter(|s| !s.is_empty()) {
         return PathBuf::from(path);
     }
+    let cli = which("agy");
+    if cli.is_absolute() { return cli; }
     let api = which("agentapi");
     if api.is_absolute() { return api; }
     if let Some(home) = base_home(Client::Antigravity) {
@@ -135,7 +137,7 @@ pub fn codex_native(bin: PathBuf) -> Res<PathBuf> {
     executable.canonicalize().map_err(|e| format!("Codex native executable unavailable: {e}"))
 }
 
-/// The client's CLI executable: `claude` on `PATH`, Codex's native executor, or Antigravity's `agentapi` CLI. A caller
+/// The client's CLI executable: `claude` on `PATH`, Codex's native executor, or Antigravity's `agy` / `agentapi` CLI. A caller
 /// that wraps the client (a sandbox) builds its own base command around this path.
 pub fn executable(client: Client) -> Res<PathBuf> {
     match client {
@@ -260,7 +262,9 @@ pub(crate) fn child_env(spec: &Spec, key: &str) -> Option<OsString> {
 }
 
 pub(crate) fn spec_home(spec: &Spec) -> Option<PathBuf> {
-    spec.home.clone().or_else(|| child_env(spec, spec.client.home_var()).map(PathBuf::from)).or_else(|| base_home(spec.client))
+    spec.home.clone().or_else(|| child_env(spec, spec.client.home_var()).filter(|v| !v.is_empty()).map(PathBuf::from))
+        .or_else(|| (spec.client == Client::Antigravity).then(|| child_env(spec, "ANTIGRAVITY_APP_DATA_DIR")).flatten().filter(|v| !v.is_empty()).map(PathBuf::from))
+        .or_else(|| base_home(spec.client))
 }
 
 /// The client argument list after the executable, in TaskQ's order.
@@ -281,15 +285,9 @@ pub fn args(spec: &Spec) -> Vec<OsString> {
             else { a.extend([s("-C"), spec.root.clone().into_os_string(), s("-")]); }
         }
         Client::Antigravity => {
-            if spec.resume {
-                a.push(s("send-message"));
-                a.extend(spec.args.iter().cloned());
-                a.extend([s(&spec.session), s("-")]);
-            } else {
-                a.push(s("new-conversation"));
-                a.extend(spec.args.iter().cloned());
-                a.push(s("-"));
-            }
+            a.extend(["--input-format", "stream-json", "--output-format", "stream-json"].map(s));
+            a.extend(spec.args.iter().cloned());
+            if spec.resume { a.extend([s("--conversation"), s(&spec.session)]); }
         }
     }
     a
@@ -331,20 +329,23 @@ struct AntigravityTranscript {
     cursor: u64,
     identity: Option<String>,
     prefix: Option<String>,
+    partial: Vec<u8>,
+    pending: std::collections::VecDeque<Value>,
+    full_step: Option<u64>,
+    full_cursor: u64,
+    full_partial: Vec<u8>,
+    full_identity: Option<String>,
+    full_prefix: Option<String>,
 }
 
 fn is_native_agentapi(cmd: &Command, spec: &Spec) -> bool {
     if spec.client != Client::Antigravity {
         return false;
     }
-    let prog = Path::new(cmd.get_program())
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
-    matches!(
-        prog,
-        "agentapi" | "agentapi.exe" | "agentapi.cmd" | "language_server" | "language_server.exe"
-    )
+    std::iter::once(cmd.get_program()).chain(cmd.get_args()).any(|arg| {
+        matches!(Path::new(arg).file_name().and_then(|n| n.to_str()),
+            Some("agentapi" | "agentapi.exe" | "agentapi.cmd" | "language_server" | "language_server.exe"))
+    })
 }
 
 fn transcript_paths(home: &Path, session: &str) -> (PathBuf, PathBuf) {
@@ -371,6 +372,40 @@ impl AntigravityTranscript {
         Ok(state)
     }
 
+    fn full_record(&mut self, path: &Path, step: u64) -> Res<Option<Value>> {
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.full_identity.is_none() => return Ok(None),
+            Err(e) => return Err(format!("antigravity full transcript: {e}")),
+        };
+        if self.full_step != Some(step) {
+            self.full_step = Some(step); self.full_cursor = 0; self.full_partial.clear();
+            self.full_identity = None; self.full_prefix = None;
+        }
+        let identity = native::file_id(&file)?;
+        if self.full_identity.as_ref().is_some_and(|id| *id != identity) { return Err("antigravity full transcript replaced".into()); }
+        let prefix = native::digest_prefix(&mut file, self.full_cursor)?;
+        if self.full_prefix.as_ref().is_some_and(|p| *p != prefix) { return Err("antigravity full transcript rewritten".into()); }
+        file.seek(SeekFrom::Start(self.full_cursor)).map_err(|e| e.to_string())?;
+        let mut bytes = vec![];
+        (&mut file).take(8*1024*1024).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        self.full_cursor += bytes.len() as u64;
+        self.full_partial.extend(bytes);
+        self.full_identity = Some(identity);
+        self.full_prefix = Some(native::digest_prefix(&mut file, self.full_cursor)?);
+        let mut consumed = 0;
+        let mut found = None;
+        for row in self.full_partial.split_inclusive(|b| *b == b'\n') {
+            if !row.ends_with(b"\n") { break; }
+            consumed += row.len();
+            let v: Value = serde_json::from_slice(row).map_err(|_| "antigravity full transcript invalid JSON")?;
+            if !v.is_object() { return Err("antigravity full transcript invalid record".into()); }
+            if v["step_index"].as_u64() == Some(step) && v.get("truncated_fields").is_none() { found = Some(v); }
+        }
+        self.full_partial.drain(..consumed);
+        Ok(found)
+    }
+
     fn append(&mut self, home: &Path, log: &Path) -> Res<()> {
         let Some(session) = self.session.as_deref() else { return Ok(()); };
         if !native::plain_id(session) || session == "-" { return Err("antigravity session invalid".into()); }
@@ -385,33 +420,32 @@ impl AntigravityTranscript {
         let prefix = native::digest_prefix(&mut file, self.cursor)?;
         if self.prefix.as_ref().is_some_and(|p| *p != prefix) { return Err("antigravity transcript rewritten".into()); }
         file.seek(SeekFrom::Start(self.cursor)).map_err(|e| e.to_string())?;
-        let mut reader = BufReader::new((&mut file).take(8*1024*1024));
-        let mut output = File::options().append(true).open(log).map_err(|e| e.to_string())?;
-        loop {
-            let mut line = String::new();
-            let n = reader.read_line(&mut line).map_err(|e| format!("antigravity transcript: {e}"))?;
-            if n == 0 || !line.ends_with('\n') { break; }
-            let mut value: Value = serde_json::from_str(&line).map_err(|_| "antigravity transcript invalid JSON")?;
+        let mut bytes = vec![];
+        (&mut file).take(8*1024*1024).read_to_end(&mut bytes).map_err(|e| format!("antigravity transcript: {e}"))?;
+        self.cursor += bytes.len() as u64;
+        self.partial.extend(bytes);
+        let mut consumed = 0;
+        for row in self.partial.split_inclusive(|b| *b == b'\n') {
+            if !row.ends_with(b"\n") { break; }
+            consumed += row.len();
+            let value: Value = serde_json::from_slice(row).map_err(|_| "antigravity transcript invalid JSON")?;
             if !value.is_object() { return Err("antigravity transcript invalid record".into()); }
-            if value.get("truncated_fields").is_some() {
-                let Ok(full_file) = File::open(&full) else { break; };
-                let step = value["step_index"].as_u64().ok_or("antigravity truncated step missing index")?;
-                let mut replacement = None;
-                let mut reader = BufReader::new(full_file.take(8*1024*1024));
-                loop {
-                    let mut row = String::new();
-                    if reader.read_line(&mut row).map_err(|e| e.to_string())? == 0 || !row.ends_with('\n') { break; }
-                    if let Ok(v) = serde_json::from_str::<Value>(&row) {
-                        if v["step_index"].as_u64() == Some(step) && v.get("truncated_fields").is_none() { replacement = Some(v); break; }
-                    }
-                }
-                let Some(v) = replacement else { break; }; value = v;
-            }
-            writeln!(output, "{value}").map_err(|e| format!("agent log: {e}"))?;
-            self.cursor += n as u64;
+            self.pending.push_back(value);
         }
+        self.partial.drain(..consumed);
         self.identity = Some(identity);
         self.prefix = Some(native::digest_prefix(&mut file, self.cursor)?);
+        let mut output = File::options().append(true).open(log).map_err(|e| e.to_string())?;
+        while let Some(mut value) = self.pending.front().cloned() {
+            if value.get("truncated_fields").is_some() {
+                let step = value["step_index"].as_u64().ok_or("antigravity truncated step missing index")?;
+                let Some(v) = self.full_record(&full, step)? else { break; };
+                if v["type"] != value["type"] || v["status"] != value["status"] { break; }
+                value = v;
+            }
+            writeln!(output, "{value}").map_err(|e| format!("agent log: {e}"))?;
+            self.pending.pop_front();
+        }
         Ok(())
     }
 }
@@ -433,6 +467,7 @@ pub struct Turn {
     /// The resumed session; a resume's output need not name it again.
     resumed: Option<String>,
     ag: AntigravityTranscript,
+    receipt: Option<std::sync::mpsc::Receiver<Res<String>>>,
 }
 
 fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64) }
@@ -447,17 +482,18 @@ impl Turn {
         let home = spec_home(spec);
         let native_agentapi = is_native_agentapi(&base, spec);
         let ag = if native_agentapi {
-            let prog = Path::new(base.get_program()).file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if prog.starts_with("language_server") {
+            if std::iter::once(base.get_program()).chain(base.get_args()).any(|arg| Path::new(arg).file_stem().is_some_and(|n| n == "language_server")) {
                 base.arg("agentapi");
             }
-            let mut turn_args = args(spec);
-            if turn_args.last().is_some_and(|a| a == "-") {
-                turn_args.pop();
-                turn_args.push(OsString::from(text));
-            }
-            base.args(turn_args);
+            base.arg(if spec.resume {"send-message"} else {"new-conversation"}).args(&spec.args);
+            if spec.resume { base.arg(&spec.session); }
+            base.arg(text);
             base = environment(base, spec);
+            let off = base.get_envs().find(|(k,_)| *k == crate::optimization::ENV)
+                .map_or_else(|| std::env::var_os(crate::optimization::ENV), |(_,v)| v.map(OsString::from));
+            if off.is_some_and(|v| v == "off") {
+                return Err("antigravity agentapi cannot propagate optimization off to an existing server; use agy".into());
+            }
             let session = spec.resume.then(|| spec.session.clone());
             AntigravityTranscript::baseline(home.as_deref(), session)?
         } else {
@@ -467,17 +503,27 @@ impl Turn {
         crate::telemetry::capture::inherit_context(&mut base);
         let started = Instant::now();
         let started_ms = unix_ms();
-        let mut child = base.stdin(Stdio::piped()).stdout(out).stderr(err).spawn().map_err(|e| format!("{} spawn: {e}", spec.client.code()))?;
+        let mut child = base.stdin(Stdio::piped()).stdout(if native_agentapi {Stdio::piped()} else {Stdio::from(out)}).stderr(err).spawn().map_err(|e| format!("{} spawn: {e}", spec.client.code()))?;
+        let receipt = if native_agentapi {
+            let mut stdout = child.stdout.take().ok_or("agentapi stdout unavailable")?;
+            let (send, receive) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                let result = stdout.read_to_string(&mut text).map(|_| text).map_err(|e| format!("agentapi receipt: {e}"));
+                let _ = send.send(result);
+            });
+            Some(receive)
+        } else { None };
         let mut stdin = child.stdin.take().ok_or("agent stdin unavailable")?;
         if !native_agentapi {
-            let input = text.as_bytes().to_vec();
+            let input = if spec.client == Client::Antigravity {format!("{}\n", json!({"event":"user","message":{"content":text}})).into_bytes()} else {text.as_bytes().to_vec()};
             // A client that never reads stdin must not block the caller; the writer ends with the pipe.
             std::thread::spawn(move || { let _ = stdin.write_all(&input); });
         } else {
             drop(stdin);
         }
         Ok(Turn { client: spec.client, child, log: log.to_path_buf(), start, pos: start, ended: false, stopping: false, timed_out: false,
-            started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag })
+            started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }
@@ -486,12 +532,24 @@ impl Turn {
         if !self.ag.native_agentapi {
             return Ok(());
         }
-        if self.ag.session.is_none() {
-            if let Some(text) = read_from(&self.log, self.start) {
-                self.ag.session = session_of(Client::Antigravity, &text).or_else(|| self.resumed.clone());
-            }
+        if self.exit.is_none() { return Ok(()); }
+        if let Some(receive) = &self.receipt {
+            let text = match receive.try_recv() {
+                Ok(result) => result?,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
+                Err(_) => return Err("agentapi receipt reader disconnected".into()),
+            };
+            let session = session_of(Client::Antigravity, &text).or_else(|| self.resumed.clone());
+            if self.resumed.is_some() && session != self.resumed { return Err("antigravity receipt session differs".into()); }
+            self.ag.session = session;
+            let mut log = File::options().append(true).open(&self.log).map_err(|e| e.to_string())?;
+            let receipt = serde_json::from_str::<Value>(&text).map(|v| v.to_string()).unwrap_or(text);
+            writeln!(log, "\n{receipt}").map_err(|e| e.to_string())?;
+            self.receipt = None;
         }
-        if let Some(home) = self.home.as_deref() { self.ag.append(home, &self.log)?; }
+        if self.exit == Some(0) {
+            if let Some(home) = self.home.as_deref() { self.ag.append(home, &self.log)?; }
+        }
         Ok(())
     }
 
@@ -517,27 +575,22 @@ impl Turn {
     /// The exit code once the process exited, else None. After a turn-end event a lingering process is stopped
     /// (Codex on Windows kept running after its turn ended).
     pub fn poll(&mut self) -> Res<Option<i32>> {
-        if self.exit.is_some() && (!self.ag.native_agentapi || self.ended || self.stopping) {
-            return Ok(self.exit);
+        if self.ag.native_agentapi {
+            if self.exit.is_none() {
+                self.exit = self.child.try_wait().map_err(|e| format!("agent wait: {e}"))?.map(|s| s.code().unwrap_or(-1));
+            }
+            self.read()?;
+            return Ok(self.exit.filter(|code| self.stopping || (self.receipt.is_none() && (*code != 0 || self.ag.session.is_none() || self.ended))));
         }
+        if self.exit.is_some() { return Ok(self.exit); }
         self.read()?;
         if self.exit.is_none() {
             if let Some(status) = self.child.try_wait().map_err(|e| format!("agent wait: {e}"))? {
                 let code = status.code().unwrap_or(-1);
                 self.read()?;
-                if self.ag.native_agentapi && self.ag.session.is_some() && code == 0 && !self.ended && !self.stopping {
-                    self.exit = Some(code);
-                    return Ok(None);
-                }
                 self.exit = Some(code);
                 return Ok(self.exit);
             }
-        }
-        if self.ag.native_agentapi && self.exit.is_some() {
-            if self.ended || self.stopping {
-                return Ok(self.exit);
-            }
-            return Ok(None);
         }
         if self.ended && !self.stopping { self.stopping = true; let _ = self.child.kill(); }
         Ok(None)
@@ -598,6 +651,7 @@ fn read_from(log: &Path, pos: u64) -> Option<String> {
 
 /// A turn-end event: Claude `result`, Codex `turn.completed` or `turn.failed`, Antigravity terminal `PLANNER_RESPONSE` or `turn.cancelled`.
 fn ends(v: &Value) -> bool {
+    if v["event"] == "result" { return matches!(v["result"]["status"].as_str(), Some("SUCCESS" | "ERROR" | "CANCELED" | "INTERRUPTED" | "INVALID")); }
     match v["type"].as_str() {
         Some("result" | "turn.completed" | "turn.failed" | "turn.cancelled") => true,
         Some("PLANNER_RESPONSE") => {
@@ -655,13 +709,23 @@ pub struct Usage {
 pub fn usage(events: &[Value]) -> Usage {
     let (mut ids, mut turns, mut models) = (std::collections::HashSet::new(), false, BTreeMap::<String, u64>::new());
     let mut sums = [Some(0u64); 4];
+    let mut cli_usage = false;
     for (idx, v) in events.iter().enumerate() {
-        let kind = v["type"].as_str().unwrap_or_default();
+        let kind = if v["event"] == "step_update" {"agy-step"} else {v["type"].as_str().unwrap_or_default()};
+        let cli = kind == "agy-step";
         let codex = kind == "turn.completed";
         let ag = kind == "PLANNER_RESPONSE";
         let counted = match kind {
             "assistant" => v["message"]["id"].as_str().is_some_and(|id| ids.insert(id.to_string())),
             "turn.completed" => { turns = true; true }
+            "agy-step" => {
+                let step = &v["step_update"];
+                if step["state"] != "DONE" || (step["step_type"] != "agent_response" && !step["usage"].is_object()) { continue; }
+                let Some(id) = step["step_index"].as_u64() else {continue;};
+                if events[idx+1..].iter().any(|later| later["event"] == "step_update" && later["step_update"]["step_index"].as_u64() == Some(id) && later["step_update"]["state"] == "DONE" && (later["step_update"]["step_type"] == "agent_response" || later["step_update"]["usage"].is_object())) {continue;}
+                cli_usage = true; turns = true;
+                ids.insert(format!("agy-step-{id}"))
+            }
             "PLANNER_RESPONSE" => {
                 if !matches!(v["status"].as_str(), Some("DONE" | "ERROR" | "CANCELLED")) { continue; }
                 if v["step_index"].as_u64().is_some_and(|step| events[idx+1..].iter().any(|later| later["type"] == "PLANNER_RESPONSE" && later["step_index"].as_u64() == Some(step))) { continue; }
@@ -671,11 +735,11 @@ pub fn usage(events: &[Value]) -> Usage {
             _ => false,
         };
         if !counted { continue }
-        let u = if codex { &v["usage"] } else if ag { v } else { &v["message"]["usage"] };
+        let u = if cli { &v["step_update"]["usage"] } else if codex { &v["usage"] } else if ag { v } else { &v["message"]["usage"] };
         let input = u["input_tokens"].as_u64();
         let read = if codex {
             u["cached_input_tokens"].as_u64()
-        } else if ag {
+        } else if ag || cli {
             u["cache_read_tokens"].as_u64().or(u["cache_read_input_tokens"].as_u64())
         } else {
             u["cache_read_input_tokens"].as_u64()
@@ -683,7 +747,7 @@ pub fn usage(events: &[Value]) -> Usage {
         let call = [
             if codex { input.zip(read).and_then(|(i, r)| i.checked_sub(r)) } else { input },
             read,
-            if codex { Some(0) } else if ag { u["cache_write_tokens"].as_u64().or(u["cache_creation_input_tokens"].as_u64()) } else { u["cache_creation_input_tokens"].as_u64() },
+            if codex { Some(0) } else if ag || cli { u["cache_write_tokens"].as_u64().or(u["cache_creation_input_tokens"].as_u64()) } else { u["cache_creation_input_tokens"].as_u64() },
             u["output_tokens"].as_u64(),
         ];
         for (s, c) in sums.iter_mut().zip(call) { *s = s.zip(c).and_then(|(a, b)| a.checked_add(b)) }
@@ -692,7 +756,7 @@ pub fn usage(events: &[Value]) -> Usage {
     }
     let [input, cache_read, cache_write, output] = sums;
     let model = models.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|m| m.0);
-    let calls = (!ids.is_empty()).then_some(ids.len() as u64);
+    let calls = (!cli_usage && !ids.is_empty()).then_some(ids.len() as u64);
     if calls.is_some() || turns { Usage { calls, input, cache_read, cache_write, output, model, unknown: None } }
     else { Usage { unknown: Some("no-usage"), ..Usage::default() } }
 }
@@ -704,6 +768,11 @@ fn model_code(m: &str) -> bool { !m.is_empty() && m.len() <= 64 && m.bytes().all
 /// None after work started or without a limit.
 pub fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
     for v in events {
+        if v["event"] == "step_update" && (v["step_update"]["step_type"] == "tool" || v["step_update"]["usage"].is_object()) { return None; }
+        if v["event"] == "result" {
+            let msg = v["result"]["error"].as_str().unwrap_or_default().to_lowercase();
+            return (v["result"]["status"] != "SUCCESS" && ["usage limit", "quota exceeded", "rate limit"].iter().any(|s| msg.contains(s))).then_some(None);
+        }
         let kind = v["type"].as_str().unwrap_or_default();
         if kind == "assistant" {
             if v["apiError"] == "usage_limit_reached" || v["quotaLimits"]["status"] == "rejected" {
@@ -754,7 +823,8 @@ pub fn transient_failure(events: &[Value]) -> Option<String> {
 /// The final text of a turn: Claude's last `result`, Codex's last `agent_message`, or Antigravity's last `PLANNER_RESPONSE` content.
 pub fn final_text(events: &[Value]) -> Option<String> {
     events.iter().rev().find_map(|v| {
-        if v["type"] == "result" { v["result"].as_str().map(String::from) }
+        if v["event"] == "result" { v["result"]["response"].as_str().map(String::from) }
+        else if v["type"] == "result" { v["result"].as_str().map(String::from) }
         else if v["type"] == "item.completed" && v["item"]["type"] == "agent_message" { v["item"]["text"].as_str().map(String::from) }
         else if v["type"] == "PLANNER_RESPONSE" && v["status"] == "DONE" && ends(v) { v["content"].as_str().filter(|s| !s.is_empty()).map(String::from) }
         else { None }
@@ -776,6 +846,7 @@ pub fn antigravity_session(text: &str) -> Option<String> {
             .or_else(|| v.pointer("/response/sendMessage/recipientId").and_then(Value::as_str))
             .or_else(|| v["conversationId"].as_str())
             .or_else(|| v["conversation_id"].as_str())
+            .or_else(|| v["result"]["conversation_id"].as_str())
             .or_else(|| (matches!(v["type"].as_str(), Some("conversation.started" | "system" | "result"))).then(|| v["session_id"].as_str()).flatten())
             .filter(|s| native::plain_id(s) && *s != "-")
             .map(String::from)
@@ -881,13 +952,15 @@ impl Report {
     pub fn read(client: Client, text: &str, events: &[Value], rollout: Option<&Path>) -> Report {
         let reached = limit_reached(events);
         let end = if client == Client::Antigravity {
-            events.iter().rev().find(|v| matches!(v["type"].as_str(), Some("PLANNER_RESPONSE" | "TOOL_RESPONSE" | "turn.failed" | "turn.cancelled"))).filter(|v| ends(v))
+            events.iter().rev().find(|v| v["event"] == "result" || matches!(v["type"].as_str(), Some("PLANNER_RESPONSE" | "TOOL_RESPONSE" | "turn.failed" | "turn.cancelled"))).filter(|v| ends(v))
         } else { events.iter().rev().find(|v| ends(v)) };
         let (outcome, error) = if reached.is_some() { ("refused", "usage-limit") }
             else if auth_rejected(text).is_some() { ("failed", "auth-rejected") }
             else if transient_failure(events).is_some() { ("failed", "model-capacity") }
             else {
                 match end {
+                    Some(v) if v["event"] == "result" && matches!(v["result"]["status"].as_str(), Some("CANCELED" | "INTERRUPTED")) => ("cancelled", "turn-cancelled"),
+                    Some(v) if v["event"] == "result" && v["result"]["status"] != "SUCCESS" => ("failed", "turn-failed"),
                     Some(v) if v["type"] == "turn.failed" || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "ERROR") => ("failed", "turn-failed"),
                     Some(v) if v["type"] == "turn.cancelled" || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "CANCELLED") => ("cancelled", "turn-cancelled"),
                     Some(v) if (v["type"] == "result" && v["is_error"] == true) || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "ERROR") => ("failed", "client-error"),
@@ -981,9 +1054,9 @@ mod tests {
         assert_eq!(s(&args(&spec)), "exec --json --sandbox workspace-write -C proj -");
         spec.client = Client::Antigravity;
         spec.args = vec!["--model=pro".into()];
-        assert_eq!(s(&args(&spec)), "new-conversation --model=pro -");
+        assert_eq!(s(&args(&spec)), "--input-format stream-json --output-format stream-json --model=pro");
         spec.resume = true;
-        assert_eq!(s(&args(&spec)), "send-message --model=pro id1 -");
+        assert_eq!(s(&args(&spec)), "--input-format stream-json --output-format stream-json --model=pro --conversation id1");
         let settings: Value = serde_json::from_str(&claude_settings(Some("rules compact"), &[("TASKQ_TASK", "7")])).unwrap();
         assert_eq!(settings["hooks"]["SessionStart"][0]["matcher"], "compact");
         assert_eq!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"], "rules compact");
@@ -1024,6 +1097,46 @@ mod tests {
         assert_eq!((missing.cache_read, missing.cache_write), (None, None), "P2: unreported counts stay unknown");
         assert!(ends(&json!({"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[]})), "empty tool calls end the turn");
         assert_eq!(usage(&[]).unknown, Some("no-usage"));
+    }
+
+    // M12.1/P2: documented agy events must yield per-turn evidence, never cumulative result usage.
+    #[test]
+    fn antigravity_headless_protocol() {
+        let rows = events(r#"{"event":"init","conversation_id":"agy-session","init":{}}
+{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"agent_response","usage":{"input_tokens":12,"cache_read_tokens":5,"output_tokens":3}}}
+{"event":"result","result":{"conversation_id":"agy-session","status":"SUCCESS","response":"answer","usage":{"input_tokens":999,"output_tokens":999}}}"#);
+        let r = Report::read(Client::Antigravity, &rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"), &rows, None);
+        assert_eq!((r.outcome, r.text.as_deref(), r.session.as_deref()), ("ok", Some("answer"), Some("agy-session")));
+        assert_eq!((r.usage.input, r.usage.cache_read, r.usage.cache_write), (Some(12), Some(5), None));
+        let error = events(r#"{"event":"result","result":{"status":"ERROR","error":"quota exceeded"}}"#);
+        assert_eq!(Report::read(Client::Antigravity, "", &error, None).outcome, "refused");
+        for (status, outcome) in [("CANCELED","cancelled"),("INTERRUPTED","cancelled"),("INVALID","failed"),("WAITING","unknown"),("RUNNING","unknown")] {
+            let rows = vec![json!({"event":"result","result":{"status":status}})];
+            assert_eq!(Report::read(Client::Antigravity,"",&rows,None).outcome,outcome,"{status}");
+        }
+        let mut missing = rows.clone();
+        let mut later = missing[1].clone(); later["step_update"]["usage"] = json!({"output_tokens":3});
+        missing.insert(2,later);
+        let u = usage(&missing);
+        assert_eq!((u.input,u.output,u.calls),(None,Some(3),None),"latest partial step stays unknown and cumulative result is ignored");
+    }
+
+    // M12.1: a bounded poll must progress through a full transcript larger than its read budget.
+    #[test]
+    fn antigravity_full_history_progresses_past_budget() {
+        let root = crate::scratch("large-full-tail");
+        let (path, full) = transcript_paths(&root, "conv-1");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let log = root.join("turn.log"); std::fs::write(&log, "").unwrap();
+        let compact = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","truncated_fields":["content"]});
+        std::fs::write(path, format!("{compact}\n")).unwrap();
+        let old = json!({"step_index":0,"content":"x".repeat(9*1024*1024)});
+        let complete = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"full"});
+        std::fs::write(full, format!("{old}\n{complete}\n")).unwrap();
+        let mut state = AntigravityTranscript {native_agentapi:true,session:Some("conv-1".into()),..Default::default()};
+        for _ in 0..4 {state.append(&root, &log).unwrap();}
+        assert_eq!(final_text(&events(&std::fs::read_to_string(log).unwrap())).as_deref(), Some("full"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // M12.1/P2: partial writes, resume history and replacement must not fabricate completion or usage.

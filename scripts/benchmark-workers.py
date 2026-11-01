@@ -57,7 +57,12 @@ def fixture(root):
     return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
 
 
-def evaluate(task, reports, root):
+def snapshot(root):
+    return {str(p.relative_to(root)): (None if p.is_symlink() else p.read_bytes())
+            for p in root.rglob("*") if (p.is_file() or p.is_symlink()) and p != root / "turn.log"}
+
+
+def evaluate(task, reports, root, before=None, snapshots=None):
     last = reports[-1] if reports else {}
     try:
         answer = json.loads(last.get("text") or "")
@@ -68,19 +73,25 @@ def evaluate(task, reports, root):
     checks["native_outcome"] = bool(reports) and all(r.get("outcome") == "ok" for r in reports)
     if task == "T2-instruction-adherence":
         checks["same_session"] = len(reports) == 2 and bool(reports[0].get("session")) and reports[0]["session"] == last.get("session")
-        checks["no_file_writes"] = not (root / "memory.txt").exists()
+        checks["no_file_writes"] = before is not None and all(tree == before for tree in (snapshots or [snapshot(root)]))
         checks["first_answer"] = reports[0].get("text") == '{"remembered":true}' if reports else False
     if task == "T4-code-patch-verification":
-        checks["minimal_patch"] = (root / "window.py").read_text() == WINDOW.replace("now > reset", "now >= reset")
-        checks["comment_preserved"] = (root / "window.py").read_text().startswith(WINDOW.splitlines()[0])
         try:
-            checks["boundary_verification"] = subprocess.run([sys.executable, "verify.py"], cwd=root, capture_output=True, timeout=10).returncode == 0
+            patch = (root / "window.py").read_text()
+        except (OSError, UnicodeError):
+            patch = ""
+        checks["minimal_patch"] = patch == WINDOW.replace("now > reset", "now >= reset")
+        checks["comment_preserved"] = patch.startswith(WINDOW.splitlines()[0])
+        tree = snapshot(root)
+        checks["only_window_changed"] = before is not None and all(tree.get(name) == data for name, data in before.items() if name != "window.py") and all(name in before or (Path(name).parent == Path("__pycache__") and name.endswith(".pyc") and Path(name).name.startswith(("window.", "verify."))) for name in tree)
+        try:
+            checks["boundary_verification"] = checks["minimal_patch"] and checks["only_window_changed"] and subprocess.run([sys.executable, "verify.py"], cwd=root, capture_output=True, timeout=10).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             checks["boundary_verification"] = False
     exact_keys = isinstance(answer, dict) and set(answer) - {"original_ref"} == set(expected)
     quality = 100 if all(checks.values()) else 0
     context = round(100 * sum(checks[k] for k in expected) / len(expected))
-    adherence = 100 if exact_keys and "```" not in (last.get("text") or "") else 0
+    adherence = 100 if exact_keys and "```" not in (last.get("text") or "") and all(checks.get(k, True) for k in ("no_file_writes", "first_answer", "only_window_changed", "minimal_patch", "comment_preserved")) else 0
     return {"checks": checks, "quality": quality, "context": context, "adherence": adherence,
             "overall": round(.4 * quality + .3 * context + .3 * adherence, 1)}
 
@@ -91,7 +102,7 @@ def run_turn(binary, client, opt, prompt, root, args, mode, task, session=None):
                "timeout_s": 120, "context": {"product": "worker-benchmark", "version": "1"}}
     if mode == "smoke":
         request.update(command=[sys.executable, str(Path(__file__).resolve()), "--fake-client", client],
-                       home=str(root / "home"), env={"BENCH_TASK": task, "COREQ_FAKE_AGENT": client, "HOME": str(root / "home"), "USERPROFILE": str(root / "home")})
+                       home=str(root.parent / "home"), env={"BENCH_TASK": task, "BENCH_MEMORY": str(root.parent / "home/memory"), "COREQ_FAKE_AGENT": client, "HOME": str(root / "home"), "USERPROFILE": str(root / "home")})
     environment = os.environ.copy()
     if mode == "smoke":
         environment.update(HOME=str(root / "home"), USERPROFILE=str(root / "home"), LOCALAPPDATA=str(root / "home"), APPDATA=str(root / "home"))
@@ -123,19 +134,19 @@ def correlate_compression(payload, client, sessions):
 
 def run_cell(binary, client, opt, task, mode, args):
     with tempfile.TemporaryDirectory(prefix="agentq-worker-bench-") as tmp:
-        root = Path(tmp)
+        root = Path(tmp) / "fixture"
+        root.mkdir()
+        (Path(tmp) / "home").mkdir()
         digest = fixture(root)
-        before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        before = snapshot(root)
         prompts = [TASKS[task]]
         reports = [run_turn(binary, client, opt, prompts[0], root, args, mode, task)]
+        snapshots = [snapshot(root)]
         if task == "T2-instruction-adherence" and reports[0].get("outcome") == "ok" and reports[0].get("session"):
             prompts.append('Recall the token from the previous turn. Return ONLY {"token":"<remembered token>"}. Do not write files or use markdown.')
             reports.append(run_turn(binary, client, opt, prompts[-1], root, args, mode, task, reports[0]["session"]))
-        rubric = evaluate(task, reports, root)
-        if task == "T2-instruction-adherence":
-            rubric["checks"]["no_file_writes"] = all((root / name).read_bytes() == data for name, data in before.items()) and not any(p.is_file() and str(p.relative_to(root)) not in before and p.name not in ("turn.log", ".smoke-memory") and "home" not in p.relative_to(root).parts for p in root.rglob("*"))
-            if not rubric["checks"]["no_file_writes"]:
-                rubric.update(quality=0, overall=round(.3*rubric["context"]+.3*rubric["adherence"], 1))
+            snapshots.append(snapshot(root))
+        rubric = evaluate(task, reports, root, before, snapshots)
         usage = {k: total([r.get("usage", {}).get(k) for r in reports]) for k in COUNTERS}
         usage["total"] = total([usage[k] for k in COUNTERS])
         models = {r.get("usage", {}).get("model") for r in reports}
@@ -198,21 +209,23 @@ def rebuild(directory=RUNS, viewer=VIEWER):
 def fake(client):
     """Protocol double only. Its answers/counters are never native benchmark evidence."""
     prompt = sys.stdin.read()
+    if client == "antigravity":
+        prompt = json.loads(prompt)["message"]["content"]
     args = sys.argv[3:]
     if client == "claude":
         session = args[args.index("--resume")+1] if "--resume" in args else args[args.index("--session-id")+1]
     elif "resume" in args:
         session = args[args.index("resume")+1]
-    elif "send-message" in args:
-        session = args[-2]
+    elif "--conversation" in args:
+        session = args[args.index("--conversation")+1]
     else:
         session = "smoke-session"
     task = os.environ["BENCH_TASK"]
     if task == "T2-instruction-adherence" and "Remember orbit-73" in prompt:
-        Path(".smoke-memory").write_text("orbit-73")
+        Path(os.environ["BENCH_MEMORY"]).write_text("orbit-73")
         answer = {"remembered": True}
     elif task == "T2-instruction-adherence":
-        answer = {"token": Path(".smoke-memory").read_text()}
+        answer = {"token": Path(os.environ["BENCH_MEMORY"]).read_text()}
     else:
         answer = EXPECTED[task]
     if task == "T4-code-patch-verification":
@@ -223,7 +236,7 @@ def fake(client):
     elif client == "codex":
         events = [{"type": "thread.started", "thread_id": session}, {"type": "item.completed", "item": {"type": "agent_message", "text": text}}, {"type": "turn.completed"}]
     else:
-        events = [{"type": "conversation.started", "session_id": session}, {"type": "PLANNER_RESPONSE", "step_index": 1, "status": "DONE", "content": text}]
+        events = [{"event":"init", "conversation_id":session}, {"event":"result", "result":{"conversation_id":session,"status":"SUCCESS","response":text}}]
     for event in events:
         print(json.dumps(event))
 
@@ -252,6 +265,24 @@ def selftest():
             pass
         else:
             raise AssertionError("history was overwritten")
+    # R13/T2/T4: forbidden writes anywhere in the fixture and missing files cannot earn a pass.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        fixture(root)
+        before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        reports = [{"outcome": "ok", "session": "same", "text": '{"remembered":true}'}, {"outcome": "ok", "session": "same", "text": '{"token":"orbit-73"}'}]
+        for name in ("memory.txt", ".smoke-memory", "home/memory.txt", "nested/turn.log"):
+            p = root / name; p.parent.mkdir(parents=True, exist_ok=True); p.write_text("orbit-73")
+            assert evaluate("T2-instruction-adherence", reports, root, before)["adherence"] == 0, name
+            p.unlink()
+        changed = dict(before, **{"memory.txt": b"orbit-73"})
+        assert evaluate("T2-instruction-adherence", reports, root, before, [changed, before])["quality"] == 0
+        (root / "window.py").write_text(WINDOW.replace("now > reset", "now >= reset"))
+        patch = [{"outcome":"ok", "text":json.dumps(EXPECTED["T4-code-patch-verification"])}]
+        (root / "verify.py").write_text("pass\n")
+        assert evaluate("T4-code-patch-verification", patch, root, before)["quality"] == 0
+        (root / "window.py").unlink()
+        assert evaluate("T4-code-patch-verification", patch, root, before)["quality"] == 0
     unavailable = run_cell(Path("/nonexistent-agentq-worker-benchmark"), "antigravity", "on", "T1-context-navigation", "live", [])
     assert unavailable["source"] == "live" and unavailable["reports"][0]["outcome"] == "unknown"
     assert unavailable["usage"]["total"] is None and unavailable["rubric"]["quality"] == 0
