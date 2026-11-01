@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "agentq-runtime"
 version = "0.1.0"
+source = "git+https://github.com/taskqorg/agentq?rev=513193c8a96f3de1c71a86291a679230817ce0b2#513193c8a96f3de1c71a86291a679230817ce0b2"
 dependencies = [
  "coreq",
  "ring",

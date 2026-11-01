@@ -25,8 +25,17 @@ The recovery checkpoint format and original scope hash remain unchanged. The ext
 
 ## Publication and qualification boundary
 
-The example manifest and lockfile identify the published immutable runtime source revision. A local path dependency alone is not publication proof. The example is outside the workspace and builds without a path patch. The runtime gate also runs publication regression checks on each CI platform.
+The example manifest and lockfile identify the published immutable runtime source revision [`513193c8a96f3de1c71a86291a679230817ce0b2`](https://github.com/taskqorg/agentq/commit/513193c8a96f3de1c71a86291a679230817ce0b2). A local path dependency alone is not publication proof. The example is outside the workspace and builds without a path patch. The runtime gate also runs publication regression checks on each CI platform.
 
 The project merge gate uses `cargo test --locked`, offline `cargo run --locked -- selftest`, the four existing Python adapter/checker suites and contract lint at the workflow-pinned specq `7e9adf57287553176d8b3be61c2b22565543dc51`. Legacy removal is isolated with `AGENT_CONTEXT_HOME` and `npm_config_prefix` in OS temporary storage. Actual gate results and the exact candidate SHA are attached to the TaskQ result and PR.
 
 GitHub merge-result `merge_group` CI remains the publication gate under TaskQ R12/§ 7. The worker does not wait for or substitute a branch-only run. Linux/macOS/Windows fake-client CI does not qualify native consumer paths. Native CLI/background/app/app-server, Remote Control and Desktop UI qualification remain with TaskQ #2094 and PilotQ #265. No consumer adoption, model/effort/grant/capacity change, service restart, optimizer installation or namespace migration occurred.
+
+## Local candidate checks
+
+- Full `cargo test --locked`: 116 root unit tests passed; `legacy::tests::edited_after_journal_is_stripped_not_refused` is sandbox-blocked with `Operation not permitted` at fixture file creation. Cargo stops the remaining targets after that failure; it is not a full-suite PASS.
+- The remaining targets were run separately: `cargo test --locked -p agentq-runtime` passed 11 unit checks and 12 deterministic runtime traces; `cargo test --locked --test compression` passed 2 checks; `cargo test --locked --test control --test hook` passed 3 control and 1 hook check.
+- Offline `cargo run --locked -- selftest` passed. Provider/client/Hermes/telemetry Python suites passed 11/9/2/4 checks respectively; the client suite retained its one existing platform skip.
+- Workflow-pinned contract lint passed with 0 errors; its contract headroom warnings remain.
+- macOS denied process inventory (`ps`: `Operation not permitted`); no process-inventory or native installed-client qualification is claimed. This host gap needs no owner ask for this task.
+- Published-pin readback: `cargo run --locked --manifest-path examples/runtime-consumer/Cargo.toml --target-dir target/runtime-consumer` passed both deterministic client turns from remote revision `513193c8a96f3de1c71a86291a679230817ce0b2`. The example manifest and lock resolve that exact Git source, with no path patch. `git diff --exit-code 513193c8a96f3de1c71a86291a679230817ce0b2 -- runtime/` passed; the final runtime matches the published pin. The 12 runtime traces passed again after changing the consumer dependency.

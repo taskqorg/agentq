@@ -147,11 +147,12 @@ Consumers of CoreQ `agent` at the CoreQ v0.18.0 baseline (default branches read 
 
 | Consumer | Current use | Adoption |
 |---|---|---|
-| PilotQ | `coreq` v0.18.0 `agent` in `src/claude.rs`, `src/host.rs`, `src/manager.rs`, `src/main.rs`, `src/slots.rs` | Its own contract change, then the runtime tag; PilotQ #265 keeps its native qualification |
-| TaskQ | No `agent` use on main; in-flight #2094 (PR #2108) adopts CoreQ `agent` | #2094 keeps its native-proof scope; TaskQ adopts the runtime tag in a later task, never as a second writer on that surface |
+| PilotQ | `coreq` v0.18.0 `agent` in `src/claude.rs`, `src/host.rs`, `src/manager.rs`, `src/main.rs`, `src/slots.rs` | Its own contract change, then the runtime revision; PilotQ #265 keeps its native qualification |
+| TaskQ | No `agent` use on main; in-flight #2094 (PR #2108) adopts CoreQ `agent` | #2094 keeps its native-proof scope; TaskQ adopts the runtime revision in a later task, never as a second writer on that surface |
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
-| AssetQ | No Rust dependency and no agent step yet | Its agent steps adopt `agentq agent turn` or the runtime tag through its own contract |
+| AssetQ | No Rust dependency and no agent step yet | Its agent steps adopt `agentq agent turn` or the runtime revision through its own contract |
 
+- Runtime source pin: `513193c8a96f3de1c71a86291a679230817ce0b2`. The external consumer manifest and lockfile select this published source.
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. Optionally, after a merged main commit passes the `Test` workflow on Linux, macOS and Windows, `scripts/tag_runtime.py` checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.
 - Forward: a consumer edits its contract, switches `coreq::agent` to `agentq_runtime::agent` at one immutable revision (same API and behavior), passes its own fake-client gates and qualifies its real native paths. A fake-client pass never substitutes for native qualification.
