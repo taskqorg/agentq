@@ -14,6 +14,14 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 
 ## Model calls
 
+### Launched sessions and project
+
+- Launched sessions (agentq.md M6.9): the Claude `Stop` hook and the Hermes `post_api_request` hook read the launch marker from their own environment, which the client passes on. A launched session reads no transcript, writes no offset and queues no span. A hook run that skips a launched session is a successful run.
+- Codex model calls arrive at the service, which does not see the client environment. The Codex `SessionStart` hook therefore writes `data/sessions/<first 32 hex of SHA-256 of the session ID>.json` with `launched` and the project code (no path). `agentq model codex` reads the record of the response's native session. A launched record queues nothing. Records are kept 7 days after their last write; a resumed session writes its record again.
+- A Codex call without a session record reads `agentq.project_unknown` `no session start` and is queued; a call that arrives before its `SessionStart` record can be counted twice.
+- Project (M6.10): the working directory is the transcript line's `cwd` for Claude, the hook input's `cwd` for Codex `SessionStart`, and the hook process's working directory for Hermes. agentq walks from it up to the first `taskq.json`. Its `repo` gives `agentq.project` when it is `owner/name` of `[A-Za-z0-9._-]`, neither part starting with `.`, at most 64 characters.
+- `agentq.project_unknown` reasons: `no working directory`, `no known project` (no `taskq.json` up to the root, or no valid `repo` in the nearest one), `no session start` (Codex).
+
 ### Claude transcript reading
 
 - The Claude `Stop` hook reads the session transcript at `transcript_path` and its `<session>/subagents/*.jsonl` from a per-transcript byte offset in `data/model/` (7 days), up to the last complete line. A rewritten or shorter file reads from the start.
