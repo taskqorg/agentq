@@ -57,7 +57,7 @@ The worker benchmark runner (`python3 scripts/benchmark-workers.py`) evaluates e
 
 ### Execution and recorded evidence
 
-`python3 scripts/benchmark-workers.py --mode live --binary <candidate>` runs the same isolated fixtures through `agentq agent turn`. It uses the caller's native authentication, model, permissions and optimizer attachment without changing configuration. `--client-args <JSON-file>` supplies caller-owned per-client arguments; no approval or sandbox flags are added. Paid calls run only with explicit `--mode live`. Missing clients, failed turns, absent counters and ineffective optimization remain visible as unavailable, failed or unknown; there is no synthetic fallback.
+`python3 scripts/benchmark-workers.py --mode live --binary <candidate>` runs the same isolated fixtures through `agentq agent turn`. Live scratch workspaces are inside `benchmarks/.tmp`; smoke uses OS temporary directories. It uses the caller's native authentication, model and optimizer attachment without changing configuration. `--client-args <JSON-file>` supplies caller-owned per-client arguments. Live Antigravity fixtures add the owner-authorized `--dangerously-skip-permissions`; other clients retain their caller permissions. The child PATH includes the existing user-bin directory so official `agy` resolves on a service PATH. Paid calls run only with explicit `--mode live`. Missing clients, failed turns, absent counters and ineffective optimization remain visible as unavailable, failed or unknown; there is no synthetic fallback.
 
 Default `--mode smoke` uses deterministic protocol doubles in OS temporary directories. It checks start/resume, JSON evaluation and the viewer pipeline without model calls. Every artifact and cell says `smoke`; emitted synthetic counters are discarded. Smoke artifacts prove no model quality, native compression, latency or token savings. They are retained as historical runner checks, never dated retroactively or presented as live benchmarks.
 
@@ -71,7 +71,7 @@ Runs are immutable JSON files under `benchmarks/runs/`. `--rebuild-viewer` gener
 
 ### SDD adherence scenario
 
-`--scenario sdd --contract-lint <path>` selects only `T5-sdd-adherence`: six cells, the same prompt and fixture for all three clients and both intents. Supply the unchanged `contract_lint.py` from the specq revision pinned in the Test workflow; its hash is retained with the fixture. The default `engineering` scenario keeps T1–T4 unchanged.
+`--scenario sdd --contract-lint <path>` selects only `T5-sdd-adherence`: six cells, the same prompt and fixture for all three clients and both intents. Supply the unchanged `contract_lint.py` from the specq revision pinned in the Test workflow; the runner checks its pinned SHA-256 before any cell and retains that hash with the fixture. A changed workflow pin requires updating this provenance check. The default `engineering` scenario keeps T1–T4 unchanged.
 
 The owner request in [#190](https://github.com/taskqorg/agentq/issues/190) authorizes changing fixture rule R1 from strictly after reset to at reset and later. R2 requires a spec-only checkpoint before code; R3 requires actual failing and passing Cargo checks and contract lint; R4 limits writable source to `fixture.md` and `src/lib.rs`; R5 requires rule citations and observed evidence in the final JSON. The boundary assertion and 180 noise tests stay unchanged. No client, installation or global configuration edits are authorized by this scenario (M12.3/M12.6).
 

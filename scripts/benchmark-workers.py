@@ -24,6 +24,8 @@ RUNS = ROOT / "benchmarks/runs"
 VIEWER = ROOT / "benchmarks/viewer"
 CLIENTS = ("claude", "codex", "antigravity")
 COUNTERS = ("input", "cache_read", "cache_write", "output")
+SPECQ_REVISION = "7e9adf57287553176d8b3be61c2b22565543dc51"
+CONTRACT_LINT_SHA256 = "77badc19c6a67f550fab1bdd1dffe20aff6f996443362ddc4703aa70bdd8d2df"
 SDD_TASK = "T5-sdd-adherence"
 SDD_CONTRACT = """# Fixture contract
 
@@ -83,6 +85,13 @@ EXPECTED = {
 def total(values):
     """P2: incomplete totals stay unknown, including all absent counters."""
     return sum(values) if values and all(type(v) is int and v >= 0 for v in values) else None
+
+
+def validate_contract_lint(path):
+    if f"ref: {SPECQ_REVISION}" not in (ROOT / ".github/workflows/test.yml").read_text():
+        raise ValueError("workflow specq pin changed; update benchmark linter provenance")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != CONTRACT_LINT_SHA256:
+        raise ValueError(f"contract_lint.py differs from upstream specq {SPECQ_REVISION}")
 
 
 def fixture(root, task=None, contract_lint=None):
@@ -206,6 +215,8 @@ def evaluate(task, reports, root, before=None, snapshots=None):
 
 
 def run_turn(binary, client, opt, prompt, root, args, mode, task, session=None):
+    if mode == "live" and client == "antigravity" and "--dangerously-skip-permissions" not in args:
+        args = [*args, "--dangerously-skip-permissions"]
     request = {"client": client, "root": str(root), "log": str(root / "turn.log"), "input": prompt,
                "session": session, "resume": bool(session), "optimization": opt, "args": args,
                "timeout_s": 120, "context": {"product": "worker-benchmark", "version": "1"}}
@@ -216,6 +227,8 @@ def run_turn(binary, client, opt, prompt, root, args, mode, task, session=None):
         for key, folder in (("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")):
             request["env"][key] = os.environ.get(key, str(Path.home() / folder))
     environment = os.environ.copy()
+    if mode == "live":
+        environment["PATH"] = environment.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")
     if mode == "smoke":
         environment.update(HOME=str(root / "home"), USERPROFILE=str(root / "home"), LOCALAPPDATA=str(root / "home"), APPDATA=str(root / "home"))
     start = time.monotonic()
@@ -245,7 +258,10 @@ def correlate_compression(payload, client, sessions):
 
 
 def run_cell(binary, client, opt, task, mode, args, contract_lint=None):
-    with tempfile.TemporaryDirectory(prefix="agentq-worker-bench-") as tmp:
+    scratch = ROOT / "benchmarks/.tmp" if mode == "live" else None
+    if scratch is not None:
+        scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="agentq-worker-bench-", dir=scratch) as tmp:
         root = Path(tmp) / "fixture"
         root.mkdir()
         (Path(tmp) / "home").mkdir()
@@ -362,6 +378,33 @@ def fake(client):
 
 
 def selftest():
+    from unittest.mock import patch as mock_patch
+    # A1: a substituted linter must be rejected before native evaluation.
+    with tempfile.TemporaryDirectory() as tmp:
+        lint = Path(tmp) / "contract_lint.py"
+        lint.write_text('print("invented linter: 0 errors")\n')
+        try:
+            validate_contract_lint(lint)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a substituted linter was accepted")
+    # #192 / owner steer: only live agy fixtures receive the headless permission flag.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for client, mode, args, expected in (
+            ("antigravity", "live", [], ["--dangerously-skip-permissions"]),
+            ("antigravity", "live", ["--dangerously-skip-permissions"], ["--dangerously-skip-permissions"]),
+            ("antigravity", "smoke", [], []),
+            ("codex", "live", [], []),
+        ):
+            with mock_patch.object(subprocess, "run") as capture:
+                capture.return_value.returncode = 0
+                capture.return_value.stdout = '{"schema":1}'
+                run_turn(Path("invented-binary"), client, "off", "invented prompt", root, args, mode, "T1-context-navigation")
+                assert json.loads(capture.call_args.kwargs["input"])["args"] == expected
+                if mode == "live":
+                    assert Path(capture.call_args.kwargs["env"]["PATH"].split(os.pathsep)[-1]) == Path.home() / ".local/bin"
     # R13/P2: absent usage, model failures, and smoke must never become successful savings.
     assert total([1, None]) is None and total([]) is None and total([0, 2]) == 2
     cell = {"source": "smoke"}
@@ -403,7 +446,11 @@ def selftest():
         assert evaluate("T4-code-patch-verification", patch, root, before)["quality"] == 0
         (root / "window.py").unlink()
         assert evaluate("T4-code-patch-verification", patch, root, before)["quality"] == 0
-    unavailable = run_cell(Path("/nonexistent-agentq-worker-benchmark"), "antigravity", "on", "T1-context-navigation", "live", [])
+    with mock_patch.object(sys.modules[__name__], "run_turn", wraps=run_turn) as turn:
+        unavailable = run_cell(Path("/nonexistent-agentq-worker-benchmark"), "antigravity", "on", "T1-context-navigation", "live", [])
+        workspace = turn.call_args.args[4]
+        assert workspace.is_relative_to(ROOT / "benchmarks/.tmp")
+        assert not workspace.exists(), "scratch must be removed after the cell"
     assert unavailable["source"] == "live" and unavailable["reports"][0]["outcome"] == "unknown"
     assert unavailable["usage"]["total"] is None and unavailable["rubric"]["quality"] == 0
     live = {"source": "live", "optimization": "off", "rubric": {"quality": 100}, "usage": {"input": 100, "model": "invented-model"}, "reports": [{"optimization": {"effective": "off"}}]}
@@ -474,6 +521,11 @@ def main():
     binary = args.binary.resolve(strict=True)
     if args.scenario == "sdd" and not args.contract_lint:
         parser.error("--scenario sdd requires --contract-lint")
+    if args.scenario == "sdd":
+        try:
+            validate_contract_lint(args.contract_lint)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
     tasks = (SDD_TASK,) if args.scenario == "sdd" else TASKS
     client_args = json.loads(args.client_args.read_text()) if args.client_args else {}
     if not isinstance(client_args, dict) or any(k not in CLIENTS or not isinstance(v, list) or any(not isinstance(a, str) for a in v) for k,v in client_args.items()):
