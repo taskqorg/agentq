@@ -42,7 +42,7 @@ fn read(path: &Path) -> Result<Option<String>, ()> {
     }
 }
 
-pub const AGENTS: [&str; 4] = ["codex", "claude", "hermes", "claude-desktop"];
+pub const AGENTS: [&str; 5] = ["codex", "claude", "hermes", "claude-desktop", "antigravity"];
 
 fn read_json(path: &Path, missing: Value) -> Result<Value, String> {
     match std::fs::read(path) {
@@ -79,7 +79,7 @@ pub fn state(data: &Path) -> Result<Value, String> {
             ["registered", "loaded", "active", "foreign"].iter().all(|k| o.get(*k).is_none_or(|v| v.is_null() || v.is_boolean()))
                 && o.get("state").is_none_or(Value::is_string) && o.get("owner").is_none_or(|v| v.as_u64().is_some())
         }))
-        || !s["profiles"].as_object().is_some_and(|p| p.len() <= 4 && p.iter().all(|(agent, r)| {
+        || !s["profiles"].as_object().is_some_and(|p| p.len() <= AGENTS.len() && p.iter().all(|(agent, r)| {
             AGENTS.contains(&agent.as_str()) && r.is_object() && r["root"].as_str().is_some_and(|p| Path::new(p).is_absolute())
                 && matches!(r["phase"].as_str(), Some("detaching" | "detached" | "enabling" | "conflict"))
                 && r["at"].as_u64().is_some() && r["direct"].is_boolean()

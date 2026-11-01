@@ -95,9 +95,12 @@ fn antigravity_executable() -> PathBuf {
     if let Some(path) = std::env::var_os("ANTIGRAVITY_AGENTAPI_EXE").filter(|s| !s.is_empty()) {
         return PathBuf::from(path);
     }
-    let cli = which("agy");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let path = user_bin_path(&path, home.as_deref()).unwrap_or(path);
+    let cli = which_in("agy", &path);
     if cli.is_absolute() { return cli; }
-    let api = which("agentapi");
+    let api = which_in("agentapi", &path);
     if api.is_absolute() { return api; }
     if let Some(home) = base_home(Client::Antigravity) {
         let p = home.join("bin/agentapi");
@@ -209,11 +212,15 @@ impl Accounts {
 }
 
 /// The client's own home: `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `ANTIGRAVITY_HOME` (or `ANTIGRAVITY_APP_DATA_DIR`)
-/// of this process, else `~/.claude` / `~/.codex` / `~/.gemini/antigravity` (a Windows service has no `HOME`, so `USERPROFILE`).
+/// of this process, else `~/.claude` / `~/.codex` / `~/.gemini/antigravity-cli` when present, else the legacy
+/// `~/.gemini/antigravity` (a Windows service has no `HOME`, so `USERPROFILE`).
 pub fn base_home(client: Client) -> Option<PathBuf> {
     std::env::var_os(client.home_var()).filter(|v| !v.is_empty()).map(PathBuf::from)
         .or_else(|| (client == Client::Antigravity).then(|| std::env::var_os("ANTIGRAVITY_APP_DATA_DIR")).flatten().filter(|v| !v.is_empty()).map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| Path::new(&h).join(client.home_dir())))
+        .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| {
+            let cli = Path::new(&h).join(".gemini/antigravity-cli");
+            if client == Client::Antigravity && cli.is_dir() { cli } else { Path::new(&h).join(client.home_dir()) }
+        }))
 }
 
 /// `<base home>/<tool>-accounts/<label>` for a non-default account; None for `default` (the child keeps the
@@ -1011,6 +1018,34 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #192 A1: service PATH misses user installs; native CLI and legacy homes must both remain usable.
+    #[test]
+    fn native_agy_user_bin_and_homes() {
+        if std::env::var_os("AGENTQ_TEST_AGY_HOME").is_some() {
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            assert_eq!(antigravity_executable(), home.join(".local/bin/agy"));
+            assert!(missing_cli(Client::Antigravity).is_none());
+            let legacy = home.join(".gemini/antigravity");
+            let cli = home.join(".gemini/antigravity-cli");
+            std::fs::create_dir_all(&legacy).unwrap();
+            assert_eq!(base_home(Client::Antigravity), Some(legacy.clone()));
+            std::fs::create_dir_all(&cli).unwrap();
+            assert_eq!(base_home(Client::Antigravity), Some(cli));
+            return;
+        }
+        let home = crate::scratch("agy-lookup");
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin/agy"), "invented CLI fixture").unwrap();
+        // A subprocess owns the environment, so parallel tests never see a fake login home or PATH.
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "agent::tests::native_agy_user_bin_and_homes", "--nocapture"])
+            .env("AGENTQ_TEST_AGY_HOME", "1").env("HOME", &home).env("USERPROFILE", &home)
+            .env("PATH", &home).env_remove("ANTIGRAVITY_HOME").env_remove("ANTIGRAVITY_APP_DATA_DIR")
+            .env_remove("ANTIGRAVITY_AGENTAPI_EXE").status().unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+        assert!(status.success());
+    }
 
     fn events(text: &str) -> Vec<Value> { text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect() }
 

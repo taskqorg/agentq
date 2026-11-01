@@ -97,6 +97,8 @@ def evaluate(task, reports, root, before=None, snapshots=None):
 
 
 def run_turn(binary, client, opt, prompt, root, args, mode, task, session=None):
+    if mode == "live" and client == "antigravity" and "--dangerously-skip-permissions" not in args:
+        args = [*args, "--dangerously-skip-permissions"]
     request = {"client": client, "root": str(root), "log": str(root / "turn.log"), "input": prompt,
                "session": session, "resume": bool(session), "optimization": opt, "args": args,
                "timeout_s": 120, "context": {"product": "worker-benchmark", "version": "1"}}
@@ -133,7 +135,10 @@ def correlate_compression(payload, client, sessions):
 
 
 def run_cell(binary, client, opt, task, mode, args):
-    with tempfile.TemporaryDirectory(prefix="agentq-worker-bench-") as tmp:
+    scratch = ROOT / "benchmarks/.tmp" if mode == "live" else None
+    if scratch is not None:
+        scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="agentq-worker-bench-", dir=scratch) as tmp:
         root = Path(tmp) / "fixture"
         root.mkdir()
         (Path(tmp) / "home").mkdir()
@@ -242,6 +247,21 @@ def fake(client):
 
 
 def selftest():
+    from unittest.mock import patch as mock_patch
+    # #192 A3: inspect the actual runtime request; permission bypass is limited to live agy fixtures.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for client, mode, args, expected in (
+            ("antigravity", "live", [], ["--dangerously-skip-permissions"]),
+            ("antigravity", "live", ["--model=pro", "--dangerously-skip-permissions"], ["--model=pro", "--dangerously-skip-permissions"]),
+            ("antigravity", "smoke", [], []),
+            ("codex", "live", [], []),
+        ):
+            with mock_patch.object(subprocess, "run") as capture:
+                capture.return_value.returncode = 0
+                capture.return_value.stdout = '{"schema":1}'
+                run_turn(Path("invented-binary"), client, "off", "invented prompt", root, args, mode, "T1-context-navigation")
+                assert json.loads(capture.call_args.kwargs["input"])["args"] == expected
     # R13/P2: absent usage, model failures, and smoke must never become successful savings.
     assert total([1, None]) is None and total([]) is None and total([0, 2]) == 2
     cell = {"source": "smoke"}
@@ -283,7 +303,11 @@ def selftest():
         assert evaluate("T4-code-patch-verification", patch, root, before)["quality"] == 0
         (root / "window.py").unlink()
         assert evaluate("T4-code-patch-verification", patch, root, before)["quality"] == 0
-    unavailable = run_cell(Path("/nonexistent-agentq-worker-benchmark"), "antigravity", "on", "T1-context-navigation", "live", [])
+    with mock_patch.object(sys.modules[__name__], "run_turn", wraps=run_turn) as turn:
+        unavailable = run_cell(Path("/nonexistent-agentq-worker-benchmark"), "antigravity", "on", "T1-context-navigation", "live", [])
+        workspace = turn.call_args.args[4]
+        assert workspace.is_relative_to(ROOT / "benchmarks/.tmp")
+        assert not workspace.exists(), "scratch must be removed after the cell"
     assert unavailable["source"] == "live" and unavailable["reports"][0]["outcome"] == "unknown"
     assert unavailable["usage"]["total"] is None and unavailable["rubric"]["quality"] == 0
     live = {"source": "live", "optimization": "off", "rubric": {"quality": 100}, "usage": {"input": 100, "model": "invented-model"}, "reports": [{"optimization": {"effective": "off"}}]}

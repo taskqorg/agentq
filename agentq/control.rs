@@ -254,6 +254,7 @@ fn inventory(listing: &str, ignore: &[u32]) -> Result<std::collections::BTreeMap
             || base == "chatgpt" || name.contains("/chatgpt.app/") || base.starts_with("chatgpt helper") { Some("codex") }
             else if base == "claude" || name.contains("/claude.app/") || base.starts_with("claude helper") { Some("claude") }
             else if base == "hermes" { Some("hermes") }
+            else if ["agy", "agentapi", "antigravity"].contains(&base) || name.contains("/antigravity.app/") { Some("antigravity") }
             else if base == "agentq" { Some("agentq") }
             else if ["launchctl", "systemctl", "schtasks"].contains(&base) { Some("controllers") }
             else { None };
@@ -394,6 +395,57 @@ mod tests {
         std::fs::write(d.join("integration.json"), "{}").unwrap();
         assert!(disabled(&d, "codex").is_err());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    // #192 A2 / M4.1, M4.6, M4.7, M9.2: native hook lifecycle preserves foreign hooks and disable intent.
+    #[test]
+    fn antigravity_hook_lifecycle() {
+        let counts = inventory("123 1 /bin/agy\n124 1 /bin/agentapi\n125 1 /Applications/Antigravity.app/Contents/MacOS/Antigravity\n", &[]).unwrap();
+        assert_eq!(counts.get("antigravity"), Some(&3), "native clients must prevent a false drained state");
+        let mut h = host("antigravity", false);
+        let root = h.data.parent().unwrap().parent().unwrap().join("gemini");
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let path = root.join("config/hooks.json");
+        let foreign = json!({"enabled": true, "PreToolUse": [{"matcher": "other", "hooks": [{"command": "invented-foreign"}]}]});
+        std::fs::write(&path, json!({"foreign": foreign, "agentq": {"PreToolUse": [foreign["PreToolUse"][0].clone()]}}).to_string()).unwrap();
+        let c = profiles::Client { kind: "antigravity", agent: "antigravity", root, files: vec![path.clone()] };
+        h.clients.push(c.clone());
+        let ws = wants(&c, &h.data, &h.exe);
+        let journal = h.data.join("owned.json");
+        let lines = onboard::apply(&ws, &journal).unwrap();
+        assert!(!lines.iter().any(|l| l.starts_with("conflict:")), "{lines:?}");
+        assert!(onboard::apply(&ws, &journal).unwrap().iter().all(|l| l.starts_with("kept:")));
+        let read = || serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let status = || profiles::status_with(&h.clients, &h.data, crate::now())["profiles"].as_array().unwrap().iter().find(|p| p["kind"] == "antigravity").unwrap().clone();
+        assert_eq!(status()["hooks"], "registered");
+        assert_eq!(status()["effective"]["state"], "configured");
+        assert_eq!(read()["agentq"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(change(&h, Some("antigravity"), false)["outcome"], "applied");
+        assert_eq!(status()["integration"]["configuration"], "detached");
+        assert_eq!(status()["hooks"], "absent");
+        assert_eq!(read()["foreign"], foreign);
+        assert_eq!(read()["agentq"]["PreToolUse"], foreign["PreToolUse"]);
+        assert_eq!(change(&h, Some("antigravity"), true)["outcome"], "applied");
+        assert_eq!(status()["hooks"], "registered");
+        executor::hook_failed(&h.data, "antigravity", "PreToolUse", 10, "invented failure");
+        assert!(executor::hook_failures(&h.data).iter().any(|f| f.starts_with("antigravity PreToolUse")));
+        executor::stamp(&h.data, "antigravity", "PreToolUse", 11);
+        assert!(executor::hook_failures(&h.data).is_empty());
+        assert_eq!(change(&h, None, false)["outcome"], "applied");
+        assert_eq!(state(&h.data).unwrap()["profiles"].as_object().unwrap().len(), 5);
+        assert_eq!(change(&h, None, true)["outcome"], "applied");
+        let mut edited = read();
+        edited["agentq"]["PreToolUse"][1]["hooks"][0]["command"] = format!("\"{}\" hook antigravity PreToolUse --invented-edit", h.exe.display()).into();
+        std::fs::write(&path, edited.to_string()).unwrap();
+        assert_eq!(change(&h, Some("antigravity"), false)["outcome"], "partial");
+        assert_eq!(read(), edited, "a later edit is kept, never overwritten");
+        std::fs::write(&path, "{invalid").unwrap();
+        assert_eq!(status()["hooks"], "unknown");
+        let inactive = r#"{"agentq":{"enabled":false}}"#;
+        std::fs::write(&path, inactive).unwrap();
+        assert!(onboard::apply(&ws, &journal).unwrap().iter().any(|l| l.starts_with("conflict:")));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), inactive, "native disabled groups remain a conflict");
+        std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
     }
 
     fn host(name: &str, routed: bool) -> executor::Host {
