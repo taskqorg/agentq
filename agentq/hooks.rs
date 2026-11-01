@@ -1,4 +1,4 @@
-//! Claude's native hooks; keep permission classification, input fields and command semantics.
+//! Claude and Antigravity native hooks; keep permission classification, input fields and command semantics.
 use serde_json::{Value, json};
 use std::path::Path;
 

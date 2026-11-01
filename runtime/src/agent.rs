@@ -29,7 +29,7 @@ impl Client {
             _ => None,
         }
     }
-    /// The runtime code in observations; also the CLI binary name.
+    /// The runtime code in observations.
     pub fn code(self) -> &'static str {
         match self {
             Client::Claude => "claude",

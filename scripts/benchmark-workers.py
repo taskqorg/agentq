@@ -71,6 +71,7 @@ def evaluate(task, reports, root):
         checks["no_file_writes"] = not (root / "memory.txt").exists()
         checks["first_answer"] = reports[0].get("text") == '{"remembered":true}' if reports else False
     if task == "T4-code-patch-verification":
+        checks["minimal_patch"] = (root / "window.py").read_text() == WINDOW.replace("now > reset", "now >= reset")
         checks["comment_preserved"] = (root / "window.py").read_text().startswith(WINDOW.splitlines()[0])
         try:
             checks["boundary_verification"] = subprocess.run([sys.executable, "verify.py"], cwd=root, capture_output=True, timeout=10).returncode == 0
@@ -91,9 +92,12 @@ def run_turn(binary, client, opt, prompt, root, args, mode, task, session=None):
     if mode == "smoke":
         request.update(command=[sys.executable, str(Path(__file__).resolve()), "--fake-client", client],
                        home=str(root / "home"), env={"BENCH_TASK": task, "COREQ_FAKE_AGENT": client, "HOME": str(root / "home"), "USERPROFILE": str(root / "home")})
+    environment = os.environ.copy()
+    if mode == "smoke":
+        environment.update(HOME=str(root / "home"), USERPROFILE=str(root / "home"), LOCALAPPDATA=str(root / "home"), APPDATA=str(root / "home"))
     start = time.monotonic()
     try:
-        proc = subprocess.run([str(binary), "agent", "turn"], input=json.dumps(request), text=True, capture_output=True, timeout=135, cwd=ROOT)
+        proc = subprocess.run([str(binary), "agent", "turn"], input=json.dumps(request), text=True, capture_output=True, timeout=135, cwd=ROOT, env=environment)
         if proc.returncode:
             report = {"outcome": "unavailable", "error": "runtime-command-failed", "detail": proc.stderr[-1000:].replace(str(root), "<fixture>")}
         else:
@@ -107,6 +111,14 @@ def run_turn(binary, client, opt, prompt, root, args, mode, task, session=None):
         report["usage"] = {**dict.fromkeys((*COUNTERS, "calls", "model")), "unknown": "synthetic-protocol-double"}
     report["wall_ms"] = round((time.monotonic() - start) * 1000)
     return report
+
+
+def correlate_compression(payload, client, sessions):
+    if not isinstance(payload, dict) or payload.get("errors") != [] or not isinstance(payload.get("records"), list):
+        return [], "unreadable-compression-records"
+    keys = ("event_id", "agent", "session", "outcome", "reason", "bytes_in", "bytes_out")
+    rows = [dict((k, r.get(k)) for k in keys) for r in payload["records"] if isinstance(r, dict) and r.get("agent") == client and r.get("session") in sessions]
+    return rows, None if rows else "no-session-correlated-compression-evidence"
 
 
 def run_cell(binary, client, opt, task, mode, args):
@@ -132,17 +144,27 @@ def run_cell(binary, client, opt, task, mode, args):
         for report in reports:
             if isinstance(report.get("text"), str):
                 report["text"] = report["text"].replace(str(root), "<fixture>")
+        rows, evidence_unknown = [], "synthetic-protocol-double"
+        if mode == "live":
+            sessions = {r["session"] for r in reports if isinstance(r.get("session"), str)}
+            try:
+                captured = subprocess.run([str(binary), "stats", "--records"], capture_output=True, text=True, timeout=15, cwd=ROOT)
+                payload = json.loads(captured.stdout) if captured.returncode == 0 else None
+                rows, evidence_unknown = correlate_compression(payload, client, sessions)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                evidence_unknown = "unreadable-compression-records"
+        measured = {"raw": total([r["bytes_in"] for r in rows]), "delivered": total([r["bytes_out"] for r in rows])} if rows else None
         return {"client": client, "optimization": opt, "task": task, "source": mode, "fixture_sha256": digest,
                 "prompts": prompts, "reports": reports, "usage": usage, "wall_ms": total([r["wall_ms"] for r in reports]),
-                "rubric": rubric, "tool_bytes": None, "tool_bytes_unknown": "not-measured",
-                "compression_evidence": None}
+                "rubric": rubric, "tool_bytes": measured, "tool_bytes_unknown": evidence_unknown,
+                "compression_evidence": rows or None}
 
 
 def paired_delta(off, on):
     # M12.5: configuration alone cannot prove actual optimization. No optimistic fallback.
     if off["source"] != "live" or on["source"] != "live":
         return {"input_saved": None, "unknown": "smoke-is-not-native-evidence"}
-    if not on.get("compression_evidence"):
+    if not any(r.get("outcome") == "compressed" for r in on.get("compression_evidence") or []):
         return {"input_saved": None, "unknown": "no-session-correlated-compression-evidence"}
     if not all(c["rubric"]["quality"] == 100 for c in (off, on)) or not off["usage"].get("model") or off["usage"]["model"] != on["usage"].get("model"):
         return {"input_saved": None, "unknown": "incomplete-or-unmatched-pair"}
@@ -212,6 +234,10 @@ def selftest():
     cell = {"source": "smoke"}
     assert paired_delta(cell, cell)["input_saved"] is None
     assert paired_delta({"source": "live"}, {"source": "live"})["unknown"] == "no-session-correlated-compression-evidence"
+    receipt = {"event_id": "invented", "agent": "antigravity", "session": "own", "outcome": "compressed", "bytes_in": 100, "bytes_out": 20}
+    assert correlate_compression({"errors": [], "records": [receipt]}, "antigravity", {"own"})[0][0]["bytes_in"] == 100
+    assert not correlate_compression({"errors": [], "records": [receipt]}, "antigravity", {"foreign"})[0]
+    assert not correlate_compression({"errors": ["corrupt"], "records": [receipt]}, "antigravity", {"own"})[0]
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         fixture(root)
@@ -229,6 +255,11 @@ def selftest():
     unavailable = run_cell(Path("/nonexistent-agentq-worker-benchmark"), "antigravity", "on", "T1-context-navigation", "live", [])
     assert unavailable["source"] == "live" and unavailable["reports"][0]["outcome"] == "unknown"
     assert unavailable["usage"]["total"] is None and unavailable["rubric"]["quality"] == 0
+    live = {"source": "live", "optimization": "off", "rubric": {"quality": 100}, "usage": {"input": 100, "model": "invented-model"}, "reports": [{"optimization": {"effective": "off"}}]}
+    on = {**live, "optimization": "on", "usage": {"input": 60, "model": "invented-model"}, "reports": [{"optimization": {"effective": "on"}}], "compression_evidence": [receipt]}
+    assert paired_delta(live, on)["input_saved"] == 40
+    on["usage"]["input"] = None
+    assert paired_delta(live, on)["input_saved"] is None
     print("PASS: unknown usage, no synthetic fallback/savings, executable rubric, immutable history")
 
 
@@ -268,6 +299,7 @@ def main():
     run = {"schema": 1, "run_id": now.strftime("%Y%m%dT%H%M%S%fZ") + "-" + sha[:12] + "-" + args.mode,
            "created_at": now.isoformat(), "git_sha": sha, "dirty": bool(git("status", "--porcelain")),
            "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+           "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
            "agentq_version": subprocess.check_output([str(binary), "--version"], text=True).strip(),
            "host": {"os": platform.system(), "arch": platform.machine(), "python": platform.python_version()},
            "mode": args.mode, "label": args.label, "client_args": client_args, "cells": cells,
