@@ -208,6 +208,15 @@ pub struct Spec {
     pub env: Vec<(OsString, OsString)>,
 }
 
+/// The last child override wins, matching `Command::envs`.
+pub(crate) fn child_env(spec: &Spec, key: &str) -> Option<OsString> {
+    spec.env.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone()).or_else(|| std::env::var_os(key))
+}
+
+pub(crate) fn spec_home(spec: &Spec) -> Option<PathBuf> {
+    spec.home.clone().or_else(|| child_env(spec, spec.client.home_var()).map(PathBuf::from)).or_else(|| base_home(spec.client))
+}
+
 /// The client argument list after the executable, in TaskQ's order.
 pub fn args(spec: &Spec) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
@@ -294,7 +303,7 @@ impl Turn {
         // A client that never reads stdin must not block the caller; the writer ends with the pipe.
         std::thread::spawn(move || { let _ = stdin.write_all(&input); });
         Ok(Turn { client: spec.client, child, log: log.to_path_buf(), start, pos: start, ended: false, stopping: false, timed_out: false,
-            started, started_ms, exit: None, home: spec.home.clone(), resumed: spec.resume.then(|| spec.session.clone()) })
+            started, started_ms, exit: None, home: spec_home(spec), resumed: spec.resume.then(|| spec.session.clone()) })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }

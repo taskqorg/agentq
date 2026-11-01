@@ -206,12 +206,12 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M12.5** Each launch states optimization intent `inherit`, `off` or `on` and gets the effective state `on`, `off` or `unknown` with a reason, read from the installation without writing it. Host and agent switches and disable win; `on` never enables anything.
 - **M12.6** A launch never edits global or client configuration, previously transmitted replay bytes, provider or model. `off` reaches the optimizer only through the child: env `AGENTQ_OPTIMIZATION=off`, and for a Codex profile routed through agentq the per-launch header override `x-agentq-optimization: off`.
 - **M12.7** Every compression adapter treats `off` as disabled for that session. An absent or failed optimizer keeps native output (P1); a runtime failure stays a runtime failure.
-- It moved unchanged from CoreQ v0.18.0 `agent` with its contract tests; TaskQ's argument order and parsers stay unchanged.
+- It derives from CoreQ v0.18.0 `agent` with its contract tests; TaskQ's argument order and parsers stay unchanged.
 - Effective `on` means configured at launch, not verified (P2); the session's `agentq.compress` records prove actual compression. Resolution order, reasons, JSON contract and fake-client traces: [RUNTIME.md](docs/spec/RUNTIME.md).
-- During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime tag through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](docs/spec/RUNTIME.md#adoption-and-rollback)).
+- During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime revision through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](docs/spec/RUNTIME.md#adoption-and-rollback)).
 
 ## Linked detail
-- [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): product outcomes R1–R12.
+- [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): product outcomes R1–R13.
 - [docs/spec/VERIFICATION.md](docs/spec/VERIFICATION.md): minimal product acceptance and live check records.
 - [docs/spec/ACCOUNTING.md](docs/spec/ACCOUNTING.md): optimization result definitions O1–O4.
 - [docs/spec/COMPRESSION.md](docs/spec/COMPRESSION.md): compression entries, config, stats record and accounting coverage.

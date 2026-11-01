@@ -140,7 +140,7 @@ class State:
 
     def transform(self, session, body, off=False):
         if isinstance(body,dict) and isinstance(body.get('response'),dict):
-            nested = self.transform(session, body['response'])
+            nested = self.transform(session, body['response'], off)
             return body if nested is body['response'] else dict(body, response=nested)
         if not session or len(session) > 256 or not isinstance(body, dict) or not isinstance(body.get('input'), list):
             return body

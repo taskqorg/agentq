@@ -121,23 +121,23 @@ The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `start
 
 ## Optimization intent
 
-`optimization::prepare(intent, product, spec, install)` resolves the effective state and adapts the child; `observe` resolves only. Both read and never write. `install` defaults to `optimization::install_root()` (agentq.md § 5 layout); the client home is `Spec::home`, else the client's own home.
+`optimization::prepare(intent, product, spec, install)` resolves the effective state and adapts the child; `observe` resolves only. Both read and never write. The JSON command selects `optimization::install_root()` (agentq.md § 5 layout); library callers pass an installation or `None` for no installation; the client home is `Spec::home`, else the last child `env` home override, else the client's own home. An inherited `AGENTQ_OPTIMIZATION=off` is observed as `off` and carried into every Codex launch mode.
 
 | Order | Condition | Effective | Reason |
 |---|---|---|---|
-| 1 | Intent `off` | `off` | `launch_off` |
+| 1 | Explicit or inherited `off` | `off` | `launch_off` |
 | 2 | No `<install>/data` | `off` | `not_installed` |
-| 3 | `data/integration.json` or `data/config.json` unreadable or not an object | `unknown` | `unreadable_state` |
+| 3 | `data/integration.json` or `data/config.json` unreadable or invalid under the shared lifecycle/config validators | `unknown` | `unreadable_state` |
 | 4 | Host disabled or the client's profile disabled (agentq.md § 4) | `off` | `integration_disabled` |
 | 5 | `compression.enabled` false | `off` | `host_off` |
 | 6 | `compression.agents.<client>` false | `off` | `agent_off` |
 | 7 | No client home known | `unknown` | `no_client_home` |
-| 8 | Codex `config.toml` top-level `model_provider = "agentq"`, Claude `settings.json` runs ` hook claude ` | `on` | `configured` |
+| 8 | Codex `config.toml` top-level `model_provider = "agentq"` (inline comments allowed), Claude `settings.json` has a compression hook command | `on` | `configured` |
 | 9 | Client configuration unreadable | `unknown` | `unreadable_client_config` |
 | 10 | Otherwise | `off` | `not_attached` |
 
 - `inherit` and `on` resolve the same way: `on` records the caller's request and never enables a switch, an integration or a disabled profile.
-- `off` adds child env `AGENTQ_OPTIMIZATION=off`. Claude hooks, `agentq run` and `agentq compress` inherit it and pass through with reason `disabled`. For a Codex home routed through agentq it also adds `-c model_providers.agentq.http_headers.x-agentq-optimization="off"` to that launch; the loopback provider passes `off` to the compressor, and replayed bytes of earlier calls stay unchanged (agentq.md § 3).
+- Explicit or inherited `off` adds child env `AGENTQ_OPTIMIZATION=off`. Claude hooks, `agentq run` and `agentq compress` inherit it and pass through with reason `disabled`. For a Codex home routed through agentq it also adds `-c model_providers.agentq.http_headers.x-agentq-optimization="off"` to CLI, app queue and app-server commands; the loopback provider passes `off` to the compressor, and replayed bytes of earlier calls stay unchanged (agentq.md § 3).
 - Every launch adds `AGENTQ_LAUNCHER=<product>` unless `TASKQ_TASK` or `AGENTQ_LAUNCHER` is already set, so agentq queues no second `agentq.model` count (agentq.md M6.9).
 - Effective `on` is the configuration at launch. Actual compression is proven only by the session's `agentq.compress` records.
 
@@ -152,9 +152,9 @@ Consumers of CoreQ `agent` at the CoreQ v0.18.0 baseline (default branches read 
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
 | AssetQ | No Rust dependency and no agent step yet | Its agent steps adopt `agentq agent turn` or the runtime tag through its own contract |
 
-- Publication: after a merged main commit passes the `Test` workflow on Linux, macOS and Windows, `scripts/tag_runtime.py` checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
+- Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. Optionally, after a merged main commit passes the `Test` workflow on Linux, macOS and Windows, `scripts/tag_runtime.py` checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.
-- Forward: a consumer edits its contract, switches `coreq::agent` to `agentq_runtime::agent` at one tag (same API and behavior), passes its own fake-client gates and qualifies its real native paths. A fake-client pass never substitutes for native qualification.
+- Forward: a consumer edits its contract, switches `coreq::agent` to `agentq_runtime::agent` at one immutable revision (same API and behavior), passes its own fake-client gates and qualifies its real native paths. A fake-client pass never substitutes for native qualification.
 - Rollback: the consumer selects its previous immutable build. Native sessions, persisted checkpoints and active work stay valid because the API, checkpoint formats and observation IDs are unchanged; no paid replay, credential, model, grant or capacity change.
 - CoreQ keeps its `agent` module frozen and compatible during adoption. Its retirement is a separate CoreQ task, only after every consumer above adopted and qualified.
 - This repository changes no consumer's live install; installed services keep running until their owners adopt.

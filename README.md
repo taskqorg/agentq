@@ -1,6 +1,6 @@
 # agentq
 
-agentq installs, routes and observes context optimization for Codex, Claude Code and Hermes on one host. One static binary per OS; no Node, npm or toolchain on the host. Decisions: [agentq.md](agentq.md). Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md).
+agentq installs, routes and observes context optimization for Codex, Claude Code and Hermes on one host. Its reusable Codex/Claude worker runtime also runs without an optimizer installation. One static binary per OS; no Node, npm or toolchain on the host. Decisions: [agentq.md](agentq.md). Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md).
 
 ## Install through an agent
 
@@ -49,6 +49,8 @@ agentq status
 The transition preserves native login, model, permissions, sandbox, compression preferences, local originals and queued observations. A target-name collision or changed owned value is reported and kept. Repeating the command finishes an interrupted transition. `agentq migrate-names --rollback` restores the recorded owned names only while the ownership/control metadata still matches the cutover; select an older binary only after that rollback. Private rollback metadata stays in the installation data folder. Historical transcripts, evidence and retired-package removal rules keep their original names.
 
 ## Commands
+
+- `agentq agent turn` runs one Codex/Claude turn from JSON stdin and returns a JSON report. No optimizer service is required. Library and request format: [runtime contract](docs/spec/RUNTIME.md).
 
 - `agentq compress <agent>` reads one tool-result JSON object (`adapter`, `tool`, `text`) and returns `text` and a recovery `ref`. Unqualified hook/provider recipes pass unchanged. `agentq stats [--json]` shows local call outcomes and bytes; missing or corrupt records are unknown.
 - `agentq profile [--json]` ranks compression and export operations by time, failure rate and variance against their budgets over the last 7 days; operations without readable samples, and proxy requests, read unknown. `agentq profile trace on [<minutes>]|off` records per-step traces for at most 60 minutes.

@@ -20,6 +20,7 @@ fn main() {
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("json_turns_run_plain_without_the_optimizer", json_turns_run_plain_without_the_optimizer),
+        ("off_reaches_codex_queue_and_app_server", off_reaches_codex_queue_and_app_server),
         ("external_consumer_builds_and_plans_turns", external_consumer_builds_and_plans_turns),
     ];
     for (name, test) in tests {
@@ -576,6 +577,9 @@ fn json_turns_run_plain_without_the_optimizer() {
 // Chain: agentq.md § 12 and RUNTIME.md § Adoption and rollback: a consumer outside the workspace builds against the
 // runtime alone and plans both clients without an installation. Risk: the published crate needs workspace-only state.
 fn external_consumer_builds_and_plans_turns() {
+    let publication = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/runtime_publication.py");
+    let out = Command::new(if cfg!(windows) { "python" } else { "python3" }).arg(publication).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/runtime-consumer");
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/runtime-consumer");
     let out = Command::new(env!("CARGO")).args(["run", "--locked", "-q", "--manifest-path"]).arg(dir.join("Cargo.toml"))
@@ -583,4 +587,23 @@ fn external_consumer_builds_and_plans_turns() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("claude: -p --output-format stream-json") && text.contains("codex: exec --json"), "{text}");
+}
+
+// M12.6/A5: off survives Codex queue and app-server adaptation; native mode and caller policy stay intact.
+fn off_reaches_codex_queue_and_app_server() {
+    use agentq_runtime::optimization::{self, Intent};
+    let root = scratch("off-modes");
+    std::fs::write(root.join("config.toml"), "model_provider = \"agentq\"\n").unwrap();
+    let mut spec = Spec { client: Client::Codex, root: root.clone(), session: "native-thread".into(), resume: true,
+        args: vec![], home: Some(root.clone()), env: vec![] };
+    optimization::prepare(Intent::Off, "fixtureq", &mut spec, None);
+    let mut base = fake_client(Client::Codex); base.env("COREQ_FAKE_CONTROL", "1");
+    agent::app_queue(base, &spec, "owned input reference", Duration::from_secs(5)).unwrap();
+    let queue: Value = serde_json::from_str(&std::fs::read_to_string(root.join("native-control.json")).unwrap()).unwrap();
+    assert!(queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue lost launch off: {queue}");
+    let command = agent::app_server_command(fake_client(Client::Codex), &spec).unwrap();
+    let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
+    assert_eq!(args[0], "app-server");
+    assert!(args.iter().any(|s| s.contains("x-agentq-optimization")));
+    std::fs::remove_dir_all(root).unwrap();
 }

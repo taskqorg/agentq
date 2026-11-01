@@ -37,7 +37,9 @@ def main():
     probe = ['git', 'ls-remote', '--exit-code', '--tags', 'origin', tag]
     existing = subprocess.run(probe, text=True, capture_output=True)
     if existing.returncode == 0:
-        print(f'{tag} exists; preserved without replacement')
+        if existing.stdout.split() != [sha, tag]:
+            raise ValueError('existing runtime tag differs from checked candidate')
+        print(f'{tag} -> {sha}; existing tag verified')
         return
     if existing.returncode != 2:
         existing.check_returncode()
