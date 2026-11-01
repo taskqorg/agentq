@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentQ worker benchmark history</title>
+<style>
+:root { color-scheme: light dark; font: 17px/1.5 system-ui,sans-serif; --border: #89919b; }
+body { max-width: 1400px; margin: auto; padding: 24px; }
+h1 { font-size: 1.8rem; margin-bottom: 0; } h2 { font-size: 1.25rem; }
+p { max-width: 90ch; } .notice { padding: 14px; border: 2px solid var(--border); border-radius: 8px; }
+.filters { display: grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap: 16px; margin: 24px 0; }
+label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+select { font: inherit; max-width: 100%; padding: 8px; } :focus-visible { outline: 3px solid #438bea; outline-offset: 3px; }
+.run { margin: 32px 0; } .meta { overflow-wrap: anywhere; }
+.scroll { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+th,td { border-bottom: 1px solid var(--border); padding: 10px; text-align: left; vertical-align: top; }
+th { white-space: nowrap; } td small { display: block; } details { margin: 12px 0; border: 1px solid var(--border); padding: 12px; border-radius: 6px; }
+summary { cursor: pointer; font-weight: 600; } pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
+@media(max-width:650px) {body {padding: 12px;} h1 {font-size:1.45rem;} .filters {grid-template-columns:minmax(0,1fr);} th,td {padding:8px;} }
+</style>
+<h1>Worker benchmark history</h1>
+<p>Claude, Codex and Antigravity · optimization off / on · isolated engineering fixtures.</p>
+<p class="notice">Smoke runs check the runner and protocols using synthetic workers. They do not measure native model quality, token savings or latency. Live runs retain unavailable clients and unknown counters. Requested optimization is shown separately from observed attachment.</p>
+<div class="filters">
+<label>Run <select id="run"></select></label>
+<label>Compare with <select id="compare"><option value="">No comparison</option></select></label>
+<label>Worker <select id="client"><option value="">All workers</option><option>claude</option><option>codex</option><option>antigravity</option></select></label>
+<label>Optimization intent <select id="optimization"><option value="">Off and on</option><option>off</option><option>on</option></select></label>
+<label>Task <select id="task"><option value="">All tasks</option></select></label>
+</div>
+<main id="results" aria-live="polite"></main>
+<script src="data.js"></script>
+<script>
+'use strict';
+const runs = window.AGENTQ_RUNS || [];
+const el = id => document.getElementById(id);
+function node(tag, text, parent) {
+  const n = document.createElement(tag); if (text !== undefined) n.textContent = text;
+  if (parent) parent.append(n); return n;
+}
+function option(select, label, value) { const n = node('option',label,select); n.value = value; }
+const number = n => n === null || n === undefined ? 'Unknown' : Number(n).toLocaleString('en-US');
+for (const run of runs) {
+  const label = `${run.created_at} · ${run.mode} · ${run.git_sha.slice(0,12)}${run.dirty ? ' + changes' : ''} · ${run.label}`;
+  option(el('run'),label,run.run_id); option(el('compare'),label,run.run_id);
+}
+for (const task of new Set(runs.flatMap(r=>r.cells.map(c=>c.task)))) option(el('task'),task,task);
+function renderRun(run) {
+  const section = node('section',undefined,el('results')); section.className = 'run';
+  node('h2',`${run.label || run.run_id} · ${run.mode.toUpperCase()}`,section);
+  const meta = node('p',`${run.created_at} | Source ${run.git_sha}${run.dirty ? ' (working changes)' : ''} | ${run.host.os}/${run.host.arch} | ${run.agentq_version}`,section); meta.className='meta';
+  const cells = run.cells.filter(c=>(!el('client').value || c.client===el('client').value) && (!el('optimization').value || c.optimization===el('optimization').value) && (!el('task').value || c.task===el('task').value));
+  node('p',`${cells.length} records. ${run.mode==='smoke' ? 'All usage and savings are unknown. Wall time measures the protocol harness only.' : 'Model usage is observed when reported. Missing values are unknown.'}`,section);
+  const scroll = node('div',undefined,section); scroll.className='scroll'; scroll.tabIndex=0; scroll.setAttribute('role','region'); scroll.setAttribute('aria-label','Worker comparison table; scroll horizontally on narrow screens');
+  const table = node('table',undefined,scroll);
+  const head = node('tr',undefined,node('thead',undefined,table));
+  for (const title of ['Worker / intent','Task / outcome','Effective optimization','Input / cache read / cache write / output','Wall time','Quality / context / adherence']) { const th=node('th',title,head); th.scope='col'; }
+  const body = node('tbody',undefined,table);
+  for (const cell of cells) {
+    const row=node('tr',undefined,body), reports=cell.reports, last=reports[reports.length-1];
+    node('td',`${cell.client} / ${cell.optimization}`,row);
+    const result=node('td',`${cell.task} · ${last.outcome}`,row); if(last.error && last.error!=='none') node('small',last.error,result);
+    node('td',reports.map(r=>r.optimization ? `${r.optimization.effective}: ${r.optimization.reason}` : 'Unknown: no report').join('; '),row);
+    node('td',['input','cache_read','cache_write','output'].map(k=>number(cell.usage[k])).join(' / '),row);
+    node('td',`${number(cell.wall_ms)} ms${cell.source==='smoke' ? ' (harness)' : ''}`,row);
+    node('td',`${cell.rubric.quality} / ${cell.rubric.context} / ${cell.rubric.adherence}${cell.source==='smoke' ? ' (synthetic)' : ''}`,row);
+  }
+  node('h2','Paired savings',section);
+  for (const delta of run.deltas.filter(d=>(!el('client').value || d.client===el('client').value) && (!el('task').value || d.task===el('task').value))) {
+    node('p',`${delta.client} · ${delta.task}: ${delta.input_saved===null ? `Unknown — ${delta.unknown}` : `${number(delta.input_saved)} input tokens`}`,section);
+  }
+  node('h2','Inspect task evidence',section);
+  for (const cell of cells) {
+    const details=node('details',undefined,section); node('summary',`${cell.client} / ${cell.optimization} · ${cell.task} · ${cell.source}`,details);
+    node('h3','Prompts',details); node('pre',cell.prompts.join('\n\nNext turn:\n'),details);
+    node('h3','Reports and responses',details); node('pre',JSON.stringify(cell.reports,null,2),details);
+    node('h3','Rubric and fixture',details); node('pre',JSON.stringify({fixture_sha256:cell.fixture_sha256,...cell.rubric,tool_bytes:cell.tool_bytes,tool_bytes_unknown:cell.tool_bytes_unknown},null,2),details);
+  }
+  const details=node('details',undefined,section); node('summary','Run provenance',details);
+  node('pre',JSON.stringify({binary_sha256:run.binary_sha256,host:run.host,client_args:run.client_args},null,2),details);
+}
+function render() {
+  el('results').replaceChildren();
+  if(!runs.length) {node('p','No runs loaded. Run python3 scripts/benchmark-workers.py, then reopen this page.',el('results')); return;}
+  for(const id of new Set([el('run').value,el('compare').value].filter(Boolean))) {
+    const run=runs.find(r=>r.run_id===id); if(run) renderRun(run);
+  }
+}
+for(const select of document.querySelectorAll('select')) select.addEventListener('change',render);
+render();
+</script>
+</html>

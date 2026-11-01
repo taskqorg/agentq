@@ -1,4 +1,4 @@
-//! Claude Code and Codex CLI turns for every consumer (agentq.md § 12, docs/spec/RUNTIME.md; moved from CoreQ v0.18.0).
+//! Claude Code, Codex CLI and Antigravity turns for every consumer (agentq.md § 12, docs/spec/RUNTIME.md; moved from CoreQ v0.18.0).
 //! One native session per conversation or attempt; each turn is one client process resumed by session ID.
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -16,19 +16,42 @@ pub use app::{AppServer, AppSession, app_server_command};
 
 type Res<T> = Result<T, String>;
 
-/// A supported client: Claude Code (`claude -p`) or Codex CLI (`codex exec`).
+/// A supported client: Claude Code (`claude -p`), Codex CLI (`codex exec`), or Antigravity (`agentapi` / `agy`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Client { Claude, Codex }
+pub enum Client { Claude, Codex, Antigravity }
 
 impl Client {
     pub fn parse(code: &str) -> Option<Client> {
-        match code { "claude" => Some(Client::Claude), "codex" => Some(Client::Codex), _ => None }
+        match code {
+            "claude" => Some(Client::Claude),
+            "codex" => Some(Client::Codex),
+            "antigravity" | "agy" => Some(Client::Antigravity),
+            _ => None,
+        }
     }
-    /// The runtime code in observations; also the CLI binary name.
-    pub fn code(self) -> &'static str { match self { Client::Claude => "claude", Client::Codex => "codex" } }
+    /// The runtime code in observations.
+    pub fn code(self) -> &'static str {
+        match self {
+            Client::Claude => "claude",
+            Client::Codex => "codex",
+            Client::Antigravity => "antigravity",
+        }
+    }
     /// The variable that names a login home to the client.
-    pub fn home_var(self) -> &'static str { match self { Client::Claude => "CLAUDE_CONFIG_DIR", Client::Codex => "CODEX_HOME" } }
-    fn home_dir(self) -> &'static str { match self { Client::Claude => ".claude", Client::Codex => ".codex" } }
+    pub fn home_var(self) -> &'static str {
+        match self {
+            Client::Claude => "CLAUDE_CONFIG_DIR",
+            Client::Codex => "CODEX_HOME",
+            Client::Antigravity => "ANTIGRAVITY_HOME",
+        }
+    }
+    fn home_dir(self) -> &'static str {
+        match self {
+            Client::Claude => ".claude",
+            Client::Codex => ".codex",
+            Client::Antigravity => ".gemini/antigravity",
+        }
+    }
 }
 
 // ---------- executable ----------
@@ -59,8 +82,28 @@ pub fn user_bin_path(path: &OsStr, home: Option<&OsStr>) -> Option<OsString> {
 
 /// Why `client` cannot start here: its CLI does not resolve on `PATH`.
 pub fn missing_cli(client: Client) -> Option<String> {
+    if client == Client::Antigravity {
+        return (!antigravity_executable().is_absolute()).then(|| "antigravity CLI not found on the service PATH".into());
+    }
     let bin = client.code();
     (!which(bin).is_absolute()).then(|| format!("{bin} CLI not found on the service PATH"))
+}
+
+fn antigravity_executable() -> PathBuf {
+    if let Some(path) = std::env::var_os("ANTIGRAVITY_AGENTAPI_EXE").filter(|s| !s.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let cli = which("agy");
+    if cli.is_absolute() { return cli; }
+    let api = which("agentapi");
+    if api.is_absolute() { return api; }
+    if let Some(home) = base_home(Client::Antigravity) {
+        let p = home.join("bin/agentapi");
+        if p.is_file() {
+            return p;
+        }
+    }
+    which("agy")
 }
 
 /// The native Codex executor behind an npm `codex.js` launcher: a kill cannot reach the native child through Node.
@@ -94,10 +137,14 @@ pub fn codex_native(bin: PathBuf) -> Res<PathBuf> {
     executable.canonicalize().map_err(|e| format!("Codex native executable unavailable: {e}"))
 }
 
-/// The client's CLI executable: `claude` on `PATH`, Codex's native executor. A caller that wraps the client (a
-/// sandbox) builds its own base command around this path.
+/// The client's CLI executable: `claude` on `PATH`, Codex's native executor, or Antigravity's `agy` / `agentapi` CLI. A caller
+/// that wraps the client (a sandbox) builds its own base command around this path.
 pub fn executable(client: Client) -> Res<PathBuf> {
-    match client { Client::Claude => Ok(which("claude")), Client::Codex => codex_native(which("codex")) }
+    match client {
+        Client::Claude => Ok(which("claude")),
+        Client::Codex => codex_native(which("codex")),
+        Client::Antigravity => Ok(antigravity_executable()),
+    }
 }
 
 // ---------- accounts ----------
@@ -159,10 +206,11 @@ impl Accounts {
     pub fn off(&self) -> bool { self.entries().iter().all(|e| !e.enabled) }
 }
 
-/// The client's own home: `CLAUDE_CONFIG_DIR` / `CODEX_HOME` of this process, else `~/.claude` / `~/.codex`
-/// (a Windows service has no `HOME`, so `USERPROFILE`).
+/// The client's own home: `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `ANTIGRAVITY_HOME` (or `ANTIGRAVITY_APP_DATA_DIR`)
+/// of this process, else `~/.claude` / `~/.codex` / `~/.gemini/antigravity` (a Windows service has no `HOME`, so `USERPROFILE`).
 pub fn base_home(client: Client) -> Option<PathBuf> {
     std::env::var_os(client.home_var()).filter(|v| !v.is_empty()).map(PathBuf::from)
+        .or_else(|| (client == Client::Antigravity).then(|| std::env::var_os("ANTIGRAVITY_APP_DATA_DIR")).flatten().filter(|v| !v.is_empty()).map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| Path::new(&h).join(client.home_dir())))
 }
 
@@ -185,9 +233,9 @@ pub fn account_homes(client: Client, tool: &str) -> Vec<PathBuf> {
 
 // ---------- start and resume ----------
 
-/// A new session ID: Claude takes a caller-chosen UUID; Codex names its thread in `thread.started` (`-` until then).
+/// A new session ID: Claude takes a caller-chosen UUID; Codex and Antigravity name their session in output (`-` until then).
 pub fn new_session(client: Client) -> String {
-    match client { Client::Claude => crate::incident::uuid(), Client::Codex => "-".into() }
+    match client { Client::Claude => crate::incident::uuid(), Client::Codex | Client::Antigravity => "-".into() }
 }
 
 /// One turn of one session.
@@ -196,11 +244,11 @@ pub struct Spec {
     pub client: Client,
     /// The project root: working directory of the client and Codex `-C` on a new start.
     pub root: PathBuf,
-    /// The native session ID: `--session-id` / `--resume` (Claude), `resume <thread>` (Codex).
+    /// The native session ID: `--session-id` / `--resume` (Claude), `resume <thread>` (Codex), `send-message <conversationId>` (Antigravity).
     pub session: String,
     /// Continue `session` instead of starting it.
     pub resume: bool,
-    /// Caller-owned client arguments in TaskQ's position: Claude permission mode and `--settings`, Codex sandbox flags.
+    /// Caller-owned client arguments in TaskQ's position: Claude permission mode and `--settings`, Codex sandbox flags, Antigravity model/title flags.
     pub args: Vec<OsString>,
     /// The account's login home (`account_home`); None keeps the caller's own.
     pub home: Option<PathBuf>,
@@ -214,7 +262,9 @@ pub(crate) fn child_env(spec: &Spec, key: &str) -> Option<OsString> {
 }
 
 pub(crate) fn spec_home(spec: &Spec) -> Option<PathBuf> {
-    spec.home.clone().or_else(|| child_env(spec, spec.client.home_var()).map(PathBuf::from)).or_else(|| base_home(spec.client))
+    spec.home.clone().or_else(|| child_env(spec, spec.client.home_var()).filter(|v| !v.is_empty()).map(PathBuf::from))
+        .or_else(|| (spec.client == Client::Antigravity).then(|| child_env(spec, "ANTIGRAVITY_APP_DATA_DIR")).flatten().filter(|v| !v.is_empty()).map(PathBuf::from))
+        .or_else(|| base_home(spec.client))
 }
 
 /// The client argument list after the executable, in TaskQ's order.
@@ -234,6 +284,11 @@ pub fn args(spec: &Spec) -> Vec<OsString> {
             if spec.resume { a.extend([s("resume"), s(&spec.session), s("-")]); }
             else { a.extend([s("-C"), spec.root.clone().into_os_string(), s("-")]); }
         }
+        Client::Antigravity => {
+            a.extend(["--input-format", "stream-json", "--output-format", "stream-json"].map(s));
+            a.extend(spec.args.iter().cloned());
+            if spec.resume { a.extend([s("--conversation"), s(&spec.session)]); }
+        }
     }
     a
 }
@@ -247,6 +302,7 @@ pub fn command(mut base: Command, spec: &Spec) -> Command {
 
 fn environment(mut base: Command, spec: &Spec) -> Command {
     base.current_dir(&spec.root).env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CODEX_THREAD_ID")
+        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
         .envs(spec.env.iter().map(|(k, v)| (k, v)));
     if let Some(home) = &spec.home { base.env(spec.client.home_var(), home); }
     crate::quiet(&mut base);
@@ -266,6 +322,134 @@ pub fn claude_settings(compact_hook: Option<&str>, env: &[(&str, &str)]) -> Stri
 
 // ---------- running turn ----------
 
+#[derive(Clone, Debug, Default)]
+struct AntigravityTranscript {
+    native_agentapi: bool,
+    session: Option<String>,
+    cursor: u64,
+    identity: Option<String>,
+    prefix: Option<String>,
+    partial: Vec<u8>,
+    pending: std::collections::VecDeque<Value>,
+    full_step: Option<u64>,
+    full_cursor: u64,
+    full_partial: Vec<u8>,
+    full_identity: Option<String>,
+    full_prefix: Option<String>,
+}
+
+fn is_native_agentapi(cmd: &Command, spec: &Spec) -> bool {
+    if spec.client != Client::Antigravity {
+        return false;
+    }
+    std::iter::once(cmd.get_program()).chain(cmd.get_args()).any(|arg| {
+        matches!(Path::new(arg).file_name().and_then(|n| n.to_str()),
+            Some("agentapi" | "agentapi.exe" | "agentapi.cmd" | "language_server" | "language_server.exe"))
+    })
+}
+
+fn transcript_paths(home: &Path, session: &str) -> (PathBuf, PathBuf) {
+    let logs = home.join("brain").join(session).join(".system_generated").join("logs");
+    (logs.join("transcript.jsonl"), logs.join("transcript_full.jsonl"))
+}
+
+impl AntigravityTranscript {
+    fn baseline(home: Option<&Path>, session: Option<String>) -> Res<Self> {
+        let mut state = Self { native_agentapi: true, session, ..Self::default() };
+        if let Some(session) = state.session.as_deref() {
+            if !native::plain_id(session) || session == "-" { return Err("antigravity session invalid".into()); }
+            let home = home.ok_or("antigravity home unavailable")?;
+            let mut file = File::open(transcript_paths(home, session).0).map_err(|e| format!("antigravity baseline: {e}"))?;
+            state.cursor = file.metadata().map_err(|e| e.to_string())?.len();
+            if state.cursor > 0 {
+                file.seek(SeekFrom::Start(state.cursor-1)).map_err(|e| e.to_string())?;
+                let mut last = [0]; file.read_exact(&mut last).map_err(|e| e.to_string())?;
+                if last != [b'\n'] { return Err("antigravity baseline incomplete".into()); }
+            }
+            state.identity = Some(native::file_id(&file)?);
+            state.prefix = Some(native::digest_prefix(&mut file, state.cursor)?);
+        }
+        Ok(state)
+    }
+
+    fn full_record(&mut self, path: &Path, step: u64) -> Res<Option<Value>> {
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.full_identity.is_none() => return Ok(None),
+            Err(e) => return Err(format!("antigravity full transcript: {e}")),
+        };
+        if self.full_step != Some(step) {
+            self.full_step = Some(step); self.full_cursor = 0; self.full_partial.clear();
+            self.full_identity = None; self.full_prefix = None;
+        }
+        let identity = native::file_id(&file)?;
+        if self.full_identity.as_ref().is_some_and(|id| *id != identity) { return Err("antigravity full transcript replaced".into()); }
+        let prefix = native::digest_prefix(&mut file, self.full_cursor)?;
+        if self.full_prefix.as_ref().is_some_and(|p| *p != prefix) { return Err("antigravity full transcript rewritten".into()); }
+        file.seek(SeekFrom::Start(self.full_cursor)).map_err(|e| e.to_string())?;
+        let mut bytes = vec![];
+        (&mut file).take(8*1024*1024).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        self.full_cursor += bytes.len() as u64;
+        self.full_partial.extend(bytes);
+        self.full_identity = Some(identity);
+        self.full_prefix = Some(native::digest_prefix(&mut file, self.full_cursor)?);
+        let mut consumed = 0;
+        let mut found = None;
+        for row in self.full_partial.split_inclusive(|b| *b == b'\n') {
+            if !row.ends_with(b"\n") { break; }
+            consumed += row.len();
+            let v: Value = serde_json::from_slice(row).map_err(|_| "antigravity full transcript invalid JSON")?;
+            if !v.is_object() { return Err("antigravity full transcript invalid record".into()); }
+            if v["step_index"].as_u64() == Some(step) && v.get("truncated_fields").is_none() { found = Some(v); }
+        }
+        self.full_partial.drain(..consumed);
+        Ok(found)
+    }
+
+    fn append(&mut self, home: &Path, log: &Path) -> Res<()> {
+        let Some(session) = self.session.as_deref() else { return Ok(()); };
+        if !native::plain_id(session) || session == "-" { return Err("antigravity session invalid".into()); }
+        let (compact, full) = transcript_paths(home, session);
+        let mut file = match File::open(compact) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.identity.is_none() => return Ok(()),
+            Err(e) => return Err(format!("antigravity transcript: {e}")),
+        };
+        let identity = native::file_id(&file)?;
+        if self.identity.as_ref().is_some_and(|id| *id != identity) { return Err("antigravity transcript replaced".into()); }
+        let prefix = native::digest_prefix(&mut file, self.cursor)?;
+        if self.prefix.as_ref().is_some_and(|p| *p != prefix) { return Err("antigravity transcript rewritten".into()); }
+        file.seek(SeekFrom::Start(self.cursor)).map_err(|e| e.to_string())?;
+        let mut bytes = vec![];
+        (&mut file).take(8*1024*1024).read_to_end(&mut bytes).map_err(|e| format!("antigravity transcript: {e}"))?;
+        self.cursor += bytes.len() as u64;
+        self.partial.extend(bytes);
+        let mut consumed = 0;
+        for row in self.partial.split_inclusive(|b| *b == b'\n') {
+            if !row.ends_with(b"\n") { break; }
+            consumed += row.len();
+            let value: Value = serde_json::from_slice(row).map_err(|_| "antigravity transcript invalid JSON")?;
+            if !value.is_object() { return Err("antigravity transcript invalid record".into()); }
+            self.pending.push_back(value);
+        }
+        self.partial.drain(..consumed);
+        self.identity = Some(identity);
+        self.prefix = Some(native::digest_prefix(&mut file, self.cursor)?);
+        let mut output = File::options().append(true).open(log).map_err(|e| e.to_string())?;
+        while let Some(mut value) = self.pending.front().cloned() {
+            if value.get("truncated_fields").is_some() {
+                let step = value["step_index"].as_u64().ok_or("antigravity truncated step missing index")?;
+                let Some(v) = self.full_record(&full, step)? else { break; };
+                if v["type"] != value["type"] || v["status"] != value["status"] { break; }
+                value = v;
+            }
+            writeln!(output, "{value}").map_err(|e| format!("agent log: {e}"))?;
+            self.pending.pop_front();
+        }
+        Ok(())
+    }
+}
+
 /// One running turn: the client process with stdout and stderr appended to the caller's log.
 pub struct Turn {
     client: Client,
@@ -282,61 +466,144 @@ pub struct Turn {
     home: Option<PathBuf>,
     /// The resumed session; a resume's output need not name it again.
     resumed: Option<String>,
+    ag: AntigravityTranscript,
+    receipt: Option<std::sync::mpsc::Receiver<Res<String>>>,
 }
 
 fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64) }
 
 impl Turn {
     /// Spawn `command(base, spec)` with `text` on stdin; output appends to `log`, so a resume continues earlier turns.
-    pub fn start(base: Command, spec: &Spec, log: &Path, text: &str) -> Res<Turn> {
+    pub fn start(mut base: Command, spec: &Spec, log: &Path, text: &str) -> Res<Turn> {
         if let Some(dir) = log.parent() { std::fs::create_dir_all(dir).map_err(|e| format!("agent log directory: {e}"))?; }
         let out = File::options().create(true).append(true).open(log).map_err(|e| format!("agent log: {e}"))?;
         let err = out.try_clone().map_err(|e| format!("agent log: {e}"))?;
         let start = out.metadata().map_err(|e| format!("agent log: {e}"))?.len();
-        let mut c = command(base, spec);
-        crate::telemetry::capture::inherit_context(&mut c);
+        let home = spec_home(spec);
+        let native_agentapi = is_native_agentapi(&base, spec);
+        let ag = if native_agentapi {
+            if std::iter::once(base.get_program()).chain(base.get_args()).any(|arg| Path::new(arg).file_stem().is_some_and(|n| n == "language_server")) {
+                base.arg("agentapi");
+            }
+            base.arg(if spec.resume {"send-message"} else {"new-conversation"}).args(&spec.args);
+            if spec.resume { base.arg(&spec.session); }
+            base.arg(text);
+            base = environment(base, spec);
+            let off = base.get_envs().find(|(k,_)| *k == crate::optimization::ENV)
+                .map_or_else(|| std::env::var_os(crate::optimization::ENV), |(_,v)| v.map(OsString::from));
+            if off.is_some_and(|v| v == "off") {
+                return Err("antigravity agentapi cannot propagate optimization off to an existing server; use agy".into());
+            }
+            let session = spec.resume.then(|| spec.session.clone());
+            AntigravityTranscript::baseline(home.as_deref(), session)?
+        } else {
+            base = command(base, spec);
+            AntigravityTranscript::default()
+        };
+        crate::telemetry::capture::inherit_context(&mut base);
         let started = Instant::now();
         let started_ms = unix_ms();
-        let mut child = c.stdin(Stdio::piped()).stdout(out).stderr(err).spawn().map_err(|e| format!("{} spawn: {e}", spec.client.code()))?;
+        let mut child = base.stdin(Stdio::piped()).stdout(if native_agentapi {Stdio::piped()} else {Stdio::from(out)}).stderr(err).spawn().map_err(|e| format!("{} spawn: {e}", spec.client.code()))?;
+        let receipt = if native_agentapi {
+            let mut stdout = child.stdout.take().ok_or("agentapi stdout unavailable")?;
+            let (send, receive) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                let result = stdout.read_to_string(&mut text).map(|_| text).map_err(|e| format!("agentapi receipt: {e}"));
+                let _ = send.send(result);
+            });
+            Some(receive)
+        } else { None };
         let mut stdin = child.stdin.take().ok_or("agent stdin unavailable")?;
-        let input = text.as_bytes().to_vec();
-        // A client that never reads stdin must not block the caller; the writer ends with the pipe.
-        std::thread::spawn(move || { let _ = stdin.write_all(&input); });
+        if !native_agentapi {
+            let input = if spec.client == Client::Antigravity {format!("{}\n", json!({"event":"user","message":{"content":text}})).into_bytes()} else {text.as_bytes().to_vec()};
+            // A client that never reads stdin must not block the caller; the writer ends with the pipe.
+            std::thread::spawn(move || { let _ = stdin.write_all(&input); });
+        } else {
+            drop(stdin);
+        }
         Ok(Turn { client: spec.client, child, log: log.to_path_buf(), start, pos: start, ended: false, stopping: false, timed_out: false,
-            started, started_ms, exit: None, home: spec_home(spec), resumed: spec.resume.then(|| spec.session.clone()) })
+            started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }
 
+    fn sync_antigravity_transcript(&mut self) -> Res<()> {
+        if !self.ag.native_agentapi {
+            return Ok(());
+        }
+        if self.exit.is_none() { return Ok(()); }
+        if let Some(receive) = &self.receipt {
+            let text = match receive.try_recv() {
+                Ok(result) => result?,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
+                Err(_) => return Err("agentapi receipt reader disconnected".into()),
+            };
+            let session = session_of(Client::Antigravity, &text).or_else(|| self.resumed.clone());
+            if self.resumed.is_some() && session != self.resumed { return Err("antigravity receipt session differs".into()); }
+            self.ag.session = session;
+            let mut log = File::options().append(true).open(&self.log).map_err(|e| e.to_string())?;
+            let receipt = serde_json::from_str::<Value>(&text).map(|v| v.to_string()).unwrap_or(text);
+            writeln!(log, "\n{receipt}").map_err(|e| e.to_string())?;
+            self.receipt = None;
+        }
+        if self.exit == Some(0) {
+            if let Some(home) = self.home.as_deref() { self.ag.append(home, &self.log)?; }
+        }
+        Ok(())
+    }
+
     /// Read complete new log lines; a turn-end event ends the turn even when the process lingers.
     fn read(&mut self) -> Res<()> {
+        self.sync_antigravity_transcript()?;
         let mut f = File::open(&self.log).map_err(|e| format!("agent log unreadable: {e}"))?;
         if f.metadata().map_err(|e| e.to_string())?.len() < self.pos { return Err("agent log truncated; turn boundary unknown".into()); }
         let mut rest = vec![];
         f.seek(SeekFrom::Start(self.pos)).and_then(|_| f.read_to_end(&mut rest)).map_err(|e| format!("agent log read: {e}"))?;
         let Some(end) = rest.iter().rposition(|b| *b == b'\n') else { return Ok(()) };
         self.pos += end as u64 + 1;
-        self.ended |= String::from_utf8_lossy(&rest[..end]).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).any(|v| ends(&v));
+        for v in String::from_utf8_lossy(&rest[..end]).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+            if (v["type"] == "PLANNER_RESPONSE" && !ends(&v)) || v["type"] == "TOOL_RESPONSE" {
+                self.ended = false;
+            } else if ends(&v) {
+                self.ended = true;
+            }
+        }
         Ok(())
     }
 
     /// The exit code once the process exited, else None. After a turn-end event a lingering process is stopped
     /// (Codex on Windows kept running after its turn ended).
     pub fn poll(&mut self) -> Res<Option<i32>> {
-        if self.exit.is_some() { return Ok(self.exit); }
-        let read = self.read();
-        if let Some(status) = self.child.try_wait().map_err(|e| format!("agent wait: {e}"))? {
-            self.exit = Some(status.code().unwrap_or(-1));
-            let _ = self.read();
-            return Ok(self.exit);
+        if self.ag.native_agentapi {
+            if self.exit.is_none() {
+                self.exit = self.child.try_wait().map_err(|e| format!("agent wait: {e}"))?.map(|s| s.code().unwrap_or(-1));
+            }
+            self.read()?;
+            return Ok(self.exit.filter(|code| self.stopping || (self.receipt.is_none() && (*code != 0 || self.ag.session.is_none() || self.ended))));
         }
-        read?;
+        if self.exit.is_some() { return Ok(self.exit); }
+        self.read()?;
+        if self.exit.is_none() {
+            if let Some(status) = self.child.try_wait().map_err(|e| format!("agent wait: {e}"))? {
+                let code = status.code().unwrap_or(-1);
+                self.read()?;
+                self.exit = Some(code);
+                return Ok(self.exit);
+            }
+        }
         if self.ended && !self.stopping { self.stopping = true; let _ = self.child.kill(); }
         Ok(None)
     }
 
     /// Request termination; `poll` confirms the exit.
-    pub fn kill(&mut self) -> Res<()> { self.stopping = true; self.child.kill().map_err(|e| format!("agent kill: {e}")) }
+    pub fn kill(&mut self) -> Res<()> {
+        self.stopping = true;
+        if self.exit.is_some() {
+            return Ok(());
+        }
+        self.child.kill().map_err(|e| format!("agent kill: {e}"))
+    }
 
     /// Poll until exit; at `deadline` stop the process, and the turn reads as timed out.
     pub fn wait(&mut self, deadline: Option<Instant>) -> Res<i32> {
@@ -345,6 +612,11 @@ impl Turn {
             if deadline.is_some_and(|d| Instant::now() >= d) && !self.timed_out {
                 self.timed_out = true;
                 let _ = self.kill();
+                if self.ag.native_agentapi {
+                    if let Some(code) = self.exit {
+                        return Ok(code);
+                    }
+                }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -354,8 +626,11 @@ impl Turn {
     pub fn report(&self) -> Report {
         let text = read_from(&self.log, self.start).unwrap_or_default();
         let events: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        let session = session_of(self.client, &text).or_else(|| self.resumed.clone());
-        let rollout = match self.client { Client::Codex => session.as_deref().and_then(|t| rollout(t, self.home.as_deref())), Client::Claude => None };
+        let session = session_of(self.client, &text).or_else(|| self.ag.session.clone()).or_else(|| self.resumed.clone());
+        let rollout = match self.client {
+            Client::Codex => session.as_deref().and_then(|t| rollout(t, self.home.as_deref())),
+            Client::Claude | Client::Antigravity => None,
+        };
         let mut r = Report::read(self.client, &text, &events, rollout.as_deref());
         r.session = session;
         r.duration_us = self.started.elapsed().as_micros() as u64;
@@ -374,8 +649,18 @@ fn read_from(log: &Path, pos: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&b).into_owned())
 }
 
-/// A turn-end event: Claude `result`, Codex `turn.completed` or `turn.failed`.
-fn ends(v: &Value) -> bool { matches!(v["type"].as_str(), Some("result" | "turn.completed" | "turn.failed")) }
+/// A turn-end event: Claude `result`, Codex `turn.completed` or `turn.failed`, Antigravity terminal `PLANNER_RESPONSE` or `turn.cancelled`.
+fn ends(v: &Value) -> bool {
+    if v["event"] == "result" { return matches!(v["result"]["status"].as_str(), Some("SUCCESS" | "ERROR" | "CANCELED" | "INTERRUPTED" | "INVALID")); }
+    match v["type"].as_str() {
+        Some("result" | "turn.completed" | "turn.failed" | "turn.cancelled") => true,
+        Some("PLANNER_RESPONSE") => {
+            matches!(v["status"].as_str(), Some("ERROR" | "CANCELLED"))
+                || (v["status"] == "DONE" && v["tool_calls"].as_array().is_none_or(Vec::is_empty))
+        }
+        _ => false,
+    }
+}
 
 /// The observation context the caller owns; every value is a code (R27).
 #[derive(Clone, Debug)]
@@ -419,29 +704,59 @@ pub struct Usage {
 
 /// Model use of the turn's events: Claude assistant messages (each message id once: input, cache read, cache write,
 /// output, the model of most calls), Codex `turn.completed` (`input_tokens` includes `cached_input_tokens`, no cache
-/// writes). A counted call without a value makes that sum unknown, never smaller.
+/// writes), Antigravity `PLANNER_RESPONSE` steps (each `step_index` once: `input_tokens`, `cache_read_tokens`,
+/// `output_tokens`). A counted call without a value makes that sum unknown, never smaller.
 pub fn usage(events: &[Value]) -> Usage {
     let (mut ids, mut turns, mut models) = (std::collections::HashSet::new(), false, BTreeMap::<String, u64>::new());
     let mut sums = [Some(0u64); 4];
-    for v in events {
-        let codex = v["type"] == "turn.completed";
-        let counted = match v["type"].as_str() {
-            Some("assistant") => v["message"]["id"].as_str().is_some_and(|id| ids.insert(id.to_string())),
-            Some("turn.completed") => { turns = true; true }
+    let mut cli_usage = false;
+    for (idx, v) in events.iter().enumerate() {
+        let kind = if v["event"] == "step_update" {"agy-step"} else {v["type"].as_str().unwrap_or_default()};
+        let cli = kind == "agy-step";
+        let codex = kind == "turn.completed";
+        let ag = kind == "PLANNER_RESPONSE";
+        let counted = match kind {
+            "assistant" => v["message"]["id"].as_str().is_some_and(|id| ids.insert(id.to_string())),
+            "turn.completed" => { turns = true; true }
+            "agy-step" => {
+                let step = &v["step_update"];
+                if step["state"] != "DONE" || (step["step_type"] != "agent_response" && !step["usage"].is_object()) { continue; }
+                let Some(id) = step["step_index"].as_u64() else {continue;};
+                if events[idx+1..].iter().any(|later| later["event"] == "step_update" && later["step_update"]["step_index"].as_u64() == Some(id) && later["step_update"]["state"] == "DONE" && (later["step_update"]["step_type"] == "agent_response" || later["step_update"]["usage"].is_object())) {continue;}
+                cli_usage = true; turns = true;
+                ids.insert(format!("agy-step-{id}"))
+            }
+            "PLANNER_RESPONSE" => {
+                if !matches!(v["status"].as_str(), Some("DONE" | "ERROR" | "CANCELLED")) { continue; }
+                if v["step_index"].as_u64().is_some_and(|step| events[idx+1..].iter().any(|later| later["type"] == "PLANNER_RESPONSE" && later["step_index"].as_u64() == Some(step))) { continue; }
+                let Some(step) = v["step_index"].as_u64() else { continue; };
+                ids.insert(format!("ag-step-{step}"))
+            }
             _ => false,
         };
         if !counted { continue }
-        let u = if codex { &v["usage"] } else { &v["message"]["usage"] };
+        let u = if cli { &v["step_update"]["usage"] } else if codex { &v["usage"] } else if ag { v } else { &v["message"]["usage"] };
         let input = u["input_tokens"].as_u64();
-        let read = u[if codex { "cached_input_tokens" } else { "cache_read_input_tokens" }].as_u64();
-        let call = [if codex { input.zip(read).and_then(|(i, r)| i.checked_sub(r)) } else { input }, read,
-            if codex { Some(0) } else { u["cache_creation_input_tokens"].as_u64() }, u["output_tokens"].as_u64()];
-        for (s, c) in sums.iter_mut().zip(call) { *s = s.zip(c).map(|(a, b)| a + b) }
-        if let Some(m) = v["message"]["model"].as_str().filter(|m| model_code(m)) { *models.entry(m.into()).or_default() += 1; }
+        let read = if codex {
+            u["cached_input_tokens"].as_u64()
+        } else if ag || cli {
+            u["cache_read_tokens"].as_u64().or(u["cache_read_input_tokens"].as_u64())
+        } else {
+            u["cache_read_input_tokens"].as_u64()
+        };
+        let call = [
+            if codex { input.zip(read).and_then(|(i, r)| i.checked_sub(r)) } else { input },
+            read,
+            if codex { Some(0) } else if ag || cli { u["cache_write_tokens"].as_u64().or(u["cache_creation_input_tokens"].as_u64()) } else { u["cache_creation_input_tokens"].as_u64() },
+            u["output_tokens"].as_u64(),
+        ];
+        for (s, c) in sums.iter_mut().zip(call) { *s = s.zip(c).and_then(|(a, b)| a.checked_add(b)) }
+        let m = v["message"]["model"].as_str().or_else(|| v["model"].as_str());
+        if let Some(m) = m.filter(|m| model_code(m)) { *models.entry(m.into()).or_default() += 1; }
     }
     let [input, cache_read, cache_write, output] = sums;
     let model = models.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|m| m.0);
-    let calls = (!ids.is_empty()).then_some(ids.len() as u64);
+    let calls = (!cli_usage && !ids.is_empty()).then_some(ids.len() as u64);
     if calls.is_some() || turns { Usage { calls, input, cache_read, cache_write, output, model, unknown: None } }
     else { Usage { unknown: Some("no-usage"), ..Usage::default() } }
 }
@@ -453,6 +768,11 @@ fn model_code(m: &str) -> bool { !m.is_empty() && m.len() <= 64 && m.bytes().all
 /// None after work started or without a limit.
 pub fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
     for v in events {
+        if v["event"] == "step_update" && (v["step_update"]["step_type"] == "tool" || v["step_update"]["usage"].is_object()) { return None; }
+        if v["event"] == "result" {
+            let msg = v["result"]["error"].as_str().unwrap_or_default().to_lowercase();
+            return (v["result"]["status"] != "SUCCESS" && ["usage limit", "quota exceeded", "rate limit"].iter().any(|s| msg.contains(s))).then_some(None);
+        }
         let kind = v["type"].as_str().unwrap_or_default();
         if kind == "assistant" {
             if v["apiError"] == "usage_limit_reached" || v["quotaLimits"]["status"] == "rejected" {
@@ -460,10 +780,19 @@ pub fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
             }
             return None;
         }
-        if kind.starts_with("item.") { return None; }
+        if kind == "PLANNER_RESPONSE" {
+            if v["status"] == "ERROR" {
+                let msg = v["content"].as_str().or(v["error"]["message"].as_str()).unwrap_or_default().to_lowercase();
+                if msg.contains("usage limit") || msg.contains("quota exceeded") || msg.contains("rate limit") {
+                    return Some(v["quotaLimits"]["resetsAt"].as_i64());
+                }
+            }
+            return None;
+        }
+        if kind.starts_with("item.") || kind == "TOOL_RESPONSE" { return None; }
         // ponytail: Codex limit text matched by words; it reports no reset. A structured field replaces this when one exists.
         let message = v["message"].as_str().or(v["error"]["message"].as_str()).unwrap_or_default().to_lowercase();
-        if matches!(kind, "error" | "turn.failed") && message.contains("usage limit") { return Some(None); }
+        if matches!(kind, "error" | "turn.failed") && (message.contains("usage limit") || message.contains("quota exceeded")) { return Some(None); }
     }
     None
 }
@@ -491,11 +820,13 @@ pub fn transient_failure(events: &[Value]) -> Option<String> {
     m.to_lowercase().contains("model is at capacity").then(|| m.to_string())
 }
 
-/// The final text of a turn: Claude's last `result`, else Codex's last `agent_message`.
+/// The final text of a turn: Claude's last `result`, Codex's last `agent_message`, or Antigravity's last `PLANNER_RESPONSE` content.
 pub fn final_text(events: &[Value]) -> Option<String> {
     events.iter().rev().find_map(|v| {
-        if v["type"] == "result" { v["result"].as_str().map(String::from) }
+        if v["event"] == "result" { v["result"]["response"].as_str().map(String::from) }
+        else if v["type"] == "result" { v["result"].as_str().map(String::from) }
         else if v["type"] == "item.completed" && v["item"]["type"] == "agent_message" { v["item"]["text"].as_str().map(String::from) }
+        else if v["type"] == "PLANNER_RESPONSE" && v["status"] == "DONE" && ends(v) { v["content"].as_str().filter(|s| !s.is_empty()).map(String::from) }
         else { None }
     })
 }
@@ -508,12 +839,27 @@ pub fn codex_thread(text: &str) -> Option<String> {
     })
 }
 
-/// The native session of a turn: Claude's `session_id` (init or result), Codex's thread.
+/// Antigravity's conversation ID from `agentapi` JSON output or a stream event.
+pub fn antigravity_session(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text).into_iter().chain(text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok())).find_map(|v| {
+        v.pointer("/response/newConversation/conversationId").and_then(Value::as_str)
+            .or_else(|| v.pointer("/response/sendMessage/recipientId").and_then(Value::as_str))
+            .or_else(|| v["conversationId"].as_str())
+            .or_else(|| v["conversation_id"].as_str())
+            .or_else(|| v["result"]["conversation_id"].as_str())
+            .or_else(|| (matches!(v["type"].as_str(), Some("conversation.started" | "system" | "result"))).then(|| v["session_id"].as_str()).flatten())
+            .filter(|s| native::plain_id(s) && *s != "-")
+            .map(String::from)
+    })
+}
+
+/// The native session of a turn: Claude's `session_id` (init or result), Codex's thread, or Antigravity's `conversationId`.
 pub fn session_of(client: Client, text: &str) -> Option<String> {
     match client {
         Client::Codex => codex_thread(text),
         Client::Claude => text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .find_map(|v| (matches!(v["type"].as_str(), Some("system" | "result"))).then(|| v["session_id"].as_str().map(String::from)).flatten()),
+        Client::Antigravity => antigravity_session(text),
     }
 }
 
@@ -551,7 +897,7 @@ fn percent(v: f64) -> Option<u64> { (v.is_finite() && v >= 0.0).then(|| v.round(
 /// else the last `token_count` of the thread rollout; the window with the higher use binds.
 pub fn snapshot(client: Client, events: &[Value], rollout: Option<&Path>) -> Snapshot {
     let found = match client {
-        Client::Claude => events.iter().rev().find(|v| v["type"] == "rate_limit_event").map(|v| {
+        Client::Claude | Client::Antigravity => events.iter().rev().find(|v| v["type"] == "rate_limit_event").map(|v| {
             let i = &v["rate_limit_info"];
             Snapshot { used_percent: i["utilization"].as_f64().and_then(|u| percent(u * 100.0)), resets_at: i["resetsAt"].as_u64(),
                 window: i["rateLimitType"].as_str().filter(|w| model_code(w)).map(String::from), unknown: None }
@@ -605,14 +951,19 @@ impl Report {
     /// Classify the turn's log text.
     pub fn read(client: Client, text: &str, events: &[Value], rollout: Option<&Path>) -> Report {
         let reached = limit_reached(events);
-        let end = events.iter().rev().find(|v| ends(v));
+        let end = if client == Client::Antigravity {
+            events.iter().rev().find(|v| v["event"] == "result" || matches!(v["type"].as_str(), Some("PLANNER_RESPONSE" | "TOOL_RESPONSE" | "turn.failed" | "turn.cancelled"))).filter(|v| ends(v))
+        } else { events.iter().rev().find(|v| ends(v)) };
         let (outcome, error) = if reached.is_some() { ("refused", "usage-limit") }
             else if auth_rejected(text).is_some() { ("failed", "auth-rejected") }
             else if transient_failure(events).is_some() { ("failed", "model-capacity") }
             else {
                 match end {
-                    Some(v) if v["type"] == "turn.failed" => ("failed", "turn-failed"),
-                    Some(v) if v["type"] == "result" && v["is_error"] == true => ("failed", "client-error"),
+                    Some(v) if v["event"] == "result" && matches!(v["result"]["status"].as_str(), Some("CANCELED" | "INTERRUPTED")) => ("cancelled", "turn-cancelled"),
+                    Some(v) if v["event"] == "result" && v["result"]["status"] != "SUCCESS" => ("failed", "turn-failed"),
+                    Some(v) if v["type"] == "turn.failed" || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "ERROR") => ("failed", "turn-failed"),
+                    Some(v) if v["type"] == "turn.cancelled" || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "CANCELLED") => ("cancelled", "turn-cancelled"),
+                    Some(v) if (v["type"] == "result" && v["is_error"] == true) || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "ERROR") => ("failed", "client-error"),
                     Some(_) => ("ok", "none"),
                     None => ("unknown", "no-end"),
                 }
@@ -701,6 +1052,11 @@ mod tests {
         assert_eq!(s(&args(&spec)), "exec --json --sandbox workspace-write resume id1 -");
         spec.resume = false;
         assert_eq!(s(&args(&spec)), "exec --json --sandbox workspace-write -C proj -");
+        spec.client = Client::Antigravity;
+        spec.args = vec!["--model=pro".into()];
+        assert_eq!(s(&args(&spec)), "--input-format stream-json --output-format stream-json --model=pro");
+        spec.resume = true;
+        assert_eq!(s(&args(&spec)), "--input-format stream-json --output-format stream-json --model=pro --conversation id1");
         let settings: Value = serde_json::from_str(&claude_settings(Some("rules compact"), &[("TASKQ_TASK", "7")])).unwrap();
         assert_eq!(settings["hooks"]["SessionStart"][0]["matcher"], "compact");
         assert_eq!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"], "rules compact");
@@ -708,10 +1064,13 @@ mod tests {
         assert!(serde_json::from_str::<Value>(&claude_settings(None, &[])).unwrap().get("hooks").is_none());
         assert_eq!(new_session(Client::Claude).len(), 36);
         assert_eq!(new_session(Client::Codex), "-");
+        assert_eq!(new_session(Client::Antigravity), "-");
+        assert_eq!(Client::parse("antigravity"), Some(Client::Antigravity));
+        assert_eq!(Client::parse("agy"), Some(Client::Antigravity));
     }
 
     // Chain: coreq.md R49 and TaskQ § 4 Profiling usage (unchanged): Claude counts each message id once; Codex input
-    // includes cached input; a missing count makes the sum unknown. Risk: double-counted or invented zero tokens.
+    // includes cached input; Antigravity counts each PLANNER_RESPONSE step_index once; a missing count makes the sum unknown.
     #[test]
     fn usage_counts_each_message_once_and_unknown_stays_null() {
         let claude = events(concat!(
@@ -725,7 +1084,95 @@ mod tests {
         assert_eq!((u.calls, u.input, u.cache_read, u.cache_write, u.output, u.model), (None, Some(20), Some(80), Some(0), Some(9), None));
         let partial = events(r#"{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":9}}"#);
         assert_eq!((usage(&partial).input, usage(&partial).cache_read), (None, None), "a missing count is unknown, never zero");
+        let ag = events(concat!(
+            r#"{"response":{"newConversation":{"conversationId":"conv-1"}}}"#, "\n",
+            r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","model":"gemini-3.1-pro","input_tokens":120,"cache_read_tokens":500,"cache_write_tokens":0,"output_tokens":15,"tool_calls":[{"id":"c1"}]}"#, "\n",
+            r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","model":"gemini-3.1-pro","input_tokens":120,"cache_read_tokens":500,"cache_write_tokens":0,"output_tokens":15,"tool_calls":[{"id":"c1"}]}"#, "\n",
+            r#"{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","model":"gemini-3.1-pro","input_tokens":80,"cache_read_tokens":600,"cache_write_tokens":0,"output_tokens":25,"content":"done"}"#, "\n"));
+        let u = usage(&ag);
+        assert_eq!((u.calls, u.input, u.cache_read, u.cache_write, u.output, u.model.as_deref()), (Some(2), Some(200), Some(1100), Some(0), Some(40), Some("gemini-3.1-pro")));
+        let r_ag = Report::read(Client::Antigravity, &ag.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"), &ag, None);
+        assert_eq!((r_ag.outcome, r_ag.session.as_deref(), r_ag.text.as_deref()), ("ok", Some("conv-1"), Some("done")));
+        let missing = usage(&events(r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":3,"output_tokens":2}"#));
+        assert_eq!((missing.cache_read, missing.cache_write), (None, None), "P2: unreported counts stay unknown");
+        assert!(ends(&json!({"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[]})), "empty tool calls end the turn");
         assert_eq!(usage(&[]).unknown, Some("no-usage"));
+    }
+
+    // M12.1/P2: documented agy events must yield per-turn evidence, never cumulative result usage.
+    #[test]
+    fn antigravity_headless_protocol() {
+        let rows = events(r#"{"event":"init","conversation_id":"agy-session","init":{}}
+{"event":"step_update","step_update":{"step_index":3,"state":"DONE","step_type":"agent_response","usage":{"input_tokens":12,"cache_read_tokens":5,"output_tokens":3}}}
+{"event":"result","result":{"conversation_id":"agy-session","status":"SUCCESS","response":"answer","usage":{"input_tokens":999,"output_tokens":999}}}"#);
+        let r = Report::read(Client::Antigravity, &rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"), &rows, None);
+        assert_eq!((r.outcome, r.text.as_deref(), r.session.as_deref()), ("ok", Some("answer"), Some("agy-session")));
+        assert_eq!((r.usage.input, r.usage.cache_read, r.usage.cache_write), (Some(12), Some(5), None));
+        let error = events(r#"{"event":"result","result":{"status":"ERROR","error":"quota exceeded"}}"#);
+        assert_eq!(Report::read(Client::Antigravity, "", &error, None).outcome, "refused");
+        for (status, outcome) in [("CANCELED","cancelled"),("INTERRUPTED","cancelled"),("INVALID","failed"),("WAITING","unknown"),("RUNNING","unknown")] {
+            let rows = vec![json!({"event":"result","result":{"status":status}})];
+            assert_eq!(Report::read(Client::Antigravity,"",&rows,None).outcome,outcome,"{status}");
+        }
+        let mut missing = rows.clone();
+        let mut later = missing[1].clone(); later["step_update"]["usage"] = json!({"output_tokens":3});
+        missing.insert(2,later);
+        let u = usage(&missing);
+        assert_eq!((u.input,u.output,u.calls),(None,Some(3),None),"latest partial step stays unknown and cumulative result is ignored");
+    }
+
+    // M12.1: a bounded poll must progress through a full transcript larger than its read budget.
+    #[test]
+    fn antigravity_full_history_progresses_past_budget() {
+        let root = crate::scratch("large-full-tail");
+        let (path, full) = transcript_paths(&root, "conv-1");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let log = root.join("turn.log"); std::fs::write(&log, "").unwrap();
+        let compact = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","truncated_fields":["content"]});
+        std::fs::write(path, format!("{compact}\n")).unwrap();
+        let old = json!({"step_index":0,"content":"x".repeat(9*1024*1024)});
+        let complete = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"full"});
+        std::fs::write(full, format!("{old}\n{complete}\n")).unwrap();
+        let mut state = AntigravityTranscript {native_agentapi:true,session:Some("conv-1".into()),..Default::default()};
+        for _ in 0..4 {state.append(&root, &log).unwrap();}
+        assert_eq!(final_text(&events(&std::fs::read_to_string(log).unwrap())).as_deref(), Some("full"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // M12.1/P2: partial writes, resume history and replacement must not fabricate completion or usage.
+    #[test]
+    fn antigravity_tail_preserves_boundaries_and_unknowns() {
+        let root = crate::scratch("antigravity-tail");
+        let (path, full) = transcript_paths(&root, "conv-1");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let log = root.join("turn.log"); std::fs::write(&log, "").unwrap();
+        let old = json!({"type":"PLANNER_RESPONSE","step_index":0,"status":"DONE","content":"old"});
+        std::fs::write(&path, format!("{old}\n")).unwrap();
+        let mut state = AntigravityTranscript::baseline(Some(&root), Some("conv-1".into())).unwrap();
+        let event = json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"new","tool_calls":[]}).to_string();
+        let half = event.len()/2;
+        let mut writer = File::options().append(true).open(&path).unwrap();
+        writer.write_all(event[..half].as_bytes()).unwrap();
+        state.append(&root, &log).unwrap(); assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
+        writeln!(writer, "{}", &event[half..]).unwrap();
+        state.append(&root, &log).unwrap(); state.append(&root, &log).unwrap();
+        assert_eq!(events(&std::fs::read_to_string(&log).unwrap()).len(), 1, "new complete record only, once");
+        let compact = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","truncated_fields":["content"]});
+        writeln!(writer, "{compact}").unwrap();
+        state.append(&root, &log).unwrap(); assert_eq!(events(&std::fs::read_to_string(&log).unwrap()).len(), 1);
+        let complete = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"full"});
+        std::fs::write(&full, format!("{old}\n{complete}")).unwrap();
+        state.append(&root, &log).unwrap(); assert_eq!(events(&std::fs::read_to_string(&log).unwrap()).len(), 1, "partial full record waits");
+        std::fs::write(&full, format!("{old}\n{complete}\n")).unwrap();
+        state.append(&root, &log).unwrap(); assert_eq!(events(&std::fs::read_to_string(&log).unwrap()).len(), 2);
+        std::fs::write(&path, "").unwrap(); assert!(state.append(&root, &log).is_err(), "truncation retains unknown ownership");
+        let failed = events(r#"{"type":"PLANNER_RESPONSE","step_index":1,"status":"ERROR","content":"quota exceeded"}"#);
+        assert_eq!(Report::read(Client::Antigravity, "", &failed, None).outcome, "refused");
+        let cancelled = events(r#"{"type":"PLANNER_RESPONSE","step_index":1,"status":"CANCELLED"}"#);
+        assert_eq!(Report::read(Client::Antigravity, "", &cancelled, None).outcome, "cancelled");
+        assert_eq!(snapshot(Client::Antigravity, &[], None).unknown, Some("not-reported"));
+        assert_eq!(antigravity_session(r#"{"conversationId":"../foreign"}"#), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // Chain: coreq.md R50, docs/design/agent.md § Limit snapshot: shapes copied from a Claude 2026-10 `rate_limit_event`

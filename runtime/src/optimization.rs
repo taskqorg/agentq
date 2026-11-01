@@ -125,13 +125,39 @@ fn claude_attached(home: &Path) -> Result<bool, ()> {
     })))
 }
 
+/// Antigravity runs the agentq hooks from `hooks.json` in `home` or `<home>/../config/hooks.json`.
+fn antigravity_attached(home: &Path, root: Option<&Path>) -> Result<bool, ()> {
+    let mut paths = vec![home.join("hooks.json")];
+    if let Some(parent) = home.parent() {
+        paths.push(parent.join("config/hooks.json"));
+    }
+    if let Some(root) = root { paths.push(root.join(".agents/hooks.json")); }
+    for path in paths {
+        let Some(text) = read(&path)? else { continue };
+        let settings: Value = serde_json::from_str(&text).map_err(|_| ())?;
+        let object = settings.as_object().ok_or(())?;
+        let attached = object.values().filter(|group| group["enabled"] != false).any(|group| {
+            group["PreToolUse"].as_array().is_some_and(|groups| {
+                groups.iter().filter(|g| g["matcher"].as_str().is_none_or(|m| matches!(m, "" | "*" | "run_command")))
+                    .filter_map(|g| g["hooks"].as_array()).flatten().any(|hook| {
+                    hook["command"].as_str().is_some_and(|s| s.contains(" hook antigravity PreToolUse"))
+                })
+            })
+        });
+        if attached {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The effective state for `client` in `home` from the read-only installation state (M12.5). Host disable and the
 /// host and agent switches win; `on` never enables anything.
 pub fn observe(intent: Intent, client: Client, install: Option<&Path>, home: Option<&Path>) -> Optimization {
-    observe_state(intent, client, install, home, intent == Intent::Off || std::env::var(ENV).is_ok_and(|v| v == "off"))
+    observe_state(intent, client, install, home, None, intent == Intent::Off || std::env::var(ENV).is_ok_and(|v| v == "off"))
 }
 
-fn observe_state(intent: Intent, client: Client, install: Option<&Path>, home: Option<&Path>, off: bool) -> Optimization {
+fn observe_state(intent: Intent, client: Client, install: Option<&Path>, home: Option<&Path>, root: Option<&Path>, off: bool) -> Optimization {
     let o = |effective, reason| Optimization { intent, effective, reason };
     if off { return o("off", "launch_off"); }
     let Some(install) = install.filter(|i| i.join("data").is_dir()) else { return o("off", "not_installed") };
@@ -144,7 +170,11 @@ fn observe_state(intent: Intent, client: Client, install: Option<&Path>, home: O
     if c["enabled"] == false { return o("off", "host_off"); }
     if c["agents"][client.code()] == false { return o("off", "agent_off"); }
     let Some(home) = home else { return o("unknown", "no_client_home") };
-    let attached = match client { Client::Codex => codex_routed(home), Client::Claude => claude_attached(home) };
+    let attached = match client {
+        Client::Codex => codex_routed(home),
+        Client::Claude => claude_attached(home),
+        Client::Antigravity => antigravity_attached(home, root),
+    };
     match attached {
         Ok(true) => o("on", "configured"),
         Ok(false) => o("off", "not_attached"),
@@ -157,7 +187,7 @@ fn observe_state(intent: Intent, client: Client, install: Option<&Path>, home: O
 pub fn prepare(intent: Intent, product: &str, spec: &mut Spec, install: Option<&Path>) -> Optimization {
     let home = spec_home(spec);
     let off = intent == Intent::Off || child_env(spec, ENV).is_some_and(|v| v == "off");
-    let o = observe_state(intent, spec.client, install, home.as_deref(), off);
+    let o = observe_state(intent, spec.client, install, home.as_deref(), Some(&spec.root), off);
     let set = |spec: &Spec, k: &str| child_env(spec, k).is_some_and(|v| !v.is_empty());
     if !set(spec, "TASKQ_TASK") && !set(spec, "AGENTQ_LAUNCHER") { spec.env.push(("AGENTQ_LAUNCHER".into(), product.into())); }
     if off {
@@ -187,8 +217,17 @@ mod tests {
         assert_eq!(seen(Intent::On, Client::Codex), ("off", "not_attached"));
         std::fs::write(home.join("config.toml"), "model = \"x\"\nmodel_provider = \"agentq\"\n[model_providers.agentq]\n").unwrap();
         std::fs::write(home.join("settings.json"), r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"/i/agentq hook claude PreToolUse"}]}]}}"#).unwrap();
+        std::fs::write(home.join("hooks.json"), r#"{"agentq":{"PreToolUse":[{"matcher":"run_command","hooks":[{"command":"/i/agentq hook antigravity PreToolUse"}]}]}}"#).unwrap();
         assert_eq!((seen(Intent::Inherit, Client::Codex), seen(Intent::On, Client::Claude)), (("on", "configured"), ("on", "configured")));
+        assert_eq!(seen(Intent::On, Client::Antigravity), ("on", "configured"));
         assert_eq!(seen(Intent::Off, Client::Claude), ("off", "launch_off"));
+        assert_eq!(seen(Intent::Off, Client::Antigravity), ("off", "launch_off"));
+        std::fs::write(home.join("hooks.json"), r#"{"agentq":{"enabled":false,"PreToolUse":[{"hooks":[{"command":"/i/agentq hook antigravity PreToolUse"}]}]}}"#).unwrap();
+        assert_eq!(seen(Intent::On, Client::Antigravity), ("off", "not_attached"), "disabled hooks cannot prove attachment");
+        let project = root.join("project"); std::fs::create_dir_all(project.join(".agents")).unwrap();
+        std::fs::write(project.join(".agents/hooks.json"), r#"{"agentq":{"PreToolUse":[{"matcher":"run_command","hooks":[{"command":"/i/agentq hook antigravity PreToolUse"}]}]}}"#).unwrap();
+        let mut spec = Spec {client:Client::Antigravity,root:project,session:"-".into(),resume:false,args:vec![],home:Some(home.clone()),env:vec![]};
+        assert_eq!(prepare(Intent::On, "fixtureq", &mut spec, Some(&install)).effective, "on", "workspace hooks are attachment evidence");
         std::fs::write(install.join("data/config.json"), r#"{"compression":{"agents":{"codex":false}}}"#).unwrap();
         assert_eq!((seen(Intent::On, Client::Codex), seen(Intent::On, Client::Claude)), (("off", "agent_off"), ("on", "configured")));
         std::fs::write(install.join("data/config.json"), r#"{"compression":{"enabled":false}}"#).unwrap();

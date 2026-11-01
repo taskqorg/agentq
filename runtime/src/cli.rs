@@ -33,7 +33,7 @@ fn strings(v: &Value, k: &str) -> Res<Vec<String>> {
 pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let v: Value = serde_json::from_str(request).map_err(|e| format!("invalid request: {e}"))?;
     if !v.is_object() { return Err("request requires a JSON object".into()); }
-    let client = Client::parse(text(&v, "client")?).ok_or("client requires claude or codex")?;
+    let client = Client::parse(text(&v, "client")?).ok_or("client requires claude, codex or antigravity")?;
     let root = path(&v, "root")?.ok_or("root requires an absolute path")?;
     let log = path(&v, "log")?.ok_or("log requires an absolute path")?;
     let resume = match &v["resume"] { Value::Null => false, Value::Bool(b) => *b, _ => return Err("resume requires a boolean".into()) };

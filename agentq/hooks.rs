@@ -1,4 +1,4 @@
-//! Claude's native hooks; keep permission classification, input fields and command semantics.
+//! Claude and Antigravity native hooks; keep permission classification, input fields and command semantics.
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -23,6 +23,28 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
         let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
         crate::model::session_start(&data()?, &v, launched(), std::env::current_dir().ok().as_deref())?;
         return Ok(empty());
+    }
+    if agent == "antigravity" && event == "PreToolUse" {
+        if cfg!(windows) { return Ok(empty()); }
+        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
+        let tool = v["toolCall"]["name"].as_str().or(v["tool_name"].as_str()).unwrap_or_default();
+        if tool != "run_command" { return Ok(empty()); }
+        let Some(command) = v["toolCall"]["args"]["CommandLine"].as_str().or(v["tool_input"]["CommandLine"].as_str()) else {
+            return Ok(empty());
+        };
+        if command.contains([';', '&', '|', '<', '>', '\n', '$', '`']) { return Ok(empty()); }
+        let words: Vec<String> = command.split_ascii_whitespace().map(String::from).collect();
+        if !crate::engines::qualified(&words) { return Ok(empty()); }
+        let mut env = String::from("AGENTQ_AGENT=antigravity ");
+        if let Some(session) = v["conversationId"].as_str().or(v["session_id"].as_str()) {
+            env += &format!("AGENTQ_SESSION={} ", quote(session));
+        }
+        if let Some(step) = v["stepIdx"].as_u64() {
+            env += &format!("AGENTQ_TOOL_CALL='step-{step}' ");
+        }
+        let path = exe.display().to_string();
+        let path = if cfg!(windows) { path.replace('\\', "/") } else { path };
+        return Ok(json!({"decision": "allow", "overwrite": {"CommandLine": format!("{env}{} run -- {command}", quote(&path))}}));
     }
     if agent != "claude" || !["PreToolUse", "PostToolUse"].contains(&event) { return Ok(empty()); }
     let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
@@ -74,6 +96,17 @@ mod tests {
         for command in ["git status", "cargo test && echo no", "cargo test; echo no", "cargo test $(touch no)"] {
             let mut v=v.clone();v["tool_input"]["command"]=json!(command);
             assert_eq!(response("claude","PreToolUse",&v.to_string(),Path::new("agentq")).unwrap(),json!({}));
+        }
+        if cfg!(windows) { return; }
+        let ag = json!({"toolCall":{"name":"run_command","args":{"CommandLine":"cargo test --color never"}},"conversationId":"ag-conv-1","stepIdx":19});
+        let r_ag = response("antigravity", "PreToolUse", &ag.to_string(), Path::new("/a b/agentq")).unwrap();
+        assert!(r_ag["overwrite"]["CommandLine"].as_str().unwrap().ends_with("'/a b/agentq' run -- cargo test --color never"));
+        assert!(r_ag["overwrite"]["CommandLine"].as_str().unwrap().contains("AGENTQ_SESSION='ag-conv-1'"));
+        assert_eq!(r_ag["decision"], "allow", "native permission policy still decides");
+        assert!(r_ag["overwrite"]["CommandLine"].as_str().unwrap().contains("AGENTQ_TOOL_CALL='step-19'"));
+        for command in ["git status", "cargo test && echo no", "cargo test $(touch no)"] {
+            let mut ag = ag.clone(); ag["toolCall"]["args"]["CommandLine"] = json!(command);
+            assert_eq!(response("antigravity", "PreToolUse", &ag.to_string(), Path::new("agentq")).unwrap(), json!({}));
         }
     }
 }

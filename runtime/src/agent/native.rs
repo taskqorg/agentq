@@ -90,7 +90,7 @@ pub(super) fn scope(spec: &Spec) -> String {
     crate::sha256_hex(&bytes)
 }
 
-fn file_id(file: &File) -> Res<String> {
+pub(super) fn file_id(file: &File) -> Res<String> {
     #[cfg(unix)] {
         use std::os::unix::fs::MetadataExt;
         let m = file.metadata().map_err(|e| e.to_string())?;
@@ -302,6 +302,31 @@ impl NativeTurn {
                         }
                     }
                 }
+                Client::Antigravity => {
+                    if matches!(v["type"].as_str(), Some("USER_INPUT")) {
+                        let content = v["content"].as_str().unwrap_or_default();
+                        if content == self.input {
+                            if self.accepted { return Err("native input appears more than once".into()); }
+                            self.accepted = true;
+                        } else if !content.is_empty() && self.accepted && !self.ended {
+                            return Err("another input superseded the native turn".into());
+                        }
+                    } else if self.accepted {
+                        if v["type"] == "PLANNER_RESPONSE" {
+                            self.events.push(v.clone());
+                            if v["status"] == "CANCELLED" {
+                                self.ended = true;
+                                self.aborted = true;
+                            } else if ends(&v) {
+                                self.ended = true;
+                            } else {
+                                self.ended = false;
+                            }
+                        } else if v["type"] == "TOOL_RESPONSE" {
+                            self.ended = false;
+                        }
+                    }
+                }
             }
             self.cursor+=size as u64;consumed+=size;
         }
@@ -356,7 +381,7 @@ pub(super) fn append_codex_usage(events:&mut Vec<Value>,last:&Value,total:&Value
     events.push(json!({"type":"turn.completed","total_usage":key,"usage":{"input_tokens":value(0),"cached_input_tokens":value(1),"output_tokens":value(2)}}));
 }
 
-fn digest_prefix(file:&mut File,length:u64)->Res<String> {
+pub(super) fn digest_prefix(file:&mut File,length:u64)->Res<String> {
     file.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;
     let until=Instant::now()+Duration::from_secs(5);
     let mut hash=ring::digest::Context::new(&ring::digest::SHA256);

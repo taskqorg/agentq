@@ -1,0 +1,1984 @@
+{
+  "schema": 1,
+  "run_id": "20261101T151302740494Z-dea812d76765-smoke",
+  "created_at": "2026-11-01T15:13:02.740494+00:00",
+  "git_sha": "dea812d7676565f22cfdea7f114a7bc362638ae1",
+  "dirty": false,
+  "binary_sha256": "91bcff407229d1d47d357096e18f83ecd854ef0271eb39b416e8165ccf7276cb",
+  "runner_sha256": "7b2a30861329929bae19f2a6b3e2b50fb14c8c4e248ec09af233d6aac551cd70",
+  "agentq_version": "agentq 0.0.0-dev",
+  "host": {
+    "os": "Darwin",
+    "arch": "arm64",
+    "python": "3.14.8"
+  },
+  "mode": "smoke",
+  "label": "Review fixes: agy protocol and strict T2/T4 constraints",
+  "client_args": {},
+  "cells": [
+    {
+      "client": "claude",
+      "optimization": "off",
+      "task": "T1-context-navigation",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Read contract.txt and src/worker.txt. Return ONLY JSON with keys clients, home_vars, end_events using their exact values."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "99195fb6-181f-4de7-80c9-32c1962b79f5",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"clients\":[\"claude\",\"codex\",\"antigravity\"],\"home_vars\":[\"CLAUDE_CONFIG_DIR\",\"CODEX_HOME\",\"ANTIGRAVITY_HOME\"],\"end_events\":[\"result\",\"turn.completed\",\"PLANNER_RESPONSE\"]}",
+          "exit": 0,
+          "started_ms": 1793545982784,
+          "duration_us": 108919,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 141
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 141,
+      "rubric": {
+        "checks": {
+          "clients": true,
+          "home_vars": true,
+          "end_events": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "claude",
+      "optimization": "on",
+      "task": "T1-context-navigation",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Read contract.txt and src/worker.txt. Return ONLY JSON with keys clients, home_vars, end_events using their exact values."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "5f39fad2-af50-430b-a9c2-c02a5fc56e3c",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"clients\":[\"claude\",\"codex\",\"antigravity\"],\"home_vars\":[\"CLAUDE_CONFIG_DIR\",\"CODEX_HOME\",\"ANTIGRAVITY_HOME\"],\"end_events\":[\"result\",\"turn.completed\",\"PLANNER_RESPONSE\"]}",
+          "exit": 0,
+          "started_ms": 1793545982903,
+          "duration_us": 105907,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 113
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 113,
+      "rubric": {
+        "checks": {
+          "clients": true,
+          "home_vars": true,
+          "end_events": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "claude",
+      "optimization": "on",
+      "task": "T2-instruction-adherence",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Remember orbit-73 for the next turn. Return ONLY {\"remembered\":true}. Do not write any file or use markdown.",
+        "Recall the token from the previous turn. Return ONLY {\"token\":\"<remembered token>\"}. Do not write files or use markdown."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "81cd3975-6ddc-4c3f-8bc2-346e634ce83f",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"remembered\":true}",
+          "exit": 0,
+          "started_ms": 1793545983020,
+          "duration_us": 123121,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 129
+        },
+        {
+          "schema": 1,
+          "session": "81cd3975-6ddc-4c3f-8bc2-346e634ce83f",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"token\":\"orbit-73\"}",
+          "exit": 0,
+          "started_ms": 1793545983149,
+          "duration_us": 105382,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 111
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 240,
+      "rubric": {
+        "checks": {
+          "token": true,
+          "native_outcome": true,
+          "same_session": true,
+          "no_file_writes": true,
+          "first_answer": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "claude",
+      "optimization": "off",
+      "task": "T2-instruction-adherence",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Remember orbit-73 for the next turn. Return ONLY {\"remembered\":true}. Do not write any file or use markdown.",
+        "Recall the token from the previous turn. Return ONLY {\"token\":\"<remembered token>\"}. Do not write files or use markdown."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "b00b0116-2c71-47c3-9693-59e159116789",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"remembered\":true}",
+          "exit": 0,
+          "started_ms": 1793545983266,
+          "duration_us": 97837,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 105
+        },
+        {
+          "schema": 1,
+          "session": "b00b0116-2c71-47c3-9693-59e159116789",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"token\":\"orbit-73\"}",
+          "exit": 0,
+          "started_ms": 1793545983370,
+          "duration_us": 75416,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 82
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 187,
+      "rubric": {
+        "checks": {
+          "token": true,
+          "native_outcome": true,
+          "same_session": true,
+          "no_file_writes": true,
+          "first_answer": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "claude",
+      "optimization": "off",
+      "task": "T3-noisy-command-compression",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Run cargo test --offline --color never in this fixture. Return ONLY JSON with keys passed, failed, marker, test using the observed failure; include original_ref if a recovery ref was delivered."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "4137be95-d189-435b-af78-cd24df0be41c",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"passed\":180,\"failed\":1,\"marker\":\"MARKER_BENCH_FAIL_42\",\"test\":\"boundary\"}",
+          "exit": 0,
+          "started_ms": 1793545983455,
+          "duration_us": 124901,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 131
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 131,
+      "rubric": {
+        "checks": {
+          "passed": true,
+          "failed": true,
+          "marker": true,
+          "test": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "claude",
+      "optimization": "on",
+      "task": "T3-noisy-command-compression",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Run cargo test --offline --color never in this fixture. Return ONLY JSON with keys passed, failed, marker, test using the observed failure; include original_ref if a recovery ref was delivered."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "dd81dd58-1e78-4144-b5da-92f35e1a57e3",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"passed\":180,\"failed\":1,\"marker\":\"MARKER_BENCH_FAIL_42\",\"test\":\"boundary\"}",
+          "exit": 0,
+          "started_ms": 1793545983590,
+          "duration_us": 173828,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 180
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 180,
+      "rubric": {
+        "checks": {
+          "passed": true,
+          "failed": true,
+          "marker": true,
+          "test": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "claude",
+      "optimization": "on",
+      "task": "T4-code-patch-verification",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Fix only window.py so expired(now, reset) is true at reset and later, false before. Preserve its comment. Run python3 verify.py. Return ONLY {\"fixed\":true,\"verified\":true}."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "948bba1e-905c-4270-b93c-4f4a45375df7",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"fixed\":true,\"verified\":true}",
+          "exit": 0,
+          "started_ms": 1793545983773,
+          "duration_us": 88058,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 94
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 94,
+      "rubric": {
+        "checks": {
+          "fixed": true,
+          "verified": true,
+          "native_outcome": true,
+          "minimal_patch": true,
+          "comment_preserved": true,
+          "only_window_changed": true,
+          "boundary_verification": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "claude",
+      "optimization": "off",
+      "task": "T4-code-patch-verification",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Fix only window.py so expired(now, reset) is true at reset and later, false before. Preserve its comment. Run python3 verify.py. Return ONLY {\"fixed\":true,\"verified\":true}."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "7709b43a-a85c-48e4-bc84-79cf3d9b423b",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"fixed\":true,\"verified\":true}",
+          "exit": 0,
+          "started_ms": 1793545983899,
+          "duration_us": 109276,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 115
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 115,
+      "rubric": {
+        "checks": {
+          "fixed": true,
+          "verified": true,
+          "native_outcome": true,
+          "minimal_patch": true,
+          "comment_preserved": true,
+          "only_window_changed": true,
+          "boundary_verification": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "off",
+      "task": "T1-context-navigation",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Read contract.txt and src/worker.txt. Return ONLY JSON with keys clients, home_vars, end_events using their exact values."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"clients\":[\"claude\",\"codex\",\"antigravity\"],\"home_vars\":[\"CLAUDE_CONFIG_DIR\",\"CODEX_HOME\",\"ANTIGRAVITY_HOME\"],\"end_events\":[\"result\",\"turn.completed\",\"PLANNER_RESPONSE\"]}",
+          "exit": 0,
+          "started_ms": 1793545984065,
+          "duration_us": 122745,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 129
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 129,
+      "rubric": {
+        "checks": {
+          "clients": true,
+          "home_vars": true,
+          "end_events": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "on",
+      "task": "T1-context-navigation",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Read contract.txt and src/worker.txt. Return ONLY JSON with keys clients, home_vars, end_events using their exact values."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"clients\":[\"claude\",\"codex\",\"antigravity\"],\"home_vars\":[\"CLAUDE_CONFIG_DIR\",\"CODEX_HOME\",\"ANTIGRAVITY_HOME\"],\"end_events\":[\"result\",\"turn.completed\",\"PLANNER_RESPONSE\"]}",
+          "exit": 0,
+          "started_ms": 1793545984197,
+          "duration_us": 95809,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 102
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 102,
+      "rubric": {
+        "checks": {
+          "clients": true,
+          "home_vars": true,
+          "end_events": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "on",
+      "task": "T2-instruction-adherence",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Remember orbit-73 for the next turn. Return ONLY {\"remembered\":true}. Do not write any file or use markdown.",
+        "Recall the token from the previous turn. Return ONLY {\"token\":\"<remembered token>\"}. Do not write files or use markdown."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"remembered\":true}",
+          "exit": 0,
+          "started_ms": 1793545984302,
+          "duration_us": 123433,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 129
+        },
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"token\":\"orbit-73\"}",
+          "exit": 0,
+          "started_ms": 1793545984432,
+          "duration_us": 79763,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 86
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 215,
+      "rubric": {
+        "checks": {
+          "token": true,
+          "native_outcome": true,
+          "same_session": true,
+          "no_file_writes": true,
+          "first_answer": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "off",
+      "task": "T2-instruction-adherence",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Remember orbit-73 for the next turn. Return ONLY {\"remembered\":true}. Do not write any file or use markdown.",
+        "Recall the token from the previous turn. Return ONLY {\"token\":\"<remembered token>\"}. Do not write files or use markdown."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"remembered\":true}",
+          "exit": 0,
+          "started_ms": 1793545984521,
+          "duration_us": 112903,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 119
+        },
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"token\":\"orbit-73\"}",
+          "exit": -1,
+          "started_ms": 1793545984640,
+          "duration_us": 133464,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 139
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 258,
+      "rubric": {
+        "checks": {
+          "token": true,
+          "native_outcome": true,
+          "same_session": true,
+          "no_file_writes": true,
+          "first_answer": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "off",
+      "task": "T3-noisy-command-compression",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Run cargo test --offline --color never in this fixture. Return ONLY JSON with keys passed, failed, marker, test using the observed failure; include original_ref if a recovery ref was delivered."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"passed\":180,\"failed\":1,\"marker\":\"MARKER_BENCH_FAIL_42\",\"test\":\"boundary\"}",
+          "exit": 0,
+          "started_ms": 1793545984783,
+          "duration_us": 130370,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 135
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 135,
+      "rubric": {
+        "checks": {
+          "passed": true,
+          "failed": true,
+          "marker": true,
+          "test": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "on",
+      "task": "T3-noisy-command-compression",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Run cargo test --offline --color never in this fixture. Return ONLY JSON with keys passed, failed, marker, test using the observed failure; include original_ref if a recovery ref was delivered."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"passed\":180,\"failed\":1,\"marker\":\"MARKER_BENCH_FAIL_42\",\"test\":\"boundary\"}",
+          "exit": 0,
+          "started_ms": 1793545984921,
+          "duration_us": 88166,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 94
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 94,
+      "rubric": {
+        "checks": {
+          "passed": true,
+          "failed": true,
+          "marker": true,
+          "test": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "on",
+      "task": "T4-code-patch-verification",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Fix only window.py so expired(now, reset) is true at reset and later, false before. Preserve its comment. Run python3 verify.py. Return ONLY {\"fixed\":true,\"verified\":true}."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"fixed\":true,\"verified\":true}",
+          "exit": 0,
+          "started_ms": 1793545985019,
+          "duration_us": 86004,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 92
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 92,
+      "rubric": {
+        "checks": {
+          "fixed": true,
+          "verified": true,
+          "native_outcome": true,
+          "minimal_patch": true,
+          "comment_preserved": true,
+          "only_window_changed": true,
+          "boundary_verification": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "codex",
+      "optimization": "off",
+      "task": "T4-code-patch-verification",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Fix only window.py so expired(now, reset) is true at reset and later, false before. Preserve its comment. Run python3 verify.py. Return ONLY {\"fixed\":true,\"verified\":true}."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"fixed\":true,\"verified\":true}",
+          "exit": 0,
+          "started_ms": 1793545985143,
+          "duration_us": 107474,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "no-rollout"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 114
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 114,
+      "rubric": {
+        "checks": {
+          "fixed": true,
+          "verified": true,
+          "native_outcome": true,
+          "minimal_patch": true,
+          "comment_preserved": true,
+          "only_window_changed": true,
+          "boundary_verification": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "off",
+      "task": "T1-context-navigation",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Read contract.txt and src/worker.txt. Return ONLY JSON with keys clients, home_vars, end_events using their exact values."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"clients\":[\"claude\",\"codex\",\"antigravity\"],\"home_vars\":[\"CLAUDE_CONFIG_DIR\",\"CODEX_HOME\",\"ANTIGRAVITY_HOME\"],\"end_events\":[\"result\",\"turn.completed\",\"PLANNER_RESPONSE\"]}",
+          "exit": 0,
+          "started_ms": 1793545985289,
+          "duration_us": 170302,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 176
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 176,
+      "rubric": {
+        "checks": {
+          "clients": true,
+          "home_vars": true,
+          "end_events": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "on",
+      "task": "T1-context-navigation",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Read contract.txt and src/worker.txt. Return ONLY JSON with keys clients, home_vars, end_events using their exact values."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"clients\":[\"claude\",\"codex\",\"antigravity\"],\"home_vars\":[\"CLAUDE_CONFIG_DIR\",\"CODEX_HOME\",\"ANTIGRAVITY_HOME\"],\"end_events\":[\"result\",\"turn.completed\",\"PLANNER_RESPONSE\"]}",
+          "exit": 0,
+          "started_ms": 1793545985469,
+          "duration_us": 111007,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 118
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 118,
+      "rubric": {
+        "checks": {
+          "clients": true,
+          "home_vars": true,
+          "end_events": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "on",
+      "task": "T2-instruction-adherence",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Remember orbit-73 for the next turn. Return ONLY {\"remembered\":true}. Do not write any file or use markdown.",
+        "Recall the token from the previous turn. Return ONLY {\"token\":\"<remembered token>\"}. Do not write files or use markdown."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"remembered\":true}",
+          "exit": 0,
+          "started_ms": 1793545985597,
+          "duration_us": 178783,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 190
+        },
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"token\":\"orbit-73\"}",
+          "exit": 0,
+          "started_ms": 1793545985783,
+          "duration_us": 158082,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 165
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 355,
+      "rubric": {
+        "checks": {
+          "token": true,
+          "native_outcome": true,
+          "same_session": true,
+          "no_file_writes": true,
+          "first_answer": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "off",
+      "task": "T2-instruction-adherence",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Remember orbit-73 for the next turn. Return ONLY {\"remembered\":true}. Do not write any file or use markdown.",
+        "Recall the token from the previous turn. Return ONLY {\"token\":\"<remembered token>\"}. Do not write files or use markdown."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"remembered\":true}",
+          "exit": 0,
+          "started_ms": 1793545985950,
+          "duration_us": 123389,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 128
+        },
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"token\":\"orbit-73\"}",
+          "exit": 0,
+          "started_ms": 1793545986080,
+          "duration_us": 120559,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 126
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 254,
+      "rubric": {
+        "checks": {
+          "token": true,
+          "native_outcome": true,
+          "same_session": true,
+          "no_file_writes": true,
+          "first_answer": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "off",
+      "task": "T3-noisy-command-compression",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Run cargo test --offline --color never in this fixture. Return ONLY JSON with keys passed, failed, marker, test using the observed failure; include original_ref if a recovery ref was delivered."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"passed\":180,\"failed\":1,\"marker\":\"MARKER_BENCH_FAIL_42\",\"test\":\"boundary\"}",
+          "exit": 0,
+          "started_ms": 1793545986209,
+          "duration_us": 121267,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 127
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 127,
+      "rubric": {
+        "checks": {
+          "passed": true,
+          "failed": true,
+          "marker": true,
+          "test": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "on",
+      "task": "T3-noisy-command-compression",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Run cargo test --offline --color never in this fixture. Return ONLY JSON with keys passed, failed, marker, test using the observed failure; include original_ref if a recovery ref was delivered."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"passed\":180,\"failed\":1,\"marker\":\"MARKER_BENCH_FAIL_42\",\"test\":\"boundary\"}",
+          "exit": 0,
+          "started_ms": 1793545986345,
+          "duration_us": 117903,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 124
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 124,
+      "rubric": {
+        "checks": {
+          "passed": true,
+          "failed": true,
+          "marker": true,
+          "test": true,
+          "native_outcome": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "on",
+      "task": "T4-code-patch-verification",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Fix only window.py so expired(now, reset) is true at reset and later, false before. Preserve its comment. Run python3 verify.py. Return ONLY {\"fixed\":true,\"verified\":true}."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"fixed\":true,\"verified\":true}",
+          "exit": 0,
+          "started_ms": 1793545986472,
+          "duration_us": 118500,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "off",
+            "reason": "not_installed"
+          },
+          "wall_ms": 124
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 124,
+      "rubric": {
+        "checks": {
+          "fixed": true,
+          "verified": true,
+          "native_outcome": true,
+          "minimal_patch": true,
+          "comment_preserved": true,
+          "only_window_changed": true,
+          "boundary_verification": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    },
+    {
+      "client": "antigravity",
+      "optimization": "off",
+      "task": "T4-code-patch-verification",
+      "source": "smoke",
+      "fixture_sha256": "a1e3384d4f40baeb7bfc769dc2df4561d1b028bc7c1a3e9a1a8c24813b6c1874",
+      "prompts": [
+        "Fix only window.py so expired(now, reset) is true at reset and later, false before. Preserve its comment. Run python3 verify.py. Return ONLY {\"fixed\":true,\"verified\":true}."
+      ],
+      "reports": [
+        {
+          "schema": 1,
+          "session": "smoke-session",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"fixed\":true,\"verified\":true}",
+          "exit": 0,
+          "started_ms": 1793545986636,
+          "duration_us": 108739,
+          "usage": {
+            "input": null,
+            "cache_read": null,
+            "cache_write": null,
+            "output": null,
+            "calls": null,
+            "model": null,
+            "unknown": "synthetic-protocol-double"
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 116
+        }
+      ],
+      "usage": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "total": null,
+        "model": null
+      },
+      "wall_ms": 116,
+      "rubric": {
+        "checks": {
+          "fixed": true,
+          "verified": true,
+          "native_outcome": true,
+          "minimal_patch": true,
+          "comment_preserved": true,
+          "only_window_changed": true,
+          "boundary_verification": true
+        },
+        "quality": 100,
+        "context": 100,
+        "adherence": 100,
+        "overall": 100.0
+      },
+      "tool_bytes": null,
+      "tool_bytes_unknown": "synthetic-protocol-double",
+      "compression_evidence": null
+    }
+  ],
+  "deltas": [
+    {
+      "client": "claude",
+      "task": "T1-context-navigation",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "claude",
+      "task": "T2-instruction-adherence",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "claude",
+      "task": "T3-noisy-command-compression",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "claude",
+      "task": "T4-code-patch-verification",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "codex",
+      "task": "T1-context-navigation",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "codex",
+      "task": "T2-instruction-adherence",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "codex",
+      "task": "T3-noisy-command-compression",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "codex",
+      "task": "T4-code-patch-verification",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "antigravity",
+      "task": "T1-context-navigation",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "antigravity",
+      "task": "T2-instruction-adherence",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "antigravity",
+      "task": "T3-noisy-command-compression",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    },
+    {
+      "client": "antigravity",
+      "task": "T4-code-patch-verification",
+      "input_saved": null,
+      "unknown": "smoke-is-not-native-evidence"
+    }
+  ]
+}
