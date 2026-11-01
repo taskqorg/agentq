@@ -31,7 +31,8 @@ pub fn fake_host() {
                 "workspace_write":true,"protected_write_create_unlink_denied":["invented-control"],"reads":"existing profile","network":"existing profile"});
             let authority=json!({"project":root,"runtime":"codex","profile_sha256":e["profile_sha256"],"requested":"workspace-write",
                 "saved":{"revision":r["policy_revision"],"grant":{"runtime":"codex","mode":"workspace","project":root,"by":e["approver"],"at":1}},
-                "resolved":{"mode":"workspace"},"executable":exe,"executable_sha256":digest(&exe),
+                "resolved":{"runtime":"codex","requested":"workspace-write","grant":"workspace","effective":"workspace",
+                    "enforcement":"invented process double, no native enforcement","refused":null},"executable":exe,"executable_sha256":digest(&exe),
                 "adapter":{"executable":exe,"sha256":digest(&exe)},"account":r["account"],"account_home":e["account_home"]});
             save(&receipt,&json!({"schema":"taskq.app-server/1","operation":r["slot"]["binding"]["op_id"],"caller":r["slot"]["binding"]["caller"],
                 "state":"verified-effective","verified_effective":effective,"launch":{"schema":"taskq.app-server/1","policy_revision":r["policy_revision"],
@@ -58,6 +59,7 @@ pub fn fake_host() {
 
 // Requirement: no input before fresh exact authority, no widening/replay from untrusted task/env/receipt text.
 // Risk: a forged/stale/unknown receipt starts work, kills a foreign child or reuses an uncertain operation.
+// #193: accept producer-shaped resolved.effective; absent/null/Full/mode-only evidence never opens stdin.
 pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     let root=scratch("protected").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
     let home=root.join("account");std::fs::create_dir(&home).unwrap();
@@ -88,6 +90,9 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
         ("/launch/state",json!("unknown")),("/launch/cancel_requested",json!(true)),("/launch/host_instance",Value::Null),
         ("/launch/policy_revision",json!(30)),("/launch/authority/saved/revision",json!(30)),
         ("/launch/authority/saved/grant/by",json!("forged-operator")),("/launch/authority/saved/grant/mode",json!("full")),
+        ("/launch/authority/resolved/effective",json!("full")),("/launch/authority/resolved/effective",Value::Null),
+        ("/launch/authority/resolved",json!({})),("/launch/authority/resolved",Value::Null),
+        ("/launch/authority/resolved",json!({"mode":"workspace"})),
         ("/launch/authority/project",json!(home)),("/launch/authority/profile_sha256",json!("c".repeat(64))),
         ("/launch/authority/account",json!("foreign")),("/launch/authority/account_home",json!(root)),
         ("/launch/authority/executable_sha256",json!("c".repeat(64))),("/launch/authority/adapter/sha256",json!("c".repeat(64))),
