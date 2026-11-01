@@ -6,14 +6,22 @@ fn quote(s: &str) -> String { format!("'{}'", s.replace('\'', "'\"'\"'")) }
 
 pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Value, String> {
     let empty = || json!({});
+    // The client passes its own environment and working directory to the hook (M6.9, M6.10).
+    let launched = || crate::model::launched(|k| std::env::var(k).ok());
+    let data = || exe.parent().map(|p| p.join("data")).ok_or("hook launcher has no install root");
     if agent == "claude" && event == "Stop" {
         let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
-        crate::model::observe(&exe.parent().ok_or("hook launcher has no install root")?.join("data"), &v)?;
+        crate::model::observe(&data()?, &v, launched())?;
         return Ok(empty());
     }
     if agent == "hermes" && event == "post_api_request" {
         let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
-        crate::model::observe_hermes(&exe.parent().ok_or("hook launcher has no install root")?.join("data"), &v)?;
+        crate::model::observe_hermes(&data()?, &v, launched(), std::env::current_dir().ok().as_deref())?;
+        return Ok(empty());
+    }
+    if agent == "codex" && event == "SessionStart" {
+        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
+        crate::model::session_start(&data()?, &v, launched(), std::env::current_dir().ok().as_deref())?;
         return Ok(empty());
     }
     if agent != "claude" || !["PreToolUse", "PostToolUse"].contains(&event) { return Ok(empty()); }
@@ -29,8 +37,7 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
         let mut result = v["tool_response"].clone();
         if result["interrupted"] != false || result["isImage"] != false || !result["stderr"].is_string() { return Ok(empty()); }
         let Some(text) = result["stdout"].as_str() else { return Ok(empty()); };
-        let data = exe.parent().ok_or("hook launcher has no install root")?.join("data");
-        let compressed = crate::compression::compress(&data, "claude", &json!({
+        let compressed = crate::compression::compress(&data()?, "claude", &json!({
             "adapter": "hook", "tool": "Bash", "command": command, "text": text, "exit_code": 0,
             "session": v["session_id"], "tool_call": v["tool_use_id"],
         }).to_string())?;

@@ -18,6 +18,26 @@ fn event_id(installation: &str, call: &str) -> String {
     crate::resource::hex(digest::digest(&digest::SHA256, format!("{installation}:model:{call}").as_bytes()).as_ref())[..32].to_string()
 }
 
+/// M6.9: TaskQ or another launcher (PilotQ) started this client; CoreQ `agent` records its turns, so agentq counts none.
+pub fn launched(env: impl Fn(&str) -> Option<String>) -> bool {
+    ["TASKQ_TASK", "AGENTQ_LAUNCHER"].iter().any(|k| env(k).is_some_and(|v| !v.is_empty()))
+}
+
+/// M6.10: `owner/name` of the nearest `taskq.json` `repo` at or above `dir`, else the unknown reason.
+pub fn project(dir: &Path) -> Result<String, &'static str> {
+    let file = dir.ancestors().map(|d| d.join("taskq.json")).find(|f| f.is_file()).ok_or("no known project")?;
+    let v: Value = std::fs::read_to_string(file).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+    let part = |p: &str| !p.is_empty() && !p.starts_with('.') && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    v["repo"].as_str().filter(|r| r.len() <= 64 && r.split_once('/').is_some_and(|(o, n)| part(o) && part(n))).map(String::from).ok_or("no known project")
+}
+
+fn set_project(a: &mut Map<String, Value>, p: Result<String, &str>) {
+    match p {
+        Ok(code) => a.insert("agentq.project".into(), json!(code)),
+        Err(reason) => a.insert("agentq.project_unknown".into(), json!(reason)),
+    };
+}
+
 /// `2026-10-19T08:32:09.030Z` as unix nanoseconds; other shapes are unknown.
 fn time_ns(s: &str) -> Option<u128> {
     let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
@@ -39,6 +59,7 @@ fn time_ns(s: &str) -> Option<u128> {
 /// call's first line).
 pub fn calls(text: &str) -> Vec<(String, Option<u128>, Value, usize)> {
     let mut out: Vec<(String, Option<u128>, Value, usize)> = vec![];
+    let mut projects: std::collections::HashMap<String, Result<String, &'static str>> = Default::default();
     for (n, line) in text.lines().enumerate() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let m = &v["message"];
@@ -48,6 +69,10 @@ pub fn calls(text: &str) -> Vec<(String, Option<u128>, Value, usize)> {
         a.insert("agentq.agent".into(), json!("claude"));
         a.insert("agentq.model.source".into(), json!(SOURCE));
         if let Some(s) = v["sessionId"].as_str() { a.insert("agentq.session".into(), json!(s)); }
+        set_project(&mut a, match v["cwd"].as_str().filter(|c| !c.is_empty()) {
+            Some(cwd) => projects.entry(cwd.into()).or_insert_with(|| project(Path::new(cwd))).clone(),
+            None => Err("no working directory"),
+        });
         let call = v["requestId"].as_str().or(m["id"].as_str());
         let u = &m["usage"];
         for (key, value) in [
@@ -102,9 +127,12 @@ pub fn hermes_call(v: &Value) -> (String, Option<u128>, Value) {
     (key, at, Value::Object(a))
 }
 
-/// Queue the `agentq.model` span of one Hermes call; an unwritten event is a recorded hook failure.
-pub fn observe_hermes(data: &Path, input: &Value) -> Result<(), String> {
+/// Queue the `agentq.model` span of one Hermes call run in `cwd`; an unwritten event is a recorded hook failure. A
+/// launched session queues nothing (M6.9).
+pub fn observe_hermes(data: &Path, input: &Value, launched: bool, cwd: Option<&Path>) -> Result<(), String> {
+    if launched { return Ok(()); }
     let (key, at, mut attrs) = hermes_call(input);
+    if let Value::Object(a) = &mut attrs { set_project(a, cwd.ok_or("no working directory").and_then(project)); }
     attrs["agentq.event_id"] = json!(event_id(&crate::telemetry::installation(data), &key));
     crate::telemetry::emit_at(data, "agentq.model", "call", attrs, at.unwrap_or_else(crate::telemetry::now_ns)).map(|_| ()).ok_or_else(|| "model call not queued".into())
 }
@@ -133,11 +161,38 @@ pub fn codex_call(input: &Value) -> (String, Option<u128>, Value) {
     (key, input["created_at"].as_u64().map(|s| s as u128 * 1_000_000_000), Value::Object(a))
 }
 
-/// `agentq model codex`: queue one `agentq.model` span unless the Codex integration is disabled.
+/// `data/sessions/<hash>.json`: what the Codex `SessionStart` hook saw of a session the service cannot see.
+fn session_file(data: &Path, session: &str) -> PathBuf {
+    data.join("sessions").join(format!("{}.json", event_id("session", session)))
+}
+
+/// Codex `SessionStart`: record whether a launcher started the session and its project code, never its path.
+pub fn session_start(data: &Path, input: &Value, launched: bool, cwd: Option<&Path>) -> Result<(), String> {
+    let session = input["session_id"].as_str().filter(|s| !s.is_empty()).ok_or("SessionStart has no session_id")?;
+    let mut record = Map::new();
+    record.insert("launched".into(), json!(launched));
+    set_project(&mut record, input["cwd"].as_str().filter(|c| !c.is_empty()).map(Path::new).or(cwd).ok_or("no working directory").and_then(project));
+    std::fs::create_dir_all(data.join("sessions")).map_err(|e| format!("session state: {e}"))?;
+    coreq::write_atomic(&session_file(data, session), &Value::Object(record).to_string()).map_err(|e| format!("session state: {e}"))?;
+    expire(&data.join("sessions"));
+    Ok(())
+}
+
+/// `agentq model codex`: queue one `agentq.model` span unless the Codex integration is disabled or a launcher
+/// started the session (M6.9).
 pub fn codex(data: &Path, input: &str) -> Result<(), String> {
     if crate::control::disabled(data, "codex")? { return Ok(()); }
     let v: Value = serde_json::from_str(input).map_err(|e| format!("model call JSON: {e}"))?;
+    let record: Value = v["session"].as_str().and_then(|s| std::fs::read_to_string(session_file(data, s)).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+    if record["launched"] == true { return Ok(()); }
     let (key, at, mut attrs) = codex_call(&v);
+    if let Value::Object(a) = &mut attrs {
+        set_project(a, match (record["agentq.project"].as_str(), record["agentq.project_unknown"].as_str()) {
+            (Some(code), _) => Ok(code.to_string()),
+            (None, Some(reason)) => Err(reason),
+            _ => Err("no session start"),
+        });
+    }
     attrs["agentq.event_id"] = json!(event_id(&crate::telemetry::installation(data), &key));
     crate::telemetry::emit_at(data, "agentq.model", "call", attrs, at.unwrap_or_else(crate::telemetry::now_ns)).map(|_| ()).ok_or_else(|| "queue write failed".into())
 }
@@ -197,8 +252,10 @@ fn drain_file(data: &Path, installation: &str, file: &Path, deadline: Instant, p
 }
 
 /// Queue one `agentq.model` span per new call of the session transcript and its subagent transcripts, bounded by
-/// `HOOK_PASS`. Leftover bytes stay in the marks as backlog for the next pass or the service (`drain`).
-pub fn observe(data: &Path, input: &Value) -> Result<(), String> {
+/// `HOOK_PASS`. Leftover bytes stay in the marks as backlog for the next pass or the service (`drain`). A launched
+/// session reads nothing and leaves no mark, so the service never drains it either (M6.9).
+pub fn observe(data: &Path, input: &Value, launched: bool) -> Result<(), String> {
+    if launched { return Ok(()); }
     observe_until(data, input, Instant::now() + HOOK_PASS)
 }
 
@@ -216,14 +273,14 @@ fn observe_until(data: &Path, input: &Value, deadline: Instant) -> Result<(), St
     for file in files {
         drain_file(data, &installation, &file, deadline, &mut progressed)?;
     }
-    expire(data);
+    expire(&data.join("model"));
     Ok(())
 }
 
-/// Marks untouched for 7 days go, a backlog of a deleted transcript included.
-fn expire(data: &Path) {
+/// Files in `dir` untouched for 7 days go: transcript marks (a backlog of a deleted transcript included) and session records.
+fn expire(dir: &Path) {
     let week = std::time::SystemTime::now() - Duration::from_secs(7 * 86400);
-    for e in std::fs::read_dir(data.join("model")).into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < week) { let _ = std::fs::remove_file(e.path()); }
     }
 }
@@ -247,7 +304,7 @@ pub fn drain(data: &Path, deadline: Instant) {
             eprintln!("agentq: model calls of a transcript unknown: {e}");
         }
     }
-    expire(data);
+    expire(&data.join("model"));
 }
 
 /// `status.json` `model_backlog` and the heartbeat: transcripts with unread calls and their bytes; unreadable marks
@@ -355,18 +412,18 @@ mod tests {
             v.sort();
             v
         };
-        observe(&data, &input).unwrap();
+        observe(&data, &input, false).unwrap();
         let first = queued(&data);
         assert_eq!(first.len(), 2, "the unterminated last line waits for the next pass");
         assert!(first.iter().any(|s| s.contains("req_s")), "subagent calls count");
         std::fs::write(&t, format!("{}\n{}\n{}\n", line(Some("req_a"), usage.clone(), "2026-10-19T08:32:09Z"), line(Some("req_b"), usage.clone(), "2026-10-19T08:32:10Z"), line(Some("req_a"), usage, "2026-10-19T08:32:12Z"))).unwrap();
-        observe(&data, &input).unwrap();
+        observe(&data, &input, false).unwrap();
         let second = queued(&data);
         assert_eq!(second.len(), 3, "req_b is new; the repeated req_a replaces its queued event");
         std::fs::remove_dir_all(data.join("model")).unwrap();
-        observe(&data, &input).unwrap();
+        observe(&data, &input, false).unwrap();
         assert_eq!(queued(&data).len(), 3, "a lost offset resends the same event IDs");
-        assert!(observe(&data, &json!({})).is_err(), "a Stop input without transcript is a recorded hook failure");
+        assert!(observe(&data, &json!({}), false).is_err(), "a Stop input without transcript is a recorded hook failure");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -389,11 +446,83 @@ mod tests {
         assert_eq!(a["agentq.model.name"], "gpt-5", "the requested model when the response names none");
         let d = std::env::temp_dir().join(format!("agentq-model-hermes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        observe_hermes(&d, &full).unwrap();
-        observe_hermes(&d, &full).unwrap();
+        observe_hermes(&d, &full, false, None).unwrap();
+        observe_hermes(&d, &full, false, None).unwrap();
         let q: Vec<String> = crate::telemetry::entries(&crate::telemetry::queue(&d)).into_iter().map(|e| std::fs::read_to_string(e.1).unwrap()).collect();
         assert_eq!(q.len(), 1, "a repeated call ID counts once");
         assert!(q[0].contains("\"agentq.model\"") && q[0].contains("hermes_hook"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #179: CoreQ `agent` already records a TaskQ- or PilotQ-launched turn; an `agentq.model` span for it counted the
+    /// turn twice. Other sessions keep their spans and name their project.
+    #[test]
+    fn launched_sessions_queue_no_model_calls_and_others_name_their_project() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_string());
+        assert!(launched(env(&[("TASKQ_TASK", "179")])) && launched(env(&[("AGENTQ_LAUNCHER", "pilotq")])));
+        assert!(!launched(env(&[])) && !launched(env(&[("TASKQ_TASK", "")])), "an empty marker is no launch");
+
+        let d = std::env::temp_dir().join(format!("agentq-model-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (root, other) = (d.join("work/agentq"), d.join("work/other"));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(other.join("src")).unwrap();
+        std::fs::write(root.join("taskq.json"), r#"{"board":"github","repo":"taskqorg/agentq"}"#).unwrap();
+        std::fs::write(other.join("taskq.json"), r#"{"repo":"../escape"}"#).unwrap();
+        assert_eq!(project(&root.join("src")), Ok("taskqorg/agentq".into()), "the nearest taskq.json at or above the directory");
+        assert_eq!(project(&other.join("src")), Err("no known project"), "a repo that is not owner/name is no project");
+
+        let data = d.join("data");
+        // Per source: the queue's 7-day cap prunes the dated Claude fixture on a later write.
+        let spans = |data: &Path, source: &str| -> Vec<Value> {
+            crate::telemetry::entries(&crate::telemetry::queue(data)).into_iter().map(|e| serde_json::from_str::<Value>(&std::fs::read_to_string(e.1).unwrap()).unwrap()).filter(|v| v.to_string().contains("\"agentq.model\"") && v.to_string().contains(source)).collect()
+        };
+        let attr = |v: &Value, key: &str| -> Option<String> {
+            let s = v.to_string();
+            let at = s.find(&format!("\"key\":\"{key}\""))?;
+            s[at..].split("\"stringValue\":\"").nth(1)?.split('"').next().map(String::from)
+        };
+
+        // Claude: a launched session reads no transcript and leaves no backlog for the service.
+        let t = d.join("s1.jsonl");
+        let usage = json!({"input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4});
+        let mut l: Value = serde_json::from_str(&line(Some("req_l"), usage, "2026-10-19T08:32:09Z")).unwrap();
+        l["cwd"] = json!(root.join("src"));
+        std::fs::write(&t, format!("{l}\n")).unwrap();
+        let input = json!({"session_id": "s1", "transcript_path": t});
+        observe(&data, &input, true).unwrap();
+        drain(&data, Instant::now() + Duration::from_secs(10));
+        assert!(spans(&data, SOURCE).is_empty(), "a launched Claude session queues no model call");
+        assert_eq!(backlog(&data)["state"], "none");
+        observe(&data, &input, false).unwrap();
+        let s = spans(&data, SOURCE);
+        assert_eq!(s.len(), 1);
+        assert_eq!(attr(&s[0], "agentq.project").as_deref(), Some("taskqorg/agentq"), "{}", s[0]);
+
+        // Codex: the service sees no client environment; the SessionStart record decides.
+        let call = |session: &str, id: &str| json!({"session": session, "id": id, "model": "gpt-5.5-codex", "usage": {"input_tokens": 10}}).to_string();
+        session_start(&data, &json!({"session_id": "t-launched", "cwd": root}), true, None).unwrap();
+        codex(&data, &call("t-launched", "resp_l")).unwrap();
+        assert!(spans(&data, "codex_provider").is_empty(), "a launched Codex session queues no model call");
+        session_start(&data, &json!({"session_id": "t-manual", "cwd": root}), false, None).unwrap();
+        codex(&data, &call("t-manual", "resp_m")).unwrap();
+        codex(&data, &call("t-unseen", "resp_u")).unwrap();
+        let s = spans(&data, "codex_provider");
+        assert_eq!(s.len(), 2);
+        let by = |id: &str| s.iter().find(|v| v.to_string().contains(id)).unwrap().clone();
+        assert_eq!(attr(&by("resp_m"), "agentq.project").as_deref(), Some("taskqorg/agentq"));
+        assert_eq!(attr(&by("resp_u"), "agentq.project_unknown").as_deref(), Some("no session start"), "unknown, never a guessed project");
+        assert!(!std::fs::read_dir(data.join("sessions")).unwrap().flatten().any(|e| std::fs::read_to_string(e.path()).unwrap().contains("work")), "a session record holds no path");
+        assert!(session_start(&data, &json!({}), false, None).is_err(), "a SessionStart without session is a recorded hook failure");
+
+        // Hermes follows the same marker.
+        let h = json!({"api_request_id": "h1", "session_id": "s", "model": "gpt-5", "usage": {}});
+        observe_hermes(&data, &h, true, Some(&root)).unwrap();
+        assert!(spans(&data, "hermes_hook").is_empty(), "a launched Hermes session queues no model call");
+        observe_hermes(&data, &h, false, Some(&other)).unwrap();
+        let s = spans(&data, "hermes_hook");
+        assert_eq!(s.len(), 1);
+        assert_eq!(attr(&s[0], "agentq.project_unknown").as_deref(), Some("no known project"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -429,7 +558,7 @@ mod tests {
         assert_eq!((b["state"].as_str(), b["transcripts"].as_u64()), (Some("pending"), Some(1)), "leftover calls are exposed: {b}");
         assert!(b["bytes"].as_u64().unwrap() > 0);
         let start = Instant::now();
-        observe(&data, &input).unwrap();
+        observe(&data, &input, false).unwrap();
         assert!(start.elapsed() < Duration::from_secs(5), "a hook pass ends inside the hook budget: {:?}", start.elapsed());
         // The service finishes what hook passes left, even after the session ended.
         while backlog(&data)["state"] == "pending" { drain(&data, Instant::now() + Duration::from_secs(10)); }
