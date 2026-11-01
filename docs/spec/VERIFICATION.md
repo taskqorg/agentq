@@ -1,6 +1,6 @@
 # Minimal product acceptance
 
-Status: target gate for [PRODUCT revision 2](PRODUCT.md). Test observable outcomes through real interfaces. A scenario may cover several requirements and use a small data table; do not write a test per function.
+Status: target gate for [PRODUCT revision 3](PRODUCT.md). Test observable outcomes through real interfaces. A scenario may cover several requirements and use a small data table; do not write a test per function.
 
 ## Core scenarios
 
@@ -113,3 +113,7 @@ Live check for agentq.md § 6 `agentq.installation` (`agentq.routing`, `agentq.h
 - Found: `agentq service restart` on this host ended the `AgentQ-host` task and then failed `schtasks /Create` with Access denied, leaving no service. `schtasks /Run /TN AgentQ-host` restored it.
 
 Hermes onboarding ships the §4 `agent-context` transform plugin through the existing ownership journal. `hermes_keeps_foreign_enabled_and_disabled_plugins_on_install_and_restore` proves repeat install/removal preserves other plugins; foreign source conflicts prevent activation before writes. `python tests/hermes_adapter.py` checks native transform metadata, envelope preservation and fail-open behavior. Installed gateway dispatch and model visibility require separate native qualification.
+
+## Shared worker runtime
+
+PRODUCT R13 and agentq.md M12.1–M12.7: `cargo test --locked -p agentq-runtime` runs deterministic Claude/Codex clients on each CI platform. It retains CLI/background/app/app-server, Remote Control, input/terminal recovery, dynamic tools, private drafts, catalogue, account/policy and idempotent attributable usage protection from CoreQ v0.18.0. JSON turns need no optimizer installation; launch intent and host-disable tests preserve native output and prior replay bytes. The external consumer in `examples/runtime-consumer` builds from a published immutable runtime revision and runs both fake clients. These checks do not qualify a consumer's native installation or UI; adoption and rollback remain [consumer-owned](RUNTIME.md#adoption-and-rollback).

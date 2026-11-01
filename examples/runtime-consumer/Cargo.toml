@@ -1,0 +1,11 @@
+# Minimal consumer outside the workspace; pin the published runtime source, never a local path.
+[package]
+name = "runtime-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+agentq-runtime = { git = "https://github.com/taskqorg/agentq", rev = "513193c8a96f3de1c71a86291a679230817ce0b2" }
+
+[workspace]

@@ -1,6 +1,6 @@
 # agentq
 
-agentq installs, routes and observes context optimization for Codex, Claude Code and Hermes on one host. One static binary per OS; no Node, npm or toolchain on the host. Decisions: [agentq.md](agentq.md). Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md).
+agentq installs, routes and observes context optimization for Codex, Claude Code and Hermes on one host. Its reusable Codex/Claude worker runtime also runs without an optimizer installation. One static binary per OS; no Node, npm or toolchain on the host. Decisions: [agentq.md](agentq.md). Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md).
 
 ## Install through an agent
 
@@ -49,6 +49,8 @@ agentq status
 The transition preserves native login, model, permissions, sandbox, compression preferences, local originals and queued observations. A target-name collision or changed owned value is reported and kept. Repeating the command finishes an interrupted transition. `agentq migrate-names --rollback` restores the recorded owned names only while the ownership/control metadata still matches the cutover; select an older binary only after that rollback. Private rollback metadata stays in the installation data folder. Historical transcripts, evidence and retired-package removal rules keep their original names.
 
 ## Commands
+
+- `agentq agent turn` runs one Codex/Claude turn from JSON stdin and returns a JSON report. No optimizer service is required. Library and request format: [runtime contract](docs/spec/RUNTIME.md).
 
 - `agentq compress <agent>` reads one tool-result JSON object (`adapter`, `tool`, `text`) and returns `text` and a recovery `ref`. Unqualified hook/provider recipes pass unchanged. `agentq stats [--json]` shows local call outcomes and bytes; missing or corrupt records are unknown.
 - `agentq profile [--json]` ranks compression and export operations by time, failure rate and variance against their budgets over the last 7 days; operations without readable samples, and proxy requests, read unknown. `agentq profile trace on [<minutes>]|off` records per-step traces for at most 60 minutes.
@@ -116,6 +118,10 @@ If `agentq` is not on PATH, use the installed launcher. On macOS/Linux: `"$HOME/
 Claude auto mode compresses successful Bash output through PostToolUse without changing native commands or permissions; failures remain native. Older PreToolUse-only profiles need explicit hook configuration; enable preserves their saved registrations. `direct` is a routing-only emergency bypass and does not pause Claude's hook.
 
 Qualification: Mac Codex/Claude CLI controls and isolated Linux systemd lifecycle/retention have native evidence. Desktop, native Mac/Windows reboot/logon and Codex originally routed service-baseline restoration are tracked separately; an unrun check remains unknown. See the [qualification record](docs/spec/INTEGRATION-CONTROL-PLAN.md#implementation-candidate-and-remaining-qualification) and [control contract](agentq.md#temporary-controls).
+
+## Run agent turns from other products
+
+`agentq-runtime` (folder `runtime/`) runs Codex and Claude worker turns for TaskQ, PilotQ and other products; a plain turn needs no optimizer installation. Rust callers pin the tag `runtime-v<version>`; other callers send one JSON request to `agentq agent turn` on stdin. Each launch states optimization `inherit`, `off` or `on` and gets the effective state back. Contract: [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md).
 
 ## Check installed client compression
 

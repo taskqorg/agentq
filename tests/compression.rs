@@ -336,6 +336,14 @@ fn execution_recovery_stats_chain() {
     assert_eq!(std::fs::read(root.join("calls")).unwrap(), calls, "PostToolUse replays a capture, never native work");
     let failure = cli(&root, &["hook","claude","PostToolUseFailure"], Some(&post.to_string()), &[]);
     assert_eq!(serde_json::from_slice::<Value>(&failure.stdout).unwrap(), json!({}), "native failures cannot be replaced by this API");
+    // Chain: agentq.md M12.7: a launch with optimization off keeps native output on the run and hook paths while the
+    // host switch stays on. Risk: an off launch still compresses, or it pauses compression for every other session.
+    let off = [("FILTER", "ok"), ("EXIT", "0"), ("AGENTQ_OPTIMIZATION", "off")];
+    assert_eq!(cli(&root, &["run", "--", "cargo", "test"], None, &off).stdout, raw.as_bytes());
+    assert_eq!(records(&root).last().unwrap()["reason"], "disabled");
+    let kept = cli(&root, &["hook","claude","PostToolUse"], Some(&post.to_string()), &off);
+    assert_eq!(serde_json::from_slice::<Value>(&kept.stdout).unwrap(), json!({}));
+    assert_eq!(std::fs::read_to_string(data.join("config.json")).unwrap(), r#"{"compression":{"stats":"queue"}}"#, "the host switch is unchanged");
     std::fs::write(data.join("config.json"), r#"{"compression":{"enabled":false}}"#).unwrap();
     let paused = cli(&root, &["hook","claude","PostToolUse"], Some(&post.to_string()), &[]);
     assert_eq!(serde_json::from_slice::<Value>(&paused.stdout).unwrap(), json!({}));

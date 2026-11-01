@@ -138,9 +138,9 @@ class State:
                 LOG.warning('model call not recorded; agentq unavailable')
         threading.Thread(target=run, daemon=True).start()
 
-    def transform(self, session, body):
+    def transform(self, session, body, off=False):
         if isinstance(body,dict) and isinstance(body.get('response'),dict):
-            nested = self.transform(session, body['response'])
+            nested = self.transform(session, body['response'], off)
             return body if nested is body['response'] else dict(body, response=nested)
         if not session or len(session) > 256 or not isinstance(body, dict) or not isinstance(body.get('input'), list):
             return body
@@ -185,6 +185,8 @@ class State:
                 candidate = original
                 try:
                     env = dict(os.environ, AGENTQ_INSTALL=str(self.install))
+                    if off:  # agentq.md M12.6/M12.7: a launch with optimization off; replayed bytes above stay unchanged.
+                        env['AGENTQ_OPTIMIZATION'] = 'off'
                     proc = subprocess.run([self.binary, 'compress', 'codex'], input=json.dumps(payload),
                                           text=True, capture_output=True, timeout=4, env=env)
                     if proc.returncode == 0:
@@ -234,6 +236,7 @@ class Adapter:
         session = headers.get(b'thread-id', headers.get(b'session-id', headers.get(b'session_id', headers.get(b'x-headroom-session-id', b'')))).decode('utf-8', 'replace')
         if not session:
             return await self.app(scope, receive, send)
+        off = headers.get(b'x-agentq-optimization') == b'off'
         pending = []
         if scope['type'] == 'http':
             pieces = bytearray()
@@ -251,7 +254,7 @@ class Adapter:
                 pending.append(disconnected)
             else:
                 raw = bytes(pieces)
-                raw = await self.transform(session, raw)
+                raw = await self.transform(session, raw, off)
                 pending.insert(0, dict(type='http.request', body=raw, more_body=False))
                 scope = dict(scope, headers=[(k, str(len(raw)).encode() if k.lower() == b'content-length' else v) for k, v in scope.get('headers', [])])
         async def incoming():
@@ -260,7 +263,7 @@ class Adapter:
                 field = 'text' if event.get('text') is not None else 'bytes'
                 raw = event.get(field)
                 if isinstance(raw, (str, bytes)):
-                    modified = await self.transform(session, raw.encode() if isinstance(raw, str) else raw)
+                    modified = await self.transform(session, raw.encode() if isinstance(raw, str) else raw, off)
                     if modified != (raw.encode() if isinstance(raw, str) else raw):
                         event = dict(event, **{field: modified.decode() if field == 'text' else modified})
             return event
@@ -291,10 +294,10 @@ class Adapter:
             await send(event)  # Provider events, encrypted reasoning and cancellation remain byte-identical.
         await self.app(scope, incoming, outgoing)
 
-    async def transform(self, session, raw):
+    async def transform(self, session, raw, off=False):
         try:
             body = json.loads(raw)
-            transformed = await asyncio.to_thread(self.state.transform, session, body)
+            transformed = await asyncio.to_thread(self.state.transform, session, body, off)
             return raw if transformed is body else json.dumps(transformed, ensure_ascii=False).encode()
         except (OSError, ValueError, TypeError, AttributeError):
             LOG.warning('provider adapter could not inspect frame; original preserved')

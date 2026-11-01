@@ -33,6 +33,35 @@ class ProviderChain(unittest.TestCase):
         self.requests.append(request)
         return subprocess.CompletedProcess([], 0, json.dumps(dict(text='180 passed; 1 failed\nAGENTQ_CHECK_ERROR\n[original rtk:fixture]', ref='rtk:fixture')), '')
 
+    # Chain: agentq.md M12.6/M12.7: a launch with optimization off reaches the compressor only through its env.
+    # Risk: an off launch still compresses, or off replaces bytes an earlier on turn already transmitted.
+    def test_launch_off_reaches_the_compressor_and_keeps_replay(self):
+        seen = []
+        def compress(*args, **kwargs):
+            seen.append(kwargs['env'].get('AGENTQ_OPTIMIZATION'))
+            return self.compress(*args, **kwargs)
+        with patch.object(p.subprocess, 'run', side_effect=compress):
+            result = self.state.transform('native-session', copy.deepcopy(BODY), True)
+            self.assertEqual(seen, ['off'])
+            self.assertEqual(self.state.transform('native-session', copy.deepcopy(BODY)), result, 'replay stays byte-identical')
+            self.assertEqual(len(seen), 1)
+
+    # M12.6/M12.7: a nested response.create frame must carry off through recursion and freeze native replay.
+    def test_nested_launch_off_preserves_native_output_and_replay(self):
+        seen = []
+        def compress(*args, **kwargs):
+            seen.append(kwargs['env'].get('AGENTQ_OPTIMIZATION'))
+            if seen[-1] == 'off':
+                return subprocess.CompletedProcess([], 0, json.dumps(dict(text=json.loads(kwargs['input'])['text'])), '')
+            return self.compress(*args, **kwargs)
+        body = dict(type='response.create', response=copy.deepcopy(BODY), opaque='keep')
+        with patch.object(p.subprocess, 'run', side_effect=compress):
+            result = self.state.transform('native-session', body, True)
+            self.assertEqual(seen, ['off'])
+            self.assertEqual(result, body)
+            self.assertEqual(self.state.transform('native-session', body), body)
+            self.assertEqual(len(seen), 1, 'native replay stays frozen after off')
+
     def test_native_shapes_replay_session_isolation_and_restart(self):
         for shape in [WRAPPED, [dict(type='input_text', text=WRAPPED), dict(type='image_url', image_url='opaque-image')],
                       json.dumps(dict(output=RAW, metadata=dict(exit_code=101, duration=2)))]:
