@@ -23,8 +23,6 @@ jobs:
     timeout-minutes: 15
     env:
       AGENTQ_SELFTEST_OFFLINE: '1'
-      # Keep the unchanged 50 ms live resource probe free of competing test subprocesses.
-      RUST_TEST_THREADS: '1'
     steps:
       - uses: actions/checkout@v6
       - run: rustup default stable
