@@ -30,7 +30,7 @@ The caller builds the base command: the client executable from `agent::executabl
 - An existing `agentapi` server does not inherit submission environment. A launch with optimization `off` (explicit or inherited) fails before submission rather than reporting suppression it cannot deliver; use the owned `agy` CLI for off/on comparisons. No server configuration is edited.
 - `kill` and a deadline stop the owned submission process and observation. They do not prove that server-side execution stopped; callers retain native cancellation and capacity ownership until their own readback. A submission without a session or terminal remains unknown. Native platform/account qualification remains open until a real caller-owned turn is observed.
 - Optimization attachment reads enabled matching hooks in the selected home/global config and the caller project's `.agents/hooks.json`; no file is edited.
-- Antigravity hooks use `toolCall.args.CommandLine`, `conversationId` and `stepIdx`; the response shallow-merges `overwrite.CommandLine` and delegates to native permissions with `decision: "allow"` (never `auto_approve`). Only qualified simple commands are wrapped; shell composition and Windows command shells remain native. [Hook schema](https://antigravity.google/docs/hooks).
+- Antigravity hooks use `toolCall.args.CommandLine`, `conversationId` and `stepIdx`; the response shallow-merges `overwrite.CommandLine` when wrapping a qualified simple command, and always delegates to native permissions with `decision: "allow"` (never `auto_approve`), including pass-through, `off`, disabled and error fallback paths so `PreToolUse` never denies native execution (P1, M1.2, M12.6, M12.7). Shell composition and Windows command shells remain native. [Hook schema](https://antigravity.google/docs/hooks).
 
 
 ## End of a turn
@@ -166,7 +166,7 @@ The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `start
 | 10 | Otherwise | `off` | `not_attached` |
 
 - `inherit` and `on` resolve the same way: `on` records the caller's request and never enables a switch, an integration or a disabled profile.
-- Explicit or inherited `off` adds child env `AGENTQ_OPTIMIZATION=off`. Claude hooks, `agentq run` and `agentq compress` inherit it and pass through with reason `disabled`. For a Codex home routed through agentq it also adds `-c model_providers.agentq.http_headers.x-agentq-optimization="off"` to CLI, app queue and app-server commands; the loopback provider passes `off` to the compressor, and replayed bytes of earlier calls stay unchanged (agentq.md § 3).
+- Explicit or inherited `off` adds child env `AGENTQ_OPTIMIZATION=off`. Claude and Antigravity hooks, `agentq run` and `agentq compress` inherit it and pass through with reason `disabled`. For a Codex home routed through agentq it also adds `-c model_providers.agentq.http_headers.x-agentq-optimization="off"` to CLI, app queue and app-server commands; the loopback provider passes `off` to the compressor, and replayed bytes of earlier calls stay unchanged (agentq.md § 3).
 - Every launch adds `AGENTQ_LAUNCHER=<product>` unless `TASKQ_TASK` or `AGENTQ_LAUNCHER` is already set, so agentq queues no second `agentq.model` count (agentq.md M6.9).
 - Effective `on` is the configuration at launch. Actual compression is proven only by the session's `agentq.compress` records.
 

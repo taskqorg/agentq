@@ -4,8 +4,12 @@ use std::path::Path;
 
 fn quote(s: &str) -> String { format!("'{}'", s.replace('\'', "'\"'\"'")) }
 
+pub fn default_response(agent: &str, event: &str) -> Value {
+    if agent == "antigravity" && event == "PreToolUse" { json!({"decision": "allow"}) } else { json!({}) }
+}
+
 pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Value, String> {
-    let empty = || json!({});
+    let empty = || default_response(agent, event);
     // The client passes its own environment and working directory to the hook (M6.9, M6.10).
     let launched = || crate::model::launched(|k| std::env::var(k).ok());
     let data = || exe.parent().map(|p| p.join("data")).ok_or("hook launcher has no install root");
@@ -106,7 +110,7 @@ mod tests {
         assert!(r_ag["overwrite"]["CommandLine"].as_str().unwrap().contains("AGENTQ_TOOL_CALL='step-19'"));
         for command in ["git status", "cargo test && echo no", "cargo test $(touch no)"] {
             let mut ag = ag.clone(); ag["toolCall"]["args"]["CommandLine"] = json!(command);
-            assert_eq!(response("antigravity", "PreToolUse", &ag.to_string(), Path::new("agentq")).unwrap(), json!({}));
+            assert_eq!(response("antigravity", "PreToolUse", &ag.to_string(), Path::new("agentq")).unwrap(), json!({"decision": "allow"}));
         }
     }
 }
