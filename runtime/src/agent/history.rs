@@ -15,8 +15,9 @@ pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res
     for feature in ["launch", "resume", "session", "input", "files_images", "ask_reply", "tools_outputs", "heartbeat", "cancel_recovery", "model_effort_accounts_permissions", "usage_errors", "history"] {
         let (status, reason) = match feature {
             "history" if format == "agy-stream" => ("limited", "completed steps may omit text; deltas/result only; unknown shapes retained raw"),
-            "history" if sidecar => ("limited", "truncated fields and raw-only attachments; caller selects full source"),
+            "history" if sidecar => ("limited", "truncated fields, GENERIC author unknown and raw-only attachments; caller selects full source"),
             "history" => ("supported", "bounded source adapter; unknown fields retained raw"),
+            "tools_outputs" if sidecar => ("limited", "native calls retained; GENERIC output has unknown tool/actor/call ID; TOOL_RESPONSE schema fixture only"),
             "heartbeat" => ("limited", "source progress and process poll only; no useful-work inference"),
             "files_images" => ("limited", "caller arguments or native typed references only; no media decoding"),
             "ask_reply" if !app => ("unsupported", "no added interactive reply channel; native caller control only"),
@@ -122,7 +123,10 @@ impl History {
         let (author, kind, item, blocks, limited) = normalize(&self.format, v);
         let hash = crate::sha256_hex(raw.as_bytes());
         let id = crate::sha256_hex(json!([self.format,self.source,self.session,offset,hash]).to_string().as_bytes());
-        let time = v.get("timestamp").or_else(|| v.get("time")).or_else(|| v.get("emittedAtMs")).cloned().unwrap_or(Value::Null);
+        let time = v.get("timestamp").or_else(|| v.get("time"))
+            .or_else(|| v.get("emittedAtMs"))
+            .or_else(|| if self.format == "antigravity-sidecar" {v.get("created_at")}else{None})
+            .cloned().unwrap_or(Value::Null);
         Ok(json!({"id":id,"source":self.source,"session":self.session,"session_binding":if native_session.is_some(){"native"}else{"caller"},"format":self.format,
             "order":offset,"start":offset,"end":offset+raw.len() as u64,"sha256":hash,"raw":raw,
             "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited}))
@@ -216,18 +220,20 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
                     limited=if truncation != "none" {truncation}else if v.get("attachments").is_some(){"attachments-raw-only"}else{"none"};
                 }
                 Some("TOOL_RESPONSE") => {author="tool";kind="tool";blocks.push(v.clone());limited=truncation;}
+                Some("SYSTEM_MESSAGE") => {author="system";kind="lifecycle";blocks=text(&v["content"]);limited=truncation;}
+                Some("GENERIC") => {blocks=text(&v["content"]);limited=if truncation != "none" {truncation}else{"generic-author-unknown"};}
                 _=>{}
             }
         }
         _ => {}
     }
-    let blocks: Vec<Value> = blocks.into_iter().map(block).collect();
+    let blocks: Vec<Value> = blocks.into_iter().map(|v| block(format, v)).collect();
     if limited == "none" && matches!(kind, "message" | "attachment" | "tool")
         && blocks.iter().any(|b| b["type"] == "unknown") { limited = "unsupported-content-block"; }
     (author,kind,item,blocks,limited)
 }
 
-fn block(v: Value) -> Value {
+fn block(format: &str, v: Value) -> Value {
     let kind = v["type"].as_str().unwrap_or_default();
     match kind {
         "text" | "input_text" | "output_text" => json!({"type":"text","text":v["text"],"native":v}),
@@ -242,6 +248,10 @@ fn block(v: Value) -> Value {
         "command_execution" | "commandExecution" => json!({"type":"tool_result","id":v["id"],
             "name":"shell","input":v["command"],"output":v.get("aggregated_output").or_else(||v.get("aggregatedOutput")),"native":v}),
         "mcp_tool_call" | "mcpToolCall" | "dynamicToolCall" | "TOOL_RESPONSE" => json!({"type":"tool_result","native":v}),
+        _ if format == "antigravity-sidecar" && v.get("type").is_none()
+            && v.get("args").is_some() && v["name"].as_str().is_some() => {
+            json!({"type":"tool_call","id":v.get("id"),"name":v["name"],"input":v["args"],"native":v})
+        }
         _ if v.get("parameters").is_some() && v.get("name").is_some() => {
             json!({"type":if v.get("output").is_some() || v.get("error").is_some(){"tool_result"}else{"tool_call"},
                 "name":v["name"],"input":v["parameters"],"output":v.get("output"),"error":v.get("error"),"native":v})

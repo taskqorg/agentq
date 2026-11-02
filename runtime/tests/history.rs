@@ -14,7 +14,7 @@ fn history_preserves_sources_and_recovers_without_replay() {
             "claude-stream" | "claude-native" => include_str!("fixtures/history/claude-native.jsonl"),
             "agy-stream" => include_str!("fixtures/history/agy-stream.jsonl"),
             "codex-app-server" => include_str!("fixtures/history/codex-app-server.jsonl"),
-            _ => "{\"type\":\"PLANNER_RESPONSE\",\"step_index\":1,\"content\":\"answer\",\"status\":\"DONE\"}\n",
+            _ => include_str!("fixtures/history/antigravity-sidecar.jsonl"),
         };
         let path = root.join(format);
         fs::write(&path, source).unwrap();
@@ -192,6 +192,10 @@ fn capability_readback_keeps_transport_limits() {
         assert_eq!(c["features"]["history"]["status"], "limited");
         assert!(!c["features"]["history"]["reason"].as_str().unwrap().is_empty());
         assert_eq!(c["native"]["status"], "untested");
+        if format == "antigravity-sidecar" {
+            assert_eq!(c["features"]["tools_outputs"]["status"],"limited");
+            assert!(c["features"]["tools_outputs"]["reason"].as_str().unwrap().contains("GENERIC"));
+        }
     }
 }
 
@@ -224,10 +228,9 @@ fn native_control_captures_keep_source_time_and_request_identity() {
     }
 }
 
-// A5: retained Claude lifecycle and projected sidecar content are source evidence,
-// not proof of missing original sidecar fields or native turn execution.
+// A5: retained Claude lifecycle records preserve source attribution and results.
 #[test]
-fn retained_lifecycle_and_sidecar_projection_keep_native_meaning() {
+fn retained_claude_lifecycle_keeps_native_meaning() {
     for row in include_str!("fixtures/history/claude-stream.jsonl").lines() {
         let source: Value = serde_json::from_str(row).unwrap();
         let session = source["sessionId"].as_str().or(source["session_id"].as_str()).unwrap();
@@ -237,22 +240,6 @@ fn retained_lifecycle_and_sidecar_projection_keep_native_meaning() {
         assert_eq!(v["kind"],"lifecycle");
         if source["type"] == "result" {assert_eq!(v["blocks"][0]["text"],source["result"]);}
         fs::remove_file(path).unwrap();
-    }
-    for row in include_str!("fixtures/history/sidecar-projection.jsonl").lines() {
-        let source: Value = serde_json::from_str(row).unwrap();
-        let v = observe("antigravity-sidecar",source.clone());
-        assert_eq!(v["item_id"],source["step_index"]);
-        assert_eq!(serde_json::from_str::<Value>(v["raw"].as_str().unwrap()).unwrap(),source);
-        if source["type"] == "PLANNER_RESPONSE" {
-            assert_eq!(v["author"],"assistant");
-            assert_eq!(v["blocks"][0]["text"],source["content"]);
-            if source["tool_calls"].as_array().unwrap().is_empty() {
-                assert_eq!(v["limited"],"none","null truncated_fields does not mark intact content truncated");
-            } else {assert_eq!(v["limited"],"unsupported-content-block");}
-        } else {
-            assert_eq!(v["kind"],"unknown");
-            assert_eq!(v["limited"],"unsupported-source-shape");
-        }
     }
 }
 
@@ -283,4 +270,50 @@ fn codex_rollout_native_user_message_is_attributable() {
     assert_eq!(v["session_binding"],"native");
     assert!(History::new("codex-rollout","native","foreign").unwrap().poll(&path).is_err());
     fs::remove_file(path).unwrap();
+}
+
+// A3-A5: original #198 sidecar records retain source time, calls and unknown generic authorship.
+#[test]
+fn original_sidecar_history_preserves_native_fields() {
+    for row in include_str!("fixtures/history/antigravity-sidecar.jsonl").lines() {
+        let source: Value = serde_json::from_str(row).unwrap();
+        let v = observe("antigravity-sidecar",source.clone());
+        assert_eq!(v["time"],source["created_at"]);
+        assert_eq!(v["item_id"],source["step_index"]);
+        assert_eq!(serde_json::from_str::<Value>(v["raw"].as_str().unwrap()).unwrap(),source);
+        match source["type"].as_str().unwrap() {
+            "USER_INPUT" => {assert_eq!(v["author"],"user");assert_eq!(v["blocks"][0]["text"],source["content"]);}
+            "PLANNER_RESPONSE" => {
+                assert_eq!(v["author"],"assistant");
+                if let Some(calls)=source["tool_calls"].as_array() {
+                    assert_eq!(v["blocks"].as_array().unwrap().len(),calls.len());
+                    for (block,call) in v["blocks"].as_array().unwrap().iter().zip(calls) {
+                        assert_eq!(block["type"],"tool_call");
+                        assert_eq!(block["name"],call["name"]);
+                        assert_eq!(block["input"],call["args"]);
+                        assert!(block["id"].is_null(),"missing native ID is not invented");
+                        assert_eq!(block["native"],*call);
+                    }
+                } else {assert_eq!(v["blocks"][0]["text"],source["content"]);}
+                assert_eq!(v["limited"],"none");
+            }
+            "SYSTEM_MESSAGE" => {assert_eq!(v["author"],"system");assert_eq!(v["kind"],"lifecycle");assert_eq!(v["blocks"][0]["text"],source["content"]);}
+            "GENERIC" => {
+                assert_eq!(v["author"],"unknown");assert_eq!(v["kind"],"unknown");
+                assert_eq!(v["blocks"][0]["text"],source["content"]);
+                assert_eq!(v["limited"],if source.get("truncated_fields").is_some(){"truncated-source"}else{"generic-author-unknown"});
+            }
+            _ => panic!("unreviewed source fixture type"),
+        }
+    }
+}
+
+// A3: the sidecar args adapter must not interpret a future typed block as a known call.
+#[test]
+fn sidecar_future_call_shape_remains_unknown() {
+    let call = json!({"type":"future_media","name":"invented","args":{}});
+    let v = observe("antigravity-sidecar",json!({"type":"PLANNER_RESPONSE","tool_calls":[call.clone()]}));
+    assert_eq!(v["blocks"][0]["type"],"unknown");
+    assert_eq!(v["blocks"][0]["native"],call);
+    assert_eq!(v["limited"],"unsupported-content-block");
 }

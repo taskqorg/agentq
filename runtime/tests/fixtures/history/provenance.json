@@ -55,13 +55,19 @@
     "redaction": "Known protocol enums retained; all other strings replaced; IDs mapped consistently; pid replaced. Field structure and other numbers retained."
   },
   {
-    "fixture": "sidecar-projection.jsonl",
-    "origin": "retained #198 diagnostic projection of real sidecar steps; not original transcript records",
-    "source_sha256": "7994ab1fab71efff2652b1b1f85f9dc52c65b097e4409dda8a1ffdc6765065db",
-    "rows": 6,
-    "redaction": "Known protocol enums retained; all other strings replaced; IDs mapped consistently; pid replaced. Field structure and other numbers retained.",
+    "fixture": "antigravity-sidecar.jsonl",
+    "origin": "original retained AgentQ #198 optimization-off resumed native sidecar transcript.jsonl; authorized exact-source read only",
+    "source_sha256": "031bd65ede0900d233de878cae28a4aebd7b64ba41876dfad8168e299357737f",
+    "source_bytes": 7866,
+    "rows": 8,
+    "native_version": null,
+    "os": "macos-arm64",
+    "version_evidence": "benchmarks/prerequisites/198.md",
+    "redaction": "Protocol type/status enums and truncated field names retained; all other strings replaced, IDs mapped consistently, source timestamps replaced. All record fields and numeric values retained. No raw source content is copied.",
     "limitations": [
-      "Field selection and derived content lengths come from the #198 diagnostic. Missing original fields and original JSONL bytes remain unverified."
-    ]
+      "Native fixture parsing is not native turn qualification. GENERIC authorship and omitted/truncated fields are not inferred. TOOL_RESPONSE is covered only by synthetic schema cases."
+    ],
+    "native_version_reported": "agy 1.4.12",
+    "version_reason": "Original transcript embeds no version; the #198 evidence reports the CLI version. No version probe or native requalification was performed."
   }
 ]

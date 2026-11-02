@@ -183,7 +183,7 @@ Supplying a version is observation input, never a native probe or a qualificatio
 | Claude stream JSON | S launch/resume/session/args/cancel/report; L interactive replies | S message blocks, tools, result | `Claude Code 2.1.316` / macOS arm64: initialize control capture only; model turns T |
 | Claude background/Remote Control | S existing launch/job/native receipt/recovery; L caller stop authority | S native message JSONL; L server state and media not observed unless emitted | T version/OS for history |
 | Antigravity agy stream | S launch/resume/session/report; L caller args, media and replies | L text deltas/tool output/result; DONE may have no text | agy 1.4.12 / macOS arm64: existing #198 execution/resume evidence only; new history API T |
-| Antigravity agentapi sidecar | S submission/session/tailing; L cancel/recovery and native controls | L USER_INPUT/PLANNER_RESPONSE/TOOL_RESPONSE; truncated fields and raw-only attachments | T native version/all OS; schema fixtures only |
+| Antigravity agentapi sidecar | S submission/session/tailing; L cancel/recovery and native controls | L USER_INPUT/PLANNER_RESPONSE/SYSTEM_MESSAGE/tool calls/results; GENERIC author unknown, truncated fields and raw-only attachments | agy 1.4.12 reported by #198 / macOS arm64: original sidecar fixture parsing only; transcript embeds no version; native history API T |
 | Any other runtime/transport/version/OS | U transport not enumerated; T unqualified version/OS | U unknown schema normalization; raw retained | No inferred parity |
 
 All enumerated formats run offline contract checks on the host; CI supplies Linux/macOS/Windows adapter coverage.
@@ -205,7 +205,7 @@ A checkpoint records format/source/session, file identity, byte boundary and pre
 `recover` validates the checkpoint and the next poll validates the original file. No process starts.
 
 Each event includes source label, exact byte range, raw UTF-8 record (newline included),
-source SHA-256, source timestamp (`timestamp`, `time` or app-server `emittedAtMs`) when present (otherwise null), author (otherwise `unknown`),
+source SHA-256, source timestamp (`timestamp`, `time`, sidecar `created_at` or app-server `emittedAtMs`) when present (otherwise null), author (otherwise `unknown`),
 native item/step ID when present, physical byte order, normalized blocks and lifecycle kind.
 An emitted native session ID must match the bound session; otherwise the page fails without advancing.
 `session_binding` is `native` only on a record carrying that ID; otherwise it is `caller`, never identity proof.
@@ -224,7 +224,15 @@ Codex tool blocks correlate by `call_id` when present; `item_id` retains the sep
 Unknown message/media blocks set `unsupported-content-block`; unknown agy step types retain
 unknown author/kind and `unsupported-source-shape`. Only known system/checkpoint step types are lifecycle.
 The agy history capability is limited because completed steps can omit text; sidecar history
-is limited by truncated fields and raw-only attachments. Capability readback reports those limits.
+is limited by truncated fields, unknown `GENERIC` authorship and raw-only attachments.
+Sidecar untyped `tool_calls` with string `name` and `args` project as calls, retaining
+absent IDs as null; future typed shapes stay unknown. The sidecar `tools_outputs`
+capability is limited: `GENERIC` output has no known tool/actor/call ID, and the
+`TOOL_RESPONSE` envelope is covered by schema fixtures only.
+`SYSTEM_MESSAGE` exposes its text as system lifecycle; `GENERIC` exposes native text
+with unknown author/kind and `generic-author-unknown`, unless truncation or malformed
+truncation already requires a limit. No tool result or actor is inferred from generic prose.
+Capability readback reports those limits.
 Markdown and code text retain exact characters; image/attachment blocks retain native references without fetching content.
 Unknown block/schema content remains in raw source with an explicit limitation, never guessed as text.
 Antigravity `truncated_fields` absent, null or an empty array means no omitted fields;

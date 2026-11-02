@@ -56,7 +56,7 @@ timestamps are replaced. Field structure and numeric values are retained.
 | Codex rollout | Retained native rollout, 12 representative rows | Response/event records share one bounded source API; schema extensions remain raw. |
 | Claude native | Retained native JSONL, 3 representative rows | Message/attachment envelopes retained; the shared stream message shape uses the same adapter. |
 | Codex app-server | Isolated codex-cli 0.159.3 / macOS arm64 initialize and thread/start capture | Real no-model control/notification envelopes; thread lifecycle, binding and emittedAtMs are tested. Turn execution remains unqualified. |
-| Antigravity sidecar | #198 diagnostic projection plus synthetic USER_INPUT/PLANNER_RESPONSE/TOOL_RESPONSE cases | Projected real content/indices/status retained, with provenance; original transcript field structure/raw records remain missing. |
+| Antigravity sidecar | Original #198 resumed optimization-off transcript, all 8 rows | Real user/planner/system/generic records, created_at, name/args calls and native truncation; GENERIC authorship is unknown. TOOL_RESPONSE remains a synthetic schema case. |
 | Claude stream/control | Isolated Claude Code 2.1.316 / macOS arm64 initialize control response, plus retained TaskQ Claude lifecycle/result observations | Real no-model control envelope and request ID; no reply channel or native model-turn qualification is inferred. The TaskQ log is not a raw CLI stream. |
 
 All feature readbacks include support status, reason and test evidence. The selected native
@@ -70,11 +70,12 @@ Unknown source shapes retain their exact raw bytes rather than guessing parity.
   original operation nor changes its authority, sealed completion or recovery checkpoint.
 - #198's [existing native receipts](../../benchmarks/prerequisites/198.md) prove their stated
   macOS execution/resume/hook behavior only. They do not qualify this new history API.
-- A5 remains partial for original sidecar-source coverage. The retained #198 diagnostic
-  selects fields and adds content lengths; it cannot replace the original transcript JSONL.
-  The known #198 source lies outside this attempt's explicit folder allowlist. It was not read.
-  App-server and Claude control captures now use real isolated no-model native processes;
-  their parsing evidence does not qualify native model turns, permissions or cancellation.
+- A5 now includes the original sidecar transcript under the exact-source authorization
+  in note 6576105503. Its bounded redacted fixture replaces the diagnostic projection.
+  App-server and Claude control captures use real isolated no-model native processes.
+  These sources prove parsing only; native model turns, permissions, cancellation and
+  version/OS qualification remain separate. The transcript embeds no version; the #198
+  evidence reports agy 1.4.12. No current native version was probed or inferred.
 - No model or paid calls, credential reads/copies, live session migration, deployment,
   native cancellation or account/model/permission changes were performed.
 - Merge-result CI and downstream TaskQ adoption are not established by local checks.
@@ -147,8 +148,9 @@ its Git blob `29609754df6067ed504621ed4fc11f5a4a6dd995` matches the pinned remot
 The later two history-only repairs use the affected history gate; neither changes the
 blocked fixture, execution API, dependency or existing runtime unit/process behavior.
 
-A5 is not complete: original sidecar transcript JSONL is still required. A6 publication
-cannot establish completion before that source gap and green merge-result CI are resolved.
+At the first repair hand-in (`23ec725`), A5 was incomplete because original sidecar
+transcript JSONL was still required. The authorization and source check below resolve
+that fixture gap. Green merge-result CI remains required for acceptance.
 
 Final affected gate: `cargo test --locked -p agentq-runtime --test history` passed all
 13 tests on the repaired sources and final redacted fixtures. Independent read-only
@@ -159,3 +161,53 @@ The no-model source captures use `codex app-server` (`initialize`, `initialized`
 `thread/start` only), and `claude -p --input-format stream-json --output-format stream-json --verbose`
 (one `control_request`/`initialize`, no user message). They are one-time source evidence;
 regression tests read only the retained redacted records. They are not a native turn gate.
+
+## Authorized original sidecar coverage
+
+Owner note 6576105503 authorizes only the exact recorded #198 sidecar JSONL, without
+new model turns or unrelated-session/account/credential discovery. The resumed
+optimization-off source was read in one bounded pass (at most 8 MiB). It has 8 records,
+7866 bytes, SHA-256 `031bd65ede0900d233de878cae28a4aebd7b64ba41876dfad8168e299357737f`.
+A second exact-source read confirmed identical bytes after redaction. The source and
+live attempts were not changed. No full-transcript fallback or other native file was read.
+
+The retained fixture preserves every original record field and numeric value; all
+non-protocol strings are redacted, protocol enums and truncated field names remain,
+and source timestamps are replaced. No diagnostic fields are added. The provenance
+records source hash/size, OS, the reported #198 version and its evidence; absence of a
+version in the source is explicit. No native parity claim follows from these fixtures (§12/P2).
+
+The original-source regression first failed on missing `created_at` (`time: null`),
+then on sidecar `name`/`args` calls (`unknown` instead of `tool_call`), then on omitted
+`GENERIC` text. The same check passes after the adapter projects exact source time,
+untyped calls and text without guessing `GENERIC` authorship. `SYSTEM_MESSAGE` is a
+system lifecycle event. Absent call IDs stay null; original `truncated_fields` still
+limits the content. A separate future-typed-call regression failed before adding the
+shape guard and passes afterward, retaining unsupported content as native unknown.
+
+The diagnostic projection fixture was removed. Original-source tests retain its
+content/order risks; the independent null/empty/malformed truncation regression
+continues to protect the earlier failure. The seven-format incremental/recovery check
+now uses the real sidecar fixture and retains exact raw rows, physical duplicates,
+partial appends, prefix/file identity checks and no input replay. No execution API,
+consumer, grant, auth, model, hook or #199 completion/recovery path changes.
+
+### Final candidate checks after original-source coverage
+
+| Check | Observed outcome |
+|---|---|
+| `cargo test --locked -p agentq-runtime --test history` | PASS, 15/15; original-source and future-call regressions failed before their fixes and passed after. |
+| Independent read-only review | PASS, A5 original-sidecar evidence gap resolved; task fit and implementation quality checked separately; native qualification remains separate. |
+| `cargo test --locked` | Sandbox-blocked, not PASS: 117 passed, unchanged legacy fixture write denied at `agentq/legacy.rs:473`; 54.41 seconds including build. |
+| `cargo test --locked -p agentq-runtime` | Sandbox-blocked, not PASS: 15 unit checks and 16 process scenarios passed, then consumer dependency-file write denied (`Operation not permitted`); 10.97 seconds. |
+| `cargo run --locked -- selftest` | PASS, offline with isolated legacy/npm homes; `selftest: ok 0.0.0-dev macos-aarch64`; 0.89 seconds. |
+| Workflow-pinned `contract_lint.py agentq.md` | PASS, 0 errors, existing headroom warnings; 0.07 seconds. |
+| Changed-document links, fixture/provenance inventory, `git diff --check` | PASS. |
+
+The full gates ran once on the final code candidate after the authorized source repair.
+No permission, legacy assertion, dependency path or sandbox rule was changed to bypass
+the two host failures. There was no rebase after the first push, no main-movement retry,
+no new model turn, no deployment and no native session/auth/grant/model mutation.
+Native version/OS qualification and native variants absent from source fixtures remain
+explicitly limited or untested in the matrix. Merge-result (`merge_group`) CI is not
+established by this worker; TaskQ review/publication must enforce it (TaskQ §7/R12).
