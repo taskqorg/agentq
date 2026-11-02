@@ -195,8 +195,11 @@ Permissions, effort/account catalogue and interactive replies unsupported by a t
 ### History wire contract
 
 `History::new(format, source, session)` binds an immutable caller source label and session.
-`poll(path)` returns a page of at most 128 records and reads at most 1 MiB;
-each record is at most 1 MiB. The caller polls at its own bounded cadence while `more` is true,
+`poll(path)` returns a page of at most 128 records and 16 MiB of source records,
+reading at most 16 MiB plus one lookahead byte (excluding prefix verification).
+Each UTF-8 JSONL record, including its newline, is at most 16 MiB; larger records
+return `history record exceeds 16 MiB` without advancing.
+The caller polls at its own bounded cadence while `more` is true,
 including partial records, and resumes observation when the source grows after EOF.
 A partial final record waits without advancing; malformed JSON, oversized records,
 replacement, truncation and consumed-prefix changes return an error without advancing the cursor.
@@ -204,12 +207,33 @@ Prefix verification reuses the existing five-second native guard.
 A checkpoint records format/source/session, file identity, byte boundary and prefix digest.
 `recover` validates the checkpoint and the next poll validates the original file. No process starts.
 
+`poll_before(path)` pages backward from the checkpoint's byte boundary (exclusive).
+On a fresh, unbound cursor it starts at EOF. Each page retains ascending physical order,
+the same event IDs and the same 128-record / 16 MiB bounds as forward polling.
+The cursor moves to the first returned record, and `more` means older bytes remain;
+at byte zero, repeated backward polls stay empty. A trailing incomplete record is
+excluded and reported in `pending_bytes`; a fresh forward observer can read it once complete.
+Backward reads use at most 16 MiB plus one boundary byte, excluding prefix verification.
+Save/recover the checkpoint between pages to retain source/session/file binding.
+Appending records does not move an existing backward cursor. Replacement, truncation,
+prefix changes, invalid cursor boundaries and malformed complete records fail without
+advancing. Callers keep separate cursors for incremental forward and backward browsing.
+
+```rust,ignore
+let mut older = History::new("codex-rollout", "worker-log", native_session)?;
+let newest_page = older.poll_before(&caller_selected_path)?;
+let saved = older.checkpoint();
+let mut older = History::recover(&saved)?;
+let preceding_page = older.poll_before(&caller_selected_path)?;
+```
+
 Each event includes source label, exact byte range, raw UTF-8 record (newline included),
 source SHA-256, source timestamp (`timestamp`, `time`, sidecar `created_at` or app-server `emittedAtMs`) when present (otherwise null), author (otherwise `unknown`),
 native item/step ID when present, physical byte order, normalized blocks and lifecycle kind.
 An emitted native session ID must match the bound session; otherwise the page fails without advancing.
 `session_binding` is `native` only on a record carrying that ID; otherwise it is `caller`, never identity proof.
-`pending_bytes` names unconsumed bytes, including partial records; an empty page alone is not a health claim.
+`pending_bytes` names unconsumed bytes in a forward read, or excluded incomplete tail bytes
+in a backward read; an empty page alone is not a health claim.
 Event IDs bind source/session/offset/raw hash; repeated reads of the same record have the same ID.
 Physical duplicate records remain visible in source order; native item IDs link updates without merging deltas or discarding repeated inputs.
 The API never sorts by timestamps or treats observer time as native time.

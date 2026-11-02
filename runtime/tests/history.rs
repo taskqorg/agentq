@@ -26,6 +26,9 @@ fn history_preserves_sources_and_recovers_without_replay() {
         let p = h.poll(&path).unwrap();
         assert!(!p.events.is_empty());
         assert_eq!(p.events.iter().map(|v| v["raw"].as_str().unwrap()).collect::<String>(), source);
+        let mut reverse = History::new(format, "caller-source", session).unwrap();
+        assert_eq!(reverse.poll_before(&path).unwrap().events, p.events,
+            "both directions retain identical adapter output and IDs");
         let saved = h.checkpoint();
         let mut h = History::recover(&saved).unwrap();
         assert!(h.poll(&path).unwrap().events.is_empty());
@@ -109,7 +112,7 @@ fn history_bounds_and_corruption_do_not_lose_records() {
     assert!(recovered.poll(&path).is_err(),"consumed prefix rewrite");
     fs::rename(&path,path.with_extension("old")).unwrap();fs::write(&path,row.repeat(300)).unwrap();
     assert!(h.poll(&path).is_err(),"same bytes in a replacement file are not original source");
-    for data in [b"not JSON\n".to_vec(),b"[]\n".to_vec(),vec![255,b'\n'],vec![b'x';1024*1024+1],b"{\"event\":\"init\",\"conversation_id\":\"foreign\"}\n".to_vec()] {
+    for data in [b"not JSON\n".to_vec(),b"[]\n".to_vec(),vec![255,b'\n'],vec![b'x';16*1024*1024+1],b"{\"event\":\"init\",\"conversation_id\":\"foreign\"}\n".to_vec()] {
         fs::write(&path,data).unwrap();
         let mut h=History::new("agy-stream","s","x").unwrap();let before=h.checkpoint();
         assert!(h.poll(&path).is_err());assert_eq!(h.checkpoint(),before);
@@ -316,4 +319,142 @@ fn sidecar_future_call_shape_remains_unknown() {
     assert_eq!(v["blocks"][0]["type"],"unknown");
     assert_eq!(v["blocks"][0]["native"],call);
     assert_eq!(v["limited"],"unsupported-content-block");
+}
+
+// #204 A2/A3, M12.1/P1: large source rows must survive intact, with bounded refusal above 16 MiB.
+#[test]
+fn history_accepts_large_records_without_loss() {
+    let path = std::env::temp_dir().join(format!("agentq-history-large-{}.jsonl", std::process::id()));
+    for size in [1024*1024+1, 16*1024*1024, 16*1024*1024+1] {
+        let raw = format!("{{\"text\":\"{}\"}}\n", "x".repeat(size - 12));
+        assert_eq!(raw.len(), size);
+        fs::write(&path, &raw).unwrap();
+        let mut h = History::new("codex-exec", "s", "x").unwrap();
+        let before = h.checkpoint();
+        if size > 16*1024*1024 {
+            assert_eq!(h.poll(&path).unwrap_err(), "history record exceeds 16 MiB");
+            assert_eq!(h.checkpoint(), before);
+        } else {
+            let page = h.poll(&path).unwrap();
+            assert_eq!(page.events.len(), 1);
+            assert_eq!(page.events[0]["raw"], raw);
+            assert!(!page.more);
+            assert!(h.poll(&path).unwrap().events.is_empty());
+        }
+    }
+    for format in ["codex-exec", "codex-rollout", "codex-app-server", "claude-stream", "claude-native", "agy-stream", "antigravity-sidecar"] {
+        let limits = capabilities(format, None, "test").unwrap()["limits"].clone();
+        assert_eq!(limits["record_bytes"], 16*1024*1024);
+        assert_eq!(limits["page_bytes"], 16*1024*1024);
+    }
+    fs::remove_file(path).unwrap();
+}
+
+// #204 A1/A3, M12.1/M12.3: backward pages cannot skip, duplicate, reorder or rebind source rows.
+#[test]
+fn history_backward_pages_and_recovery_preserve_boundaries() {
+    let path = std::env::temp_dir().join(format!("agentq-history-backward-{}.jsonl", std::process::id()));
+    let raw: String = (0..300).map(|i| format!("{{\"n\":{i}}}\n")).collect();
+    fs::write(&path, &raw).unwrap();
+    let mut forward = History::new("codex-exec", "s", "x").unwrap();
+    let mut expected = Vec::new();
+    loop {
+        let page = forward.poll(&path).unwrap();
+        expected.extend(page.events);
+        if !page.more { break; }
+    }
+    let mut backward = History::new("codex-exec", "s", "x").unwrap();
+    let last = backward.poll_before(&path).unwrap();
+    assert_eq!(last.events, expected[172..]);
+    assert!(last.more);
+    let saved = backward.checkpoint();
+    let mut backward = History::recover(&saved).unwrap();
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"{}\n").unwrap();
+    let middle = backward.poll_before(&path).unwrap();
+    assert_eq!(middle.events, expected[44..172]);
+    assert!(middle.more);
+    let first = backward.poll_before(&path).unwrap();
+    assert_eq!(first.events, expected[..44]);
+    assert!(!first.more);
+    assert!(backward.poll_before(&path).unwrap().events.is_empty());
+    assert_eq!(backward.checkpoint()["offset"], 0);
+    // A forward checkpoint is also an exclusive backward boundary.
+    assert_eq!(forward.poll_before(&path).unwrap().events, expected[172..]);
+    let mut invalid = saved.clone(); invalid["offset"] = json!(1);
+    invalid["prefix"] = json!(ring::digest::digest(&ring::digest::SHA256, b"{").as_ref()
+        .iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let mut invalid = History::recover(&invalid).unwrap();
+    assert_eq!(invalid.poll_before(&path).unwrap_err(), "history cursor is not a record boundary");
+    let boundary = History::new("codex-exec", "s", "x").unwrap().checkpoint();
+    fs::write(&path, b"").unwrap();
+    let mut empty = History::recover(&boundary).unwrap();
+    assert!(empty.poll_before(&path).unwrap().events.is_empty());
+    assert!(!empty.poll_before(&path).unwrap().more);
+    let mut changed = History::recover(&saved).unwrap();
+    let before = changed.checkpoint();
+    assert!(changed.poll_before(&path).is_err(), "truncated source");
+    assert_eq!(changed.checkpoint(), before);
+    fs::write(&path, &raw).unwrap();
+    let mut changed_bytes = raw.as_bytes().to_vec(); changed_bytes[2] = b'X';
+    fs::write(&path, changed_bytes).unwrap();
+    assert!(History::recover(&saved).unwrap().poll_before(&path).is_err(), "prefix rewrite");
+    fs::rename(&path, path.with_extension("old")).unwrap();
+    fs::write(&path, &raw).unwrap();
+    assert!(History::recover(&saved).unwrap().poll_before(&path).is_err(), "replacement identity");
+    fs::remove_file(path.with_extension("old")).unwrap();
+    for count in [0, 1, 128, 129, 256] {
+        fs::write(&path, "{}\n".repeat(count)).unwrap();
+        let mut h = History::new("codex-exec", "s", "x").unwrap();
+        let mut total = 0;
+        loop {
+            let page = h.poll_before(&path).unwrap();
+            assert!(page.events.len() <= 128);
+            total += page.events.len();
+            if !page.more { break; }
+        }
+        assert_eq!(total, count);
+        assert!(!h.poll_before(&path).unwrap().more);
+    }
+    fs::remove_file(&path).unwrap();
+}
+
+// #204 A1-A3: byte windows must not split a maximum-size row or discard a partial tail.
+#[test]
+fn history_backward_byte_limits_and_partial_tail() {
+    let path = std::env::temp_dir().join(format!("agentq-history-backward-bytes-{}.jsonl", std::process::id()));
+    let large = format!("{{\"text\":\"{}\"}}\n", "x".repeat(16*1024*1024 - 12));
+    let raw = format!("{{}}\n{large}{{}}\n{{\"partial\":");
+    fs::write(&path, &raw).unwrap();
+    let mut forward = History::new("codex-exec", "s", "x").unwrap();
+    for expected in ["{}\n", &large, "{}\n"] {
+        let page = forward.poll(&path).unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0]["raw"], expected);
+        assert!(page.more);
+    }
+    let before = forward.checkpoint();
+    assert!(forward.poll(&path).unwrap().events.is_empty());
+    assert_eq!(forward.checkpoint(), before);
+    let mut h = History::new("codex-exec", "s", "x").unwrap();
+    let last = h.poll_before(&path).unwrap();
+    assert_eq!(last.events.len(), 1);
+    assert_eq!(last.events[0]["raw"], "{}\n");
+    assert_eq!(last.pending_bytes, "{\"partial\":".len());
+    assert!(last.more);
+    let middle = h.poll_before(&path).unwrap();
+    assert_eq!(middle.events.len(), 1);
+    assert_eq!(middle.events[0]["raw"], large);
+    assert!(middle.more);
+    let first = h.poll_before(&path).unwrap();
+    assert_eq!(first.events.len(), 1);
+    assert_eq!(first.events[0]["raw"], "{}\n");
+    assert!(!first.more);
+    for data in [vec![b'x';16*1024*1024+1], format!("{{\"text\":\"{}\"}}\n", "x".repeat(16*1024*1024+1-12)).into_bytes(), b"{}\nnot-json\n".to_vec(), b"[]\n".to_vec(), vec![255,b'\n'], b"{\"session_id\":\"foreign\"}\n".to_vec()] {
+        fs::write(&path, data).unwrap();
+        let mut h = History::new("claude-stream", "s", "x").unwrap();
+        let before = h.checkpoint();
+        assert!(h.poll_before(&path).is_err());
+        assert_eq!(h.checkpoint(), before);
+    }
+    fs::remove_file(path).unwrap();
 }
