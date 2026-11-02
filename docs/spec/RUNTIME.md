@@ -179,11 +179,11 @@ Supplying a version is observation input, never a native probe or a qualificatio
 |---|---|---|---|
 | Codex exec JSON | S launch/resume/session/args/cancel/report; L interactive replies/media | S items, tools, lifecycle; L user input absent from exec output | T version/OS; portable fake clients only for this API |
 | Codex desktop rollout | S `NativeTurn` observation/recovery; L caller-owned app submission | S response/event records; L evolving native schema | T version/OS for history; existing runtime evidence remains separate |
-| Codex app-server | S caller-owned requests/replies/tools/input/cancel/recovery; L protected host authority | S caller-recorded JSONL notifications; L unrecognized notifications raw-only | T version/OS; protected qualification remains M12.8 |
-| Claude stream JSON | S launch/resume/session/args/cancel/report; L interactive replies | S message blocks, tools, result | T version/OS; redacted source fixtures prove parsing only |
+| Codex app-server | S caller-owned requests/replies/tools/input/cancel/recovery; L protected host authority | S caller-recorded JSONL notifications; L unrecognized notifications raw-only | `codex-cli 0.159.3` / macOS arm64: initialize/thread-start capture only; model turns T; protected qualification remains M12.8 |
+| Claude stream JSON | S launch/resume/session/args/cancel/report; L interactive replies | S message blocks, tools, result | `Claude Code 2.1.316` / macOS arm64: initialize control capture only; model turns T |
 | Claude background/Remote Control | S existing launch/job/native receipt/recovery; L caller stop authority | S native message JSONL; L server state and media not observed unless emitted | T version/OS for history |
 | Antigravity agy stream | S launch/resume/session/report; L caller args, media and replies | L text deltas/tool output/result; DONE may have no text | agy 1.4.12 / macOS arm64: existing #198 execution/resume evidence only; new history API T |
-| Antigravity agentapi sidecar | S submission/session/tailing; L cancel/recovery and native controls | S USER_INPUT/PLANNER_RESPONSE/TOOL_RESPONSE; L truncated fields | T native version/all OS; schema fixtures only |
+| Antigravity agentapi sidecar | S submission/session/tailing; L cancel/recovery and native controls | L USER_INPUT/PLANNER_RESPONSE/TOOL_RESPONSE; truncated fields and raw-only attachments | T native version/all OS; schema fixtures only |
 | Any other runtime/transport/version/OS | U transport not enumerated; T unqualified version/OS | U unknown schema normalization; raw retained | No inferred parity |
 
 All enumerated formats run offline contract checks on the host; CI supplies Linux/macOS/Windows adapter coverage.
@@ -205,7 +205,7 @@ A checkpoint records format/source/session, file identity, byte boundary and pre
 `recover` validates the checkpoint and the next poll validates the original file. No process starts.
 
 Each event includes source label, exact byte range, raw UTF-8 record (newline included),
-source SHA-256, source timestamp when present (otherwise null), author (otherwise `unknown`),
+source SHA-256, source timestamp (`timestamp`, `time` or app-server `emittedAtMs`) when present (otherwise null), author (otherwise `unknown`),
 native item/step ID when present, physical byte order, normalized blocks and lifecycle kind.
 An emitted native session ID must match the bound session; otherwise the page fails without advancing.
 `session_binding` is `native` only on a record carrying that ID; otherwise it is `caller`, never identity proof.
@@ -215,9 +215,22 @@ Physical duplicate records remain visible in source order; native item IDs link 
 The API never sorts by timestamps or treats observer time as native time.
 Blocks use `text`, `image`, `attachment`, `tool_call`, `tool_result` or `unknown` types.
 Each typed block retains its native JSON; text and tool fields are projected without rewriting strings.
+Claude result records expose their final text alongside the native lifecycle envelope.
+Claude stream control request/response records are lifecycle observations, correlated by
+their native request ID; they add no reply channel. Codex rollout `UserMessage`
+records retain user authorship and validate the enclosing native `thread_id`. App-server `thread/started` is a
+lifecycle observation, not a turn acceptance receipt.
+Codex tool blocks correlate by `call_id` when present; `item_id` retains the separate native item identity.
+Unknown message/media blocks set `unsupported-content-block`; unknown agy step types retain
+unknown author/kind and `unsupported-source-shape`. Only known system/checkpoint step types are lifecycle.
+The agy history capability is limited because completed steps can omit text; sidecar history
+is limited by truncated fields and raw-only attachments. Capability readback reports those limits.
 Markdown and code text retain exact characters; image/attachment blocks retain native references without fetching content.
 Unknown block/schema content remains in raw source with an explicit limitation, never guessed as text.
-Truncated Antigravity content is marked limited and is not presented as complete; callers can select the full source.
+Antigravity `truncated_fields` absent, null or an empty array means no omitted fields;
+a nonempty array marks `truncated-source`, and any other shape marks
+`unsupported-truncation-field`. Truncated content is not presented as complete;
+callers can select the full source.
 History lifecycle events are descriptive only; existing terminal/identity parsers remain the sole turn-completion authority.
 
 ## JSON command

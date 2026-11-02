@@ -13,14 +13,14 @@ fn history_preserves_sources_and_recovers_without_replay() {
             "codex-rollout" => include_str!("fixtures/history/codex-rollout.jsonl"),
             "claude-stream" | "claude-native" => include_str!("fixtures/history/claude-native.jsonl"),
             "agy-stream" => include_str!("fixtures/history/agy-stream.jsonl"),
-            "codex-app-server" => "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"turn\",\"status\":\"completed\"}}}\n",
+            "codex-app-server" => include_str!("fixtures/history/codex-app-server.jsonl"),
             _ => "{\"type\":\"PLANNER_RESPONSE\",\"step_index\":1,\"content\":\"answer\",\"status\":\"DONE\"}\n",
         };
         let path = root.join(format);
         fs::write(&path, source).unwrap();
         let session = match format {
             "agy-stream" => "redacted-id-1", "codex-exec"=>"redacted-id-2",
-            "claude-native" | "claude-stream"=>"redacted-id-9", _=>"session",
+            "claude-native" | "claude-stream"=>"redacted-id-9", "codex-app-server"=>"fixture-id-1", "codex-rollout"=>"redacted-id-18", _=>"session",
         };
         let mut h = History::new(format, "caller-source", session).unwrap();
         let p = h.poll(&path).unwrap();
@@ -134,5 +134,153 @@ fn sidecar_media_errors_and_future_fields_remain_observable() {
     assert_eq!(page.events[2]["author"],"unknown");
     assert_eq!(page.events[2]["limited"],"unsupported-source-shape");
     assert_eq!(serde_json::from_str::<Value>(page.events[2]["raw"].as_str().unwrap()).unwrap(),rows[2]);
+    fs::remove_file(path).unwrap();
+}
+
+// A3/P2: final result text must be visible without losing the error/usage envelope.
+#[test]
+fn claude_result_exposes_text_and_lifecycle() {
+    let v = observe("claude-stream", json!({"type":"result","result":"**answer**","is_error":true,"errors":["native error"]}));
+    assert_eq!(v["kind"], "lifecycle");
+    assert_eq!(v["blocks"][0]["type"], "text");
+    assert_eq!(v["blocks"][0]["text"], "**answer**");
+    assert_eq!(v["blocks"][1]["native"]["errors"][0], "native error");
+}
+
+// A3: a native item ID must not break call/result correlation.
+#[test]
+fn codex_tools_correlate_by_call_id() {
+    for (call, output) in [("function_call", "function_call_output"), ("custom_tool_call", "custom_tool_call_output")] {
+        let a = observe("codex-rollout", json!({"type":"response_item","payload":{"type":call,"id":"item-1","call_id":"call-1","name":"tool","arguments":"{}"}}));
+        let b = observe("codex-rollout", json!({"type":"response_item","payload":{"type":output,"call_id":"call-1","output":"done"}}));
+        assert_eq!(a["item_id"], "item-1");
+        assert_eq!(a["blocks"][0]["id"], b["blocks"][0]["id"]);
+        assert_eq!(a["blocks"][0]["id"], "call-1");
+    }
+}
+
+// A3/A4/P2: unknown steps/media cannot claim complete normalization.
+#[test]
+fn agy_unknown_steps_keep_unknown_meaning() {
+    let v = observe("agy-stream", json!({"event":"step_update","step_update":{"step_index":1,"step_type":"future_media","state":"DONE"}}));
+    assert_eq!(v["author"], "unknown");
+    assert_eq!(v["kind"], "unknown");
+    assert_eq!(v["limited"], "unsupported-source-shape");
+    for known in ["system_message", "checkpoint"] {
+        let v = observe("agy-stream", json!({"event":"step_update","step_update":{"step_index":2,"step_type":known,"state":"DONE"}}));
+        assert_eq!(v["kind"], "lifecycle");
+        assert_eq!(v["limited"], "none");
+    }
+}
+
+#[test]
+fn claude_unknown_media_is_explicitly_limited() {
+    for format in ["claude-stream", "claude-native"] {
+        let source = json!({"type":"assistant","message":{"content":[{"type":"future_media","uri":"invented://media"}]}});
+        let v = observe(format, source.clone());
+        assert_eq!(v["blocks"][0]["type"], "unknown");
+        assert_eq!(v["blocks"][0]["native"], source["message"]["content"][0]);
+        assert_eq!(v["limited"], "unsupported-content-block");
+    }
+}
+
+// A1/A4: readback cannot advertise more than the transport matrix.
+#[test]
+fn capability_readback_keeps_transport_limits() {
+    for format in ["agy-stream", "antigravity-sidecar"] {
+        let c = capabilities(format, Some("caller-observed"), "macos").unwrap();
+        assert_eq!(c["features"]["history"]["status"], "limited");
+        assert!(!c["features"]["history"]["reason"].as_str().unwrap().is_empty());
+        assert_eq!(c["native"]["status"], "untested");
+    }
+}
+
+fn observe(format: &str, source: Value) -> Value {
+    let path = std::env::temp_dir().join(format!("agentq-history-probe-{}-{:?}.jsonl", std::process::id(), std::thread::current().id()));
+    fs::write(&path, format!("{source}\n")).unwrap();
+    let v = History::new(format, "s", "session").unwrap().poll(&path).unwrap().events.remove(0);
+    fs::remove_file(path).unwrap();
+    v
+}
+
+// A5: actual no-model control captures protect envelopes independently of fake turn tests.
+#[test]
+fn native_control_captures_keep_source_time_and_request_identity() {
+    let rows: Vec<Value> = include_str!("fixtures/history/codex-app-server.jsonl").lines().map(|r|serde_json::from_str(r).unwrap()).collect();
+    let source = rows.iter().find(|v|v["method"] == "thread/started").unwrap();
+    let path = std::env::temp_dir().join(format!("agentq-app-native-{}.jsonl",std::process::id()));
+    fs::write(&path, format!("{source}\n")).unwrap();
+    let v = History::new("codex-app-server","app",source["params"]["thread"]["id"].as_str().unwrap()).unwrap().poll(&path).unwrap().events.remove(0);
+    assert_eq!(v["kind"],"lifecycle");
+    assert_eq!(v["session_binding"],"native");
+    assert_eq!(v["time"],source["emittedAtMs"]);
+    fs::remove_file(path).unwrap();
+    for row in include_str!("fixtures/history/claude-control.jsonl").lines() {
+        let source: Value = serde_json::from_str(row).unwrap();
+        let v = observe("claude-stream",source.clone());
+        assert_eq!(v["kind"],"lifecycle");
+        assert_eq!(v["item_id"],source["response"]["request_id"]);
+        assert_eq!(v["blocks"][0]["native"],source);
+    }
+}
+
+// A5: retained Claude lifecycle and projected sidecar content are source evidence,
+// not proof of missing original sidecar fields or native turn execution.
+#[test]
+fn retained_lifecycle_and_sidecar_projection_keep_native_meaning() {
+    for row in include_str!("fixtures/history/claude-stream.jsonl").lines() {
+        let source: Value = serde_json::from_str(row).unwrap();
+        let session = source["sessionId"].as_str().or(source["session_id"].as_str()).unwrap();
+        let path = std::env::temp_dir().join(format!("agentq-claude-native-{}.jsonl",std::process::id()));
+        fs::write(&path,format!("{source}\n")).unwrap();
+        let v = History::new("claude-stream","native",session).unwrap().poll(&path).unwrap().events.remove(0);
+        assert_eq!(v["kind"],"lifecycle");
+        if source["type"] == "result" {assert_eq!(v["blocks"][0]["text"],source["result"]);}
+        fs::remove_file(path).unwrap();
+    }
+    for row in include_str!("fixtures/history/sidecar-projection.jsonl").lines() {
+        let source: Value = serde_json::from_str(row).unwrap();
+        let v = observe("antigravity-sidecar",source.clone());
+        assert_eq!(v["item_id"],source["step_index"]);
+        assert_eq!(serde_json::from_str::<Value>(v["raw"].as_str().unwrap()).unwrap(),source);
+        if source["type"] == "PLANNER_RESPONSE" {
+            assert_eq!(v["author"],"assistant");
+            assert_eq!(v["blocks"][0]["text"],source["content"]);
+            if source["tool_calls"].as_array().unwrap().is_empty() {
+                assert_eq!(v["limited"],"none","null truncated_fields does not mark intact content truncated");
+            } else {assert_eq!(v["limited"],"unsupported-content-block");}
+        } else {
+            assert_eq!(v["kind"],"unknown");
+            assert_eq!(v["limited"],"unsupported-source-shape");
+        }
+    }
+}
+
+// A3/A5: the real projection uses null for intact fields; empty lists also omit nothing.
+#[test]
+fn sidecar_truncation_marker_distinguishes_missing_fields() {
+    for kind in ["PLANNER_RESPONSE", "TOOL_RESPONSE"] {
+        for (marker, expected) in [(Value::Null,"none"),(json!([]),"none"),(json!(["content"]),"truncated-source"),(json!(42),"unsupported-truncation-field")] {
+            let v = observe("antigravity-sidecar",json!({"type":kind,"step_index":1,"content":"intact","truncated_fields":marker}));
+            assert_eq!(v["limited"],expected);
+        }
+    }
+}
+
+// A3/A5: real rollout event_msg UserMessage uses a different case from app-server.
+#[test]
+fn codex_rollout_native_user_message_is_attributable() {
+    let source: Value = include_str!("fixtures/history/codex-rollout.jsonl").lines()
+        .map(|r|serde_json::from_str::<Value>(r).unwrap())
+        .find(|v|v["payload"]["item"]["type"] == "UserMessage").unwrap();
+    let path=std::env::temp_dir().join(format!("agentq-rollout-native-{}.jsonl",std::process::id()));
+    fs::write(&path,format!("{source}\n")).unwrap();
+    let session=source["payload"]["thread_id"].as_str().unwrap();
+    let v=History::new("codex-rollout","native",session).unwrap().poll(&path).unwrap().events.remove(0);
+    assert_eq!(v["author"],"user");
+    assert_eq!(v["kind"],"message");
+    assert_eq!(v["blocks"][0]["text"],source["payload"]["item"]["content"][0]["text"]);
+    assert_eq!(v["session_binding"],"native");
+    assert!(History::new("codex-rollout","native","foreign").unwrap().poll(&path).is_err());
     fs::remove_file(path).unwrap();
 }

@@ -1,8 +1,8 @@
 {"type": "thread.started", "thread_id": "redacted-id-2"}
-{"type": "item.completed", "item": {"id": "redacted-id-3", "type": "redacted", "message": "redacted"}}
+{"type": "item.completed", "item": {"id": "redacted-id-3", "type": "error", "message": "redacted"}}
 {"type": "turn.started"}
 {"type": "item.completed", "item": {"id": "redacted-id-4", "type": "agent_message", "text": "redacted"}}
-{"type": "item.completed", "item": {"id": "redacted-id-5", "type": "command_execution", "command": "redacted", "aggregated_output": "redacted", "exit_code": 0, "status": "redacted"}}
-{"type": "item.completed", "item": {"id": "redacted-id-6", "type": "mcp_tool_call", "server": "redacted", "tool": "redacted", "arguments": {"repository_full_name": "redacted", "ref": "redacted", "path": "redacted"}, "result": {"content": [{"type": "text", "text": "redacted"}], "structured_content": {"content": "redacted", "encoding": "redacted", "sha": "redacted", "display_url": "redacted", "display_title": "redacted"}}, "error": null, "status": "redacted"}}
-{"type": "item.completed", "item": {"id": "redacted-id-7", "type": "redacted", "changes": [{"path": "redacted", "kind": "redacted"}, {"path": "redacted", "kind": "redacted"}], "status": "redacted"}}
+{"type": "item.completed", "item": {"id": "redacted-id-5", "type": "command_execution", "command": "redacted", "aggregated_output": "redacted", "exit_code": 0, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "redacted-id-6", "type": "mcp_tool_call", "server": "redacted", "tool": "redacted", "arguments": {"repository_full_name": "redacted", "ref": "redacted", "path": "redacted"}, "result": {"content": [{"type": "text", "text": "redacted"}], "structured_content": {"content": "redacted", "encoding": "redacted", "sha": "redacted", "display_url": "redacted", "display_title": "redacted"}}, "error": null, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "redacted-id-7", "type": "file_change", "changes": [{"path": "redacted", "kind": "redacted"}, {"path": "redacted", "kind": "redacted"}], "status": "completed"}}
 {"type": "turn.completed", "usage": {"input_tokens": 8131956, "cached_input_tokens": 7922944, "cache_write_input_tokens": 0, "output_tokens": 42305, "reasoning_output_tokens": 17018}}

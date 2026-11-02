@@ -14,6 +14,8 @@ pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res
     let mut features = serde_json::Map::new();
     for feature in ["launch", "resume", "session", "input", "files_images", "ask_reply", "tools_outputs", "heartbeat", "cancel_recovery", "model_effort_accounts_permissions", "usage_errors", "history"] {
         let (status, reason) = match feature {
+            "history" if format == "agy-stream" => ("limited", "completed steps may omit text; deltas/result only; unknown shapes retained raw"),
+            "history" if sidecar => ("limited", "truncated fields and raw-only attachments; caller selects full source"),
             "history" => ("supported", "bounded source adapter; unknown fields retained raw"),
             "heartbeat" => ("limited", "source progress and process poll only; no useful-work inference"),
             "files_images" => ("limited", "caller arguments or native typed references only; no media decoding"),
@@ -112,6 +114,7 @@ impl History {
             "claude-native" | "claude-stream" => v["sessionId"].as_str().or(v["session_id"].as_str()),
             "agy-stream" => v["step_update"]["conversation_id"].as_str(),
             "codex-rollout" if v["type"] == "session_meta" => v["payload"]["id"].as_str(),
+            "codex-rollout" => v["payload"]["thread_id"].as_str(),
             "codex-app-server" => v["params"]["threadId"].as_str().or(v["params"]["thread"]["id"].as_str()),
             _ => None,
         });
@@ -119,7 +122,7 @@ impl History {
         let (author, kind, item, blocks, limited) = normalize(&self.format, v);
         let hash = crate::sha256_hex(raw.as_bytes());
         let id = crate::sha256_hex(json!([self.format,self.source,self.session,offset,hash]).to_string().as_bytes());
-        let time = v.get("timestamp").or_else(|| v.get("time")).cloned().unwrap_or(Value::Null);
+        let time = v.get("timestamp").or_else(|| v.get("time")).or_else(|| v.get("emittedAtMs")).cloned().unwrap_or(Value::Null);
         Ok(json!({"id":id,"source":self.source,"session":self.session,"session_binding":if native_session.is_some(){"native"}else{"caller"},"format":self.format,
             "order":offset,"start":offset,"end":offset+raw.len() as u64,"sha256":hash,"raw":raw,
             "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited}))
@@ -146,8 +149,17 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
                     blocks = v["message"]["content"].as_array().cloned().unwrap_or_else(|| text(&v["message"]["content"]));
                     limited = "none";
                 }
+                Some("control_request" | "control_response") => {
+                    author="system";kind="lifecycle";
+                    item=v.get("request_id").or_else(||v["response"].get("request_id")).cloned().unwrap_or(Value::Null);
+                    blocks.push(v.clone());limited="none";
+                }
                 Some("attachment") => {kind="attachment"; blocks.push(v["attachment"].clone()); limited="none";}
-                Some("result" | "system" | "rate_limit_event") => {author="system";kind="lifecycle";blocks.push(v.clone());limited="none";}
+                Some("result" | "system" | "rate_limit_event") => {
+                    author="system";kind="lifecycle";
+                    if v["type"] == "result" { blocks = text(&v["result"]); }
+                    blocks.push(v.clone());limited="none";
+                }
                 _ => {}
             }
         }
@@ -157,15 +169,15 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
             let i = p.get("item").unwrap_or(p);
             item = i.get("id").or_else(||i.get("call_id")).cloned().unwrap_or(Value::Null);
             match i["type"].as_str() {
-                Some("message" | "agent_message" | "agentMessage" | "userMessage") => {
-                    author = match i["role"].as_str() {Some("user")=>"user",Some("assistant")=>"assistant",_ if i["type"]=="userMessage"=>"user",_ if i["type"]!="message"=>"assistant",_=>"unknown"};
+                Some("message" | "agent_message" | "agentMessage" | "userMessage" | "UserMessage") => {
+                    author = match i["role"].as_str() {Some("user")=>"user",Some("assistant")=>"assistant",_ if i["type"]=="userMessage" || i["type"]=="UserMessage"=>"user",_ if i["type"]!="message"=>"assistant",_=>"unknown"};
                     kind="message"; blocks=i["content"].as_array().cloned().unwrap_or_else(||text(&i["text"])); limited="none";
                 }
                 Some("command_execution" | "commandExecution" | "function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output" | "mcp_tool_call" | "mcpToolCall" | "dynamicToolCall") => {author="tool";kind="tool";blocks.push(i.clone());limited="none";}
                 _ => {
                     if matches!(v["type"].as_str(),Some("thread.started"|"turn.started"|"turn.completed"|"turn.failed"|"error"))
                         || matches!(p["type"].as_str(),Some("task_started"|"task_complete"|"turn_aborted"|"token_count"))
-                        || matches!(v["method"].as_str(),Some("turn/started"|"turn/completed"|"error")) {
+                        || matches!(v["method"].as_str(),Some("thread/started"|"turn/started"|"turn/completed"|"error")) {
                         author="system";kind="lifecycle";blocks.push(v.clone());limited="none";
                     }
                 }
@@ -179,7 +191,8 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
                         Some("agent_response") => {author="assistant";kind="message";blocks=text(&step["text_delta"]);limited=if blocks.is_empty(){"text-not-emitted"}else{"none"};}
                         Some("user_input") => {author="user";kind="message";limited="text-not-emitted";}
                         Some("tool") => {author="tool";kind="tool";blocks.push(step["tool_info"].clone());limited="none";}
-                        _ => {author="system";kind="lifecycle";blocks.push(step.clone());limited="none";}
+                        Some("system_message" | "checkpoint") => {author="system";kind="lifecycle";blocks.push(step.clone());limited="none";}
+                        _ => {}
                     }
                 }
                 Some("init") => {author="system";kind="lifecycle";blocks.push(v.clone());limited="none";}
@@ -189,20 +202,28 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
         }
         "antigravity-sidecar" => {
             item = v["step_index"].clone();
+            let truncation = match v.get("truncated_fields") {
+                None | Some(Value::Null) => "none",
+                Some(Value::Array(fields)) if fields.is_empty() => "none",
+                Some(Value::Array(_)) => "truncated-source",
+                _ => "unsupported-truncation-field",
+            };
             match v["type"].as_str() {
                 Some("USER_INPUT" | "PLANNER_RESPONSE") => {
                     author=if v["type"]=="USER_INPUT"{"user"}else{"assistant"};kind="message";
                     blocks=text(&v["content"]);
                     if let Some(calls)=v["tool_calls"].as_array(){blocks.extend(calls.iter().cloned());}
-                    limited=if v.get("truncated_fields").is_some(){"truncated-source"}else if v.get("attachments").is_some(){"attachments-raw-only"}else{"none"};
+                    limited=if truncation != "none" {truncation}else if v.get("attachments").is_some(){"attachments-raw-only"}else{"none"};
                 }
-                Some("TOOL_RESPONSE") => {author="tool";kind="tool";blocks.push(v.clone());limited=if v.get("truncated_fields").is_some(){"truncated-source"}else{"none"};}
+                Some("TOOL_RESPONSE") => {author="tool";kind="tool";blocks.push(v.clone());limited=truncation;}
                 _=>{}
             }
         }
         _ => {}
     }
-    let blocks = blocks.into_iter().map(block).collect();
+    let blocks: Vec<Value> = blocks.into_iter().map(block).collect();
+    if limited == "none" && matches!(kind, "message" | "attachment" | "tool")
+        && blocks.iter().any(|b| b["type"] == "unknown") { limited = "unsupported-content-block"; }
     (author,kind,item,blocks,limited)
 }
 
@@ -213,7 +234,7 @@ fn block(v: Value) -> Value {
         "image" | "input_image" | "image_url" => json!({"type":"image","native":v}),
         "document" | "attachment" | "file" | "input_file" => json!({"type":"attachment","native":v}),
         "tool_use" | "function_call" | "custom_tool_call" => json!({"type":"tool_call",
-            "id":v.get("id").or_else(||v.get("call_id")),"name":v["name"],
+            "id":v.get("call_id").or_else(||v.get("id")),"name":v["name"],
             "input":v.get("input").or_else(||v.get("arguments")),"native":v}),
         "tool_result" | "function_call_output" | "custom_tool_call_output" => json!({"type":"tool_result",
             "id":v.get("tool_use_id").or_else(||v.get("call_id")),

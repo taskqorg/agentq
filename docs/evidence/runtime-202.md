@@ -55,8 +55,9 @@ timestamps are replaced. Field structure and numeric values are retained.
 | Codex exec | Retained #199 native stream, 8 representative rows | Items, tools and terminal usage have different envelopes; absent user input is not invented. |
 | Codex rollout | Retained native rollout, 12 representative rows | Response/event records share one bounded source API; schema extensions remain raw. |
 | Claude native | Retained native JSONL, 3 representative rows | Message/attachment envelopes retained; the shared stream message shape uses the same adapter. |
-| Codex app-server | Synthetic protocol notifications | Contract mapping only; no retained real notification fixture or native version/OS qualification. |
-| Antigravity sidecar | Synthetic USER_INPUT/PLANNER_RESPONSE/TOOL_RESPONSE schema cases | Contract mapping only; truncated source is explicitly limited; no retained real sidecar fixture. |
+| Codex app-server | Isolated codex-cli 0.159.3 / macOS arm64 initialize and thread/start capture | Real no-model control/notification envelopes; thread lifecycle, binding and emittedAtMs are tested. Turn execution remains unqualified. |
+| Antigravity sidecar | #198 diagnostic projection plus synthetic USER_INPUT/PLANNER_RESPONSE/TOOL_RESPONSE cases | Projected real content/indices/status retained, with provenance; original transcript field structure/raw records remain missing. |
+| Claude stream/control | Isolated Claude Code 2.1.316 / macOS arm64 initialize control response, plus retained TaskQ Claude lifecycle/result observations | Real no-model control envelope and request ID; no reply channel or native model-turn qualification is inferred. The TaskQ log is not a raw CLI stream. |
 
 All feature readbacks include support status, reason and test evidence. The selected native
 version/OS is caller-supplied readback, not a version probe. Every new-history native tuple
@@ -69,17 +70,19 @@ Unknown source shapes retain their exact raw bytes rather than guessing parity.
   original operation nor changes its authority, sealed completion or recovery checkpoint.
 - #198's [existing native receipts](../../benchmarks/prerequisites/198.md) prove their stated
   macOS execution/resume/hook behavior only. They do not qualify this new history API.
-- A5 remains partial for retained-real-source coverage: app-server and sidecar are synthetic;
-  Claude stream-specific control events also lack a retained stream fixture. Original real
-  sources for these paths are needed before claiming native source parity.
+- A5 remains partial for original sidecar-source coverage. The retained #198 diagnostic
+  selects fields and adds content lengths; it cannot replace the original transcript JSONL.
+  The known #198 source lies outside this attempt's explicit folder allowlist. It was not read.
+  App-server and Claude control captures now use real isolated no-model native processes;
+  their parsing evidence does not qualify native model turns, permissions or cancellation.
 - No model or paid calls, credential reads/copies, live session migration, deployment,
   native cancellation or account/model/permission changes were performed.
 - Merge-result CI and downstream TaskQ adoption are not established by local checks.
 
-## Candidate checks and independent review
+## Previous candidate checks and independent review
 
 Code candidate `c14ef38c7e6ee3e403f061320deb7c3951379e6e` was rebased once on `origin/main` before first push.
-Subsequent evidence edits change no tested source, dependency or fixture.
+At that hand-in, subsequent evidence edits changed no tested source, dependency or fixture.
 Checks used `AGENTQ_SELFTEST_OFFLINE=1`; legacy home and npm prefix were isolated in OS temporary directories.
 
 | Check | Observed outcome |
@@ -94,3 +97,65 @@ Checks used `AGENTQ_SELFTEST_OFFLINE=1`; legacy home and npm prefix were isolate
 
 The macOS sandbox failures are not passing evidence and do not authorize a grant change.
 No CI result is claimed here. TaskQ review must check green merge-result (`merge_group`) CI before acceptance.
+
+## Review repair (attempt 6575787694)
+
+The reviewer rejected the previous candidate against A1/A3–A5. Five new regressions
+failed on its implementation (4 previous tests still passed):
+
+| Defect before | Passing repair / retained protection |
+|---|---|
+| Claude result exposed an unknown block, hiding final text | Final text is projected verbatim before the native lifecycle/error envelope. |
+| Codex function/custom tool call used item ID while output used call_id | Both blocks correlate by call_id; item_id remains separate. Both call types are covered. |
+| Future agy step became system/lifecycle, limited=none | Unknown kind/author and unsupported-source-shape remain; known system/checkpoint lifecycle stays. |
+| Future Claude media had limited=none | Native unknown block remains exact and unsupported-content-block is explicit. |
+| agy history advertised supported despite missing emitted text | agy and sidecar history readbacks report limited with transport-specific reasons. |
+
+The same history command passed all five repairs. A sixth regression from the real
+app-server capture first failed (`thread/started` was unknown); it now passes with
+native thread binding and exact `emittedAtMs`. Claude's real initialize control response
+is lifecycle-only and retains its native request ID. No user message or `turn/start`
+was sent in either capture; each child was reaped. Both used empty temporary client
+homes and inherited no auth environment or client configuration. Source hashes, version/OS and redaction are recorded in
+`runtime/tests/fixtures/history/provenance.json`. Protocol role/type/status enums stay
+literal, including previously over-redacted Codex `developer` roles.
+
+The source, exports, execution APIs and callers were searched before repair. Only the
+history adapter, its existing tests/fixtures, specification and this evidence change.
+Original sessions, #199 authority/recovery, #198 hooks, grants, auth, models and
+optimization remain unchanged (§12 M12.3–M12.8).
+
+Independent repair review found two direct effects in the new real-source coverage:
+null `truncated_fields` was falsely reported truncated, and native rollout `UserMessage`
+was left unknown after restoring protocol enums. Each added regression failed before
+its fix. Null/empty truncation markers now mean no omitted fields; malformed markers
+stay explicitly limited. Rollout user authorship and enclosing native thread binding
+are preserved; a foreign thread is rejected. The matching affected tests pass after repair.
+
+### Repair gate readback
+
+`cargo test --locked` again observed 117 passing root tests and the unchanged legacy
+fixture's `PermissionDenied` at `agentq/legacy.rs:473` (34.49 seconds including build).
+`cargo test --locked -p agentq-runtime` observed 15 unit and 16 process scenarios passing,
+then the unchanged consumer dependency write failed with `Operation not permitted`
+(8.56 seconds). Both full gates remain sandbox-blocked, never PASS. These failures
+were not retried by changing permissions, fixture paths or assertions.
+
+`cargo run --locked -- selftest` passed offline in isolated legacy/npm homes (0.63 seconds).
+The workflow-pinned contract lint passed with existing headroom warnings (0.03 seconds);
+its Git blob `29609754df6067ed504621ed4fc11f5a4a6dd995` matches the pinned remote file.
+The later two history-only repairs use the affected history gate; neither changes the
+blocked fixture, execution API, dependency or existing runtime unit/process behavior.
+
+A5 is not complete: original sidecar transcript JSONL is still required. A6 publication
+cannot establish completion before that source gap and green merge-result CI are resolved.
+
+Final affected gate: `cargo test --locked -p agentq-runtime --test history` passed all
+13 tests on the repaired sources and final redacted fixtures. Independent read-only
+re-review passed the two direct findings and their regressions; it retained the original
+sidecar-source gap. Changed-document local links and `git diff --check` passed.
+
+The no-model source captures use `codex app-server` (`initialize`, `initialized`,
+`thread/start` only), and `claude -p --input-format stream-json --output-format stream-json --verbose`
+(one `control_request`/`initialize`, no user message). They are one-time source evidence;
+regression tests read only the retained redacted records. They are not a native turn gate.

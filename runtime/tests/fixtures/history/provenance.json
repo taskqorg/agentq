@@ -26,5 +26,42 @@
     "source_sha256": "03bbbaee66b721d878986dc4cfd3e4513a38dbe68550671b5d718759797ec549",
     "rows": 12,
     "redaction": "All non-protocol strings replaced; IDs mapped consistently; timestamp replaced. Numbers and field structure retained."
+  },
+  {
+    "fixture": "codex-app-server.jsonl",
+    "origin": "isolated no-model native app-server capture: initialize, initialized, thread/start only",
+    "source_sha256": "ae1b5baa6fa8716e9e30b1f0a4c8521cdb019923479d87807ee81307232c72d0",
+    "rows": 4,
+    "redaction": "Known protocol enums retained; all other strings replaced; IDs mapped consistently; pid replaced. Field structure and other numbers retained.",
+    "native_version": "codex-cli 0.159.3",
+    "os": "macos-arm64",
+    "model_calls": 0
+  },
+  {
+    "fixture": "claude-control.jsonl",
+    "origin": "isolated no-model native Claude stream initialize control response; no user input",
+    "source_sha256": "6aad0fb8aab0679cb0487aaa1a13530c38381efdd5dc384a82b1dc5523955804",
+    "rows": 1,
+    "redaction": "Known protocol enums retained; all other strings replaced; IDs mapped consistently; pid replaced. Field structure and other numbers retained.",
+    "native_version": "Claude Code 2.1.316",
+    "os": "macos-arm64",
+    "model_calls": 0
+  },
+  {
+    "fixture": "claude-stream.jsonl",
+    "origin": "retained TaskQ Claude observation log; native transcript system records and launcher result envelope; not a raw CLI stream",
+    "source_sha256": "85e572728fe60d16cb621c0887544cf7e7ec7d426d9db265ccff8d5c79638981",
+    "rows": 4,
+    "redaction": "Known protocol enums retained; all other strings replaced; IDs mapped consistently; pid replaced. Field structure and other numbers retained."
+  },
+  {
+    "fixture": "sidecar-projection.jsonl",
+    "origin": "retained #198 diagnostic projection of real sidecar steps; not original transcript records",
+    "source_sha256": "7994ab1fab71efff2652b1b1f85f9dc52c65b097e4409dda8a1ffdc6765065db",
+    "rows": 6,
+    "redaction": "Known protocol enums retained; all other strings replaced; IDs mapped consistently; pid replaced. Field structure and other numbers retained.",
+    "limitations": [
+      "Field selection and derived content lengths come from the #198 diagnostic. Missing original fields and original JSONL bytes remain unverified."
+    ]
   }
 ]
