@@ -19,6 +19,15 @@ pub struct ProtectedIdentity {
     pub approver: String,
 }
 
+/// Private independent preparation, not a grant. Persist before launch, never rebuild from observation.
+#[derive(Clone)]
+pub struct ProtectedPreparation { request: Value, prepared: Value, expected: ProtectedIdentity, receipt: Value }
+
+impl ProtectedPreparation {
+    pub fn request(&self) -> &Value { &self.request }
+    pub fn checkpoint(&self) -> Value { json!({"slot":self.request["slot"],"receipt":self.receipt}) }
+}
+
 impl ProtectedHost {
     pub fn taskq(executable: &Path, sha256: &str) -> Res<Self> {
         canonical(executable)?;
@@ -35,7 +44,10 @@ impl ProtectedHost {
     }
 
     fn command(&self, action: &str, request: &Value) -> Res<Command> {
-        validate_request(request)?;
+        if action == "prepare" {
+            if !fields(request, &["schema", "slot"]) || request["schema"] != SCHEMA { return Err("protected preparation request invalid".into()); }
+            validate_slot(&request["slot"])?;
+        } else { validate_request(request)?; }
         self.checked()?;
         let mut command = Command::new(&self.executable);
         command.args(["service", "app-server", "--action", action, "--request", &request.to_string()]);
@@ -57,6 +69,57 @@ impl ProtectedHost {
     /// Exact host cancellation, never slot release or proof of whole-turn completion.
     pub fn cancel(&self, request: &Value, until: Instant) -> Res<Value> { self.read("cancel", request, until) }
 
+    /// Non-launching host resolution of existing authority for the actual reserved consumer incarnation.
+    pub fn prepare(&self, slot: &Value, until: Instant) -> Res<ProtectedPreparation> {
+        validate_slot(slot)?;
+        if native(&slot["binding"])? != identity(std::process::id())? { return Err("protected preparation belongs to another consumer incarnation".into()); }
+        let receipt = self.read("prepare", &json!({"schema":SCHEMA,"slot":slot}), until)?;
+        let preparation = self.recover_preparation(&json!({"slot":slot,"receipt":receipt}))?;
+        validate_expected(&preparation.expected)?;
+        Ok(preparation)
+    }
+
+    /// Restore only a caller-retained independent checkpoint. No dispatch or current-caller requirement.
+    pub fn recover_preparation(&self, checkpoint: &Value) -> Res<ProtectedPreparation> {
+        self.checked()?;
+        let receipt = &checkpoint["receipt"]; let prepared = &receipt["prepared"]; let a = &prepared["authority"];
+        if !fields(checkpoint, &["slot", "receipt"]) || receipt["schema"] != SCHEMA || receipt["state"] != "prepared"
+            || !fields(prepared, &["schema", "binding", "authority", "host_instance"])
+            || prepared["schema"] != "taskq.app-server-preparation/1" || prepared["binding"] != checkpoint["slot"]["binding"]
+            || !nonempty(&prepared["host_instance"]) || !receipt["preparation"].as_str().is_some_and(hash) {
+            return Err("protected independent preparation missing or mismatched".into());
+        }
+        let request = json!({"schema":SCHEMA,"slot":checkpoint["slot"],"policy_revision":receipt["policy_revision"],
+            "account":receipt["account"],"preparation":receipt["preparation"]});
+        validate_request(&request)?;
+        let path = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(PathBuf::from).ok_or("protected prepared path unknown");
+        let expected = ProtectedIdentity { profile_sha256:a["profile_sha256"].as_str().unwrap_or("").into(),
+            executable:path(&a["executable"])?, executable_sha256:a["executable_sha256"].as_str().unwrap_or("").into(),
+            account_home:path(&a["account_home"])?, approver:a["saved"]["grant"]["by"].as_str().unwrap_or("").into() };
+        if !hash(&expected.profile_sha256) || !hash(&expected.executable_sha256) || expected.approver.trim().is_empty()
+            || expected.approver == "unknown" || !expected.executable.is_absolute() || !expected.account_home.is_absolute() {
+            return Err("protected prepared authority incomplete".into());
+        }
+        validate_authority(a, &request, &expected, self)?;
+        Ok(ProtectedPreparation { request, prepared:prepared.clone(), expected, receipt:receipt.clone() })
+    }
+
+    /// Persist checkpoint first. Errors retain the original operation; never retry native launch.
+    pub fn launch_prepared(&self, preparation: &ProtectedPreparation, intent: Intent, private_log: &Path) -> Res<ProtectedAppServer> {
+        let preparation = self.recover_preparation(&preparation.checkpoint())?;
+        let mut server = self.launch(preparation.request.clone(), preparation.expected.clone(), intent, private_log)?;
+        server.prepared = Some(preparation.prepared);
+        Ok(server)
+    }
+
+    /// Fresh same-operation host reconciliation only; never releases capacity or proves external effects.
+    pub fn reconcile(&self, preparation: &ProtectedPreparation, until: Instant) -> Res<Value> {
+        let preparation = self.recover_preparation(&preparation.checkpoint())?;
+        let receipt = self.read("reconcile", &preparation.request, until)?;
+        validate_completion(&receipt, &preparation)?;
+        Ok(receipt)
+    }
+
     /// Persist the original operation before calling. Even an error is uncertain; never retry launch.
     pub fn launch(&self, request: Value, expected: ProtectedIdentity, intent: Intent, private_log: &Path) -> Res<ProtectedAppServer> {
         validate_expected(&expected)?;
@@ -67,7 +130,7 @@ impl ProtectedHost {
         let intent = if std::env::var_os(optimization::ENV).is_some_and(|v| v == "off") { Intent::Off } else { intent };
         command.env(optimization::ENV, intent.code());
         let server = AppServer::spawn(command, private_log)?;
-        Ok(ProtectedAppServer { host: self.clone(), request, expected, server, binding: None, fault: None, intent })
+        Ok(ProtectedAppServer { host: self.clone(), request, expected, server, binding: None, fault: None, intent, prepared: None })
     }
 }
 
@@ -80,10 +143,11 @@ pub struct ProtectedAppServer {
     binding: Option<Value>,
     fault: Option<String>,
     intent: Intent,
+    prepared: Option<Value>,
 }
 
 impl ProtectedAppServer {
-    /// Supervisor PID, not the native child's PID. Native incarnation comes from verified readback.
+    /// Adapter frontend PID; legacy adapters also supervise. Scope/native identities come from readback.
     pub fn id(&self) -> u32 { self.server.id() }
 
     pub fn optimization(&self) -> Optimization {
@@ -93,15 +157,23 @@ impl ProtectedAppServer {
     /// No generating request is needed to verify authority. Failed readback never clears an earlier binding.
     pub fn verify(&mut self, until: Instant) -> Res<Value> {
         if let Some(reason) = &self.fault { return Err(reason.clone()); }
-        if self.server.poll()?.is_some() { return Err("protected supervisor exited; retain operation".into()); }
+        if self.server.poll()?.is_some() { return Err("protected frontend exited; retain operation".into()); }
         let receipt = self.host.observe(&self.request, until)?;
         let binding = validate_receipt(&receipt, &self.request, &self.expected, &self.host, self.id())?;
-        if self.server.poll()?.is_some() { return Err("protected supervisor exited during readback; retain operation".into()); }
         if self.binding.as_ref().is_some_and(|old| old != &binding) {
             let reason = "protected launch binding changed; input fenced, reconcile original operation".to_string();
             self.fault = Some(reason.clone());
             return Err(reason);
         }
+        if let Some(prepared) = &self.prepared {
+            let launch = &receipt["launch"]; let scope = &launch["scope"];
+            if launch["authority"] != prepared["authority"] || launch["host_instance"] != prepared["host_instance"]
+                || launch["frontend"].is_null() || launch["input_closed"] != false || scope["dispatch_ack"] != true
+                || !scope_binding(&scope["binding"], &self.request["slot"]["binding"]) {
+                return Err("protected prepared launch binding changed; no native input".into());
+            }
+        }
+        if self.server.poll()?.is_some() { return Err("protected frontend exited during readback; retain operation".into()); }
         self.binding = Some(binding);
         Ok(receipt)
     }
@@ -148,14 +220,19 @@ fn identity(pid: u32) -> Res<Identity> {
     coreq::process::identity(pid).map_err(|_| "protected process liveness unknown")?.ok_or_else(|| "protected process absent; retain operation".into())
 }
 fn validate_request(r: &Value) -> Res<()> {
-    let slot = &r["slot"]; let b = &slot["binding"];
-    if !fields(r, &["schema", "slot", "policy_revision", "account"]) || r["schema"] != SCHEMA
+    if !(fields(r, &["schema", "slot", "policy_revision", "account"])
+        || fields(r, &["schema", "slot", "policy_revision", "account", "preparation"]) && r["preparation"].as_str().is_some_and(hash)) || r["schema"] != SCHEMA
         || r["policy_revision"].as_u64().is_none_or(|n| n == 0) || !nonempty(&r["account"])
-        || !fields(slot, &["binding", "key"]) || !slot["key"].as_str().is_some_and(hash)
+        || r.to_string().len() > 16384 { return Err("protected request invalid; no native launch".into()); }
+    validate_slot(&r["slot"])
+}
+fn validate_slot(slot: &Value) -> Res<()> {
+    let b = &slot["binding"];
+    if !fields(slot, &["binding", "key"]) || !slot["key"].as_str().is_some_and(hash)
         || !fields(b, &["schema", "caller", "op_id", "root", "runtime", "pid", "started", "boot", "expires_at"])
         || b["schema"] != "taskq.slots/1" || b["runtime"] != "codex" || !nonempty(&b["caller"]) || !nonempty(&b["op_id"])
         || b["boot"].as_i64().is_none_or(|n| n <= 0) || b["expires_at"].as_u64().is_none_or(|n| n == 0)
-        || r.to_string().len() > 16384 { return Err("protected request invalid; no native launch".into()); }
+        || slot.to_string().len() > 16384 { return Err("protected slot invalid; no native launch".into()); }
     native(b)?;
     canonical(Path::new(b["root"].as_str().ok_or("protected project absent")?))
 }
@@ -167,29 +244,64 @@ fn validate_expected(e: &ProtectedIdentity) -> Res<()> {
     if file_hash(&e.executable)? != e.executable_sha256 { return Err("protected native artifact changed".into()); }
     Ok(())
 }
-fn validate_receipt(r: &Value, request: &Value, expected: &ProtectedIdentity, host: &ProtectedHost, supervisor: u32) -> Res<Value> {
-    validate_expected(expected)?;
-    let launch = &r["launch"]; let a = &launch["authority"]; let b = &request["slot"]["binding"];
-    let effective = &r["verified_effective"];
-    if r["schema"] != SCHEMA || r["state"] != "verified-effective" || r["caller"] != b["caller"] || r["operation"] != b["op_id"]
-        || launch["schema"] != SCHEMA || launch["state"] != "verified-effective" || launch["cancel_requested"] != false
-        || launch["policy_revision"] != request["policy_revision"] || launch["account"] != request["account"]
-        || !nonempty(&launch["host_instance"]) || !launch["reason"].is_null()
-        || a["project"] != b["root"] || a["runtime"] != "codex" || a["account"] != request["account"]
+fn validate_authority(a: &Value, request: &Value, expected: &ProtectedIdentity, host: &ProtectedHost) -> Res<()> {
+    let b = &request["slot"]["binding"];
+    if a["project"] != b["root"] || a["runtime"] != "codex" || a["account"] != request["account"]
         || a["account_home"] != json!(expected.account_home) || a["profile_sha256"] != expected.profile_sha256
         || a["executable"] != json!(expected.executable) || a["executable_sha256"] != expected.executable_sha256
         || a["adapter"]["executable"] != json!(host.executable) || a["adapter"]["sha256"] != host.sha256
         || a["saved"]["revision"] != request["policy_revision"] || a["saved"]["grant"]["by"] != expected.approver
         || a["saved"]["grant"]["mode"] != "workspace" || a["saved"]["grant"]["runtime"] != "codex"
         || a["saved"]["grant"]["project"] != b["root"] || a["saved"]["grant"]["at"].as_u64().is_none_or(|n| n == 0)
-        || !nonempty(&a["requested"]) || a["resolved"]["effective"] != "workspace"
+        || !nonempty(&a["requested"]) || a["resolved"]["effective"] != "workspace" {
+        return Err("protected authority missing, unknown or mismatched; no native input".into());
+    }
+    Ok(())
+}
+fn validate_receipt(r: &Value, request: &Value, expected: &ProtectedIdentity, host: &ProtectedHost, frontend: u32) -> Res<Value> {
+    validate_expected(expected)?;
+    let launch = &r["launch"]; let a = &launch["authority"]; let b = &request["slot"]["binding"];
+    validate_authority(a, request, expected, host)?;
+    let effective = &r["verified_effective"];
+    if r["schema"] != SCHEMA || r["state"] != "verified-effective" || r["caller"] != b["caller"] || r["operation"] != b["op_id"]
+        || launch["schema"] != SCHEMA || launch["state"] != "verified-effective" || launch["cancel_requested"] != false
+        || launch["policy_revision"] != request["policy_revision"] || launch["account"] != request["account"]
+        || !nonempty(&launch["host_instance"]) || !launch["reason"].is_null()
         || effective["state"] != "verified-effective" || !nonempty(&effective["scope"])
         || effective["workspace_write"] != true || !effective["protected_write_create_unlink_denied"].as_array().is_some_and(|v| !v.is_empty())
         || launch["verified_effective"] != *effective { return Err("protected authority missing, unknown or mismatched; no native input".into()); }
     let owner = native(&launch["supervisor"])?; let child = native(&launch["native"])?;
-    if owner.pid != supervisor || owner == child || identity(owner.pid)? != owner || identity(child.pid)? != child
+    let transport = if launch["frontend"].is_null() { owner.clone() } else { native(&launch["frontend"])? };
+    if transport.pid != frontend || identity(transport.pid)? != transport || transport == child
+        || owner == child || identity(owner.pid)? != owner || identity(child.pid)? != child
         || identity(b["pid"].as_u64().ok_or("consumer identity absent")? as u32)? != native(b)? {
         return Err("protected native/supervisor/consumer incarnation changed; no native input".into());
     }
-    Ok(json!({"authority": a, "supervisor": launch["supervisor"], "native": launch["native"], "host_instance": launch["host_instance"], "verified_effective": effective}))
+    Ok(json!({"authority": a, "frontend":launch["frontend"], "supervisor": launch["supervisor"], "native": launch["native"],
+        "scope":launch["scope"]["binding"], "host_instance": launch["host_instance"], "verified_effective": effective}))
+}
+
+fn scope_binding(scope: &Value, slot: &Value) -> bool {
+    scope["coalition"].as_u64().is_some_and(|n| n > 0)
+        && scope["boot"].as_i64().zip(slot["boot"].as_i64()).is_some_and(|(a,b)| a > 0 && b > 0 && a.abs_diff(b) <= 2)
+}
+fn validate_completion(r: &Value, preparation: &ProtectedPreparation) -> Res<()> {
+    let request = &preparation.request; let b = &request["slot"]["binding"]; let launch = &r["launch"];
+    if r["schema"] != SCHEMA || r["caller"] != b["caller"] || r["operation"] != b["op_id"] {
+        return Err("protected completion operation unknown; retain original slot".into());
+    }
+    if r["state"] == "unknown" { return Ok(()); }
+    let scope = &launch["scope"]; let cert = &scope["certificate"];
+    if r["state"] != "completed" || launch["schema"] != SCHEMA || launch["policy_revision"] != request["policy_revision"]
+        || launch["account"] != request["account"] || launch["authority"] != preparation.prepared["authority"]
+        || launch["host_instance"] != preparation.prepared["host_instance"] || launch["input_closed"] != true
+        || scope["dispatch_ack"] != true || scope["cleanup_intent"] != true || scope["bootout_ack"] != true || scope["cleanup_verified"] != true
+        || cert["schema"] != "taskq.native-completion/1" || !scope_binding(&scope["binding"], b)
+        || cert["scope"] != scope["binding"] || cert["native"] != launch["native"] || cert["supervisor"] != launch["supervisor"]
+        || cert["counts"].as_array().is_none_or(|a| a.len() != 2)
+        || cert["counts"][0].as_u64().zip(cert["counts"][1].as_u64()).is_none_or(|(a,b)| a.checked_sub(b) != Some(1)) {
+        return Err("protected descendant completion or cleanup unproved; retain original slot".into());
+    }
+    if native(&launch["native"])? == native(&launch["supervisor"])? { return Err("protected completion incarnation mismatched; retain original slot".into()); }
+    Ok(())
 }
