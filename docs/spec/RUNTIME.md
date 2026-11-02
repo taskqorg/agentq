@@ -143,6 +143,104 @@ The [owner-route handoff](../evidence/runtime-199/OWNER-ROUTE.md) supplies the c
 
 The additive TaskQ prerequisite and launchd optimization-intent correction are published at `5292e63ffaeda41ca90d1b2e21b93f78fe2d3e39` ([#2151](https://github.com/taskqorg/taskq/issues/2151), [#2161](https://github.com/taskqorg/taskq/issues/2161)). The supervisor job carries explicit/inherited `AGENTQ_OPTIMIZATION=off` in its hashed environment; publication does not prove the installed host source or native behavior. Publication of AgentQ requires reviewed immutable source and green merge-result CI; PM then qualifies only the new preparation/completion/recovery paths under existing Mac Workspace authority. Reuse AssetQ `05476e88c53f5232cc17f37bd664aad0ba103a79` composed PASS. No model/paid turn, crate replay, new grant, Full fallback, ordinary install, account/model/capacity change, `TASKQ_ATTEMPT` stripping or slot-CLI refusal bypass is authorized. Portable checks alone cannot close this native gate. Recipe and evidence: [task 199](../evidence/runtime-199.md).
 
+## Worker capabilities and bounded history
+
+`agent::history` is the shared read-only observation API for TaskQ and other callers.
+It does not submit input, change sessions, grant authority or migrate live workers.
+Existing `Turn`, `NativeTurn` and `AppSession` remain the execution and receipt APIs.
+
+### Required functions and ownership
+
+| Function | Runtime boundary and receipt |
+|---|---|
+| Launch, resume, session ID | `command`/`Turn`; native session receipt, never a generated ID treated as acceptance |
+| Input, files, images | Caller retains input and file/image references; CLI passes caller arguments; app-server passes typed input unchanged |
+| Ask, reply, result | Native tool/request records are observations; app-server caller replies with original request ID; CLI has no added interactive reply channel |
+| Tools and outputs | History blocks retain native calls/results and IDs; dynamic tools remain app-server caller-owned |
+| Heartbeat | History progress is source progress only; `poll` process readiness is not useful work or completion |
+| Cancel and recovery | Existing ownership/checkpoint APIs apply; sidecar submission kill never proves server cancellation |
+| Model, effort, accounts, permissions | Caller arguments/environment/account home or app-server parameters; never inferred from requested values |
+| Usage and errors | Existing `usage`/`Report` parsers; missing counters and malformed observation stay unknown |
+
+A history cursor is not an acceptance, completion or cleanup receipt (M12.3/M12.8).
+Recovery reopens the original source and validates identity and consumed bytes; it never resubmits.
+The caller protects logs, cursors, raw content and attachment references outside telemetry.
+No history content is exported as `agent.turn` metadata.
+
+### Capability matrix
+
+S = supported by adapter tests, L = limited with the reason below, U = unsupported,
+T = native behavior untested. Adapter support and native qualification are separate axes.
+`history::capabilities` returns the selected format, caller-observed native version and OS,
+feature status/reason, and evidence. An absent version or an unqualified tuple stays T.
+Supplying a version is observation input, never a native probe or a qualification claim.
+
+| Runtime / transport | Required functions | History | Native version / OS evidence |
+|---|---|---|---|
+| Codex exec JSON | S launch/resume/session/args/cancel/report; L interactive replies/media | S items, tools, lifecycle; L user input absent from exec output | T version/OS; portable fake clients only for this API |
+| Codex desktop rollout | S `NativeTurn` observation/recovery; L caller-owned app submission | S response/event records; L evolving native schema | T version/OS for history; existing runtime evidence remains separate |
+| Codex app-server | S caller-owned requests/replies/tools/input/cancel/recovery; L protected host authority | S caller-recorded JSONL notifications; L unrecognized notifications raw-only | `codex-cli 0.159.3` / macOS arm64: initialize/thread-start capture only; model turns T; protected qualification remains M12.8 |
+| Claude stream JSON | S launch/resume/session/args/cancel/report; L interactive replies | S message blocks, tools, result | `Claude Code 2.1.316` / macOS arm64: initialize control capture only; model turns T |
+| Claude background/Remote Control | S existing launch/job/native receipt/recovery; L caller stop authority | S native message JSONL; L server state and media not observed unless emitted | T version/OS for history |
+| Antigravity agy stream | S launch/resume/session/report; L caller args, media and replies | L text deltas/tool output/result; DONE may have no text | agy 1.4.12 / macOS arm64: existing #198 execution/resume evidence only; new history API T |
+| Antigravity agentapi sidecar | S submission/session/tailing; L cancel/recovery and native controls | L USER_INPUT/PLANNER_RESPONSE/SYSTEM_MESSAGE/tool calls/results; GENERIC author unknown, truncated fields and raw-only attachments | agy 1.4.12 reported by #198 / macOS arm64: original sidecar fixture parsing only; transcript embeds no version; native history API T |
+| Any other runtime/transport/version/OS | U transport not enumerated; T unqualified version/OS | U unknown schema normalization; raw retained | No inferred parity |
+
+All enumerated formats run offline contract checks on the host; CI supplies Linux/macOS/Windows adapter coverage.
+Other OSes remain untested. Headless Antigravity streams do not expose every persisted step field.
+Use a caller-selected sidecar transcript for full content; never locate another account or substitute a different session.
+Media support means retaining native references/blocks, not downloading, decoding or inventing captions.
+Permissions, effort/account catalogue and interactive replies unsupported by a transport remain native caller controls.
+
+### History wire contract
+
+`History::new(format, source, session)` binds an immutable caller source label and session.
+`poll(path)` returns a page of at most 128 records and reads at most 1 MiB;
+each record is at most 1 MiB. The caller polls at its own bounded cadence while `more` is true,
+including partial records, and resumes observation when the source grows after EOF.
+A partial final record waits without advancing; malformed JSON, oversized records,
+replacement, truncation and consumed-prefix changes return an error without advancing the cursor.
+Prefix verification reuses the existing five-second native guard.
+A checkpoint records format/source/session, file identity, byte boundary and prefix digest.
+`recover` validates the checkpoint and the next poll validates the original file. No process starts.
+
+Each event includes source label, exact byte range, raw UTF-8 record (newline included),
+source SHA-256, source timestamp (`timestamp`, `time`, sidecar `created_at` or app-server `emittedAtMs`) when present (otherwise null), author (otherwise `unknown`),
+native item/step ID when present, physical byte order, normalized blocks and lifecycle kind.
+An emitted native session ID must match the bound session; otherwise the page fails without advancing.
+`session_binding` is `native` only on a record carrying that ID; otherwise it is `caller`, never identity proof.
+`pending_bytes` names unconsumed bytes, including partial records; an empty page alone is not a health claim.
+Event IDs bind source/session/offset/raw hash; repeated reads of the same record have the same ID.
+Physical duplicate records remain visible in source order; native item IDs link updates without merging deltas or discarding repeated inputs.
+The API never sorts by timestamps or treats observer time as native time.
+Blocks use `text`, `image`, `attachment`, `tool_call`, `tool_result` or `unknown` types.
+Each typed block retains its native JSON; text and tool fields are projected without rewriting strings.
+Claude result records expose their final text alongside the native lifecycle envelope.
+Claude stream control request/response records are lifecycle observations, correlated by
+their native request ID; they add no reply channel. Codex rollout `UserMessage`
+records retain user authorship and validate the enclosing native `thread_id`. App-server `thread/started` is a
+lifecycle observation, not a turn acceptance receipt.
+Codex tool blocks correlate by `call_id` when present; `item_id` retains the separate native item identity.
+Unknown message/media blocks set `unsupported-content-block`; unknown agy step types retain
+unknown author/kind and `unsupported-source-shape`. Only known system/checkpoint step types are lifecycle.
+The agy history capability is limited because completed steps can omit text; sidecar history
+is limited by truncated fields, unknown `GENERIC` authorship and raw-only attachments.
+Sidecar untyped `tool_calls` with string `name` and `args` project as calls, retaining
+absent IDs as null; future typed shapes stay unknown. The sidecar `tools_outputs`
+capability is limited: `GENERIC` output has no known tool/actor/call ID, and the
+`TOOL_RESPONSE` envelope is covered by schema fixtures only.
+`SYSTEM_MESSAGE` exposes its text as system lifecycle; `GENERIC` exposes native text
+with unknown author/kind and `generic-author-unknown`, unless truncation or malformed
+truncation already requires a limit. No tool result or actor is inferred from generic prose.
+Capability readback reports those limits.
+Markdown and code text retain exact characters; image/attachment blocks retain native references without fetching content.
+Unknown block/schema content remains in raw source with an explicit limitation, never guessed as text.
+Antigravity `truncated_fields` absent, null or an empty array means no omitted fields;
+a nonempty array marks `truncated-source`, and any other shape marks
+`unsupported-truncation-field`. Truncated content is not presented as complete;
+callers can select the full source.
+History lifecycle events are descriptive only; existing terminal/identity parsers remain the sole turn-completion authority.
+
 ## JSON command
 
 `agentq agent turn` reads one JSON request on stdin, runs the turn with `agent::run` (or `Turn` without a store) and prints one JSON report. It uses the same `Spec`, `Report` and optimization code as the library. A request error prints `Error:`/`Next:` and exits 1; a failed turn is a report and exits 0.
@@ -206,3 +304,18 @@ Consumers of CoreQ `agent` at the CoreQ v0.18.0 baseline (default branches read 
 ## Caller responsibilities
 
 - Rule text, sandbox policy, permission mode and attempt logs are consumer decisions; the caller passes them in.
+
+History consumer example (caller-owned source and protected checkpoint storage):
+
+```rust,ignore
+use agentq_runtime::agent::history::{History, capabilities};
+let support = capabilities("agy-stream", Some("1.4.12"), "macos")?;
+let mut history = History::new("agy-stream", "worker-log", native_session)?;
+let page = history.poll(caller_log)?;
+// Persist this checkpoint only after durably accepting the page.
+let saved = history.checkpoint();
+let recovered = History::recover(&saved)?; // Observation only; no input replay.
+```
+
+Source-fixture provenance, adapter conclusions and remaining native gaps:
+[worker history evidence](../evidence/runtime-202.md).
