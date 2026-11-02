@@ -1,0 +1,514 @@
+{
+  "schema": "agentq.prerequisite.receipt.v1",
+  "task": 198,
+  "attempt": 6567141002,
+  "notes": [6566782424, 6571931625],
+  "stage": "A2-A3-antigravity-workspace",
+  "observed": "2026-11-02T08:33:36.000000+00:00",
+  "predecessor_receipts": {
+    "196-6562154470.json": "7dc70bc017d7f3e6573bb68f41085d8ac11e1a68fb7803ed1cfb933ac5ea9c9f",
+    "198-6565868146.json": "333660d1605fff0ac9ad3874b061775414fbb0af30940318916583d1781cef23",
+    "198-6566782424-admission.json": "38c155c160cb0c927afa60a93c5d704bb6b27b1fe79e729391db9604d9e49659"
+  },
+  "revisions": {
+    "origin_main": "39ead0cec0cf77019f46964dbf8671cdb00e8e55",
+    "head_before_commit": "903667669e8ed4d6531ef74eb0aacf3b4be5fe8d",
+    "candidate_agentq_before_sha256": "8c0cd1507c2f80d168f38aad9d562f83805ea7df5408603a42257b11cc69beac",
+    "candidate_agentq_after_sha256": "6e9436f96f46abe949e130b742e1449364e1430b5c4de2803e766c573472b8f4",
+    "installed_agentq_sha256": "3851ee14a623f7dcb0e917f1c4076047cd9132e0cec4c1adb6a4863b3ff17d2b",
+    "rtk_0_51_0_sha256": "02866e65968c0359b19495a5dc2d3ec643a1553fdd1c83c0ad33a8ad33bac3c9"
+  },
+  "admission_and_authority": {
+    "prior_codex_attempt": 6565868146,
+    "prior_codex_execution": 6566784404,
+    "prior_release_event": "[6566826476] taskq: released 6566784404 exit attempt 6565868146",
+    "admitted_attempt": 6567141002,
+    "admitted_session": "antigravity:- mac",
+    "permissions_header": "Policy: revision 34, 26 grants",
+    "service": {
+      "state": "running",
+      "version": "4.6.59-dev.1793584678",
+      "fresh": true
+    },
+    "kids": [
+      {
+        "task": 198,
+        "attempt": 6567141002,
+        "execution": null,
+        "runtime": "antigravity",
+        "state": "running",
+        "reason": null,
+        "role": null
+      }
+    ],
+    "task_executions": [
+      {
+        "task": 198,
+        "attempt": 6567141002,
+        "id": 6567141002,
+        "through": 6567141002,
+        "state": "running",
+        "reason": "native execution observed; termination pending",
+        "host": "mac",
+        "runtime": "antigravity",
+        "observed": 1793586116,
+        "role": "worker"
+      }
+    ],
+    "access": [
+      {
+        "runtime": "codex",
+        "grant": "workspace (project) rev 34 by kirs",
+        "effective": "workspace",
+        "enforcement": "taskq seatbelt, writes only to the workspace set",
+        "refused": null
+      },
+      {
+        "runtime": "antigravity",
+        "grant": "workspace (host) rev 34 by kirs",
+        "effective": "workspace",
+        "enforcement": "taskq seatbelt, writes only to the workspace set",
+        "refused": null
+      }
+    ],
+    "invariant_checks": {
+      "single_active_attempt": true,
+      "no_grant_or_policy_change": true,
+      "no_credential_reads_or_copies": true,
+      "no_home_relocation": true,
+      "no_model_or_effort_override": true
+    }
+  },
+  "antigravity_on_workload": {
+    "status": "passed",
+    "fixture": {
+      "marker": "MARKER_PREREQUISITE_198",
+      "cargo_tests_total": 181,
+      "cargo_tests_passed": 180,
+      "cargo_tests_failed": 1,
+      "independent_native_write_readback": "native-ok"
+    },
+    "native_storage": {
+      "agentapi_helper_exists": true,
+      "transcript_jsonl_exists": true,
+      "transcript_jsonl_bytes": 4473,
+      "transcript_full_jsonl_exists": true,
+      "transcript_full_jsonl_bytes": 4453,
+      "transcript_steps_count": 8
+    },
+    "turn_1": {
+      "schema": 1,
+      "session": "015808c6-0d10-44e0-aca6-cd2c14f775d5",
+      "outcome": "ok",
+      "error": "none",
+      "text": "{\"read\": true, \"write\": true, \"outer_sandbox\": true, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_PREREQUISITE_198\", \"original_ref\": \"rtk:000018e4-185d-8af9-5428-000024eb0000\"}\n",
+      "exit": -1,
+      "started_ms": 1793585330120,
+      "duration_us": 18313851,
+      "usage": {
+        "calls": null,
+        "input": 10128,
+        "cache_read": 5416,
+        "cache_write": null,
+        "output": 305,
+        "model": null,
+        "unknown": null
+      },
+      "limit": {
+        "used_percent": null,
+        "resets_at": null,
+        "window": null,
+        "unknown": "not-reported"
+      },
+      "reached": null,
+      "recorded": "not-requested",
+      "optimization": {
+        "intent": "on",
+        "effective": "on",
+        "reason": "configured"
+      }
+    },
+    "turn_2_resume": {
+      "schema": 1,
+      "session": "015808c6-0d10-44e0-aca6-cd2c14f775d5",
+      "outcome": "ok",
+      "error": "none",
+      "text": "{\"resumed\": true, \"marker\": \"MARKER_PREREQUISITE_198\", \"original_ref\": \"rtk:000018e4-185d-8af9-5428-000024eb0000\"}\n",
+      "exit": -1,
+      "started_ms": 1793585403517,
+      "duration_us": 7940619,
+      "usage": {
+        "calls": null,
+        "input": 2436,
+        "cache_read": 6025,
+        "cache_write": null,
+        "output": 90,
+        "model": null,
+        "unknown": null
+      },
+      "limit": {
+        "used_percent": null,
+        "resets_at": null,
+        "window": null,
+        "unknown": "not-reported"
+      },
+      "reached": null,
+      "recorded": "not-requested",
+      "optimization": {
+        "intent": "on",
+        "effective": "on",
+        "reason": "configured"
+      }
+    },
+    "transcript_tool_steps": [
+      {
+        "step_index": 1,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "",
+        "tool_calls": [
+          {
+            "name": "run_command",
+            "args": {
+              "CommandLine": "\"python3 probe.py\"",
+              "WaitMsBeforeAsync": "5000",
+              "toolSummary": "\"Run probe.py\""
+            }
+          },
+          {
+            "name": "run_command",
+            "args": {
+              "CommandLine": "\"cargo test --offline --color never\"",
+              "WaitMsBeforeAsync": "10000",
+              "toolSummary": "\"Run cargo test\""
+            }
+          }
+        ]
+      },
+      {
+        "step_index": 2,
+        "type": "GENERIC",
+        "status": "DONE",
+        "content": "Created At: 2026-11-02T09:08:57+07:00\nCompleted At: 2026-11-02T09:08:59+07:00\nCommand exited with code 0.\n\nCommand output:\n{\"outer_sandbox\": true, \"read\": true, \"write\": true}\r\n",
+        "tool_calls": []
+      },
+      {
+        "step_index": 3,
+        "type": "GENERIC",
+        "status": "DONE",
+        "content": "Created At: 2026-11-02T09:08:57+07:00\nCompleted At: 2026-11-02T09:09:02+07:00\nA pre-tool hook changed the arguments of this tool call before it ran. Changed: CommandLine.\n\nCommand exited with code 101.\n\nCommand output:\n---- intentional_failure stdout ----\r\n\r\nthread 'intentional_failure' (11208342) panicked at src/lib.rs:181:36:\r\nMARKER_PREREQUISITE_198\r\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\r\n\r\n\r\ntest result: FAILED. 180 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\r\n\r\n[AgentQ original ref: rtk:000018e4-185d-8af9-5428-000024eb0000; use get_original.]\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s\r\n     Running unittests src/lib.rs (target/debug/deps/prerequisite_198-89489fbade7ce034)\r\nerror: test failed, to rerun pass `--lib`\r\n",
+        "tool_calls": []
+      },
+      {
+        "step_index": 4,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "{\"read\": true, \"write\": true, \"outer_sandbox\": true, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_PREREQUISITE_198\", \"original_ref\": \"rtk:000018e4-185d-8af9-5428-000024eb0000\"}",
+        "tool_calls": []
+      },
+      {
+        "step_index": 7,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "{\"resumed\": true, \"marker\": \"MARKER_PREREQUISITE_198\", \"original_ref\": \"rtk:000018e4-185d-8af9-5428-000024eb0000\"}",
+        "tool_calls": []
+      }
+    ],
+    "compression_record": {
+      "schema": 1,
+      "event_id": "000018e4185d9fd60ad0000024eb0001",
+      "time": 1793585341,
+      "agent": "antigravity",
+      "adapter": "run",
+      "tool": "shell",
+      "runner": "cargo test",
+      "engine": "rtk",
+      "outcome": "compressed",
+      "reason": "compressed",
+      "bytes_in": 4207,
+      "bytes_out": 397,
+      "est_tokens_in": 1052,
+      "est_tokens_out": 100,
+      "duration_ms": 969,
+      "ref": "rtk:000018e4-185d-8af9-5428-000024eb0000",
+      "session": "015808c6-0d10-44e0-aca6-cd2c14f775d5",
+      "turn": null,
+      "tool_call": "step-3",
+      "version": "0.0.0-dev",
+      "engine_version": "0.51.0",
+      "exit_code": 101
+    },
+    "mcp_get_original": {
+      "ref": "rtk:000018e4-185d-8af9-5428-000024eb0000",
+      "recovered_bytes": 4520,
+      "recovered_sha256": "65fd290ecda4ac81940796335771a6dfd8ca86b6cabb1a14d2290d0362954a83",
+      "contains_summary": true,
+      "contains_marker": true
+    }
+  },
+  "antigravity_off_workload_before": {
+    "status": "failed_before_fix",
+    "native_storage": {
+      "agentapi_helper_exists": true,
+      "transcript_jsonl_exists": true,
+      "transcript_jsonl_bytes": 4438,
+      "transcript_full_jsonl_exists": true,
+      "transcript_full_jsonl_bytes": 4414,
+      "transcript_steps_count": 8
+    },
+    "turn_1": {
+      "schema": 1,
+      "session": "5e3e75cf-ca1b-4abf-8fee-2efa2e5b67f0",
+      "outcome": "ok",
+      "error": "none",
+      "text": "{\"read\": null, \"write\": null, \"outer_sandbox\": null, \"passed\": null, \"failed\": null, \"marker\": null, \"original_ref\": null}\n",
+      "exit": -1,
+      "started_ms": 1793585446821,
+      "duration_us": 27924150,
+      "usage": {
+        "calls": null,
+        "input": 14467,
+        "cache_read": 16950,
+        "cache_write": null,
+        "output": 769,
+        "model": null,
+        "unknown": null
+      },
+      "limit": {
+        "used_percent": null,
+        "resets_at": null,
+        "window": null,
+        "unknown": "not-reported"
+      },
+      "reached": null,
+      "recorded": "not-requested",
+      "optimization": {
+        "intent": "off",
+        "effective": "off",
+        "reason": "launch_off"
+      }
+    },
+    "transcript_tool_steps": [
+      {
+        "step_index": 1,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "",
+        "tool_calls": [
+          {
+            "name": "run_command",
+            "args": {
+              "CommandLine": "\"python3 probe.py\"",
+              "WaitMsBeforeAsync": "10000",
+              "toolSummary": "\"Run probe.py script\""
+            }
+          }
+        ]
+      },
+      {
+        "step_index": 2,
+        "type": "GENERIC",
+        "status": "ERROR",
+        "content": "Created At: 2026-11-02T09:10:54+07:00\nCompleted At: 2026-11-02T09:10:54+07:00\nEncountered error in step execution: tool call denied by pre-tool hook: ",
+        "tool_calls": []
+      },
+      {
+        "step_index": 3,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "",
+        "tool_calls": [
+          {
+            "name": "run_command",
+            "args": {
+              "CommandLine": "\"cargo test --offline --color never\"",
+              "WaitMsBeforeAsync": "10000",
+              "toolSummary": "\"Run cargo test offline\""
+            }
+          }
+        ]
+      },
+      {
+        "step_index": 4,
+        "type": "GENERIC",
+        "status": "ERROR",
+        "content": "Created At: 2026-11-02T09:11:00+07:00\nCompleted At: 2026-11-02T09:11:00+07:00\nEncountered error in step execution: tool call denied by pre-tool hook: ",
+        "tool_calls": []
+      },
+      {
+        "step_index": 7,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "{\"read\": null, \"write\": null, \"outer_sandbox\": null, \"passed\": null, \"failed\": null, \"marker\": null, \"original_ref\": null}",
+        "tool_calls": []
+      }
+    ],
+    "hook_contract_diagnosis": {
+      "global_hooks_config": "<native-gemini-config>/hooks.json",
+      "global_hook_command": "\"<installed-agentq>/agentq\" hook antigravity PreToolUse",
+      "workspace_hook_override_tested": "<fixture-off>/.agents/hooks.json with {\"agentq\": {\"enabled\": false}} still runs global hooks sequentially (agy docs/hooks.md line 58)",
+      "agentq_main_short_circuit": "agentq/main.rs:180 returned Ok(json!({})) whenever !c[\"enabled\"].as_bool().unwrap_or(false), including AGENTQ_OPTIMIZATION=off",
+      "direct_cli_reproduction": {
+        "installed_agentq_optimization_off": {},
+        "candidate_agentq_after_fix_optimization_off": {
+          "decision": "allow"
+        },
+        "candidate_agentq_after_fix_invalid_stdin": {
+          "decision": "allow"
+        }
+      },
+      "agy_1_4_12_requirement": "PreToolUse requires {\"decision\": \"allow\"} to permit tool execution; returning {} yields decision == \"\" and fails with 'tool call denied by pre-tool hook:'"
+    }
+  },
+  "antigravity_off_workload_after": {
+    "status": "passed",
+    "fixture": {
+      "marker": "MARKER_PREREQUISITE_198",
+      "cargo_tests_total": 181,
+      "cargo_tests_passed": 180,
+      "cargo_tests_failed": 1,
+      "independent_native_write_readback": "native-ok"
+    },
+    "native_storage": {
+      "agentapi_helper_exists": true,
+      "transcript_jsonl_exists": true,
+      "transcript_jsonl_bytes": 7866,
+      "transcript_full_jsonl_exists": true,
+      "transcript_full_jsonl_bytes": 8433,
+      "transcript_steps_count": 8
+    },
+    "turn_1": {
+      "schema": 1,
+      "session": "3ed8a575-f186-4a32-94ac-e15f76387520",
+      "outcome": "ok",
+      "error": "none",
+      "text": "{\"read\": true, \"write\": true, \"outer_sandbox\": true, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_PREREQUISITE_198\", \"original_ref\": null}\n",
+      "exit": -1,
+      "started_ms": 1793608362602,
+      "duration_us": 17604449,
+      "usage": {
+        "calls": null,
+        "input": 9736,
+        "cache_read": 7587,
+        "cache_write": null,
+        "output": 290,
+        "model": null,
+        "unknown": null
+      },
+      "limit": {
+        "used_percent": null,
+        "resets_at": null,
+        "window": null,
+        "unknown": "not-reported"
+      },
+      "reached": null,
+      "recorded": "not-requested",
+      "optimization": {
+        "intent": "off",
+        "effective": "off",
+        "reason": "launch_off"
+      }
+    },
+    "turn_2_resume": {
+      "schema": 1,
+      "session": "3ed8a575-f186-4a32-94ac-e15f76387520",
+      "outcome": "ok",
+      "error": "none",
+      "text": "{\"resumed\": true, \"marker\": \"MARKER_PREREQUISITE_198\", \"original_ref\": null}\n",
+      "exit": -1,
+      "started_ms": 1793608407951,
+      "duration_us": 8949736,
+      "usage": {
+        "calls": null,
+        "input": 2442,
+        "cache_read": 7688,
+        "cache_write": null,
+        "output": 42,
+        "model": null,
+        "unknown": null
+      },
+      "limit": {
+        "used_percent": null,
+        "resets_at": null,
+        "window": null,
+        "unknown": "not-reported"
+      },
+      "reached": null,
+      "recorded": "not-requested",
+      "optimization": {
+        "intent": "off",
+        "effective": "off",
+        "reason": "launch_off"
+      }
+    },
+    "transcript_tool_steps": [
+      {
+        "step_index": 1,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "",
+        "tool_calls": [
+          {
+            "name": "run_command",
+            "args": {
+              "CommandLine": "\"python3 probe.py\"",
+              "WaitMsBeforeAsync": "5000",
+              "toolSummary": "\"Run probe.py script\""
+            }
+          },
+          {
+            "name": "run_command",
+            "args": {
+              "CommandLine": "\"cargo test --offline --color never\"",
+              "WaitMsBeforeAsync": "10000",
+              "toolSummary": "\"Run cargo tests offline\""
+            }
+          }
+        ]
+      },
+      {
+        "step_index": 2,
+        "type": "GENERIC",
+        "status": "DONE",
+        "content": "Created At: 2026-11-02T15:32:50+07:00\nCompleted At: 2026-11-02T15:32:53+07:00\nCommand exited with code 0.\n\nCommand output:\n{\"outer_sandbox\": true, \"read\": true, \"write\": true}\r\n",
+        "tool_calls": []
+      },
+      {
+        "step_index": 3,
+        "type": "GENERIC",
+        "status": "DONE",
+        "truncated_fields": [
+          "content"
+        ],
+        "content_bytes_compact": 4119,
+        "content_bytes_full": 4687,
+        "hook_rewrote_command": false,
+        "contains_agentq_ref": false,
+        "contains_marker": true,
+        "exit_code": 101,
+        "tool_calls": []
+      },
+      {
+        "step_index": 4,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "{\"read\": true, \"write\": true, \"outer_sandbox\": true, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_PREREQUISITE_198\", \"original_ref\": null}",
+        "tool_calls": []
+      },
+      {
+        "step_index": 7,
+        "type": "PLANNER_RESPONSE",
+        "status": "DONE",
+        "content": "{\"resumed\": true, \"marker\": \"MARKER_PREREQUISITE_198\", \"original_ref\": null}",
+        "tool_calls": []
+      }
+    ],
+    "compression_records": {
+      "schema": 1,
+      "records": [],
+      "errors": [],
+      "state": "unknown",
+      "reason": "no retained observations"
+    }
+  }
+}
