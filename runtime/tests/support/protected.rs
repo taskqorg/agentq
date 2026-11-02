@@ -2,6 +2,8 @@
 use super::*;
 use agent::{ProtectedHost, ProtectedIdentity};
 use agentq_runtime::optimization::Intent;
+#[path="../../../docs/evidence/runtime-199/owner-route.rs"]
+mod owner_route;
 
 fn digest(path:&Path)->String {
     ring::digest::digest(&ring::digest::SHA256,&std::fs::read(path).unwrap()).as_ref().iter().map(|b|format!("{b:02x}")).collect()
@@ -43,6 +45,9 @@ pub fn fake_host() {
                 assert_eq!(r["preparation"],prepared["preparation"],"missing/stale preparation refuses before intent");
                 assert_eq!(r["slot"]["binding"],prepared["prepared"]["binding"]);
                 assert_eq!(authority(&root,&r["policy_revision"],&r["account"]),prepared["prepared"]["authority"],"launch revalidates host authority");
+            }
+            if root.join("owner-route").exists() {
+                assert_eq!(read(&root.join("owner-route/launch-intent.json")),r,"durable exact intent precedes dispatch");
             }
             assert!(!original.exists(),"uncertain launch must never replay"); save(&original,&r);
             if root.join("scope-mode").exists() {
@@ -134,11 +139,20 @@ pub fn protected_preparation_and_completion_recover_original_operation() {
     let mut wrong=slot.clone();wrong["binding"]["started"]=json!("reused-consumer-pid");
     assert!(host.prepare(&wrong,until()).is_err());assert!(!root.join("prepared.json").exists());
     assert!(host.prepare(&slot,Instant::now()).is_err());assert!(!root.join("prepared.json").exists(),"expired readback never invokes host");
-    let preparation=host.prepare(&slot,until()).unwrap();let checkpoint=preparation.checkpoint();
+    let handoff=root.join("owner-route");std::fs::create_dir(&handoff).unwrap();
+    let preparation=owner_route::prepare(&host,&slot,&handoff).unwrap();let checkpoint=preparation.checkpoint();
+    assert_eq!(read(&handoff.join("preparation.json")),checkpoint);
+    assert_eq!(read(&handoff.join("launch-request.json")),*preparation.request());
+    assert!(owner_route::prepare(&host,&slot,&handoff).is_err(),"one-shot checkpoint cannot repeat preparation");
     assert_eq!(preparation.request()["slot"],slot);assert!(!root.join("request.json").exists(),"prepare cannot launch");
     assert_eq!(host.prepare(&slot,until()).unwrap().checkpoint(),checkpoint,"duplicate prepare keeps original authority");
     // Durable reload before intent never dispatches. Missing preparation cannot come from an operation receipt.
     let recovered=host.recover_preparation(&serde_json::from_str::<Value>(&checkpoint.to_string()).unwrap()).unwrap();
+    assert_eq!(owner_route::recover(&host,&handoff).unwrap().request(),recovered.request());
+    let mut foreign=recovered.request().clone();foreign["slot"]["key"]=json!("c".repeat(64));
+    save(&handoff.join("launch-request.json"),&foreign);
+    assert!(owner_route::recover(&host,&handoff).is_err(),"request cannot replace original slot/key");
+    save(&handoff.join("launch-request.json"),recovered.request());
     assert_eq!(host.reconcile(&recovered,until()).unwrap()["state"],"unknown");
     assert!(!root.join("request.json").exists());
     for (pointer,value) in [
@@ -158,7 +172,8 @@ pub fn protected_preparation_and_completion_recover_original_operation() {
     let deadline=until();while refused.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     assert!(!root.join("request.json").exists(),"drift refusal precedes intent/native launch");drop(refused);
     save(&root.join("expected.json"),&expected);
-    let mut server=host.launch_prepared(&recovered,Intent::Off,&root.join("private.log")).unwrap();
+    let mut server=owner_route::launch(&host,&handoff,&root.join("private.log")).unwrap();
+    assert!(owner_route::launch(&host,&handoff,&root.join("duplicate.log")).is_err(),"intent consumes dispatch before any retry");
     let deadline=until();while !root.join("intent.json").exists() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     let path=root.join("receipt.json");let good=read(&path);let message=json!({"id":1,"method":"initialize","params":{}});
     for (pointer,value) in [
@@ -173,10 +188,11 @@ pub fn protected_preparation_and_completion_recover_original_operation() {
     save(&path,&good);server.verify(until()).unwrap();
     server.send(&message,until()).unwrap();assert_eq!(server.receive(until()).unwrap().unwrap()["id"],1);
     server.send(&json!({"method":"initialized"}),until()).unwrap();
-    let deadline=until();while std::fs::read_to_string(root.join("app-input.jsonl")).unwrap_or_default().lines().count()!=2 {
+    let deadline=until();let native_input=loop {
+        let input=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap_or_default();
+        if input.ends_with('\n') && input.lines().count()==2 {break input;}
         assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));
-    }
-    let native_input=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
+    };
     let mut changed=good.clone();changed["launch"]["scope"]["binding"]["coalition"]=json!(124);save(&path,&changed);
     assert!(server.send(&message,until()).is_err(),"changed live binding fences input");save(&path,&good);
     assert!(server.send(&message,until()).is_err(),"old observation cannot reopen fenced input");
