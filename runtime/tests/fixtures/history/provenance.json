@@ -1,0 +1,30 @@
+[
+  {
+    "fixture": "agy-stream.jsonl",
+    "origin": "retained native source",
+    "source_sha256": "7994ab1fab71efff2652b1b1f85f9dc52c65b097e4409dda8a1ffdc6765065db",
+    "rows": 10,
+    "redaction": "All non-protocol strings replaced; IDs mapped consistently; timestamp replaced. Numbers and field structure retained."
+  },
+  {
+    "fixture": "codex-exec.jsonl",
+    "origin": "retained native source",
+    "source_sha256": "0bb9ebd062ebff8901c2ac55bbefb7dce269086e884dc66c6c09113e9453dd16",
+    "rows": 8,
+    "redaction": "All non-protocol strings replaced; IDs mapped consistently; timestamp replaced. Numbers and field structure retained."
+  },
+  {
+    "fixture": "claude-native.jsonl",
+    "origin": "retained native source",
+    "source_sha256": "c37d1973b372af9d069890633cd47505b2e746dacaabef2265ffb8c3f20eba02",
+    "rows": 3,
+    "redaction": "All non-protocol strings replaced; IDs mapped consistently; timestamp replaced. Numbers and field structure retained."
+  },
+  {
+    "fixture": "codex-rollout.jsonl",
+    "origin": "retained native source",
+    "source_sha256": "03bbbaee66b721d878986dc4cfd3e4513a38dbe68550671b5d718759797ec549",
+    "rows": 12,
+    "redaction": "All non-protocol strings replaced; IDs mapped consistently; timestamp replaced. Numbers and field structure retained."
+  }
+]

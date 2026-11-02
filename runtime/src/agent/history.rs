@@ -1,0 +1,230 @@
+//! Read-only, bounded native history (agentq.md §12; RUNTIME.md history wire contract).
+use super::{Res, native};
+use serde_json::{Value, json};
+use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
+
+const BUDGET: usize = 1024 * 1024;
+const FORMATS: &[&str] = &["codex-exec", "codex-rollout", "codex-app-server", "claude-stream", "claude-native", "agy-stream", "antigravity-sidecar"];
+
+/// Adapter support is distinct from native qualification. Version and OS are caller readback.
+pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res<Value> {
+    if !FORMATS.contains(&format) { return Err("history transport unsupported".into()); }
+    let sidecar = format == "antigravity-sidecar";
+    let app = format == "codex-app-server";
+    let mut features = serde_json::Map::new();
+    for feature in ["launch", "resume", "session", "input", "files_images", "ask_reply", "tools_outputs", "heartbeat", "cancel_recovery", "model_effort_accounts_permissions", "usage_errors", "history"] {
+        let (status, reason) = match feature {
+            "history" => ("supported", "bounded source adapter; unknown fields retained raw"),
+            "heartbeat" => ("limited", "source progress and process poll only; no useful-work inference"),
+            "files_images" => ("limited", "caller arguments or native typed references only; no media decoding"),
+            "ask_reply" if !app => ("unsupported", "no added interactive reply channel; native caller control only"),
+            "cancel_recovery" if sidecar => ("limited", "submission kill is not server cancellation; original ownership retained"),
+            "model_effort_accounts_permissions" => ("limited", "caller arguments/environment/parameters; no grant or catalogue inference"),
+            _ => ("supported", "existing Turn/NativeTurn/AppSession boundary; not a history receipt"),
+        };
+        features.insert(feature.into(), json!({"status":status,"reason":reason}));
+    }
+    Ok(json!({"schema":1,"format":format,"native_version":native_version,"os":os,"features":features,
+        "native":{"status":"untested","reason":"history API not qualified on a native version/OS tuple"},
+        "evidence":["runtime/tests/history.rs","runtime/tests/agent.rs"],
+        "limits":{"page_bytes":BUDGET,"record_bytes":BUDGET,"page_events":128}}))
+}
+
+/// An observation cursor, never execution or stop authority. Protect its checkpoint as private data.
+#[derive(Clone, Debug)]
+pub struct History {
+    format: String,
+    source: String,
+    session: String,
+    offset: u64,
+    identity: Option<String>,
+    prefix: String,
+}
+
+#[derive(Debug)]
+pub struct Page {
+    pub events: Vec<Value>,
+    /// Unconsumed source bytes remain, including a partial final record.
+    pub more: bool,
+    /// Unconsumed bytes in this bounded read, including a partial final record.
+    pub pending_bytes: usize,
+}
+
+impl History {
+    pub fn new(format: &str, source: &str, session: &str) -> Res<Self> {
+        if !FORMATS.contains(&format) { return Err("history transport unsupported".into()); }
+        if source.is_empty() || session.is_empty() { return Err("history source/session required".into()); }
+        Ok(Self {format:format.into(), source:source.into(), session:session.into(), offset:0,
+            identity:None, prefix:crate::sha256_hex(b"")})
+    }
+
+    pub fn checkpoint(&self) -> Value {
+        json!({"schema":1,"format":self.format,"source":self.source,"session":self.session,
+            "offset":self.offset,"identity":self.identity,"prefix":self.prefix})
+    }
+
+    pub fn recover(v: &Value) -> Res<Self> {
+        if v["schema"] != 1 { return Err("history checkpoint schema invalid".into()); }
+        let field = |k: &str| v[k].as_str().ok_or_else(|| format!("history checkpoint {k} invalid"));
+        let mut h = Self::new(field("format")?, field("source")?, field("session")?)?;
+        h.offset = v["offset"].as_u64().ok_or("history checkpoint offset invalid")?;
+        h.prefix = field("prefix")?.into();
+        if h.prefix.len() != 64 || !h.prefix.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("history checkpoint prefix invalid".into()); }
+        h.identity = match &v["identity"] { Value::Null if h.offset == 0 => None,
+            Value::String(s) if !s.is_empty() => Some(s.clone()), _ => return Err("history checkpoint identity invalid".into()) };
+        Ok(h)
+    }
+
+    /// A failed poll leaves the cursor untouched. No source is edited or input submitted.
+    pub fn poll(&mut self, path: &Path) -> Res<Page> {
+        let mut file = File::open(path).map_err(|e| format!("history unavailable: {e}"))?;
+        if !file.metadata().map_err(|e| e.to_string())?.is_file() { return Err("history not a regular file".into()); }
+        let identity = native::file_id(&file)?;
+        if self.identity.as_ref().is_some_and(|id| *id != identity) { return Err("history replaced".into()); }
+        if native::digest_prefix(&mut file, self.offset)? != self.prefix { return Err("history truncated or rewritten".into()); }
+        file.seek(SeekFrom::Start(self.offset)).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        (&mut file).take(BUDGET as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        let mut consumed = 0;
+        let mut events = Vec::new();
+        for row in bytes.split_inclusive(|b| *b == b'\n') {
+            if events.len() == 128 { break; }
+            if row.len() > BUDGET { return Err("history record exceeds 1 MiB".into()); }
+            if !row.ends_with(b"\n") || consumed + row.len() > BUDGET { break; }
+            let raw = std::str::from_utf8(row).map_err(|_| "history invalid UTF-8")?;
+            let v: Value = serde_json::from_str(raw).map_err(|_| "history invalid JSON")?;
+            if !v.is_object() { return Err("history invalid record".into()); }
+            events.push(self.event(&v, raw, self.offset + consumed as u64)?);
+            consumed += row.len();
+        }
+        let end = self.offset + consumed as u64;
+        let prefix = native::digest_prefix(&mut file, end)?;
+        let more = consumed < bytes.len();
+        self.offset = end; self.prefix = prefix; self.identity = Some(identity);
+        Ok(Page {events, more, pending_bytes:bytes.len()-consumed})
+    }
+
+    fn event(&self, v: &Value, raw: &str, offset: u64) -> Res<Value> {
+        let client = if self.format.starts_with("codex-") {super::Client::Codex}
+            else if self.format.starts_with("claude-") {super::Client::Claude} else {super::Client::Antigravity};
+        let session = super::session_of(client, raw);
+        let native_session = session.as_deref().or_else(|| match self.format.as_str() {
+            "claude-native" | "claude-stream" => v["sessionId"].as_str().or(v["session_id"].as_str()),
+            "agy-stream" => v["step_update"]["conversation_id"].as_str(),
+            "codex-rollout" if v["type"] == "session_meta" => v["payload"]["id"].as_str(),
+            "codex-app-server" => v["params"]["threadId"].as_str().or(v["params"]["thread"]["id"].as_str()),
+            _ => None,
+        });
+        if native_session.is_some_and(|s| s != self.session) { return Err("history native session differs".into()); }
+        let (author, kind, item, blocks, limited) = normalize(&self.format, v);
+        let hash = crate::sha256_hex(raw.as_bytes());
+        let id = crate::sha256_hex(json!([self.format,self.source,self.session,offset,hash]).to_string().as_bytes());
+        let time = v.get("timestamp").or_else(|| v.get("time")).cloned().unwrap_or(Value::Null);
+        Ok(json!({"id":id,"source":self.source,"session":self.session,"session_binding":if native_session.is_some(){"native"}else{"caller"},"format":self.format,
+            "order":offset,"start":offset,"end":offset+raw.len() as u64,"sha256":hash,"raw":raw,
+            "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited}))
+    }
+}
+
+fn text(s: &Value) -> Vec<Value> {
+    s.as_str().map(|s| vec![json!({"type":"text","text":s})]).unwrap_or_default()
+}
+
+// Native blocks remain native JSON; only the envelope differs by adapter.
+fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec<Value>, &'static str) {
+    let mut author = "unknown";
+    let mut kind = "unknown";
+    let mut blocks = vec![];
+    let mut item = Value::Null;
+    let mut limited = "unsupported-source-shape";
+    match format {
+        "claude-stream" | "claude-native" => {
+            item = v.get("uuid").or_else(|| v["message"].get("id")).cloned().unwrap_or(Value::Null);
+            match v["type"].as_str() {
+                Some("user" | "assistant") => {
+                    author = if v["type"] == "user" {"user"} else {"assistant"}; kind = "message";
+                    blocks = v["message"]["content"].as_array().cloned().unwrap_or_else(|| text(&v["message"]["content"]));
+                    limited = "none";
+                }
+                Some("attachment") => {kind="attachment"; blocks.push(v["attachment"].clone()); limited="none";}
+                Some("result" | "system" | "rate_limit_event") => {author="system";kind="lifecycle";blocks.push(v.clone());limited="none";}
+                _ => {}
+            }
+        }
+        "codex-exec" | "codex-rollout" | "codex-app-server" => {
+            let p = if format == "codex-rollout" {&v["payload"]}
+                else if format == "codex-app-server" {&v["params"]} else {v};
+            let i = p.get("item").unwrap_or(p);
+            item = i.get("id").or_else(||i.get("call_id")).cloned().unwrap_or(Value::Null);
+            match i["type"].as_str() {
+                Some("message" | "agent_message" | "agentMessage" | "userMessage") => {
+                    author = match i["role"].as_str() {Some("user")=>"user",Some("assistant")=>"assistant",_ if i["type"]=="userMessage"=>"user",_ if i["type"]!="message"=>"assistant",_=>"unknown"};
+                    kind="message"; blocks=i["content"].as_array().cloned().unwrap_or_else(||text(&i["text"])); limited="none";
+                }
+                Some("command_execution" | "commandExecution" | "function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output" | "mcp_tool_call" | "mcpToolCall" | "dynamicToolCall") => {author="tool";kind="tool";blocks.push(i.clone());limited="none";}
+                _ => {
+                    if matches!(v["type"].as_str(),Some("thread.started"|"turn.started"|"turn.completed"|"turn.failed"|"error"))
+                        || matches!(p["type"].as_str(),Some("task_started"|"task_complete"|"turn_aborted"|"token_count"))
+                        || matches!(v["method"].as_str(),Some("turn/started"|"turn/completed"|"error")) {
+                        author="system";kind="lifecycle";blocks.push(v.clone());limited="none";
+                    }
+                }
+            }
+        }
+        "agy-stream" => {
+            match v["event"].as_str() {
+                Some("step_update") => {
+                    let step = &v["step_update"]; item = step["step_index"].clone();
+                    match step["step_type"].as_str() {
+                        Some("agent_response") => {author="assistant";kind="message";blocks=text(&step["text_delta"]);limited=if blocks.is_empty(){"text-not-emitted"}else{"none"};}
+                        Some("user_input") => {author="user";kind="message";limited="text-not-emitted";}
+                        Some("tool") => {author="tool";kind="tool";blocks.push(step["tool_info"].clone());limited="none";}
+                        _ => {author="system";kind="lifecycle";blocks.push(step.clone());limited="none";}
+                    }
+                }
+                Some("init") => {author="system";kind="lifecycle";blocks.push(v.clone());limited="none";}
+                Some("result") => {author="assistant";kind="result";blocks=text(&v["result"]["response"]);limited="none";}
+                _ => {}
+            }
+        }
+        "antigravity-sidecar" => {
+            item = v["step_index"].clone();
+            match v["type"].as_str() {
+                Some("USER_INPUT" | "PLANNER_RESPONSE") => {
+                    author=if v["type"]=="USER_INPUT"{"user"}else{"assistant"};kind="message";
+                    blocks=text(&v["content"]);
+                    if let Some(calls)=v["tool_calls"].as_array(){blocks.extend(calls.iter().cloned());}
+                    limited=if v.get("truncated_fields").is_some(){"truncated-source"}else if v.get("attachments").is_some(){"attachments-raw-only"}else{"none"};
+                }
+                Some("TOOL_RESPONSE") => {author="tool";kind="tool";blocks.push(v.clone());limited=if v.get("truncated_fields").is_some(){"truncated-source"}else{"none"};}
+                _=>{}
+            }
+        }
+        _ => {}
+    }
+    let blocks = blocks.into_iter().map(block).collect();
+    (author,kind,item,blocks,limited)
+}
+
+fn block(v: Value) -> Value {
+    let kind = v["type"].as_str().unwrap_or_default();
+    match kind {
+        "text" | "input_text" | "output_text" => json!({"type":"text","text":v["text"],"native":v}),
+        "image" | "input_image" | "image_url" => json!({"type":"image","native":v}),
+        "document" | "attachment" | "file" | "input_file" => json!({"type":"attachment","native":v}),
+        "tool_use" | "function_call" | "custom_tool_call" => json!({"type":"tool_call",
+            "id":v.get("id").or_else(||v.get("call_id")),"name":v["name"],
+            "input":v.get("input").or_else(||v.get("arguments")),"native":v}),
+        "tool_result" | "function_call_output" | "custom_tool_call_output" => json!({"type":"tool_result",
+            "id":v.get("tool_use_id").or_else(||v.get("call_id")),
+            "output":v.get("content").or_else(||v.get("output")),"native":v}),
+        "command_execution" | "commandExecution" => json!({"type":"tool_result","id":v["id"],
+            "name":"shell","input":v["command"],"output":v.get("aggregated_output").or_else(||v.get("aggregatedOutput")),"native":v}),
+        "mcp_tool_call" | "mcpToolCall" | "dynamicToolCall" | "TOOL_RESPONSE" => json!({"type":"tool_result","native":v}),
+        _ if v.get("parameters").is_some() && v.get("name").is_some() => {
+            json!({"type":if v.get("output").is_some() || v.get("error").is_some(){"tool_result"}else{"tool_call"},
+                "name":v["name"],"input":v["parameters"],"output":v.get("output"),"error":v.get("error"),"native":v})
+        }
+        _ => json!({"type":"unknown","native":v}),
+    }
+}
