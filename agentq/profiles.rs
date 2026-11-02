@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA: u64 = 1;
 /// Kind, display label, client aliases that share its configuration root, supported operations (A1).
-pub const KINDS: [(&str, &str, &[&str], &[&str]); 4] = [
+pub const KINDS: [(&str, &str, &[&str], &[&str]); 5] = [
     ("codex", "Codex", &["codex-cli", "codex-desktop"], &["routing", "optimization", "mcp", "hooks"]),
     ("claude-code", "Claude Code", &["claude-code-cli", "claude-desktop-code"], &["routing", "optimization", "mcp", "hooks"]),
     ("claude-desktop-chat", "Claude Desktop Chat", &["claude-desktop-chat"], &["mcp"]),
     ("hermes", "Hermes", &["hermes"], &["optimization", "mcp", "plugin"]),
+    ("antigravity", "Antigravity", &["agy"], &["optimization", "hooks"]),
 ];
 
 /// One configuration root and the files whose bytes make its revision.
@@ -45,9 +46,10 @@ pub fn clients() -> Vec<Client> {
         code,
         c("claude-desktop-chat", "claude-desktop", desktop_root(), &["claude_desktop_config.json"]),
         c("hermes", "hermes", onboard::root("hermes"), &["config.yaml"]),
+        c("antigravity", "antigravity", onboard::root("antigravity"), &["config/hooks.json"]),
     ];
     for c in &mut clients {
-        if c.agent != "claude-desktop" { c.files.push(c.root.join(if c.agent == "claude" { "CLAUDE.md" } else { "AGENTS.md" })); }
+        if !matches!(c.agent, "claude-desktop" | "antigravity") { c.files.push(c.root.join(if c.agent == "claude" { "CLAUDE.md" } else { "AGENTS.md" })); }
     }
     clients
 }
@@ -100,9 +102,13 @@ fn status_using(clients: &[Client], data: &Path, now: u64, key: &hmac::Key) -> V
     json!({"schema": SCHEMA, "at": now, "revision": sign(key, &revs), "defaults": defaults, "profiles": profiles})
 }
 
-/// The registered events of `hooks.<event>` entries whose command runs `agentq hook <agent> <event>`.
+/// The registered events of native hook entries whose command runs `agentq hook <agent> <event>`.
 fn hooked(doc: &Value, agent: &str, events: &[&str]) -> Vec<bool> {
-    events.iter().map(|e| doc["hooks"][e].as_array().into_iter().flatten().flat_map(|m| m["hooks"].as_array().into_iter().flatten()).any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(&format!(" hook {agent} {e}"))))).collect()
+    let hooks = &doc[if agent == "antigravity" { "agentq" } else { "hooks" }];
+    events.iter().map(|e| (agent != "antigravity" || hooks["enabled"] != false) && hooks[e].as_array().into_iter().flatten()
+        .filter(|m| agent != "antigravity" || m["matcher"].as_str().is_none_or(|m| matches!(m, "" | "*" | "run_command")))
+        .flat_map(|m| m["hooks"].as_array().into_iter().flatten())
+        .any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(&format!(" hook {agent} {e}"))))).collect()
 }
 
 fn hooks_state(h: &[bool]) -> &'static str {
@@ -208,6 +214,12 @@ pub fn profile(c: &Client, data: &Path, journal: &Path, key: &hmac::Key) -> Valu
                 None => "unknown",
             };
             (r, mcp, h.as_deref().map_or("unknown", hooks_state), "unsupported", "hook", eff)
+        }
+        "antigravity" => {
+            let h = json_doc(0).map(|d| hooked(&d, "antigravity", &["PreToolUse"]));
+            let hooks = h.as_deref().map_or("unknown", hooks_state);
+            let eff = match hooks { "registered" => "configured", "absent" => "missing", _ => "unknown" };
+            ("unsupported", "unsupported", hooks, "unsupported", "hook", eff)
         }
         "claude-desktop-chat" => {
             let mcp = json_doc(0).map_or("unknown", |d| present(d["mcpServers"]["agentq"].is_object()));

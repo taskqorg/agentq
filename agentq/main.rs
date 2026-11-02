@@ -40,7 +40,7 @@ const UPDATE_EVERY: u64 = 3600;
 const DRAIN: u64 = 900;
 /// `onboard --yes` waits this long for a started proxy to answer, before and after one restart (#137).
 const PROXY_START: Duration = Duration::from_secs(60);
-const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | agent turn | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | migrate-names [--dry-run|--rollback] | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--legacy] [--dry-run] | --version";
+const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | agent turn | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes|antigravity..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | migrate-names [--dry-run|--rollback] | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--legacy] [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -169,7 +169,8 @@ fn main() {
         ["configure", rest @ ..] => configure_cmd(&t, rest),
         ["hook", agent @ ("codex" | "claude" | "hermes" | "antigravity"), event] => {
             let data = t.install.join("data");
-            // A failed hook answers `{}` and exits 0; closed stdout is recorded without panicking.
+            let pass = || hooks::default_response(agent, event);
+            // A failed hook answers `{}` (or `{"decision": "allow"}` for Antigravity PreToolUse) and exits 0; closed stdout is recorded without panicking.
             let input = std::io::read_to_string(std::io::stdin());
             let response = input.as_ref().map_err(|e| format!("stdin: {e}")).and_then(|s| {
                 match control::disabled(&data, agent) {
@@ -177,15 +178,15 @@ fn main() {
                         if matches!(*agent, "claude" | "antigravity") && ["PreToolUse", "PostToolUse"].contains(event) {
                             let c = compression::policy(&data, agent)?;
                             // A wrapper can change native approval decisions even when its compression is paused.
-                            if c["enabled"] == false || c["agents"][*agent] == false { return Ok(serde_json::json!({})); }
+                            if c["enabled"] == false || c["agents"][*agent] == false { return Ok(pass()); }
                         }
                         hooks::response(agent,event,s,&t.install.join(t.exe_name()))
                     },
-                    Ok(true) => Ok(serde_json::json!({})),
+                    Ok(true) => Ok(pass()),
                     Err(e) => Err(e),
                 }
             });
-            let payload = response.as_ref().cloned().unwrap_or_else(|_| serde_json::json!({}));
+            let payload = response.as_ref().cloned().unwrap_or_else(|_| pass());
             let wrote = writeln!(std::io::stdout(), "{payload}").err().map(|e| format!("stdout: {e}"));
             let errors: Vec<String> = response.err().into_iter().chain(wrote).collect();
             if errors.is_empty() {
@@ -290,6 +291,12 @@ fn doctor(t: &Tool) -> i32 {
     for p in report["configuration"]["profiles"].as_array().into_iter().flatten().filter(|p| p["integration"]["desired"] == "disabled") {
         line(p["integration"]["configuration"] == "detached", format!("integration: {} disabled, configuration {}, runtime {}", p["kind"].as_str().unwrap_or("unknown"),
             p["integration"]["configuration"].as_str().unwrap_or("unknown"), p["integration"]["runtime"].as_str().unwrap_or("unknown")));
+    }
+    for p in report["configuration"]["profiles"].as_array().into_iter().flatten()
+        .filter(|p| p["kind"] == "antigravity" && p["integration"]["desired"] != "disabled") {
+        let hooks = p["hooks"].as_str().unwrap_or("unknown");
+        let good = hooks == "registered" || (hooks == "absent" && p["owned"] == false);
+        line(good, format!("hooks: antigravity {hooks}{}", if good { "" } else { "; run `agentq onboard --yes antigravity`" }));
     }
     for d in routing::drift(&journal(t)) {
         line(false, format!("routing: drift: {d} changed since onboard; run `agentq onboard --yes`"));
@@ -991,7 +998,11 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
         Err(e) => fail(&e, "fix it, then run `agentq onboard --yes` again"),
     }
     doctor(t);
-    println_code(&format!("verify: start a new {} session and call agentq search_document", agents.join(", ")))
+    if agents.contains(&"antigravity") {
+        println!("verify: start a new Antigravity session and run a qualified command; configured hooks do not prove compression");
+    }
+    let mcp: Vec<_> = agents.into_iter().filter(|a| *a != "antigravity").collect();
+    if mcp.is_empty() { 0 } else { println_code(&format!("verify: start a new {} session and call agentq search_document", mcp.join(", "))) }
 }
 
 /// agentq.md § 1: remove routing edits only; MCP, hooks and telemetry stay. Files only, so it works without the service.

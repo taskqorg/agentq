@@ -6,6 +6,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+#[path="support/protected.rs"]
+mod protected;
 
 fn main() {
     let wrapper: Vec<_> = std::env::args_os().skip(1).collect();
@@ -13,6 +15,7 @@ fn main() {
         std::process::exit(Command::new(&wrapper[1]).args(&wrapper[2..]).status().unwrap().code().unwrap_or(1));
     }
     if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
+    if std::env::args().nth(1).as_deref()==Some("service") { return protected::fake_host(); }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
     let tests: &[(&str, fn())] = &[
         ("antigravity_wrapped_submission_keeps_prompt_and_tail", antigravity_wrapped_submission_keeps_prompt_and_tail),
@@ -26,15 +29,18 @@ fn main() {
         ("app_server_preserves_session_policy_and_counts_turns", app_server_preserves_session_policy_and_counts_turns),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
+        ("protected_launch_refuses_tampering_and_preserves_native_transport", protected::protected_launch_refuses_tampering_and_preserves_native_transport),
         ("json_turns_run_plain_without_the_optimizer", json_turns_run_plain_without_the_optimizer),
         ("off_reaches_codex_queue_and_app_server", off_reaches_codex_queue_and_app_server),
         ("external_consumer_builds_and_plans_turns", external_consumer_builds_and_plans_turns),
     ];
-    for (name, test) in tests {
+    let filters:Vec<_>=std::env::args().skip(1).collect();
+    let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
+    for (name, test) in &selected {
         test();
         println!("test {name} ... ok");
     }
-    println!("test result: ok. {} passed", tests.len());
+    println!("test result: ok. {} passed", selected.len());
 }
 
 fn append(path:&Path, events:&[Value]) {
@@ -271,6 +277,7 @@ fn fake_app_server() {
     println!("fixture startup diagnostic");
     for line in std::io::stdin().lock().lines() {
         let value:Value=serde_json::from_str(&line.unwrap()).unwrap();
+        append(Path::new("app-input.jsonl"), &[value.clone()]);
         let id=&value["id"];
         match value["method"].as_str() {
             Some("initialize")=>println!("{}",json!({"id":id,"result":{}})),

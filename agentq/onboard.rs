@@ -1,4 +1,4 @@
-//! Owned config edits for Codex, Claude Code and Hermes with the ownership journal (agentq.md § 4, § 8, § 9).
+//! Owned config edits for Codex, Claude Code, Hermes and Antigravity with the ownership journal (agentq.md § 4, § 8, § 9).
 //!
 //! ponytail: MCP registration, hooks and Codex routing. Claude Code routing, telemetry env and the
 //! instruction block join with their own tasks.
@@ -7,7 +7,7 @@ use coreq::write_atomic;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-pub const AGENTS: [&str; 3] = ["codex", "claude", "hermes"];
+pub const AGENTS: [&str; 4] = ["codex", "claude", "hermes", "antigravity"];
 
 // Conversations retain this provider ID; no base_url lets Codex use its native authenticated endpoint.
 pub const CODEX_DIRECT_PROVIDER: &str = "# agentq: direct OpenAI for saved conversations\n[model_providers.agentq]\nname = \"OpenAI\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nsupports_websockets = true\n";
@@ -39,6 +39,7 @@ impl Want {
         match (&self.routing, self.key[0].as_str()) {
             (Some(_), _) => "routing",
             (None, "hooks") => "hooks",
+            (None, "agentq") if self.agent == "antigravity" => "hooks",
             (None, "plugins" | "$file") => "plugin",
             _ => "mcp",
         }
@@ -51,6 +52,10 @@ fn home() -> PathBuf {
 
 /// The client's own env, else the default home folder (§ 4).
 pub fn root(agent: &str) -> PathBuf {
+    if agent == "antigravity" {
+        return agentq_runtime::agent::base_home(agentq_runtime::agent::Client::Antigravity)
+            .and_then(|h| h.parent().map(Path::to_path_buf)).unwrap_or_else(|| home().join(".gemini"));
+    }
     let (var, dir) = match agent {
         "codex" => ("CODEX_HOME", ".codex"),
         "claude" => ("CLAUDE_CONFIG_DIR", ".claude"),
@@ -81,6 +86,10 @@ pub fn wants(agent: &str, root: &Path, claude_json: &Path, exe: &Path) -> Vec<Wa
             w(root.join("settings.json"), &["hooks", "PostToolUse"], json!({"matcher": "Bash", "hooks": [hook("PostToolUse")]}), true),
             w(root.join("settings.json"), &["hooks", "Stop"], json!({"hooks": [hook("Stop")]}), true),
             w(claude_json.into(), &["mcpServers", "agentq"], json!({"type": "stdio", "command": exe, "args": ["mcp", "claude"]}), false),
+        ],
+        "antigravity" => vec![
+            w(root.join("config/hooks.json"), &["agentq", "enabled"], json!(true), false),
+            w(root.join("config/hooks.json"), &["agentq", "PreToolUse"], json!({"matcher": "run_command", "hooks": [hook("PreToolUse")]}), true),
         ],
         // Desktop Chat is MCP-only (CONFIGURATION A1), with its own control identity.
         "claude-desktop" => vec![w(root.join("claude_desktop_config.json"), &["mcpServers", "agentq"], json!({"command": exe, "args": ["mcp", "claude-desktop"]}), false)],
@@ -284,7 +293,7 @@ pub fn saved_wants(wants: Vec<Want>, entries: &[Value]) -> Result<Vec<Want>, Str
 }
 
 pub fn instruction_wants(agent: &str, root: &Path, entries: &[Value]) -> Vec<Want> {
-    if agent == "claude-desktop" { return vec![]; }
+    if matches!(agent, "claude-desktop" | "antigravity") { return vec![]; }
     let file = root.join(if agent == "claude" { "CLAUDE.md" } else { "AGENTS.md" });
     let mut out = vec![];
     for e in entries.iter().filter(|e| e["file"] == file.display().to_string()) {

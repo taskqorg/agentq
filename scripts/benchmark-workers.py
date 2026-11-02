@@ -394,7 +394,7 @@ def selftest():
         root = Path(tmp)
         for client, mode, args, expected in (
             ("antigravity", "live", [], ["--dangerously-skip-permissions"]),
-            ("antigravity", "live", ["--dangerously-skip-permissions"], ["--dangerously-skip-permissions"]),
+            ("antigravity", "live", ["--model=pro", "--dangerously-skip-permissions"], ["--model=pro", "--dangerously-skip-permissions"]),
             ("antigravity", "smoke", [], []),
             ("codex", "live", [], []),
         ):
