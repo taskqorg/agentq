@@ -75,3 +75,22 @@ Unknown source shapes retain their exact raw bytes rather than guessing parity.
 - No model or paid calls, credential reads/copies, live session migration, deployment,
   native cancellation or account/model/permission changes were performed.
 - Merge-result CI and downstream TaskQ adoption are not established by local checks.
+
+## Candidate checks and independent review
+
+Code candidate `c14ef38c7e6ee3e403f061320deb7c3951379e6e` was rebased once on `origin/main` before first push.
+Subsequent evidence edits change no tested source, dependency or fixture.
+Checks used `AGENTQ_SELFTEST_OFFLINE=1`; legacy home and npm prefix were isolated in OS temporary directories.
+
+| Check | Observed outcome |
+|---|---|
+| `cargo test --locked` | 117 passed; 1 sandbox-blocked: `legacy::tests::edited_after_journal_is_stripped_not_refused`, OS error 1 `Operation not permitted` creating the isolated legacy fixture. Full gate is not PASS. |
+| `cargo test --locked -p agentq-runtime` | 15 unit tests and 16 process scenarios passed; external-consumer build sandbox-blocked while writing `target/runtime-consumer/.../find_msvc_tools-*.d`, OS error 1. Full runtime gate is not PASS. |
+| `cargo test --locked -p agentq-runtime --test history` | 4 passed on the final code candidate; run separately because the sandbox-blocked process scenario stopped Cargo before this target. |
+| `cargo run --locked -- selftest` | PASS, `selftest: ok 0.0.0-dev macos-aarch64`. |
+| Workflow-pinned `contract_lint.py agentq.md` | PASS, 0 errors; existing root-contract headroom warnings remain. Pin: `7e9adf57287553176d8b3be61c2b22565543dc51`. |
+| Changed-document local links and `git diff --check` | PASS. |
+| Independent read-only review | Task fit and quality reviewed separately; partial-write blocker fixed and rechecked. Remaining real-source fixture gap explicitly retained. |
+
+The macOS sandbox failures are not passing evidence and do not authorize a grant change.
+No CI result is claimed here. TaskQ review must check green merge-result (`merge_group`) CI before acceptance.
