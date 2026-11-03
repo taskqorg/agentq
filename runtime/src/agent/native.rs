@@ -78,6 +78,68 @@ pub(super) fn remote_url(url: &str) -> bool {
     url.strip_prefix("https://claude.ai/code/session_").is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
+/// The Remote Control URL of a native bridge session `cse_<id>`.
+fn bridge_url(id: &str) -> Option<String> {
+    let url = format!("https://claude.ai/code/session_{}", id.strip_prefix("cse_")?);
+    remote_url(&url).then_some(url)
+}
+
+/// A Claude link absence: the cause and its native evidence text.
+pub(crate) type Absence = (Cause, Option<String>);
+
+/// Claude Remote Control link of `session` from native records only (RUNTIME.md Session observation): `seen` from the
+/// transcript, then the background job state, then the debug log. `requested` is the launch's `--remote-control`.
+pub(crate) fn claude_link(home: Option<&Path>, session: &str, job: Option<&str>, mut requested: bool, seen: Option<String>) -> Result<String, Absence> {
+    if let Some(url) = seen { return Ok(url); }
+    let unreadable = |what: &str, e: &dyn std::fmt::Display| (Cause("evidence-unreadable"), Some(format!("{what}: {e}")));
+    let read = |path: PathBuf, what: &str| -> Result<Option<Vec<u8>>, Absence> {
+        let mut file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(unreadable(what, &e)),
+        };
+        // ponytail: last 16 MiB only; a bridge line older than that reads as the newer evidence or `pending`.
+        let size = file.metadata().map_err(|e| unreadable(what, &e))?.len();
+        file.seek(SeekFrom::Start(size.saturating_sub(16 << 20))).map_err(|e| unreadable(what, &e))?;
+        let mut bytes = vec![];
+        file.read_to_end(&mut bytes).map_err(|e| unreadable(what, &e))?;
+        Ok(Some(bytes))
+    };
+    let Some(home) = home else { return Err((Cause("evidence-unreadable"), Some("no Claude home".into()))) };
+    if let Some(job) = job.filter(|j| plain_id(j)) {
+        if let Some(bytes) = read(home.join("jobs").join(job).join("state.json"), "job state")? {
+            let state: Value = serde_json::from_slice(&bytes).map_err(|e| unreadable("job state", &e))?;
+            if let Some(url) = state["bridgeSessionId"].as_str().and_then(bridge_url) { return Ok(url); }
+            requested |= state["respawnFlags"].as_array().is_some_and(|a| a.iter().any(|f| f == "--remote-control"));
+        }
+    }
+    if !plain_id(session) { return Err((Cause("session-unknown"), None)); }
+    let Some(log) = read(home.join("debug").join(format!("{session}.txt")), "debug log")? else {
+        return Err((Cause(if requested { "unlogged" } else { "not-requested" }), None));
+    };
+    let failure = |detail: &str| {
+        let d = detail.to_ascii_lowercase();
+        let refused = ["polic", "disabled", "turned off", "subscription", "login", "logged in", "only available", "not available"].iter().any(|w| d.contains(w));
+        Err((Cause(if refused { "disabled" } else { "failed" }), Some(detail.trim().to_string()).filter(|d| !d.is_empty())))
+    };
+    let mut last = None;
+    for line in String::from_utf8_lossy(&log).lines() {
+        let Some(at) = line.find("[bridge:repl] ") else { continue };
+        let rest = &line[at + 14..];
+        let found = if let Some(id) = ["Hook initialized, session=", "Mirror initialized, session="].iter().find_map(|p| rest.strip_prefix(p)) {
+            bridge_url(id.trim()).map(Ok)
+        } else if let Some(d) = rest.strip_prefix("Init failed: ") {
+            Some(failure(d.split("; consecutive failures").next().unwrap_or(d)))
+        } else if let Some(d) = rest.strip_prefix("notifyBridgeFailed detail=\"") {
+            Some(failure(d.split("\" outboundOnly=").next().unwrap_or(d)))
+        } else if rest.starts_with("Org policy now refuses the connected bridge") {
+            Some(failure(rest))
+        } else { None };
+        if found.is_some() { last = found; }
+    }
+    last.unwrap_or(Err((Cause(if requested { "pending" } else { "not-requested" }), None)))
+}
+
 pub(super) fn plain_id(id: &str) -> bool { !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') }
 
 pub(super) fn scope(spec: &Spec) -> String {
@@ -415,6 +477,40 @@ mod tests {
 
     fn observations(store: &crate::telemetry::Store) -> Vec<Value> {
         store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
+    }
+
+    // #213 A1-A4: Claude link from native records only. Risk: a missing link reads as a guess or `unknown` instead of the
+    // runtime's logged cause, or unreadable evidence reads as pending.
+    #[test]
+    fn claude_link_names_url_or_logged_cause() {
+        let home=crate::scratch("claude-link");
+        let link=|job:Option<&str>,requested:bool| claude_link(Some(&home),"s-1",job,requested,None);
+        let cause=|r:Result<String,Absence>| r.unwrap_err();
+        assert_eq!(claude_link(Some(&home),"s-1",None,true,Some("https://claude.ai/code/session_seen1".into())).unwrap(),"https://claude.ai/code/session_seen1");
+        assert_eq!(cause(link(None,false)),(Cause("not-requested"),None));
+        assert_eq!(cause(link(None,true)),(Cause("unlogged"),None),"no runtime log is unknown, never pending");
+        let log=home.join("debug/s-1.txt");std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log,"2026-11-03T09:00:00Z [DEBUG] other line\n").unwrap();
+        assert_eq!(cause(link(None,true)),(Cause("pending"),None));
+        let write=|line:&str| {use std::io::Write;writeln!(File::options().append(true).open(&log).unwrap(),"2026-11-03T09:00:01Z [DEBUG] {line}").unwrap();};
+        write("[bridge:repl] Init failed: Remote Control is disabled by your organization's policy.; consecutive failures: 1");
+        assert_eq!(cause(link(None,true)),(Cause("disabled"),Some("Remote Control is disabled by your organization's policy.".into())));
+        write("[bridge:repl] notifyBridgeFailed detail=\"Session ingress unreachable\" outboundOnly=false wasConnected=false");
+        assert_eq!(cause(link(None,false)),(Cause("failed"),Some("Session ingress unreachable".into())),"the latest logged event wins");
+        write("[bridge:repl] Hook initialized, session=cse_01Abc");
+        assert_eq!(link(None,true).unwrap(),"https://claude.ai/code/session_01Abc");
+        let state=home.join("jobs/c37eb75a/state.json");std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state,"{\"bridgeSessionId\":\"cse_01Job\"}").unwrap();
+        assert_eq!(link(Some("c37eb75a"),false).unwrap(),"https://claude.ai/code/session_01Job","background job state carries the URL");
+        std::fs::write(&state,"{\"respawnFlags\":[\"--remote-control\"]}").unwrap();std::fs::remove_file(&log).unwrap();
+        assert_eq!(cause(link(Some("c37eb75a"),false)).0,Cause("unlogged"),"a background job's saved flags request Remote Control");
+        std::fs::write(&state,"{").unwrap();
+        assert_eq!(cause(link(Some("c37eb75a"),true)).0,Cause("evidence-unreadable"));
+        std::fs::remove_file(&state).unwrap();std::fs::create_dir_all(&log).unwrap();
+        let (c,detail)=cause(link(None,true));
+        assert!(c==Cause("evidence-unreadable") && detail.is_some_and(|d|d.starts_with("debug log: ")),"an unreadable log names its error");
+        assert_eq!(cause(claude_link(None,"s-1",None,true,None)).0,Cause("evidence-unreadable"));
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     // R48/R49: launcher readiness is separate from exact input and its native terminal; cold observation never replays.
