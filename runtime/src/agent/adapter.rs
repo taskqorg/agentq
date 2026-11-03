@@ -6,6 +6,7 @@ use super::native::{BackgroundJob, NativeTurn};
 use super::app::{AppServer, AppSession, app_server_command};
 use super::protected::ProtectedAppServer;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::process::Output;
 
 /// The only runtime metadata a caller reads. `name` is an opaque ID; `label` and `brand` are for people.
 #[derive(Debug, PartialEq, Eq)]
@@ -521,6 +522,52 @@ pub trait Runtime: Send + Sync {
     fn checkpoint(&self, run: &Run) -> Result<Value, Cause>;
     /// The run rebuilt from `checkpoint` and the same launch fields, without a native call.
     fn recover(&self, saved: &Value, launch: &Launch) -> Res<Run>;
+
+    // Native seams for a caller that builds its own native session (docs/spec/RUNTIME.md § Runtime trait).
+    /// The `Report` of caller-held log text, without a run.
+    fn classify(&self, log: &str) -> Report;
+    /// The client executable on `path` (None: the process `PATH`); an unresolved name comes back bare.
+    fn executable(&self, path: Option<&OsStr>) -> Res<PathBuf>;
+    /// The client's own home.
+    fn home(&self) -> Option<PathBuf>;
+    /// The native transcript file of `session` in `home` (None: the client's own); none where the runtime keeps none.
+    fn session_transcript(&self, session: &str, home: Option<&Path>) -> Option<PathBuf>;
+    /// The optimization intent applied to `spec`, as `launch` applies it.
+    fn prepare(&self, intent: Intent, product: &str, spec: &mut NativeSpec, install: Option<&Path>) -> Optimization;
+    /// `base` with the native turn arguments, working directory and environment of `spec`.
+    fn command(&self, base: Command, spec: &NativeSpec) -> Res<Command>;
+    /// One turn started with `command(base, spec)`; `input` goes to the client, output appends to `log`.
+    fn turn(&self, base: Command, spec: &NativeSpec, log: &Path, input: &str, process: &Process) -> Res<Turn>;
+    /// Capability `background`: the launcher exchange; `reference` is the caller's durably bound input.
+    fn background_launch(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Result<Output, crate::process::Failure>>;
+    /// Capability `background`: native job rows; `filtered` limits them to `spec.root`.
+    fn jobs(&self, base: Command, spec: &NativeSpec, filtered: bool, budget: Duration) -> Res<Vec<Value>>;
+    /// Capability `background`: job `id` validated from one `jobs` row against `spec`.
+    fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob>;
+    /// Capability `background`: request the stop of `job`; the output acknowledges only the request.
+    fn stop_job(&self, base: Command, spec: &NativeSpec, job: &BackgroundJob, budget: Duration) -> Res<Output>;
+    /// The named cause of a launcher refusal in `stderr`, if known.
+    fn launch_refusal(&self, stderr: &str) -> Option<Cause>;
+    /// Capability `app-queue`: queue `reference` into the desktop thread `spec.session`.
+    fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output>;
+    /// Capability `app-server`: the app-server command for a caller-owned host.
+    fn app_server_command(&self, base: Command, spec: &NativeSpec) -> Res<Command>;
+}
+
+/// The caller's view of one native session for the native seams; the adapter adds its client.
+#[derive(Clone, Debug, Default)]
+pub struct NativeSpec {
+    /// Working directory of the client and Codex `-C` on a new start.
+    pub root: PathBuf,
+    /// The native session ID to start (Claude) or resume.
+    pub session: String,
+    pub resume: bool,
+    /// Native client arguments in the Arguments position.
+    pub args: Vec<OsString>,
+    /// The account's login home; None keeps the caller's own.
+    pub home: Option<PathBuf>,
+    /// Extra child environment; values never enter argv or the log.
+    pub env: Vec<(OsString, OsString)>,
 }
 
 struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize }
@@ -639,6 +686,14 @@ fn lines_from(log: &Path, from: u64) -> Res<(Vec<Value>, u64)> {
 }
 
 impl Adapter {
+    fn native(&self, s: &NativeSpec) -> Spec {
+        Spec { client: self.client, root: s.root.clone(), session: s.session.clone(), resume: s.resume, args: s.args.clone(), home: s.home.clone(), env: s.env.clone() }
+    }
+
+    fn needs(&self, capability: &str) -> Res<()> {
+        if self.descriptor.has(capability) { Ok(()) } else { Err(format!("{capability} unsupported by {}", self.descriptor.name)) }
+    }
+
     fn link(&self, run: &Run) -> Result<String, native::Absence> {
         let none = |c| Err((Cause(c), None));
         let Ok(run) = self.own(run) else { return none("foreign-run") };
@@ -965,6 +1020,68 @@ impl Runtime for Adapter {
         let body = Body::Native(Box::new(Native { queue, turn, spec, command: l.command.clone(), job_id: text("job"), job: None,
             attached: saved["attached"].as_bool().ok_or("run recovery state invalid")?, fault: text("fault"), report: None }));
         Ok(me.run(body, start, optimization, l))
+    }
+
+    fn classify(&self, log: &str) -> Report {
+        let events: Vec<Value> = log.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        Report::read(self.client, log, &events, None)
+    }
+
+    fn executable(&self, path: Option<&OsStr>) -> Res<PathBuf> {
+        match path { Some(p) => executable_in(self.client, p), None => executable(self.client) }
+    }
+
+    fn home(&self) -> Option<PathBuf> { base_home(self.client) }
+
+    fn session_transcript(&self, session: &str, home: Option<&Path>) -> Option<PathBuf> {
+        (self.client == Client::Codex).then(|| rollout(session, home)).flatten()
+    }
+
+    fn prepare(&self, intent: Intent, product: &str, spec: &mut NativeSpec, install: Option<&Path>) -> Optimization {
+        let mut native = self.native(spec);
+        let optimization = optimization::prepare(intent, product, &mut native, install);
+        (spec.args, spec.env) = (native.args, native.env);
+        optimization
+    }
+
+    fn command(&self, base: Command, spec: &NativeSpec) -> Res<Command> { Ok(command(base, &self.native(spec))) }
+
+    fn turn(&self, base: Command, spec: &NativeSpec, log: &Path, input: &str, process: &Process) -> Res<Turn> {
+        Turn::start(base, &self.native(spec), log, input, process)
+    }
+
+    fn background_launch(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Result<Output, crate::process::Failure>> {
+        self.needs("background")?;
+        native::background_launch(base, &self.native(spec), reference, budget)
+    }
+
+    fn jobs(&self, base: Command, spec: &NativeSpec, filtered: bool, budget: Duration) -> Res<Vec<Value>> {
+        self.needs("background")?;
+        native::background_jobs(base, &self.native(spec), filtered, budget)
+    }
+
+    fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob> {
+        self.needs("background")?;
+        BackgroundJob::read(row, &self.native(spec), id)
+    }
+
+    fn stop_job(&self, base: Command, spec: &NativeSpec, job: &BackgroundJob, budget: Duration) -> Res<Output> {
+        self.needs("background")?;
+        native::background_stop(base, &self.native(spec), job, budget)
+    }
+
+    fn launch_refusal(&self, stderr: &str) -> Option<Cause> {
+        (self.client == Client::Claude && stderr.contains("Workspace not trusted")).then_some(Cause("workspace-untrusted"))
+    }
+
+    fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output> {
+        self.needs("app-queue")?;
+        native::app_queue(base, &self.native(spec), reference, budget)
+    }
+
+    fn app_server_command(&self, base: Command, spec: &NativeSpec) -> Res<Command> {
+        self.needs("app-server")?;
+        app_server_command(base, &self.native(spec))
     }
 }
 

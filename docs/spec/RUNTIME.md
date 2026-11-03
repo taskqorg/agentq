@@ -29,6 +29,17 @@ Each adapter implements every operation. The sections below remain the binding d
 | `protected_paths(home)` | Native home folders and files a run must not overwrite: Claude home and `.claude.json`, Codex home, Antigravity home and its sibling `config`. |
 | `home_env(tool, label)` | The home variable pointing at `<base home>/<tool>-accounts/<label>`; none for `default`, which keeps the caller's own home. |
 | `checkpoint(run)`, `recover(saved, &Launch)` | Private recovery value of a CLI turn, background or queue run, and the run rebuilt from it without a native call (Turn recovery and process setup, Compatibility sessions). An `agentapi` submission returns cause `no-checkpoint`. |
+| `classify(log)` | The `Report` of caller-held log text without a run: the same `Report::read` as a finished turn, with no exit code, deadline or rollout. `detail` holds the native reason of `auth-rejected` or `model-capacity`. One event classifies as its own one-line log. |
+| `executable(path)` | The client executable resolved on `path` (none: the process `PATH`), as in Arguments; Codex resolves its native executor. Unresolved names come back bare; nothing is spawned. |
+| `home()` | The client's own home (Arguments, `protected_paths`). |
+| `session_transcript(session, home)` | The native transcript file of a session in `home` (none: the client's own): the Codex rollout. Other runtimes and an unknown session read none. |
+| `prepare(intent, product, &mut NativeSpec, install)` | The optimization intent applied to a caller-built spec, as `launch` applies it. |
+| `command(base, &NativeSpec)`, `turn(base, &NativeSpec, log, input, &Process)` | The native turn command (Arguments), and one `Turn` started with it: `id`, `poll`, `kill`, `wait`, `report`. For a caller that adds native arguments of its own; `launch` stays the default. |
+| `background_launch`, `jobs`, `job`, `stop_job` | Capability `background`: the launcher exchange, the job list (`filtered` adds the project filter), one validated `BackgroundJob` row and its stop request (Compatibility sessions). Other runtimes refuse with `background unsupported by <name>`. |
+| `launch_refusal(stderr)` | The named cause of a launcher refusal: Claude `Workspace not trusted` reads `workspace-untrusted`; otherwise none. |
+| `app_queue`, `app_server_command` | Capabilities `app-queue` and `app-server`: the desktop-thread queue exchange and the app-server command for a caller-owned host. Other runtimes refuse with `<capability> unsupported by <name>`. |
+
+`NativeSpec` is the caller's view of one native session for these operations: `root`, `session`, `resume`, `args` (native client arguments in the Arguments position), `home` and `env`; the adapter adds its own client. Callers gate each optional operation on `descriptor().has(capability)`.
 
 Descriptor data, the only runtime metadata a caller reads:
 
