@@ -56,7 +56,7 @@ Claude sources, each in the client home (`CLAUDE_CONFIG_DIR` or `~/.claude`, the
 
 1. A `system` `bridge_status` record with an `https://claude.ai/code/session_*` URL in the run's log or native transcript.
 2. A background job's `jobs/<job>/state.json`: `bridgeSessionId` `cse_<id>` gives `https://claude.ai/code/session_<id>`; `respawnFlags` containing `--remote-control` marks it requested.
-3. The debug log `debug/<session>.txt` (written when Claude debug logging is on), last 16 MiB: the last of `[bridge:repl] Hook initialized, session=cse_<id>` or `Mirror initialized` (URL), `[bridge:repl] Init failed: <detail>`, `notifyBridgeFailed detail="<detail>"` and `Org policy now refuses the connected bridge` decides. A detail naming a policy, plan, subscription, login or `disabled` reads `disabled`, any other `failed`.
+3. The debug log `debug/<session>.txt` (written when Claude debug logging is on), last 16 MiB, lines whose marker follows only the logger's `<time> [<LEVEL>] ` prefix: the last of `[bridge:repl] Hook initialized, session=cse_<id>` or `Mirror initialized` (URL), `[bridge:repl] Init failed: <detail>`, `notifyBridgeFailed detail="<detail>"` and `Org policy now refuses the connected bridge` decides. A detail naming a policy, plan, subscription, login or `disabled` reads `disabled`, any other `failed`.
 
 The runtime never enables Claude debug logging; turning it on for workers is a separate launch decision with its own native qualification.
 
