@@ -3,12 +3,15 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 import unittest
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('tag_runtime', Path(__file__).parents[1] / 'scripts/tag_runtime.py')
 tag_runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tag_runtime)
+# The tag follows the crate version, so a version bump keeps this fixture valid.
+VERSION = tomllib.loads((Path(__file__).parents[1] / 'runtime/Cargo.toml').read_text())['package']['version']
 
 
 class Publication(unittest.TestCase):
@@ -24,7 +27,7 @@ class Publication(unittest.TestCase):
                     if argv[:2] == ['git', 'rev-parse']:
                         return subprocess.CompletedProcess(argv, 0, sha + '\n', '')
                     if argv[:2] == ['git', 'ls-remote']:
-                        return subprocess.CompletedProcess(argv, 0, existing_sha + '\trefs/tags/runtime-v0.1.0\n', '')
+                        return subprocess.CompletedProcess(argv, 0, existing_sha + f'\trefs/tags/runtime-v{VERSION}\n', '')
                     if argv[:2] == ['git', 'merge-base']:
                         return subprocess.CompletedProcess(argv, 0, '', '')
                     self.fail('existing immutable tags must never be rewritten: ' + repr(argv))

@@ -155,6 +155,31 @@ impl std::fmt::Display for Cause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
 }
 
+/// A typed operation error: `Refused` before any native write, `Failed` after a native or transport error (never retried).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure { Refused(Cause), Failed(String) }
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Failure::Refused(c) => write!(f, "{c}"), Failure::Failed(e) => f.write_str(e) }
+    }
+}
+
+impl From<String> for Failure { fn from(e: String) -> Self { Failure::Failed(e) } }
+impl From<&str> for Failure { fn from(e: &str) -> Self { Failure::Failed(e.into()) } }
+
+/// One ordered part of user input. An image is a local file the caller already verified; only its absolute path is forwarded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Part { Text(String), Image(PathBuf) }
+
+/// How a session's native account is signed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Login { Subscription, ApiKey, None }
+
+/// Read-only login identity of a session; it carries no credential, token or email.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Account { pub login: Login, pub plan: Option<String> }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State { Running, Finished, Failed, Unknown }
 
@@ -352,12 +377,24 @@ impl App {
         Ok(())
     }
 
-    fn input(&mut self, text: &str, until: Instant) -> Res<()> {
+    fn input(&mut self, text: &str, until: Instant) -> Res<()> { self.start(json!([{"type": "text", "text": text}]), until) }
+
+    /// Start the next turn with exactly `items`; a failed write stays uncertain and is never resent.
+    fn start(&mut self, items: Value, until: Instant) -> Res<()> {
         if self.session.report().is_some() { self.session.finish_turn()?; }
-        let mut params = json!({"input": [{"type": "text", "text": text}]});
+        let mut params = json!({"input": items});
         if let Some(m) = &self.model { params["model"] = json!(m); }
         let request = self.session.start_turn(params)?;
         self.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)
+    }
+
+    /// One read-only `account/read` without token refresh; its reply stays private to the caller of `account`.
+    fn account(&mut self, until: Instant) -> Result<Account, Failure> {
+        let request = self.session.request("account/read", json!({"refreshToken": false}))?;
+        let id = request["id"].clone();
+        self.exchange(request, until)?;
+        let at = self.pending.iter().rposition(|m| m["id"] == id && m.get("method").is_none()).ok_or("account/read reply missing")?;
+        account_of(&self.pending.remove(at))
     }
 
     /// Read every message available now.
@@ -403,14 +440,42 @@ impl Native {
     }
 }
 
+/// The `Account` of a Codex `account/read` reply: `chatgpt` is a subscription, `apiKey` an API key, no account none.
+fn account_of(reply: &Value) -> Result<Account, Failure> {
+    if !reply["error"].is_null() { return Err(Failure::Failed("account/read refused; identity unknown".into())); }
+    let a = &reply["result"]["account"];
+    if a.is_null() && reply["result"].is_object() { return Ok(Account { login: Login::None, plan: None }); }
+    let login = match a["type"].as_str() { Some("chatgpt") => Login::Subscription, Some("apiKey") => Login::ApiKey, _ => return Err(Failure::Failed("account login unknown".into())) };
+    let plan = a["planType"].as_str().filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')).map(String::from);
+    Ok(Account { login, plan })
+}
+
+/// The native app-server items of `parts`, or the typed refusal; checked before any native write.
+fn input_items(descriptor: &Descriptor, parts: &[Part]) -> Result<Value, Failure> {
+    if parts.iter().all(|p| matches!(p, Part::Text(t) if t.is_empty())) { return Err(Failure::Refused(Cause("input-empty"))); }
+    let mut items = vec![];
+    for p in parts {
+        items.push(match p {
+            Part::Text(t) => json!({"type": "text", "text": t}),
+            Part::Image(_) if !descriptor.has("image-input") => return Err(Failure::Refused(Cause("image-unsupported"))),
+            Part::Image(path) if !path.is_absolute() || !path.is_file() => return Err(Failure::Refused(Cause("image-invalid"))),
+            Part::Image(path) => json!({"type": "localImage", "path": path}),
+        });
+    }
+    Ok(Value::Array(items))
+}
+
 /// The one trait every runtime adapter implements (specq agent-runtimes § Runtime trait).
 pub trait Runtime: Send + Sync {
     fn descriptor(&self) -> &Descriptor;
     fn launch(&self, launch: &Launch) -> Res<Run>;
     fn resume(&self, session: &str, launch: &Launch) -> Res<Run>;
-    fn input(&self, run: &mut Run, text: &str) -> Res<()>;
+    /// Start the next turn of a session run with exactly `parts`, once; see `Failure` for refusals.
+    fn input(&self, run: &mut Run, parts: &[Part]) -> Result<(), Failure>;
+    /// Read-only login identity of a session run (capability `account`); never refreshes or writes a credential.
+    fn account(&self, run: &mut Run) -> Result<Account, Failure>;
     /// Send one native protocol message of a session run: a reply to a server request from `progress`, or a
-    /// catalogue/account read (`model/list`, `account/rateLimits/read`). Other runs return cause `send-unsupported`.
+    /// catalogue/limit read (`model/list`, `account/rateLimits/read`). Every other method returns cause `send-unsupported`.
     fn send(&self, run: &mut Run, message: &Value) -> Res<()>;
     /// Request the stop; true when the exit is already confirmed.
     fn cancel(&self, run: &mut Run) -> Res<bool>;
@@ -439,7 +504,7 @@ static ADAPTERS: [Adapter; 3] = [
     Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "background", "title"] } },
     Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt",
-        capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server", "effort"] } },
+        capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server", "effort", "image-input", "account"] } },
     Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini",
         capabilities: &["turn", "resume", "title"] } },
 ];
@@ -628,12 +693,23 @@ impl Runtime for Adapter {
 
     fn resume(&self, session: &str, launch: &Launch) -> Res<Run> { table(self.client).start(launch, Some(session)) }
 
-    fn input(&self, run: &mut Run, text: &str) -> Res<()> {
+    fn input(&self, run: &mut Run, parts: &[Part]) -> Result<(), Failure> {
+        let run = self.own_mut(run)?;
+        let items = input_items(&self.descriptor, parts)?;
+        let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+        match &mut run.body {
+            Body::App(a) => { a.pump()?; a.start(items, until)?; run.live.get_or_insert(Live(&table(self.client).live)).0.fetch_add(1, Ordering::SeqCst); Ok(()) }
+            // A CLI run reads one input; the next turn is a resume.
+            _ => Err(Failure::Refused(Cause("input-unsupported"))),
+        }
+    }
+
+    fn account(&self, run: &mut Run) -> Result<Account, Failure> {
         let run = self.own_mut(run)?;
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
-            Body::App(a) => { a.pump()?; a.input(text, until)?; run.live.get_or_insert(Live(&table(self.client).live)).0.fetch_add(1, Ordering::SeqCst); Ok(()) }
-            _ => Err("input-unsupported: a CLI run reads one input; resume the session for the next turn".into()),
+            Body::App(a) if self.descriptor.has("account") => a.account(until),
+            _ => Err(Failure::Refused(Cause("account-unsupported"))),
         }
     }
 
@@ -949,6 +1025,29 @@ mod tests {
         assert_eq!((t["sandbox"].as_str(), t["approvalPolicy"].as_str()), (Some("workspace-write"), Some("never")));
         l.policy.unelevated = true;
         assert_eq!(thread_params(&l, &json!({})).unwrap_err(), "policy unelevated unsupported by app-server");
+    }
+
+    // #217 A1/A2: parts map to native items or refuse by cause before any write; account identity maps only login kind
+    // and a plain plan name. Risk: an image reaches a runtime that cannot carry it, or a credential/email leaves the adapter.
+    #[test]
+    fn input_parts_and_account_identity_map_or_refuse() {
+        let refused = |c: &'static str| Err(Failure::Refused(Cause(c)));
+        let codex = runtime("codex").unwrap().descriptor();
+        let abs = std::env::current_exe().unwrap();
+        assert_eq!(input_items(codex, &[Part::Text("a".into()), Part::Image(abs.clone())]).unwrap(), json!([{"type": "text", "text": "a"}, {"type": "localImage", "path": abs}]));
+        assert_eq!(input_items(codex, &[]), refused("input-empty"));
+        assert_eq!(input_items(codex, &[Part::Image("rel.png".into())]), refused("image-invalid"));
+        for name in ["claude", "antigravity"] {
+            assert_eq!(input_items(runtime(name).unwrap().descriptor(), &[Part::Image(abs.clone())]), refused("image-unsupported"), "{name}");
+        }
+        let read = |v: Value| account_of(&v);
+        assert_eq!(read(json!({"id": 1, "result": {"account": {"type": "chatgpt", "email": "e@example.invalid", "planType": "pro"}}})).unwrap(),
+            Account { login: Login::Subscription, plan: Some("pro".into()) });
+        assert_eq!(read(json!({"id": 1, "result": {"account": {"type": "apiKey"}}})).unwrap(), Account { login: Login::ApiKey, plan: None });
+        assert_eq!(read(json!({"id": 1, "result": {"account": null, "requiresOpenaiAuth": true}})).unwrap(), Account { login: Login::None, plan: None });
+        assert_eq!(read(json!({"id": 1, "result": {"account": {"type": "chatgpt", "planType": "e@example.invalid"}}})).unwrap().plan, None, "plan is a plain name");
+        assert!(matches!(read(json!({"id": 1, "result": {"account": {"type": "other"}}})), Err(Failure::Failed(_))), "unknown login is never guessed");
+        assert!(matches!(read(json!({"id": 1, "error": {"code": -1}})), Err(Failure::Failed(_))));
     }
 
     // #210 A1/A3: descriptors are the only metadata; every runtime answers session_url and home/quota operations or names a
