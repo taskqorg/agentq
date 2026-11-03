@@ -482,6 +482,18 @@ mod tests {
         store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
     }
 
+    // #213 A3 native proof, not CI: reads a live background job of this host through the same reader.
+    // Run: AGENTQ_LIVE_CLAUDE_JOB=<job id> cargo test -p agentq-runtime --lib live_claude_job_link -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_claude_job_link() {
+        let job = std::env::var("AGENTQ_LIVE_CLAUDE_JOB").expect("AGENTQ_LIVE_CLAUDE_JOB");
+        let home = PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).expect("home")).join(".claude");
+        let link = claude_link(Some(&home), "-", Some(&job), false, None);
+        println!("live job {job}: {link:?}");
+        assert!(link.is_ok_and(|u| remote_url(&u)), "a live Remote Control job names its URL");
+    }
+
     // #213 A1-A4: Claude link from native records only. Risk: a missing link reads as a guess or `unknown` instead of the
     // runtime's logged cause, or unreadable evidence reads as pending.
     #[test]

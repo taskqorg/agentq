@@ -636,10 +636,15 @@ impl Adapter {
         let none = |c| Err((Cause(c), None));
         let Ok(run) = self.own(run) else { return none("foreign-run") };
         if !self.descriptor.has("session-url") { return none("no-session-url"); }
+        // An unreadable transcript names its error rather than reading as an unknown session (P2).
+        let text = match &run.body {
+            Body::Turn(t) => read_log(&t.log, t.start).map_err(|e| (Cause("evidence-unreadable"), Some(format!("transcript: {e}"))))?,
+            _ => String::new(),
+        };
         let Some(session) = self.session_id(run) else { return none("session-unknown") };
         let bridge = |v: &Value| (v["subtype"] == "bridge_status").then(|| v["url"].as_str().filter(|u| native::remote_url(u)).map(String::from)).flatten();
         let (home, job, seen) = match &run.body {
-            Body::Turn(t) => (t.home.clone(), None, read_from(&t.log, t.start).unwrap_or_default().lines()
+            Body::Turn(t) => (t.home.clone(), None, text.lines()
                 .filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| bridge(&v)).next_back()),
             Body::Native(n) => (spec_home(&n.spec), n.job.as_ref().map(|j| j.id.clone()).or_else(|| n.job_id.clone()), n.turn.remote_url().map(String::from)),
             Body::App(_) => return none("no-session-url"),

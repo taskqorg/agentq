@@ -717,11 +717,13 @@ impl Turn {
     }
 }
 
-fn read_from(log: &Path, pos: u64) -> Option<String> {
-    let mut f = File::open(log).ok()?;
+fn read_from(log: &Path, pos: u64) -> Option<String> { read_log(log, pos).ok() }
+
+fn read_log(log: &Path, pos: u64) -> std::io::Result<String> {
+    let mut f = File::open(log)?;
     let mut b = vec![];
-    f.seek(SeekFrom::Start(pos)).and_then(|_| f.read_to_end(&mut b)).ok()?;
-    Some(String::from_utf8_lossy(&b).into_owned())
+    f.seek(SeekFrom::Start(pos)).and_then(|_| f.read_to_end(&mut b))?;
+    Ok(String::from_utf8_lossy(&b).into_owned())
 }
 
 /// A turn-end event: Claude `result`, Codex `turn.completed` or `turn.failed`, Antigravity terminal `PLANNER_RESPONSE` or `turn.cancelled`.
