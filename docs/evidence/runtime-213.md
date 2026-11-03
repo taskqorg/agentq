@@ -47,6 +47,19 @@ The first live run (job `42b99951`) registered Remote Control natively (`state.j
 - A1: the first `observe` read `Running`, session `61c8f489-ce26-40c9-9537-9e272067e4af`, cause `unlogged` (registration not yet written). The next `observe` returned `url: https://claude.ai/code/session_017XK7FVbkUsFjJJPqAdZ25m`, cause none. The job state held `bridgeSessionId` `cse_017XK7FVbkUsFjJJPqAdZ25m`, and the transcript held one `bridge_status` record.
 - A2: the checkpoint held `"job":"61c8f489"`, `"attached":true` and the transcript path under `C--Users-…`. The run rebuilt by `recover` returned the same URL through `observe` with no launch. `cancel` stopped the job; `claude agents` then listed it as `stopped`.
 
+## Native macOS proof (task 220)
+
+Source: [task 220](https://github.com/taskqorg/agentq/issues/220), for A3 of this task. Host: native macOS (arm64), Claude Code 2.1.316 (`Runtime::ready` version `2.1.316 (Claude Code)`), candidate main at `0cb1acef1c480b89255e5a604278b1a27db43da0`. This is a live client run, separate from the fake-client checks above.
+
+Procedure: the same `AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent` as task 216, with no code change. The workspace was `benchmarks/.tmp/live-bg-54706`; no trust was granted and no working profile or client configuration changed.
+
+### Live run (job `912d254d`)
+
+- A1: the first `observe` read `Running`, session `912d254d-edd3-4ce1-b81b-cc15e09f8bb7`, cause `unlogged`. The next `observe` returned `url: https://claude.ai/code/session_017XK7FUHRdK6oU6EkUX2Cj5`, cause none. The job state held `bridgeSessionId` `cse_017XK7FUHRdK6oU6EkUX2Cj5`.
+- A2: the checkpoint held `"job":"912d254d"`, `"attached":true` and the transcript path under `-Users-kirs-Projects-agentq--worktrees-taskq-220-benchmarks--tmp-live-bg-54706`. The run rebuilt by `recover` returned the same URL through `observe` with no launch. `cancel` returned `Ok(false)` (a background stop does not observe the exit); the job state then read `done` and `claude agents --json` no longer listed it.
+- The test printed `live result: ok https://claude.ai/code/session_017XK7FUHRdK6oU6EkUX2Cj5`.
+- No macOS defect was found: the launcher-line job parser and the project folder name from task 216 hold on macOS.
+
 ## Open
 
 - Native platform proof: macOS and Windows each have one live background run with a registered Remote Control link. No live failed or disabled registration was observed on either platform.
