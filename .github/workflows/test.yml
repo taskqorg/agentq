@@ -24,7 +24,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # macOS runs on the self-hosted Apple-silicon runner except for fork pull requests; the matrix value keeps the required check name.
+    runs-on: ${{ matrix.os == 'macos-latest' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "macOS", "ARM64", "taskq-mac"]') || matrix.os }}
     timeout-minutes: 15
     env:
       AGENTQ_SELFTEST_OFFLINE: '1'
