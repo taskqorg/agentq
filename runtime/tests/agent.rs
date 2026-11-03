@@ -521,6 +521,18 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         while r.poll(&mut next).unwrap() == agent::State::Running { std::thread::sleep(Duration::from_millis(20)); }
         let second = r.report(&next).unwrap();
         assert_eq!((second.outcome, second.text.as_deref(), second.session.as_deref()), ("ok", Some("turn 2"), Some(session.as_str())), "{}", d.name);
+        if d.has("session-url") {
+            // #213 A2 review: a finished transcript replaced by a directory reads `evidence-unreadable` with its error, never `session-unknown`.
+            let log = r.transcript(&next).unwrap();
+            let kept = root.join("worker.log.kept");
+            std::fs::rename(&log, &kept).unwrap();
+            std::fs::create_dir(&log).unwrap();
+            let seen = r.observe(&mut next);
+            assert_eq!(seen.cause, Some(agent::Cause("evidence-unreadable")), "{}: {seen:?}", d.name);
+            assert!(seen.detail.as_deref().is_some_and(|t| t.starts_with("transcript: ")), "{}: {seen:?}", d.name);
+            std::fs::remove_dir(&log).unwrap();
+            std::fs::rename(&kept, &log).unwrap();
+        }
         assert!(r.input(&mut next, "more").unwrap_err().starts_with("input-unsupported"));
         assert_eq!(observations(&store)[0]["runtime"].as_str(), Some(d.name));
         let mut refused = l.clone();
