@@ -1,7 +1,8 @@
 name: Test
 on:
+  # Branch work runs through pull_request and merge_group; main pushes keep the main status.
   push:
-    branches-ignore: ['gh-readonly-queue/**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
   merge_group:
@@ -32,6 +33,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: rustup default stable
+      # Only main pushes save the cache; the self-hosted runner keeps its own target directory.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: runner.environment == 'github-hosted'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: python tests/client_compression_check.py
       - run: python tests/provider_adapter.py
       - run: python tests/hermes_adapter.py
