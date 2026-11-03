@@ -15,6 +15,10 @@ pub struct Descriptor {
     pub label: &'static str,
     pub brand: &'static str,
     pub family: &'static str,
+    /// Model aliases a caller may offer without a catalogue read.
+    pub models: &'static [&'static str],
+    /// Oldest supported CLI version; empty: none.
+    pub minimum: &'static str,
     pub capabilities: &'static [&'static str],
 }
 
@@ -31,6 +35,10 @@ pub enum Network { #[default] Native, On, Off }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Approval { #[default] Native, Plan, Edits, Auto, /** Never prompt; a request that needs approval is denied. */ Deny, Bypass }
+
+/// The runtime's own shell and web tools.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Builtin { #[default] Native, On, Off }
 
 /// Extra writable folders beside the workspace; every path is absolute.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -56,6 +64,11 @@ pub struct Policy {
     pub roots: Roots,
     /// The runtime's own Windows sandbox runs without elevation.
     pub unelevated: bool,
+    pub builtin: Builtin,
+    /// No user settings, plugins, slash commands or extra MCP servers.
+    pub isolated: bool,
+    /// Subscription login only, never an API key.
+    pub subscription: bool,
 }
 
 /// Runs on the child `Command` after the adapter's own setup, directly before spawn.
@@ -117,6 +130,16 @@ pub struct Launch {
     pub deadline: Option<Instant>,
     /// Caller setup of the child process.
     pub process: Process,
+    /// Login home of the run; None keeps the caller's own.
+    pub home: Option<PathBuf>,
+    /// MCP config file of a CLI turn (capability `mcp-config`); its servers join the tools allowlist.
+    pub mcp: Option<PathBuf>,
+    /// File appended to the system prompt of a CLI turn (capability `instructions-file`).
+    pub instructions: Option<PathBuf>,
+    /// Ordered turn input replacing `input` (capability `turn-parts`).
+    pub parts: Vec<Part>,
+    /// Partial text records in `progress` (capability `turn-deltas`; app-server runs always stream them).
+    pub deltas: bool,
 }
 
 /// How a run reaches the runtime; every mode but `Turn` needs the descriptor capability of the same name.
@@ -144,7 +167,7 @@ impl Launch {
     pub fn new(root: impl Into<PathBuf>, log: impl Into<PathBuf>, input: impl Into<String>, product: impl Into<String>) -> Self {
         Launch { root: root.into(), log: log.into(), input: input.into(), policy: Policy::default(), model: None, effort: None, compact_hook: None,
             env: vec![], command: vec![], optimization: Intent::Inherit, product: product.into(), install: None, accounts: None,
-            mode: Mode::Turn, title: None, deadline: None, process: Process::default() }
+            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false }
     }
 }
 
@@ -207,6 +230,42 @@ impl State {
 /// One readiness part: `ok`, `missing` or `unknown`, with the value or the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Check { pub state: &'static str, pub detail: String }
+
+/// Numeric parts of the first dotted version token of `s`: `codex-cli 0.162.0` and `2.1.5 (Claude Code)` read alike.
+fn version_parts(s: &str) -> Option<Vec<u64>> {
+    s.split(|c: char| c.is_whitespace() || c == '(').find_map(|t| {
+        let v: Option<Vec<u64>> = t.trim_start_matches('v').split('.').map(|p| p.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).collect();
+        v.filter(|v| v.len() >= 2)
+    })
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 { s.push(if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' }); }
+    }
+    s
+}
+
+/// Claude stream-json turn input: one user message, images as base64 blocks.
+fn stream_message(parts: &[Part]) -> Res<String> {
+    let mut content = vec![];
+    for p in parts {
+        content.push(match p {
+            Part::Text(t) => json!({"type": "text", "text": t}),
+            Part::Image(path) => {
+                if !path.is_absolute() { return Err("image-invalid".into()); }
+                let bytes = std::fs::read(path).map_err(|_| "image-invalid".to_string())?;
+                let media = match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+                    "png" => "image/png", "webp" => "image/webp", "gif" => "image/gif", _ => "image/jpeg" };
+                json!({"type": "image", "source": {"type": "base64", "media_type": media, "data": b64(&bytes)}})
+            }
+        });
+    }
+    Ok(format!("{}\n", json!({"type": "user", "message": {"role": "user", "content": content}})))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ready { pub install: Check, pub version: Check, pub login: Check }
@@ -512,7 +571,7 @@ pub trait Runtime: Send + Sync {
     /// Poll, then the native session and session URL or its absence cause, in one record.
     fn observe(&self, run: &mut Run) -> Observation;
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause>;
-    fn ready(&self, home: Option<&Path>) -> Ready;
+    fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready;
     fn quota(&self, accounts: &Accounts, now: i64) -> Quota;
     fn running(&self) -> usize;
     fn protected_paths(&self, home: Option<&Path>) -> Vec<PathBuf>;
@@ -547,7 +606,7 @@ pub trait Runtime: Send + Sync {
     /// Capability `background`: request the stop of `job`; the output acknowledges only the request.
     fn stop_job(&self, base: Command, spec: &NativeSpec, job: &BackgroundJob, budget: Duration) -> Res<Output>;
     /// The named cause of a launcher refusal in `stderr`, if known.
-    fn launch_refusal(&self, stderr: &str) -> Option<Cause>;
+    fn launch_refusal(&self, text: &str) -> Option<Cause>;
     /// Capability `app-queue`: queue `reference` into the desktop thread `spec.session`.
     fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output>;
     /// Capability `app-server`: the app-server command for a caller-owned host.
@@ -574,10 +633,12 @@ struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize }
 
 static ADAPTERS: [Adapter; 3] = [
     Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
-        capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "background", "title"] } },
-    Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt",
+        models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
+        capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "background", "title", "mcp-config",
+            "instructions-file", "turn-parts", "turn-deltas"] } },
+    Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt", models: &[], minimum: "0.162.0",
         capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server", "effort", "image-input", "account"] } },
-    Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini",
+    Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "",
         capabilities: &["turn", "resume", "title"] } },
 ];
 
@@ -598,12 +659,27 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
     match client {
         Client::Claude => {
             if p.read != Scope::Native { return refuse("read"); }
-            if p.write != Scope::Native { return refuse("write"); }
+            // Full write only without prompts. No write stays refused: MCP servers and project hooks can write whatever the
+            // built-in tools are, so Claude has no flag that enforces it.
+            if !matches!((p.write, p.approval), (Scope::Native, _) | (Scope::Any, Approval::Bypass)) { return refuse("write"); }
             if p.network != Network::Native { return refuse("network"); }
             if p.roots != Roots::Native { return refuse("roots"); }
             if p.unelevated { return refuse("unelevated"); }
-            if let Some(tools) = &p.tools {
-                if tools.is_empty() || tools.iter().any(|t| t.is_empty() || t.starts_with('-')) { return refuse("tools"); }
+            // `on` is Claude's own default tool set.
+            if p.builtin == Builtin::Off { a.extend(["--tools".into(), "".into()]); }
+            if p.isolated {
+                a.extend(["--strict-mcp-config", "--setting-sources", "project", "--disable-slash-commands", "--system-prompt-snapshot", "off"].map(OsString::from));
+            }
+            let mut tools = p.tools.clone();
+            if tools.as_ref().is_some_and(|t| t.is_empty() || t.iter().any(|t| t.is_empty() || t.starts_with('-'))) { return refuse("tools"); }
+            if let Some(file) = &l.mcp {
+                a.extend(["--mcp-config".into(), file.clone().into_os_string()]);
+                tools.get_or_insert_with(Vec::new).extend(mcp_servers(file)?.into_iter().map(|s| format!("mcp__{s}")));
+            }
+            if let Some(file) = &l.instructions { a.extend(["--append-system-prompt-file".into(), file.clone().into_os_string()]); }
+            if !l.parts.is_empty() { a.extend(["--input-format", "stream-json"].map(OsString::from)); }
+            if l.deltas { a.push("--include-partial-messages".into()); }
+            if let Some(tools) = tools.filter(|t| !t.is_empty()) {
                 a.push("--allowedTools".into());
                 a.extend(tools.iter().map(OsString::from));
             }
@@ -642,10 +718,12 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
             if roots.iter().any(|r| !r.is_absolute()) { return refuse("roots"); }
             for r in roots { a.extend(["--add-dir".into(), r.clone().into_os_string()]); }
             if p.unelevated { c(&mut a, "windows.sandbox=unelevated"); }
+            a.extend(codex_extras(p));
         }
         Client::Antigravity => {
             for (part, native) in [("read", p.read == Scope::Native), ("write", p.write == Scope::Native), ("network", p.network == Network::Native), ("tools", p.tools.is_none()),
-                ("roots", p.roots == Roots::Native), ("unelevated", !p.unelevated)] {
+                ("roots", p.roots == Roots::Native), ("unelevated", !p.unelevated), ("builtin", p.builtin == Builtin::Native), ("isolated", !p.isolated),
+                ("subscription", !p.subscription)] {
                 if !native { return refuse(part); }
             }
             match p.approval { Approval::Native => {}, Approval::Bypass => a.push("--dangerously-skip-permissions".into()), _ => return refuse("approval") }
@@ -672,6 +750,27 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
         a.extend(["--settings".into(), claude_settings(Some(hook), &[]).into()]);
     }
     Ok(a)
+}
+
+/// Codex `builtin`, `isolated` and `subscription` flags; `exec` and `app-server` both take them.
+fn codex_extras(p: &Policy) -> Vec<OsString> {
+    let mut a: Vec<&str> = vec![];
+    if p.isolated { for f in ["apps", "plugins", "browser_use", "computer_use", "multi_agent", "image_generation"] { a.extend(["--disable", f]); } }
+    match p.builtin {
+        Builtin::Native => {}
+        Builtin::On => a.extend(["--enable", "shell_tool", "-c", "web_search=\"live\""]),
+        Builtin::Off => a.extend(["--disable", "shell_tool", "-c", "web_search=\"disabled\""]),
+    }
+    if p.subscription { a.extend(["-c", "forced_login_method=\"chatgpt\""]); }
+    a.into_iter().map(OsString::from).collect()
+}
+
+/// Server names of an MCP config file (`mcpServers` keys).
+fn mcp_servers(file: &Path) -> Res<Vec<String>> {
+    let v: Value = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).ok_or("mcp config unreadable")?;
+    let names: Vec<String> = v["mcpServers"].as_object().ok_or("mcp config names no servers")?.keys().cloned().collect();
+    if names.iter().any(|n| n.is_empty() || !n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')) { return Err("mcp server name must be plain".into()); }
+    Ok(names)
 }
 
 /// Complete JSON lines of `log` from byte `from`, and the byte after the last complete line.
@@ -726,10 +825,20 @@ impl Adapter {
 
     /// The child spec for `l`: mapped policy, then the launch's optimization intent.
     fn spec(&self, l: &Launch, session: String, resume: bool) -> Res<(Spec, Optimization)> {
-        // App-server policy travels as thread parameters, never as CLI flags.
-        let args = if matches!(l.mode, Mode::AppServer { .. }) { vec![] } else { mapped(self.client, self.descriptor.name, l)? };
-        let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: None, env: l.env.clone() };
-        let optimization = optimization::prepare(l.optimization, &l.product, &mut spec, l.install.as_deref());
+        let name = self.descriptor.name;
+        let app = matches!(l.mode, Mode::AppServer { .. });
+        for (capability, set) in [("mcp-config", l.mcp.is_some()), ("instructions-file", l.instructions.is_some()), ("turn-parts", !l.parts.is_empty()),
+            ("turn-deltas", l.deltas && !app)] {
+            if set && (l.mode != Mode::Turn || !self.descriptor.has(capability)) { return Err(format!("{capability} unsupported by {name}")); }
+        }
+        // App-server policy travels as thread parameters; only the Codex extras stay flags.
+        let args = if !app { mapped(self.client, name, l)? } else if self.client == Client::Codex { codex_extras(&l.policy) } else { vec![] };
+        let mut env = l.env.clone();
+        if l.policy.subscription && self.client == Client::Claude { env.extend(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].map(|k| (k.into(), OsString::new()))); }
+        let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: l.home.clone(), env };
+        // Isolation excludes the user hooks that carry optimization, so it cannot be effective.
+        let intent = if l.policy.isolated && self.client == Client::Claude { Intent::Off } else { l.optimization };
+        let optimization = optimization::prepare(intent, &l.product, &mut spec, l.install.as_deref());
         Ok((spec, optimization))
     }
 
@@ -755,7 +864,8 @@ impl Adapter {
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
         match &l.mode {
             Mode::Turn => {
-                let turn = Turn::start(command, &spec, &l.log, &l.input, &l.process)?;
+                let input = if l.parts.is_empty() { l.input.clone() } else { stream_message(&l.parts)? };
+                let turn = Turn::start(command, &spec, &l.log, &input, &l.process)?;
                 let start = turn.start;
                 Ok(self.run(Body::Turn(turn), start, optimization, l))
             }
@@ -928,33 +1038,64 @@ impl Runtime for Adapter {
         }
     }
 
-    fn ready(&self, home: Option<&Path>) -> Ready {
+    fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready {
         let check = |state, detail: &str| Check { state, detail: detail.into() };
-        let (install, version) = match executable(self.client) {
-            Ok(exe) if exe.is_absolute() => {
-                let mut c = Command::new(&exe);
-                c.arg("--version");
-                crate::quiet(&mut c);
-                let version = match crate::process::output("agent.version", &mut c, Duration::from_secs(5)) {
-                    Ok(o) => String::from_utf8_lossy(&o.stdout).lines().next().map(str::trim).filter(|s| !s.is_empty())
-                        .map_or_else(|| check("unknown", "version not reported"), |v| check("ok", v)),
-                    Err(e) => check("unknown", &e.to_string()),
-                };
-                (check("ok", &exe.to_string_lossy()), version)
-            }
-            Ok(_) => (check("missing", &format!("{} CLI not found on PATH", self.descriptor.name)), check("unknown", "not installed")),
-            Err(e) => (check("unknown", &e), check("unknown", "executable unknown")),
+        let exe = match executable {
+            Some(p) if p.is_absolute() || p.components().count() > 1 => Ok(p.to_path_buf()),
+            Some(p) => Ok(which_in(&p.to_string_lossy(), &std::env::var_os("PATH").unwrap_or_default())),
+            None => self::executable(self.client),
         };
-        let home = home.map(Path::to_path_buf).or_else(|| base_home(self.client));
-        let file = match self.client { Client::Claude => Some(".credentials.json"), Client::Codex => Some("auth.json"), Client::Antigravity => None };
-        let login = match (home, file) {
-            (None, _) => check("unknown", "no client home"),
-            (_, None) => check("unknown", "no credential file"),
-            (Some(h), Some(f)) if h.join(f).is_file() => check("ok", f),
-            // A keychain or OS credential store may hold the login.
-            (Some(_), Some(_)) => check("unknown", "credential store unknown"),
+        let run = |exe: &Path, args: &[&str], budget| {
+            let mut c = Command::new(exe);
+            c.args(args);
+            if let Some(h) = home { c.env(self.client.home_var(), h); }
+            crate::quiet(&mut c);
+            crate::process::output("agent.ready", &mut c, Duration::from_secs(budget))
         };
-        Ready { install, version, login }
+        let exe = match exe {
+            Ok(exe) if exe.is_absolute() && exe.is_file() => exe,
+            Ok(exe) => return Ready { install: check("missing", &format!("{} not found", exe.display())), version: check("unknown", "not installed"),
+                login: check("unknown", "not installed") },
+            Err(e) => return Ready { install: check("unknown", &e), version: check("unknown", "executable unknown"), login: check("unknown", "executable unknown") },
+        };
+        let minimum = self.descriptor.minimum;
+        let version = match run(&exe, &["--version"], 5) {
+            Ok(o) => match String::from_utf8_lossy(&o.stdout).lines().next().map(str::trim).filter(|s| !s.is_empty()) {
+                None => check("unknown", "version not reported"),
+                Some(v) if minimum.is_empty() => check("ok", v),
+                Some(v) => match (version_parts(v), version_parts(minimum)) {
+                    (Some(have), Some(need)) if have < need => check("outdated", &format!("{v} is below {minimum}")),
+                    (Some(_), _) => check("ok", v),
+                    (None, _) => check("unknown", &format!("{v} is not a version")),
+                },
+            },
+            Err(e) => check("unknown", &e.to_string()),
+        };
+        let status = |args: &[&str]| run(&exe, args, 10).map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)));
+        let login = match self.client {
+            Client::Claude => match status(&["auth", "status", "--json"]) {
+                Ok(out) => match serde_json::from_str::<Value>(out.trim()).ok().or_else(|| out.lines().find_map(|l| serde_json::from_str(l).ok())) {
+                    Some(v) if v["loggedIn"] == false => check("missing", "not logged in"),
+                    Some(v) if v["loggedIn"] == true && v["authMethod"] == "claude.ai" && v["apiProvider"] == "firstParty" => check("ok", "subscription"),
+                    Some(v) if v["loggedIn"] == true => check("api-key", v["authMethod"].as_str().unwrap_or("other login")),
+                    _ => check("unknown", "login status unreadable"),
+                },
+                Err(e) => check("unknown", &e.to_string()),
+            },
+            Client::Codex => match status(&["-c", "forced_login_method=\"chatgpt\"", "login", "status"]) {
+                Ok(out) => {
+                    let plain: String = out.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+                    if plain.contains("loggedinusingchatgpt") { check("ok", "subscription") }
+                    else if plain.contains("notloggedin") { check("missing", "not logged in") }
+                    else if plain.contains("loggedin") { check("api-key", "not a ChatGPT login") }
+                    else { check("unknown", "login status unreadable") }
+                }
+                Err(e) => check("unknown", &e.to_string()),
+            },
+            // No status command; a keychain or OS credential store may hold the login.
+            Client::Antigravity => check("unknown", "no login status command"),
+        };
+        Ready { install: check("ok", &exe.to_string_lossy()), version, login }
     }
 
     fn quota(&self, accounts: &Accounts, now: i64) -> Quota {
@@ -1070,8 +1211,17 @@ impl Runtime for Adapter {
         native::background_stop(base, &self.native(spec), job, budget)
     }
 
-    fn launch_refusal(&self, stderr: &str) -> Option<Cause> {
-        (self.client == Client::Claude && stderr.contains("Workspace not trusted")).then_some(Cause("workspace-untrusted"))
+    fn launch_refusal(&self, text: &str) -> Option<Cause> {
+        let lower = text.to_ascii_lowercase();
+        let cause = match self.client {
+            Client::Claude if text.contains("Workspace not trusted") => "workspace-untrusted",
+            Client::Claude if text.contains("No conversation found with session ID") => "session-missing",
+            Client::Claude if text.contains("Not logged in") || text.contains("/login") => "login-required",
+            Client::Codex if text.contains("app-server thread/resume refused") => "session-missing",
+            Client::Codex if ["401", "login", "log in"].iter().any(|m| lower.contains(m)) => "login-required",
+            _ => return None,
+        };
+        Some(Cause(cause))
     }
 
     fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output> {
@@ -1140,6 +1290,52 @@ mod tests {
         assert_eq!(args("antigravity", &l).unwrap_err(), "compact-hook unsupported by antigravity");
         l.policy.tools = Some(vec!["Read".into()]);
         assert_eq!(args("antigravity", &l).unwrap_err(), "policy tools unsupported by antigravity");
+    }
+
+    // Built-in tools, isolation, subscription login and CLI-turn relay data map to native flags; a runtime or mode that cannot
+    // carry one refuses launch. Risk: a product keeps its own native flag table, or a restricted run keeps built-in tools.
+    #[test]
+    fn builtin_isolation_subscription_and_relay_map_or_refuse() {
+        let mut l = Launch::new("/p", "/l", "x", "fixtureq");
+        l.policy = Policy { write: Scope::Any, approval: Approval::Bypass, builtin: Builtin::On, isolated: true, subscription: true, ..Policy::default() };
+        assert_eq!(args("claude", &l).unwrap(), ["--strict-mcp-config", "--setting-sources", "project", "--disable-slash-commands", "--system-prompt-snapshot", "off",
+            "--permission-mode", "bypassPermissions"], "`on` is Claude's default tool set");
+        l.policy = Policy { approval: Approval::Deny, builtin: Builtin::Off, ..Policy::default() };
+        assert_eq!(args("claude", &l).unwrap(), ["--tools", "", "--permission-mode", "dontAsk"]);
+        // Read-only is not enforceable: MCP servers and project hooks still write without built-in tools.
+        l.policy = Policy { write: Scope::None, approval: Approval::Deny, builtin: Builtin::Off, isolated: true, ..Policy::default() };
+        assert_eq!(args("claude", &l).unwrap_err(), "policy write unsupported by claude");
+        let mut l = Launch::new("/p", "/l", "x", "fixtureq");
+        l.policy = Policy { write: Scope::None, builtin: Builtin::Off, isolated: true, subscription: true, ..Policy::default() };
+        let codex = args("codex", &l).unwrap();
+        assert_eq!(codex[..2], ["--sandbox", "read-only"]);
+        assert_eq!(codex[2..].join(" "), "--disable apps --disable plugins --disable browser_use --disable computer_use --disable multi_agent --disable image_generation \
+            --disable shell_tool -c web_search=\"disabled\" -c forced_login_method=\"chatgpt\"");
+        l.policy.builtin = Builtin::On;
+        assert!(args("codex", &l).unwrap().join(" ").contains("--enable shell_tool -c web_search=\"live\""));
+        for (part, policy) in [("builtin", Policy { builtin: Builtin::Off, ..Policy::default() }), ("isolated", Policy { isolated: true, ..Policy::default() }),
+            ("subscription", Policy { subscription: true, ..Policy::default() })] {
+            let l = Launch { policy, ..Launch::new("/p", "/l", "x", "q") };
+            assert_eq!(args("antigravity", &l).unwrap_err(), format!("policy {part} unsupported by antigravity"));
+        }
+        let dir = std::env::temp_dir().join(format!("agentq-mcp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mcp = dir.join("mcp.json");
+        std::fs::write(&mcp, r#"{"mcpServers":{"relay":{"command":"x"}}}"#).unwrap();
+        let mut l = Launch::new("/p", "/l", "x", "fixtureq");
+        l.policy.tools = Some(vec!["Read".into()]);
+        l.mcp = Some(mcp.clone()); l.instructions = Some(dir.join("rules.md")); l.parts = vec![Part::Text("hi".into())]; l.deltas = true;
+        assert_eq!(args("claude", &l).unwrap(), ["--mcp-config".into(), mcp.to_string_lossy().into_owned(), "--append-system-prompt-file".into(),
+            dir.join("rules.md").to_string_lossy().into_owned(), "--input-format".into(), "stream-json".into(), "--include-partial-messages".into(),
+            "--allowedTools".into(), "Read".into(), "mcp__relay".into()]);
+        std::fs::write(&mcp, r#"{"mcpServers":{"bad name":{}}}"#).unwrap();
+        assert_eq!(args("claude", &l).unwrap_err(), "mcp server name must be plain");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let line = stream_message(&[Part::Text("hi".into())]).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}}));
+        assert_eq!(stream_message(&[Part::Image("rel.png".into())]).unwrap_err(), "image-invalid");
+        assert_eq!((version_parts("2.1.3 (Claude Code)"), version_parts("codex-cli 0.162.0")), (Some(vec![2, 1, 3]), Some(vec![0, 162, 0])));
+        assert!(version_parts("0.99.9").unwrap() < version_parts("0.162.0").unwrap());
     }
 
     // #212 A3: every permission request TaskQ passes today maps without loss: Claude `dontAsk`, Codex sandbox modes, network,
@@ -1224,6 +1420,9 @@ mod tests {
         assert_eq!(runtime("agy").unwrap().descriptor().name, "antigravity");
         assert!(runtime("other").is_none());
         assert!(runtime("claude").unwrap().descriptor().has("compact-hook") && !runtime("codex").unwrap().descriptor().has("compact-hook"));
+        assert!(runtime("claude").unwrap().descriptor().has("turn-parts") && !runtime("codex").unwrap().descriptor().has("turn-parts"));
+        assert_eq!(runtime("claude").unwrap().descriptor().models, ["opus", "sonnet", "haiku"]);
+        assert!(runtimes().iter().all(|r| r.descriptor().minimum.is_empty() || version_parts(r.descriptor().minimum).is_some()));
         for r in runtimes() {
             assert!(r.home_env("fixtureq", DEFAULT).is_empty(), "default keeps the caller's home");
             let q = r.quota(&Accounts::default(), 0);
