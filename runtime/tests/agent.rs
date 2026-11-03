@@ -1,6 +1,6 @@
 //! agentq.md § 12 (moved from coreq.md § Agent runtimes) with fake clients: this binary is also the fake `claude` and `codex` when
 //! `COREQ_FAKE_AGENT` names one, so start, resume, end detection and observations run on every OS without a real CLI.
-use agentq_runtime::agent::{self, Client, Context, Spec, Turn};
+use agentq_runtime::agent::{self, Client, Context, Spec};
 use serde_json::{Value, json};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,6 @@ fn main() {
         ("lingering_process_is_stopped_after_its_turn_ends", lingering_process_is_stopped_after_its_turn_ends),
         ("deadline_stops_a_turn_that_never_ends", deadline_stops_a_turn_that_never_ends),
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
-        ("native_turns_bind_input_terminal_and_recovery", native_turns_bind_input_terminal_and_recovery),
         ("app_server_preserves_session_policy_and_counts_turns", app_server_preserves_session_policy_and_counts_turns),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
@@ -50,65 +49,6 @@ fn append(path:&Path, events:&[Value]) {
     use std::io::Write;
     let mut f=std::fs::File::options().create(true).append(true).open(path).unwrap();
     for event in events {writeln!(f,"{event}").unwrap();}
-}
-
-// R48/R49: launcher readiness is separate from exact input and its native terminal; cold observation never replays.
-// Risk: stale/foreign/partial native history releases owned work or charges a turn twice across restart.
-fn native_turns_bind_input_terminal_and_recovery() {
-    for client in [Client::Claude,Client::Codex] {
-        let root=scratch(client.code());
-        let spec=Spec {client,root:root.clone(),session:"native-session".into(),resume:false,args:vec![],home:Some(root.join("account")),env:vec![]};
-        let path=root.join("native.jsonl");
-        if client==Client::Codex {append(&path,&[json!({"type":"session_meta","payload":{"id":spec.session,"cwd":root}})]);}
-        let mut turn=agent::NativeTurn::before(&spec,&path,"owned input").unwrap();
-        let checkpoint=turn.checkpoint();
-        let terminal=if client==Client::Claude {json!({"type":"system","subtype":"turn_duration","sessionId":spec.session,"durationMs":10})}
-            else {json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"owned-turn"}})};
-        append(&path,&[terminal.clone()]);
-        assert!(turn.poll().unwrap().is_none(),"stale terminal without own input is not completion");
-        assert!(!turn.accepted());
-        let input=if client==Client::Claude {json!({"type":"user","sessionId":spec.session,"message":{"content":"owned input"}})}
-            else {json!({"type":"event_msg","payload":{"type":"user_message","message":"owned input","turn_id":"owned-turn"}})};
-        if client==Client::Codex {append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"owned-turn"}})]);}
-        append(&path,&[input.clone()]);
-        assert!(turn.poll().unwrap().is_none()); assert!(turn.accepted());
-        if client==Client::Claude {
-            append(&path,&[json!({"type":"system","subtype":"bridge_status","sessionId":spec.session,"url":"https://claude.ai/code/session_fixture123"}),
-                json!({"type":"assistant","sessionId":spec.session,"message":{"content":[{"type":"tool_use","id":"tool1","name":"Read","input":{}}]}}),
-                json!({"type":"user","sessionId":spec.session,"message":{"content":[{"type":"tool_result","tool_use_id":"tool1","content":"file content"}]}}),
-                json!({"type":"assistant","sessionId":spec.session,"message":{"id":"m1","model":"fixture-model","content":[{"type":"text","text":"answer"}],
-                "usage":{"input_tokens":3,"cache_read_input_tokens":20,"cache_creation_input_tokens":4,"output_tokens":5}}}),
-                json!({"type":"rate_limit_event","rate_limit_info":{"utilization":0.25,"resetsAt":1793700000u64,"rateLimitType":"five_hour"}})]);
-        } else {
-            append(&path,&[json!({"type":"event_msg","payload":{"type":"token_count","turn_id":"foreign","info":{"last_token_usage":{"input_tokens":999,"cached_input_tokens":0,"output_tokens":999}}}})]);
-        }
-        append(&path,&[terminal]);
-        let mut recovered=agent::NativeTurn::recover(&spec,&checkpoint).unwrap();
-        let store=coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
-        let ctx=Context {product:"fixtureq",version:"1.0.0",project:"other",task:Some((9,1)),route:None,account:"work"};
-        let report=recovered.record(&ctx,&store).unwrap().unwrap(); report.recorded.unwrap();
-        assert_eq!(report.outcome,"ok");
-        let saved=recovered.checkpoint();
-        recovered.record(&ctx,&store).unwrap().unwrap().recorded.unwrap();
-        let mut cold=agent::NativeTurn::recover(&spec,&checkpoint).unwrap();
-        cold.record(&ctx,&store).unwrap().unwrap().recorded.unwrap();
-        assert_eq!(observations(&store).len(),1,"one durable observation even from a pre-ack checkpoint");
-        if client==Client::Claude {
-            assert_eq!(report.usage.input,Some(3)); assert_eq!(report.text.as_deref(),Some("answer"));
-            assert_eq!(recovered.remote_url(),Some("https://claude.ai/code/session_fixture123"));
-        } else {assert_eq!(report.usage.input,None,"foreign usage never becomes this turn's usage");assert_eq!(report.usage.unknown,Some("no-usage"));}
-        let payload=observations(&store)[0].to_string();
-        for private in ["owned input","native-session","native.jsonl","session_fixture123","answer"] {assert!(!payload.contains(private));}
-        let changed=Spec {home:Some(root.join("foreign-account")),..spec.clone()};
-        assert!(agent::NativeTurn::recover(&changed,&saved).is_err());
-        let changed=Spec {resume:!spec.resume,..spec.clone()};assert!(agent::NativeTurn::recover(&changed,&saved).is_err());
-        use std::io::Write;
-        std::fs::File::options().append(true).open(&path).unwrap().write_all(b"{\"type\":").unwrap();
-        assert!(recovered.poll().is_err(),"partial record cannot establish completion");
-        std::fs::write(&path,"{}\n").unwrap();
-        assert!(recovered.poll().is_err(),"truncated or rewritten history stays unknown");
-        drop(store);std::fs::remove_dir_all(root).unwrap();
-    }
 }
 
 // R47-R50: app-server protocol shares session/turn ownership while caller policy and server requests stay intact.
@@ -200,7 +140,7 @@ fn fake(client: &str) {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
     if client == "antigravity" { input = serde_json::from_str::<Value>(&input).unwrap()["message"]["content"].as_str().unwrap().to_string(); }
-    if std::env::var("COREQ_FAKE_CONTROL").is_ok() {
+    if std::env::var("COREQ_FAKE_CONTROL").is_ok() && args.first().is_some_and(|a| matches!(a.as_str(), "agents" | "stop" | "queue")) {
         let record=json!({"args":args,"home":std::env::var(if client=="claude" {"CLAUDE_CONFIG_DIR"} else {"CODEX_HOME"}).ok()});
         std::fs::write("native-control.json",record.to_string()).unwrap();
         if args.first().is_some_and(|s|s=="agents") {println!("{}",std::env::var("FAKE_JOB_ROWS").unwrap());}
@@ -385,88 +325,125 @@ fn observations(store: &coreq::telemetry::Store) -> Vec<Value> {
     store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
 }
 
-// R48/R49/R36: control acknowledgments, native readiness and large history progress cannot retire an execution.
+fn exe() -> std::ffi::OsString { std::env::current_exe().unwrap().into() }
+
+/// A launch of the fake `name` client through the trait; `env` adds fake switches and the account home.
+fn fake_launch(name: &str, root: &Path, input: &str, env: &[(&str, &std::ffi::OsStr)]) -> agent::Launch {
+    let mut l = agent::Launch::new(root, root.join("worker.log"), input, "fixtureq");
+    l.command = vec![exe()];
+    l.env = std::iter::once(("COREQ_FAKE_AGENT".into(), name.into())).chain(env.iter().map(|(k, v)| (k.into(), v.into()))).collect();
+    l
+}
+
+fn finish(r: &dyn agent::Runtime, run: &mut agent::Run) -> agent::State {
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let s = r.poll(run).unwrap();
+        if s != agent::State::Running { return s; }
+        assert!(Instant::now() < until, "run ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn control(root: &Path) -> Value { serde_json::from_str(&std::fs::read_to_string(root.join("native-control.json")).unwrap()).unwrap() }
+
+// R48/R49/R36 through the trait: job discovery, stop acknowledgment, native readiness and large history cannot retire a
+// background or queue run, and checkpoints taken before or after discovery recover it without resubmission.
 // Risk: account/root confusion stops foreign work, or a bounded reader repeats input / accepts a stale terminal.
 fn native_control_readiness_and_large_history_stay_owned() {
+    use agent::State::{Finished, Running};
     let root=scratch("native-control");
-    let mut spec=Spec {client:Client::Claude,root:root.clone(),session:"alias".into(),resume:false,args:vec![],home:Some(root.join("account")),env:vec![]};
+    let account=root.join("account");
+    let claude=agent::runtime("claude").unwrap();
     let row=json!({"id":"c37eb75a","kind":"background","cwd":root,"sessionId":"native-session","state":"working","pid":42});
-    let mut base=fake_client(Client::Claude);base.env("COREQ_FAKE_CONTROL","1").env("FAKE_JOB_ROWS",json!([row]).to_string());
-    let rows=agent::background_jobs(base,&spec,Duration::from_secs(5)).unwrap();
-    let job=agent::BackgroundJob::read(&rows[0],&spec,"c37eb75a").unwrap();assert_eq!(job.session,"native-session");
-    let control:Value=serde_json::from_str(&std::fs::read_to_string(root.join("native-control.json")).unwrap()).unwrap();
-    assert_eq!(control["args"],json!(["agents","--json","--all","--cwd",root]));assert_eq!(control["home"],json!(spec.home));
-    for field in ["id","kind","cwd","state","sessionId"] {
-        let mut bad=row.clone();bad[field]=json!("foreign");
-        assert!(agent::BackgroundJob::read(&bad,&Spec {resume:true,session:"native-session".into(),..spec.clone()},"c37eb75a").is_err(),"{field}");
-    }
-    let absent=root.join("not-created.jsonl");
-    let history=root.join("native.jsonl");
-    let mut turn=agent::NativeTurn::before(&spec,&absent,"owned").unwrap();
-    turn.attach_background(&job,&history).unwrap();
-    spec.session=job.session.clone();
-    let saved=turn.checkpoint();
-    let mut cold=agent::NativeTurn::recover(&spec,&saved).unwrap();
-    let mut base=fake_client(Client::Claude);base.env("COREQ_FAKE_CONTROL","1");
-    agent::background_stop(base,&spec,&job,Duration::from_secs(5)).unwrap();
-    assert!(cold.poll().is_err(),"stop acknowledgment without native history never becomes completion");
-    append(&history,&[json!({"type":"user","sessionId":spec.session,"message":{"content":"owned"}})]);
+    let rows=json!([row]).to_string();
+    let mut l=fake_launch("claude",&root,"owned",&[("COREQ_FAKE_BACKGROUND","1".as_ref()),("COREQ_FAKE_CONTROL","1".as_ref()),
+        ("FAKE_JOB_ROWS",rows.as_ref()),("CLAUDE_CONFIG_DIR",account.as_os_str())]);
+    l.mode=agent::Mode::Background;
+    let mut run=claude.launch(&l).unwrap();
+    assert_eq!((claude.session_id(&run),claude.transcript(&run).unwrap_err()),(None,agent::Cause("transcript-unknown")),"launcher output is not a session");
+    let early=claude.checkpoint(&run).unwrap();
+    assert_eq!(claude.poll(&mut run).unwrap(),Running,"readiness without native history is not completion");
+    assert_eq!(control(&root)["args"],json!(["agents","--json","--all","--cwd",root]));assert_eq!(control(&root)["home"],json!(account));
+    assert_eq!(claude.session_id(&run).as_deref(),Some("native-session"));
+    let history=claude.transcript(&run).unwrap();
+    assert!(history.starts_with(account.join("projects")) && history.ends_with("native-session.jsonl"),"{}",history.display());
+    let saved=claude.checkpoint(&run).unwrap();
+    let mut cold=claude.recover(&saved,&l).unwrap();
+    assert!(!claude.cancel(&mut cold).unwrap(),"a stop request never proves exit");
+    assert_eq!(control(&root)["args"],json!(["stop","c37eb75a"]));
+    assert_eq!(claude.poll(&mut cold).unwrap(),Running,"stop acknowledgment without native history never becomes completion");
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    append(&history,&[json!({"type":"user","sessionId":"native-session","message":{"content":"owned"}})]);
     // Multiple bounded passes, each individual native record below the record bound.
     let filler=json!({"type":"progress","data":"x".repeat(1024*1024)});
     append(&history,&vec![filler;9]);
-    append(&history,&[json!({"type":"system","subtype":"turn_duration","sessionId":spec.session})]);
-    assert!(cold.poll().unwrap().is_none(),"scan budget is pending, never an early success");
-    assert!(cold.accepted());
-    assert_eq!(cold.poll().unwrap().unwrap().outcome,"ok");
-    let mut changed=spec.clone();changed.args.push("--model=foreign".into());assert!(agent::NativeTurn::recover(&changed,&saved).is_err());
+    append(&history,&[json!({"type":"system","subtype":"turn_duration","sessionId":"native-session"})]);
+    assert_eq!(claude.poll(&mut cold).unwrap(),Running,"scan budget is pending, never an early success");
+    assert_eq!(claude.poll(&mut cold).unwrap(),Finished);
+    assert_eq!(claude.report(&cold).unwrap().outcome,"ok");
+    let mut before=claude.recover(&early,&l).unwrap();
+    assert_eq!(finish(claude,&mut before),Finished,"a checkpoint from before discovery rediscovers the same job");
+    let mut changed=l.clone();changed.policy.approval=agent::Approval::Auto;assert!(claude.recover(&saved,&changed).is_err());
+    let late=claude.checkpoint(&cold).unwrap();
     let replacement=root.join("replacement.jsonl");std::fs::copy(&history,&replacement).unwrap();
     std::fs::remove_file(&history).unwrap();std::fs::rename(&replacement,&history).unwrap();
-    assert!(cold.poll().is_err(),"a copied transcript has another file identity");
-    spec.client=Client::Codex;spec.resume=true;spec.session="native-thread".into();
-    let mut base=fake_client(Client::Codex);base.env("COREQ_FAKE_CONTROL","1");
-    agent::app_queue(base,&spec,"caller input reference",Duration::from_secs(5)).unwrap();
-    let control:Value=serde_json::from_str(&std::fs::read_to_string(root.join("native-control.json")).unwrap()).unwrap();
-    assert_eq!(control["args"],json!(["queue","--thread","native-thread","--message","caller input reference"]));assert_eq!(control["home"],json!(spec.home));
+    assert!(claude.poll(&mut claude.recover(&late,&l).unwrap()).is_err(),"a copied transcript has another file identity");
+    let codex=agent::runtime("codex").unwrap();
     let path=root.join("app.jsonl");
-    append(&path,&[json!({"type":"session_meta","payload":{"id":spec.session,"cwd":root}})]);
-    let mut app=agent::NativeTurn::before(&spec,&path,"caller input reference").unwrap();
+    append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);
+    let mut q=fake_launch("codex",&root,"caller input reference",&[("COREQ_FAKE_CONTROL","1".as_ref()),("CODEX_HOME",account.as_os_str())]);
+    q.mode=agent::Mode::Queue {transcript:path.clone()};
+    assert!(codex.launch(&q).is_err(),"queue needs a running thread");
+    let mut app=codex.resume("native-thread",&q).unwrap();
+    assert_eq!(control(&root)["args"],json!(["queue","--thread","native-thread","--message","caller input reference"]));assert_eq!(control(&root)["home"],json!(account));
     let usage=json!({"type":"event_msg","payload":{"type":"token_count","turn_id":"native-turn","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":5,"output_tokens":2},"total_token_usage":{"input_tokens":110,"cached_input_tokens":55,"output_tokens":12}}}});
     append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"native-turn"}}),
-        json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":spec.session,"turn_id":"native-turn","item":{"type":"UserMessage","content":[{"type":"text","text":"caller input reference\n"}]}}}),
+        json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"native-thread","turn_id":"native-turn","item":{"type":"UserMessage","content":[{"type":"text","text":"caller input reference\n"}]}}}),
         usage.clone(),usage,
         json!({"type":"event_msg","payload":{"type":"agent_message","message":"app answer"}}),
         json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"native-turn"}})]);
-    let report=app.poll().unwrap().unwrap();assert_eq!(report.usage.input,Some(5));assert_eq!(report.text.as_deref(),Some("app answer"));
-    spec.session="unsafe & command".into();assert!(agent::app_queue(fake_client(Client::Codex),&spec,"x",Duration::from_secs(5)).is_err());
+    assert_eq!(codex.poll(&mut app).unwrap(),Finished);
+    let report=codex.report(&app).unwrap();assert_eq!(report.usage.input,Some(5));assert_eq!(report.text.as_deref(),Some("app answer"));
+    assert!(codex.progress(&mut app).unwrap().len()==6 && codex.progress(&mut app).unwrap().is_empty(),"progress reads the native transcript once");
+    assert!(codex.cancel(&mut app).unwrap_err().starts_with("cancel-unsupported"));
+    assert!(codex.resume("unsafe & command",&q).is_err());
+    assert_eq!(claude.resume("native-thread",&q).err().as_deref(),Some("mode app-queue unsupported by claude"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
 fn soon() -> Option<Instant> { Some(Instant::now() + Duration::from_secs(30)) }
 
-// R47/R48: the native background path preserves exact start-only policy and resume argv.
+// R47/R48: the native background path maps the abstract launch to start-only flags and keeps the resume argv exact.
 // Risk: workers silently move to print mode or resume with changed saved permissions/rules.
 fn background_commands_preserve_native_mode() {
     let root = scratch("background-command");
-    let mut spec = Spec { client:Client::Claude, root:root.clone(), session:"native-session".into(), resume:false,
-        args:vec!["--settings".into(),r#"{"env":{"FIXTURE_ATTEMPT":"7"}}"#.into(),"--name".into(),"fixture name".into(),
-            "--remote-control".into(),"fixture name".into(),"--permission-mode".into(),"dontAsk".into()],
-        home:Some(root.join("account")),env:vec![("FAKE_EXTRA".into(),"preserved".into())] };
-    let mut base = fake_client(Client::Claude); base.env("COREQ_FAKE_BACKGROUND","1");
-    let mut command = agent::background_command(base, &spec).unwrap();
-    let out = coreq::process::exchange("fixture.launch", &mut command, b"read caller-owned input file", Duration::from_secs(5)).unwrap();
-    assert!(out.status.success(), "native background start must be supported");
+    let account = root.join("account");
+    let claude = agent::runtime("claude").unwrap();
+    let row = json!([{"id":"c37eb75a","kind":"background","cwd":root,"sessionId":"native-session","state":"idle","pid":null}]).to_string();
+    let mut l = fake_launch("claude", &root, "read caller-owned input file", &[("COREQ_FAKE_BACKGROUND","1".as_ref()),("COREQ_FAKE_CONTROL","1".as_ref()),
+        ("FAKE_JOB_ROWS",row.as_ref()),("CLAUDE_CONFIG_DIR",account.as_os_str()),("FAKE_EXTRA","preserved".as_ref())]);
+    l.mode = agent::Mode::Background; l.title = Some("fixture name".into()); l.policy.approval = agent::Approval::Auto; l.compact_hook = Some("rules".into());
+    // SAFETY: this harness runs its tests one at a time on the main thread.
+    unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", "parent"); }
+    let mut run = claude.launch(&l).unwrap();
+    unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID"); }
     let record:Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
-    assert_eq!(record["args"][0],"--bg");
-    assert_eq!(record["args"].as_array().unwrap().len(),1+spec.args.len());
+    let args: Vec<_> = record["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+    assert_eq!(&args[..7], ["--bg","--permission-mode","auto","--name","fixture name","--remote-control","fixture name"]);
+    assert_eq!((args[7], args.len()), ("--settings", 9));
     assert_eq!(record["input"],"read caller-owned input file");
-    assert_eq!(record["home"],spec.home.as_ref().unwrap().to_str().unwrap());
+    assert_eq!(record["home"],json!(account));
     assert_eq!(record["inherited"],false); assert_eq!(record["extra"],"preserved");
-    spec.resume = true;
-    let mut base = fake_client(Client::Claude); base.env("COREQ_FAKE_BACKGROUND","1");
-    agent::background_launch(base,&spec,"continue file reference",Duration::from_secs(5)).unwrap().unwrap();
+    assert_eq!(claude.checkpoint(&run).unwrap()["job"], "c37eb75a", "the launcher names the job");
+    claude.poll(&mut run).unwrap();
+    let history = claude.transcript(&run).unwrap();
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    append(&history, &[json!({"type":"system","subtype":"init","sessionId":"native-session"})]);
+    claude.resume("native-session", &l).unwrap();
     let record:Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
     assert_eq!(record["args"],json!(["--bg","--resume","native-session"]));
-    assert!(!agent::background_command(fake_client(Client::Codex),&Spec {client:Client::Codex,..spec}).is_ok());
+    assert_eq!(agent::runtime("codex").unwrap().launch(&l).err().as_deref(), Some("mode background unsupported by codex"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -478,19 +455,26 @@ fn background_commands_preserve_native_mode() {
 fn claude_starts_and_resumes_one_session() {
     let root = scratch("claude");
     let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
-    let log = root.join("logs").join("T1-1.log");
-    let session = agent::new_session(Client::Claude);
-    let settings = r#"{"env":{}}"#;
-    let mut spec = Spec { client: Client::Claude, root: root.clone(), session: session.clone(), resume: false,
-        args: vec!["--permission-mode".into(), "auto".into(), "--settings".into(), settings.into()], home: None, env: vec![("FAKE_EXTRA".into(), "x".into())] };
+    let claude = agent::runtime("claude").unwrap();
+    let mut l = fake_launch("claude", &root, "brief", &[("FAKE_EXTRA", "x".as_ref())]);
+    l.log = root.join("logs").join("T1-1.log");
+    l.policy.approval = agent::Approval::Auto;
     let ctx = Context { product: "fixtureq", version: "1.0.0", project: "taskqorg/coreq", task: Some((1, 1)), route: None, account: "default" };
-    let first = agent::run(fake_client(Client::Claude), &spec, &log, "brief", soon(), &ctx, &store).unwrap();
+    // SAFETY: this harness runs its tests one at a time on the main thread.
+    unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", "parent"); }
+    let mut run = claude.launch(&l).unwrap();
+    finish(claude, &mut run);
+    let first = run.record(&ctx, &store).unwrap();
+    let session = claude.session_id(&run).expect("caller-chosen session");
     assert_eq!((first.outcome, first.session.as_deref(), first.text.as_deref(), first.exit), ("ok", Some(session.as_str()), Some("turn 1"), Some(0)));
     first.recorded.as_ref().unwrap();
     let r = record(&root, 1);
     assert_eq!((r["input"].as_str(), r["inherited"].as_bool(), r["extra"].as_str()), (Some("brief"), Some(false), Some("x")), "stdin brief, no parent session, caller env");
-    spec.resume = true;
-    let second = agent::run(fake_client(Client::Claude), &spec, &log, "next", soon(), &ctx, &store).unwrap();
+    l.input = "next".into();
+    let mut next = claude.resume(&session, &l).unwrap();
+    finish(claude, &mut next);
+    unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID"); }
+    let second = next.record(&ctx, &store).unwrap();
     assert_eq!((second.outcome, second.text.as_deref()), ("ok", Some("turn 2")), "the resume continues the same session");
     assert!(record(&root, 2)["args"].as_array().unwrap().iter().any(|a| a == "--resume"));
     assert_eq!(second.usage.input, Some(3), "a resume reads only its own turn from the shared log");
@@ -512,19 +496,23 @@ fn codex_resumes_its_thread_in_the_account_home() {
     let root = scratch("codex");
     let home = root.join("codex-home").join("fixtureq-accounts").join("work");
     let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
-    let log = root.join("T2-1.log");
-    let mut spec = Spec { client: Client::Codex, root: root.clone(), session: agent::new_session(Client::Codex), resume: false,
-        args: vec!["--sandbox".into(), "workspace-write".into()], home: Some(home.clone()), env: vec![] };
+    let codex = agent::runtime("codex").unwrap();
+    let mut l = fake_launch("codex", &root, "hello", &[("CODEX_HOME", home.as_os_str())]);
+    l.log = root.join("T2-1.log");
+    l.policy.write = agent::Scope::Project;
     let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: None, route: Some("manager"), account: "work" };
-    let first = agent::run(fake_client(Client::Codex), &spec, &log, "hello", soon(), &ctx, &store).unwrap();
+    let mut run = codex.launch(&l).unwrap();
+    finish(codex, &mut run);
+    let first = run.record(&ctx, &store).unwrap();
     let thread = first.session.clone().expect("thread.started names the thread");
     assert_eq!((first.outcome, first.text.as_deref()), ("ok", Some("turn 1")));
     assert_eq!(record(&root, 1)["home"].as_str().map(PathBuf::from), Some(home.clone()), "the account home reaches the child");
     let args = record(&root, 1)["args"].clone();
     assert_eq!(args, json!(["exec", "--json", "--sandbox", "workspace-write", "-C", root.to_string_lossy(), "-"]));
-    spec.session = thread.clone();
-    spec.resume = true;
-    let second = agent::run(fake_client(Client::Codex), &spec, &log, "again", soon(), &ctx, &store).unwrap();
+    l.input = "again".into();
+    let mut next = codex.resume(&thread, &l).unwrap();
+    finish(codex, &mut next);
+    let second = next.record(&ctx, &store).unwrap();
     assert_eq!((second.outcome, second.text.as_deref()), ("ok", Some("turn 2")));
     assert_eq!(record(&root, 2)["args"], json!(["exec", "--json", "--sandbox", "workspace-write", "resume", thread, "-"]));
     assert_eq!((second.limit.used_percent, second.limit.resets_at, second.limit.window.as_deref()), (Some(32), Some(1793700000), Some("300m")), "latest rollout snapshot");
@@ -539,14 +527,14 @@ fn codex_resumes_its_thread_in_the_account_home() {
 // Risk: a client that keeps running after its turn holds the caller's slot until the deadline.
 fn lingering_process_is_stopped_after_its_turn_ends() {
     let root = scratch("linger");
-    let spec = Spec { client: Client::Codex, root: root.clone(), session: "-".into(), resume: false, args: vec![], home: None, env: vec![] };
-    let mut base = fake_client(Client::Codex);
-    base.env("COREQ_FAKE_LINGER", "1");
+    let codex = agent::runtime("codex").unwrap();
+    let mut l = fake_launch("codex", &root, "x", &[("COREQ_FAKE_LINGER", "1".as_ref())]);
+    l.deadline = soon();
     let started = Instant::now();
-    let mut turn = Turn::start(base, &spec, &root.join("T3-1.log"), "x").unwrap();
-    turn.wait(soon()).unwrap();
+    let mut run = codex.launch(&l).unwrap();
+    finish(codex, &mut run);
     assert!(started.elapsed() < Duration::from_secs(20), "stopped after its turn ended, not at the deadline");
-    assert_eq!(turn.report().outcome, "ok", "the ended turn keeps its outcome");
+    assert_eq!(codex.report(&run).unwrap().outcome, "ok", "the ended turn keeps its outcome");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -609,19 +597,27 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
     }
 }
 
-// Chain: coreq.md R49: a turn past its deadline is stopped and observed as cancelled/timeout, never ok.
-// Risk: a hung client blocks its caller forever or reads as a finished turn.
+// Chain: coreq.md R49: a turn past its deadline is stopped and observed as cancelled/timeout, never ok; a caller
+// cancel reads cancelled/interrupted. Risk: a hung client blocks its caller forever or reads as a finished turn.
 fn deadline_stops_a_turn_that_never_ends() {
     let root = scratch("hang");
-    let spec = Spec { client: Client::Claude, root: root.clone(), session: agent::new_session(Client::Claude), resume: false, args: vec![], home: None, env: vec![] };
-    let mut base = fake_client(Client::Claude);
-    base.env("COREQ_FAKE_HANG", "1");
-    let mut turn = Turn::start(base, &spec, &root.join("T4-1.log"), "x").unwrap();
-    turn.wait(Some(Instant::now() + Duration::from_millis(500))).unwrap();
-    let r = turn.report();
+    let claude = agent::runtime("claude").unwrap();
+    let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
+    let mut l = fake_launch("claude", &root, "x", &[("COREQ_FAKE_HANG", "1".as_ref())]);
+    l.deadline = Some(Instant::now() + Duration::from_millis(500));
+    let mut run = claude.launch(&l).unwrap();
+    finish(claude, &mut run);
+    let r = claude.report(&run).unwrap();
     assert_eq!((r.outcome, r.error), ("cancelled", "timeout"));
     let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: Some((4, 1)), route: None, account: "default" };
-    coreq::telemetry::Event::new(r.observation(Client::Claude, &ctx)).expect("a cancelled turn is a valid observation");
+    run.record(&ctx, &store).unwrap().recorded.expect("a cancelled turn is a valid observation");
+    l.deadline = None;
+    let mut run = claude.launch(&l).unwrap();
+    claude.cancel(&mut run).unwrap();
+    finish(claude, &mut run);
+    let r = claude.report(&run).unwrap();
+    assert_eq!((r.outcome, r.error), ("cancelled", "interrupted"));
+    drop(store);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -681,13 +677,18 @@ fn off_reaches_codex_queue_and_app_server() {
     use agentq_runtime::optimization::{self, Intent};
     let root = scratch("off-modes");
     std::fs::write(root.join("config.toml"), "model_provider = \"agentq\"\n").unwrap();
+    let path = root.join("app.jsonl");
+    append(&path, &[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);
+    let mut q = fake_launch("codex", &root, "owned input reference", &[("COREQ_FAKE_CONTROL", "1".as_ref()), ("CODEX_HOME", root.as_os_str())]);
+    q.mode = agent::Mode::Queue { transcript: path };
+    q.optimization = Intent::Off;
+    let run = agent::runtime("codex").unwrap().resume("native-thread", &q).unwrap();
+    assert_eq!(run.optimization().reason, "launch_off");
+    let queue = control(&root);
+    assert!(queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue lost launch off: {queue}");
     let mut spec = Spec { client: Client::Codex, root: root.clone(), session: "native-thread".into(), resume: true,
         args: vec![], home: Some(root.clone()), env: vec![] };
     optimization::prepare(Intent::Off, "fixtureq", &mut spec, None);
-    let mut base = fake_client(Client::Codex); base.env("COREQ_FAKE_CONTROL", "1");
-    agent::app_queue(base, &spec, "owned input reference", Duration::from_secs(5)).unwrap();
-    let queue: Value = serde_json::from_str(&std::fs::read_to_string(root.join("native-control.json")).unwrap()).unwrap();
-    assert!(queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue lost launch off: {queue}");
     let command = agent::app_server_command(fake_client(Client::Codex), &spec).unwrap();
     let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
     assert_eq!(args[0], "app-server");
@@ -700,17 +701,20 @@ fn antigravity_wrapped_submission_keeps_prompt_and_tail() {
     let root = scratch("wrapped-agentapi");
     let bin = root.join(if cfg!(windows) {"agentapi.exe"} else {"agentapi"});
     std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
-    let mut spec = Spec {client:Client::Antigravity,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.join("home")),env:vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("AGENTQ_OPTIMIZATION".into(),"inherit".into())]};
-    let base = || {let mut c=Command::new(std::env::current_exe().unwrap());c.arg("--wrap").arg(&bin);c};
-    let log = root.join("turn.log");
-    let mut turn = Turn::start(base(), &spec, &log, "first").unwrap();
-    let history = spec.home.as_ref().unwrap().join("brain/native-conv/.system_generated/logs/transcript.jsonl");
+    let ag = agent::runtime("antigravity").unwrap();
+    let home = root.join("home");
+    let mut l = agent::Launch::new(&root, root.join("turn.log"), "first", "fixtureq");
+    l.command = vec![exe(), "--wrap".into(), bin.clone().into()];
+    l.env = vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("AGENTQ_OPTIMIZATION".into(),"inherit".into()),("ANTIGRAVITY_HOME".into(),home.clone().into())];
+    let mut run = ag.launch(&l).unwrap();
+    let history = home.join("brain/native-conv/.system_generated/logs/transcript.jsonl");
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     append(&history, &[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"wrapper answer"})]);
-    turn.wait(soon()).unwrap();
-    assert_eq!((turn.report().outcome,turn.report().text.as_deref()),("ok",Some("wrapper answer")));
-    spec.env.push(("AGENTQ_OPTIMIZATION".into(),"off".into()));
-    assert!(Turn::start(base(), &spec, &log, "first").is_err(),"submission env cannot suppress existing server hooks");
+    finish(ag, &mut run);
+    let r = ag.report(&run).unwrap();
+    assert_eq!((r.outcome,r.text.as_deref()),("ok",Some("wrapper answer")));
+    l.env.push(("AGENTQ_OPTIMIZATION".into(),"off".into()));
+    assert!(ag.launch(&l).is_err(),"submission env cannot suppress existing server hooks");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -720,34 +724,40 @@ fn antigravity_native_submission_tails_and_resumes() {
     let root = scratch("native-agentapi");
     let bin = root.join(if cfg!(windows) { "agentapi.exe" } else { "agentapi" });
     std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
-    let mut spec = Spec {client:Client::Antigravity,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.join("home")),env:vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into())]};
-    let log = root.join("turns.log");
-    let mut turn = Turn::start(Command::new(&bin), &spec, &log, "first").unwrap();
+    let ag = agent::runtime("antigravity").unwrap();
+    let home = root.join("home");
+    let mut l = agent::Launch::new(&root, root.join("turns.log"), "first", "fixtureq");
+    l.command = vec![bin.clone().into()];
+    l.env = vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("ANTIGRAVITY_HOME".into(),home.clone().into())];
+    let mut run = ag.launch(&l).unwrap();
     // The double exits after receipt. Supply the terminal later, as a separately owned server would.
-    wait_agentapi_receipt(&mut turn, &log, "first");
-    assert!(turn.poll().unwrap().is_none(), "submission is not completion");
-    let history = spec.home.as_ref().unwrap().join("brain/native-conv/.system_generated/logs/transcript.jsonl");
+    wait_agentapi_receipt(ag, &mut run, &l.log, "first");
+    assert_eq!(ag.poll(&mut run).unwrap(), agent::State::Running, "submission is not completion");
+    let history = home.join("brain/native-conv/.system_generated/logs/transcript.jsonl");
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"first done","input_tokens":3,"cache_read_tokens":2,"cache_write_tokens":0,"output_tokens":1,"tool_calls":[]})]);
-    turn.wait(soon()).unwrap(); let report=turn.report();
+    finish(ag, &mut run); let report=ag.report(&run).unwrap();
     assert_eq!((report.outcome,report.text.as_deref(),report.session.as_deref()),("ok",Some("first done"),Some("native-conv")));
-    spec.session=report.session.unwrap();spec.resume=true;
-    let mut turn=Turn::start(Command::new(&bin),&spec,&log,"second").unwrap();
-    wait_agentapi_receipt(&mut turn, &log, "second");
-    assert!(turn.poll().unwrap().is_none());
+    let session=report.session.unwrap();
+    l.input="second".into();
+    let mut run=ag.resume(&session,&l).unwrap();
+    wait_agentapi_receipt(ag, &mut run, &l.log, "second");
+    assert_eq!(ag.poll(&mut run).unwrap(), agent::State::Running);
     append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"second done","input_tokens":7,"cache_read_tokens":4,"cache_write_tokens":0,"output_tokens":2})]);
-    turn.wait(soon()).unwrap();let report=turn.report();
+    finish(ag, &mut run);let report=ag.report(&run).unwrap();
     assert_eq!((report.outcome,report.usage.input,report.usage.calls,report.text.as_deref()),("ok",Some(7),Some(1),Some("second done")));
-    let mut turn=Turn::start(Command::new(&bin),&spec,&log,"timeout").unwrap();
-    turn.wait(Some(Instant::now()+Duration::from_millis(100))).unwrap();
-    assert_eq!((turn.report().outcome,turn.report().error),("cancelled","timeout"));
+    l.input="timeout".into(); l.deadline=Some(Instant::now()+Duration::from_millis(100));
+    let mut run=ag.resume(&session,&l).unwrap();
+    finish(ag, &mut run);
+    let report=ag.report(&run).unwrap();
+    assert_eq!((report.outcome,report.error),("cancelled","timeout"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
-fn wait_agentapi_receipt(turn: &mut Turn, log: &Path, prompt: &str) {
+fn wait_agentapi_receipt(ag: &dyn agent::Runtime, run: &mut agent::Run, log: &Path, prompt: &str) {
     let until = Instant::now()+Duration::from_secs(5);
     loop {
-        assert!(turn.poll().unwrap().is_none(), "receipt alone is not a terminal");
+        assert_eq!(ag.poll(run).unwrap(), agent::State::Running, "receipt alone is not a terminal");
         if std::fs::read_to_string(log).unwrap_or_default().contains(&format!("\"prompt\":\"{prompt}\"")) {break;}
         assert!(Instant::now()<until); std::thread::sleep(Duration::from_millis(10));
     }

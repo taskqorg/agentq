@@ -2,7 +2,7 @@
 use super::*;
 
 /// Claude assigns the job/session on a start. Resume never overrides its saved settings or permissions.
-pub fn background_command(mut base: Command, spec: &Spec) -> Res<Command> {
+pub(crate) fn background_command(mut base: Command, spec: &Spec) -> Res<Command> {
     if spec.client != Client::Claude { return Err("background requires Claude".into()); }
     base.arg("--bg");
     if spec.resume {
@@ -14,11 +14,11 @@ pub fn background_command(mut base: Command, spec: &Spec) -> Res<Command> {
 
 /// Only the launcher exchange. Any uncertain response requires observation of the original submission, never replay.
 /// `reference` points to caller-protected, durably bound input: Claude forwards stdin to child argv.
-pub fn background_launch(base: Command, spec: &Spec, reference: &str, budget: Duration) -> Res<Result<std::process::Output, crate::process::Failure>> {
+pub(crate) fn background_launch(base: Command, spec: &Spec, reference: &str, budget: Duration) -> Res<Result<std::process::Output, crate::process::Failure>> {
     Ok(crate::process::exchange("agent.background-launch", &mut background_command(base, spec)?, reference.as_bytes(), budget))
 }
 
-pub fn background_jobs(mut base: Command, spec: &Spec, budget: Duration) -> Res<Vec<Value>> {
+pub(crate) fn background_jobs(mut base: Command, spec: &Spec, budget: Duration) -> Res<Vec<Value>> {
     if spec.client != Client::Claude { return Err("background requires Claude".into()); }
     base.args(["agents", "--json", "--all", "--cwd"]).arg(&spec.root);
     let output = crate::process::output("agent.background-jobs", &mut environment(base, spec), budget).map_err(|e| e.to_string())?;
@@ -27,10 +27,9 @@ pub fn background_jobs(mut base: Command, spec: &Spec, budget: Duration) -> Res<
 
 /// Validated native readiness. This is neither accepted input nor an execution grant.
 #[derive(Clone, Debug)]
-pub struct BackgroundJob {
+pub(crate) struct BackgroundJob {
     pub id: String,
     pub session: String,
-    pub state: String,
     pub pid: Option<u32>,
     root: PathBuf,
     scope: String,
@@ -47,15 +46,15 @@ impl BackgroundJob {
         }
         let session = row["sessionId"].as_str().filter(|s| plain_id(s)).ok_or("background session unknown")?;
         if spec.resume && session != spec.session { return Err("background resumed another session".into()); }
-        let state = row["state"].as_str().filter(|s| matches!(*s, "working" | "idle" | "done" | "blocked" | "failed" | "crashed" | "stopped"))
+        row["state"].as_str().filter(|s| matches!(*s, "working" | "idle" | "done" | "blocked" | "failed" | "crashed" | "stopped"))
             .ok_or("background state unknown")?;
         let pid = if row["pid"].is_null() { None } else { Some(row["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 0).ok_or("background pid invalid")?) };
-        Ok(Self { id: job.into(), session: session.into(), state: state.into(), pid, root, scope:scope(spec) })
+        Ok(Self { id: job.into(), session: session.into(), pid, root, scope:scope(spec) })
     }
 }
 
 /// Caller must already own this execution. Acknowledges only a stop request; inspect jobs/process identity for exit.
-pub fn background_stop(mut base: Command, spec: &Spec, job: &BackgroundJob, budget: Duration) -> Res<std::process::Output> {
+pub(crate) fn background_stop(mut base: Command, spec: &Spec, job: &BackgroundJob, budget: Duration) -> Res<std::process::Output> {
     if spec.client != Client::Claude || spec.root.canonicalize().ok().as_ref() != Some(&job.root) || scope(spec)!=job.scope
         || (spec.resume && spec.session != job.session) { return Err("background stop scope differs".into()); }
     base.args(["stop", &job.id]);
@@ -63,7 +62,7 @@ pub fn background_stop(mut base: Command, spec: &Spec, job: &BackgroundJob, budg
 }
 
 /// The caller owns app presence/UI and a durable submission binding. A failed response never permits replay.
-pub fn app_queue(mut base: Command, spec: &Spec, reference: &str, budget: Duration) -> Res<std::process::Output> {
+pub(crate) fn app_queue(mut base: Command, spec: &Spec, reference: &str, budget: Duration) -> Res<std::process::Output> {
     if spec.client != Client::Codex || !plain_id(&spec.session) || spec.session == "-" { return Err("app thread invalid".into()); }
     base.args(["queue", "--thread", &spec.session, "--message", reference]);
     // Queue uses the app's saved policy; forward only the per-launch optimizer override, never CLI permissions.
@@ -118,7 +117,7 @@ pub(super) fn file_id(file: &File) -> Res<String> {
 
 /// An observation cursor, never a process owner. Save its checkpoint before submitting the bound input.
 #[derive(Clone)]
-pub struct NativeTurn {
+pub(crate) struct NativeTurn {
     spec: Spec,
     path: PathBuf,
     input: String,
@@ -197,8 +196,11 @@ impl NativeTurn {
         Ok(())
     }
 
-    pub fn accepted(&self) -> bool { self.accepted }
-    pub fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
+    #[cfg(test)]
+    fn accepted(&self) -> bool { self.accepted }
+    pub(crate) fn path(&self) -> &Path { &self.path }
+    pub(crate) fn start(&self) -> u64 { self.start }
+    pub(crate) fn session(&self) -> &str { &self.spec.session }
     pub fn remote_url(&self) -> Option<&str> { self.remote.as_deref() }
 
     /// Read at most 8 MiB of new records per pass; incomplete/corrupt evidence never retires ownership.
@@ -400,4 +402,78 @@ pub(super) fn digest_prefix(file:&mut File,length:u64)->Res<String> {
         hash.update(&buffer[..n]);left-=n as u64;
     }
     Ok(hash.finish().as_ref().iter().map(|b|format!("{b:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn append(path: &Path, events: &[Value]) {
+        let mut f = File::options().create(true).append(true).open(path).unwrap();
+        for event in events { writeln!(f, "{event}").unwrap(); }
+    }
+
+    fn observations(store: &crate::telemetry::Store) -> Vec<Value> {
+        store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
+    }
+
+    // R48/R49: launcher readiness is separate from exact input and its native terminal; cold observation never replays.
+    // Risk: stale/foreign/partial native history releases owned work or charges a turn twice across restart.
+    #[test]
+    fn native_turns_bind_input_terminal_and_recovery() {
+        for client in [Client::Claude,Client::Codex] {
+            let root=crate::scratch(client.code());
+            let spec=Spec {client,root:root.clone(),session:"native-session".into(),resume:false,args:vec![],home:Some(root.join("account")),env:vec![]};
+            let path=root.join("native.jsonl");
+            if client==Client::Codex {append(&path,&[json!({"type":"session_meta","payload":{"id":spec.session,"cwd":root}})]);}
+            let mut turn=NativeTurn::before(&spec,&path,"owned input").unwrap();
+            let checkpoint=turn.checkpoint();
+            let terminal=if client==Client::Claude {json!({"type":"system","subtype":"turn_duration","sessionId":spec.session,"durationMs":10})}
+                else {json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"owned-turn"}})};
+            append(&path,&[terminal.clone()]);
+            assert!(turn.poll().unwrap().is_none(),"stale terminal without own input is not completion");
+            assert!(!turn.accepted());
+            let input=if client==Client::Claude {json!({"type":"user","sessionId":spec.session,"message":{"content":"owned input"}})}
+                else {json!({"type":"event_msg","payload":{"type":"user_message","message":"owned input","turn_id":"owned-turn"}})};
+            if client==Client::Codex {append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"owned-turn"}})]);}
+            append(&path,&[input.clone()]);
+            assert!(turn.poll().unwrap().is_none()); assert!(turn.accepted());
+            if client==Client::Claude {
+                append(&path,&[json!({"type":"system","subtype":"bridge_status","sessionId":spec.session,"url":"https://claude.ai/code/session_fixture123"}),
+                    json!({"type":"assistant","sessionId":spec.session,"message":{"content":[{"type":"tool_use","id":"tool1","name":"Read","input":{}}]}}),
+                    json!({"type":"user","sessionId":spec.session,"message":{"content":[{"type":"tool_result","tool_use_id":"tool1","content":"file content"}]}}),
+                    json!({"type":"assistant","sessionId":spec.session,"message":{"id":"m1","model":"fixture-model","content":[{"type":"text","text":"answer"}],
+                    "usage":{"input_tokens":3,"cache_read_input_tokens":20,"cache_creation_input_tokens":4,"output_tokens":5}}}),
+                    json!({"type":"rate_limit_event","rate_limit_info":{"utilization":0.25,"resetsAt":1793700000u64,"rateLimitType":"five_hour"}})]);
+            } else {
+                append(&path,&[json!({"type":"event_msg","payload":{"type":"token_count","turn_id":"foreign","info":{"last_token_usage":{"input_tokens":999,"cached_input_tokens":0,"output_tokens":999}}}})]);
+            }
+            append(&path,&[terminal]);
+            let mut recovered=NativeTurn::recover(&spec,&checkpoint).unwrap();
+            let store=crate::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
+            let ctx=Context {product:"fixtureq",version:"1.0.0",project:"other",task:Some((9,1)),route:None,account:"work"};
+            let report=recovered.record(&ctx,&store).unwrap().unwrap(); report.recorded.unwrap();
+            assert_eq!(report.outcome,"ok");
+            let saved=recovered.checkpoint();
+            recovered.record(&ctx,&store).unwrap().unwrap().recorded.unwrap();
+            let mut cold=NativeTurn::recover(&spec,&checkpoint).unwrap();
+            cold.record(&ctx,&store).unwrap().unwrap().recorded.unwrap();
+            assert_eq!(observations(&store).len(),1,"one durable observation even from a pre-ack checkpoint");
+            if client==Client::Claude {
+                assert_eq!(report.usage.input,Some(3)); assert_eq!(report.text.as_deref(),Some("answer"));
+                assert_eq!(recovered.remote_url(),Some("https://claude.ai/code/session_fixture123"));
+            } else {assert_eq!(report.usage.input,None,"foreign usage never becomes this turn's usage");assert_eq!(report.usage.unknown,Some("no-usage"));}
+            let payload=observations(&store)[0].to_string();
+            for private in ["owned input","native-session","native.jsonl","session_fixture123","answer"] {assert!(!payload.contains(private));}
+            let changed=Spec {home:Some(root.join("foreign-account")),..spec.clone()};
+            assert!(NativeTurn::recover(&changed,&saved).is_err());
+            let changed=Spec {resume:!spec.resume,..spec.clone()};assert!(NativeTurn::recover(&changed,&saved).is_err());
+            use std::io::Write;
+            std::fs::File::options().append(true).open(&path).unwrap().write_all(b"{\"type\":").unwrap();
+            assert!(recovered.poll().is_err(),"partial record cannot establish completion");
+            std::fs::write(&path,"{}\n").unwrap();
+            assert!(recovered.poll().is_err(),"truncated or rewritten history stays unknown");
+            drop(store);std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 }

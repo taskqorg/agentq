@@ -25,14 +25,15 @@ Each adapter implements every operation. The sections below remain the binding d
 | `running()` | Runs of this adapter in this process that have not reached a terminal poll and were not dropped. |
 | `protected_paths(home)` | Native home folders and files a run must not overwrite: Claude home and `.claude.json`, Codex home, Antigravity home and its sibling `config`. |
 | `home_env(tool, label)` | The home variable pointing at `<base home>/<tool>-accounts/<label>`; none for `default`, which keeps the caller's own home. |
+| `checkpoint(run)`, `recover(saved, &Launch)` | Private recovery value of a background or queue run, and the run rebuilt from it without a native call (Compatibility sessions). A CLI turn returns cause `no-checkpoint`. |
 
 Descriptor data, the only runtime metadata a caller reads:
 
 | `name` | `label` | `brand` | `family` | `capabilities` |
 |---|---|---|---|---|
-| `claude` | Claude Code | Anthropic | `claude` | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot` |
-| `codex` | Codex CLI | OpenAI | `gpt` | `turn`, `resume`, `quota-snapshot` |
-| `antigravity` | Antigravity | Google | `gemini` | `turn`, `resume` |
+| `claude` | Claude Code | Anthropic | `claude` | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title` |
+| `codex` | Codex CLI | OpenAI | `gpt` | `turn`, `resume`, `quota-snapshot`, `app-queue` |
+| `antigravity` | Antigravity | Google | `gemini` | `turn`, `resume`, `title` |
 
 ### Policy map
 
@@ -46,7 +47,7 @@ Descriptor data, the only runtime metadata a caller reads:
 | `tools` | `native`; allowlist → `--allowedTools <tool>..` | `native` | `native` |
 | `approval` | `plan`, `edits` (`acceptEdits`), `auto`, `bypass` (`bypassPermissions`) → `--permission-mode <mode>` | `bypass` with `write` `any` → `--dangerously-bypass-approvals-and-sandbox` instead of `--sandbox` | `bypass` → `--dangerously-skip-permissions` |
 
-`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.wrapper` is a caller sandbox command placed before the native executable. The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
+`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
 
 ## Session model
 
@@ -83,12 +84,12 @@ The caller builds the base command: the client executable from `agent::executabl
 
 - A turn ends at a Claude `result` event, a Codex `turn.completed` or `turn.failed` event, or an Antigravity `PLANNER_RESPONSE` step with `status: "DONE"` and no `tool_calls` (or `status: "ERROR"` / `"CANCELLED"`).
 - A process that is still running after its turn-end event is stopped: Codex on Windows kept running after its turn ended.
-- `Turn::wait(deadline)` stops the process at the deadline; the turn then reads `cancelled` with error `timeout`.
-- `Turn::poll` serves a caller loop that does not block.
+- `Launch.deadline` stops the process at the deadline; the turn then reads `cancelled` with error `timeout`.
+- `poll` serves a caller loop that does not block.
 
 ## Outcome
 
-`Turn::report` classifies the turn in this order; `Report::read` alone has no deadline or exit code:
+`report` classifies the turn in this order; `Report::read` alone has no deadline or exit code:
 
 | Condition | Outcome | Error |
 |---|---|---|
@@ -126,7 +127,7 @@ A reached limit returns `Report::reached`: the reported reset in unix seconds, o
 
 ## Observation
 
-`agent::run` appends one observation per turn; `Report::observation` builds it for a caller that runs turns itself.
+`Run::record` appends the one observation of a finished run; a second call is refused.
 
 - Keys: `product`, `version`, `operation` and `kind` = `agent.turn`, `started_ms`, `duration_us`, `outcome`, `error`, `project`, `runtime`, `account`, `task`, `attempt`, `route`, `model`, `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `limit_used_percent`, `limit_resets_at`, `limit_window`, `unknown`.
 - `trace` and `span` are null with reason `not-traced`. A task turn has `route` null with reason `task-turn`; a route turn has `task` and `attempt` null with reason `no-task`.
@@ -142,7 +143,17 @@ A reached limit returns `Report::reached`: the reported reset in unix seconds, o
 
 ## Compatibility sessions
 
-Native CLI turns keep the v0.17 arguments and behavior inside the adapters; the output parsers, `which`, `codex_native`, `claude_settings` and `rollout` are private. Background, desktop queue, app-server and protected modes move behind the trait as adapter modes; until then `Spec`, `Client`, `Turn`, `NativeTurn`, `AppSession` and their helpers below stay public for existing consumers, and new callers use the trait. These modes never switch Claude to `-p` or replace an app session with `exec`.
+Native CLI turns keep the v0.17 arguments and behavior inside the adapters. `Turn`, `NativeTurn`, `BackgroundJob`, the background and queue helpers, the output parsers, `which`, `codex_native`, `claude_settings` and `rollout` are private. `Launch.mode` selects a compatibility mode. Each mode needs the descriptor capability of the same name; otherwise launch refuses with `mode <mode> unsupported by <name>`.
+
+| Mode | Capability | Runtimes | Behavior |
+|---|---|---|---|
+| `Turn` (default) | `turn` | all | One CLI turn, as in the sections above. |
+| `Background` | `background` | Claude | `--bg` launch; `Launch.input` is the caller's protected file reference. `poll` discovers the job from the launcher's job ID (or, on resume, the session), then binds the native transcript `<home>/projects/<canonical root, each non-alphanumeric character as ->/<session>.jsonl`. `cancel` sends the stop request for the verified job. |
+| `Queue { transcript }` | `app-queue` | Codex | `resume` only: queues `Launch.input` (a reference) into the desktop thread and observes `transcript`. `cancel` returns cause `cancel-unsupported`: desktop cancellation stays a caller UI operation. |
+
+In both modes `launch` returns an error only before submission. A launcher or queue response that fails after submission keeps the `Run`; its state reads `unknown` until native evidence arrives, and nothing resubmits. `checkpoint(run)` returns the private recovery value (cause `no-checkpoint` for a CLI turn); `recover(saved, &Launch)` rebuilds the run from it and the same launch fields, without a native call. `session_url` returns the observed Remote Control URL or a cause. `progress` and `transcript` read the native transcript. `Launch.title` maps to Claude `--name <t> --remote-control <t>` and Antigravity `--title=<t>`; Codex refuses it. `Launch.deadline` stops a CLI turn at that instant; the run then reads `cancelled` with error `timeout`. A cancelled CLI turn reads `cancelled` with error `interrupted`.
+
+App-server and protected launches stay on the public `AppSession`, `AppServer` and `ProtectedAppServer`, with the `Client` and `Spec` they take, until they become the `app-server` mode; new callers use the trait. These modes never switch Claude to `-p` or replace an app session with `exec`.
 
 - `background_command` passes `--bg <caller args>` on start and only `--bg --resume <session>` on resume. Start arguments include the caller's settings, name, Remote Control name and permission mode in their original order. The native client assigns the start's session and job IDs. Input is the caller's file reference, not private task text: Claude forwards it to child argv. The caller durably binds and retains that input before submission.
 - `background_launch` uses bounded stdin exchange and returns launcher output or failure without interpreting either as completed work. A timeout, lost reply or malformed reply is uncertain; retain the original input and recover without resubmitting. `background_jobs` uses `agents --json --all --cwd <root>` in the same account. `BackgroundJob::read` verifies exact canonical root, job and session; readiness means a known native state, not accepted input or completion. Remote Control identity comes only from that session's native `bridge_status` URL.
@@ -151,7 +162,7 @@ Native CLI turns keep the v0.17 arguments and behavior inside the adapters; the 
 - `NativeTurn::checkpoint` and `recover` preserve the original input boundary, account, session, timing and observation ID. They contain private locators and input; callers protect and durably store them outside telemetry before submission. A new background launch uses a caller alias and an absent transcript locator; `attach_background` binds the verified job and its native transcript after discovery, retaining the original input. Recovery validates file identity and the read prefix and rebuilds observation only; it grants no stop authority. Each poll reads at most 8 MiB of new records, each record at most 8 MiB; prefix verification has a 5-second bound and failure retains ownership. `record` commits the terminal observation using the saved ID so an acknowledgment lost across restart cannot duplicate it.
 - `app_server_command` builds `app-server <caller args>` with the shared environment/account handling; the caller owns transport lifetime. `AppSession` supplies initialize/initialized, thread start/resume, turn start, interrupt and raw notification observation. All JSON parameters, including instructions, tools, model, effort, provider and grants, are caller inputs and are preserved. A server request remains with the caller and is never auto-approved. A missing thread cannot silently start another one. A request-correlated native turn ID is required before a matching `turn/completed` ends the turn without ending the server; process/transport exit alone remains unknown. Before that reply, up to 256 notifications / 8 MiB can be retained for correlation; exceeding either bound preserves the uncertain original submission.
 - `AppServer` owns the shared stdio transport: start, bounded send/receive, process polling and explicit direct-child stop. Each record is at most 8 MiB; a 16-record queue applies backpressure without dropping events. A timed-out write is uncertain and never retried. Stderr goes only to the caller's private log. Native notifications and server requests reach the caller unchanged, including dynamic-tool calls and private `item/agentMessage/delta` drafts. `AppSession::request` also carries native `model/list` and `account/rateLimits/read` requests; callers select models, page/filter catalogue results and handle tools without a second transport or an MCP replacement. No terminal event automatically kills the server. Callers retain their existing process-group supervision and startup serialization.
-- Stop requests do not prove exit or completion. `background_stop` targets only a verified job and returns the request response; the caller reads jobs and its owned process identity back before releasing capacity. App-server interrupt targets the exact accepted thread/turn. Desktop native cancellation remains a caller-owned UI/control operation using `NativeTurn::turn_id`; the runtime observes its matching abort. No process tree or grant is inferred from these identities.
+- Stop requests do not prove exit or completion. `background_stop` targets only a verified job and returns the request response; the caller reads jobs and its owned process identity back before releasing capacity. App-server interrupt targets the exact accepted thread/turn. Desktop native cancellation remains a caller-owned UI/control operation using the native turn ID of the run's `progress` records; the runtime observes its matching abort. No process tree or grant is inferred from these identities.
 
 Compatibility reports reuse `Report`, `Usage`, `Snapshot`, `Context` and `agent.turn`. Claude usage counts assistant IDs within the matched input's turn. Codex usage adds attributable model-call increments (`last_token_usage` / `last`) once per distinct cumulative snapshot (`total_token_usage` / `total`); it never reports the thread total as turn usage. Missing counters or inconsistent increments make the affected sums unknown. App-server usage/limits normalize native field names; absent values remain null with reasons. Native formats without attributable usage return `no-usage`; unreported duration is null with `not-reported` in the observation. Readiness and launcher/queue responses emit no completed-turn observation. Protocol references: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [OpenAI token accounting](https://github.com/openai/symphony/blob/main/elixir/docs/token_accounting.md).
 

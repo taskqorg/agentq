@@ -14,8 +14,7 @@ mod native;
 mod app;
 mod protected;
 mod adapter;
-pub use adapter::{Approval, Cause, Check, Descriptor, Launch, Network, Policy, Quota, Ready, Run, Runtime, Scope, State, runtime, runtimes};
-pub use native::{BackgroundJob, NativeTurn, background_command, background_launch, background_jobs, background_stop, app_queue};
+pub use adapter::{Approval, Cause, Check, Descriptor, Launch, Mode, Network, Policy, Quota, Ready, Run, Runtime, Scope, State, runtime, runtimes};
 pub use app::{AppServer, AppSession, app_server_command};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
@@ -138,7 +137,7 @@ pub(crate) fn codex_native(bin: PathBuf) -> Res<PathBuf> {
 
 /// The client's CLI executable: `claude` on `PATH`, Codex's native executor, or Antigravity's `agy` / `agentapi` CLI. A caller
 /// that wraps the client (a sandbox) builds its own base command around this path.
-pub fn executable(client: Client) -> Res<PathBuf> {
+pub(crate) fn executable(client: Client) -> Res<PathBuf> {
     match client {
         Client::Claude => Ok(which("claude")),
         Client::Codex => codex_native(which("codex")),
@@ -226,7 +225,7 @@ pub(crate) fn account_home(client: Client, tool: &str, label: &str) -> Option<Pa
 // ---------- start and resume ----------
 
 /// A new session ID: Claude takes a caller-chosen UUID; Codex and Antigravity name their session in output (`-` until then).
-pub fn new_session(client: Client) -> String {
+pub(crate) fn new_session(client: Client) -> String {
     match client { Client::Claude => crate::incident::uuid(), Client::Codex | Client::Antigravity => "-".into() }
 }
 
@@ -260,7 +259,7 @@ pub(crate) fn spec_home(spec: &Spec) -> Option<PathBuf> {
 }
 
 /// The client argument list after the executable, in TaskQ's order.
-pub fn args(spec: &Spec) -> Vec<OsString> {
+pub(crate) fn args(spec: &Spec) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
     let s = |v: &str| OsString::from(v);
     match spec.client {
@@ -287,7 +286,7 @@ pub fn args(spec: &Spec) -> Vec<OsString> {
 
 /// `base` (the client executable, or a sandbox wrapper around it) with the turn's arguments and environment. The
 /// inherited session variables of an enclosing client are removed so a child never joins its parent's session.
-pub fn command(mut base: Command, spec: &Spec) -> Command {
+pub(crate) fn command(mut base: Command, spec: &Spec) -> Command {
     base.args(args(spec));
     environment(base, spec)
 }
@@ -443,8 +442,10 @@ impl AntigravityTranscript {
 }
 
 /// One running turn: the client process with stdout and stderr appended to the caller's log.
-pub struct Turn {
+pub(crate) struct Turn {
     client: Client,
+    /// The caller cancelled the run.
+    cancelled: bool,
     child: Child,
     log: PathBuf,
     start: u64,
@@ -514,7 +515,7 @@ impl Turn {
         } else {
             drop(stdin);
         }
-        Ok(Turn { client: spec.client, child, log: log.to_path_buf(), start, pos: start, ended: false, stopping: false, timed_out: false,
+        Ok(Turn { client: spec.client, cancelled: false, child, log: log.to_path_buf(), start, pos: start, ended: false, stopping: false, timed_out: false,
             started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt })
     }
 
@@ -629,6 +630,7 @@ impl Turn {
         r.started_ms = self.started_ms;
         r.exit = self.exit;
         if self.timed_out { (r.outcome, r.error) = ("cancelled", "timeout"); }
+        else if self.cancelled { (r.outcome, r.error) = ("cancelled", "interrupted"); }
         else if r.outcome == "unknown" && self.exit.is_some_and(|c| c != 0) && r.error == "no-end" { (r.outcome, r.error) = ("failed", "exit"); }
         r
     }
@@ -670,7 +672,7 @@ pub struct Context<'a> {
 
 /// Start, wait and report one turn, then append its `agent.turn` observation to `store`. A failed append is kept in
 /// `Report::recorded` and never changes the turn's result (R30).
-pub fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store) -> Res<Report> {
+pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store) -> Res<Report> {
     let mut turn = Turn::start(base, spec, log, text)?;
     turn.wait(deadline)?;
     let mut r = turn.report();
