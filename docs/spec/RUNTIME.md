@@ -26,29 +26,46 @@ Each adapter implements every operation. The sections below remain the binding d
 | `running()` | Runs of this adapter in this process that have not reached a terminal poll and were not dropped. |
 | `protected_paths(home)` | Native home folders and files a run must not overwrite: Claude home and `.claude.json`, Codex home, Antigravity home and its sibling `config`. |
 | `home_env(tool, label)` | The home variable pointing at `<base home>/<tool>-accounts/<label>`; none for `default`, which keeps the caller's own home. |
-| `checkpoint(run)`, `recover(saved, &Launch)` | Private recovery value of a background or queue run, and the run rebuilt from it without a native call (Compatibility sessions). A CLI turn returns cause `no-checkpoint`. |
+| `checkpoint(run)`, `recover(saved, &Launch)` | Private recovery value of a CLI turn, background or queue run, and the run rebuilt from it without a native call (Turn recovery and process setup, Compatibility sessions). An `agentapi` submission returns cause `no-checkpoint`. |
 
 Descriptor data, the only runtime metadata a caller reads:
 
 | `name` | `label` | `brand` | `family` | `capabilities` |
 |---|---|---|---|---|
 | `claude` | Claude Code | Anthropic | `claude` | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title` |
-| `codex` | Codex CLI | OpenAI | `gpt` | `turn`, `resume`, `quota-snapshot`, `app-queue` |
+| `codex` | Codex CLI | OpenAI | `gpt` | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort` |
 | `antigravity` | Antigravity | Google | `gemini` | `turn`, `resume`, `title` |
 
 ### Policy map
 
-`Policy` has `read` and `write` scope (`native`, `none`, `project`, `any`), `network` (`native`, `on`, `off`), `tools` (`native` or an allowlist) and `approval` (`native`, `plan`, `edits`, `auto`, `bypass`). `native` keeps the runtime's own default. Every value without a row below refuses launch with `policy <part> unsupported by <name>`.
+`Policy` has `read` and `write` scope (`native`, `none`, `project`, `any`), `network` (`native`, `on`, `off`), `tools` (`native` or an allowlist), `approval` (`native`, `plan`, `edits`, `auto`, `deny`, `bypass`), `roots` (`native`, `exact` list or `add` list of extra absolute writable folders) and `unelevated` (the runtime's own Windows sandbox runs without elevation). `native` keeps the runtime's own default. Every value without a row below refuses launch with `policy <part> unsupported by <name>`.
 
 | Part | Claude | Codex | Antigravity |
 |---|---|---|---|
 | `read` | `native` | `native`, `any` | `native` |
 | `write` | `native` | `none` → `--sandbox read-only`, `project` → `--sandbox workspace-write`, `any` → `--sandbox danger-full-access` | `native` |
-| `network` | `native` | `on` with `project` → `-c sandbox_workspace_write.network_access=true`; `off` with `none`/`project`; `native` | `native` |
+| `network` | `native` | `on` with `project` → `-c sandbox_workspace_write.network_access=true`; `off` with `project` → `-c sandbox_workspace_write.network_access=false`; `off` with `none`; `native` | `native` |
 | `tools` | `native`; allowlist → `--allowedTools <tool>..` | `native` | `native` |
-| `approval` | `plan`, `edits` (`acceptEdits`), `auto`, `bypass` (`bypassPermissions`) → `--permission-mode <mode>` | `bypass` with `write` `any` → `--dangerously-bypass-approvals-and-sandbox` instead of `--sandbox` | `bypass` → `--dangerously-skip-permissions` |
+| `approval` | `plan`, `edits` (`acceptEdits`), `auto`, `deny` (`dontAsk`), `bypass` (`bypassPermissions`) → `--permission-mode <mode>` | `deny` → `-c approval_policy=never` after the `write` sandbox; `auto` with `write` `project` → `--full-auto` instead of `--sandbox`; `bypass` with `write` `any` → `--dangerously-bypass-approvals-and-sandbox` instead of `--sandbox` | `bypass` → `--dangerously-skip-permissions` |
+| `roots` | `native` | `exact` → `-c sandbox_workspace_write.writable_roots=[]` then `--add-dir <root>` per absolute root, so config-defined roots never widen it; `add` → only `--add-dir <root>` per absolute root, added to config-defined roots | `native` |
+| `unelevated` | `false` | `true` → `-c windows.sandbox=unelevated` | `false` |
 
-`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
+`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.effort` (capability `effort`, a plain word) maps to Codex `-c model_reasoning_effort=<e>`; other runtimes refuse it. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
+
+### Turn recovery and process setup
+
+A consumer service that re-executes itself reattaches its live CLI turn children through `checkpoint` and `recover`:
+
+- `checkpoint` of a CLI turn holds schema `agentq-run/1`, kind `turn`, the child's native process identity (`coreq::process::identity`: PID plus creation time), the log path, the turn's start offset and start time, the resumed session, the cancel/timeout flags and the launch scope hash (arguments, environment and home). It returns cause `turn-ended` once the exit was observed, `identity-unknown` when the native identity cannot be read, and `no-checkpoint` for an `agentapi` submission, whose receipt pipe cannot outlive its parent.
+- `recover(saved, &Launch)` with the same launch fields rebuilds an observation-only run: no process starts and no input is sent. A changed scope, runtime or log refuses. `poll` rereads the log from the saved start offset for the turn-end event and checks the identity; a different or missing incarnation means the child exited. On Unix a child that is still the caller's own (a re-executed parent keeps its PID) is reaped with `waitpid` and its exit code read. An exit it did not observe reads `exit` unknown, so a turn without an end event reads `unknown`, never `failed` or `ok`.
+- `cancel`, a deadline and a lingering child after its turn-end event stop the recovered child only through `coreq::process::terminate` with the saved identity, so a reused PID is never signalled. `id` stays the child's PID; `progress`, `session_id`, `report` and `record` work as for the original run.
+- The original child keeps running when its parent exits: its stdout and stderr append to the log file, not to a pipe of the parent.
+
+`Launch.process` configures the child process of a CLI turn and of an app-server session:
+
+- `configure(&mut Command)` runs last, after the adapter's working directory, environment and `quiet` (Windows `CREATE_NO_WINDOW`) setup, and directly before spawn. Windows creation flags set there replace the adapter's, so a caller that keeps a hidden window includes `CREATE_NO_WINDOW` itself. Unix `process_group`, `pre_exec` and similar settings apply unchanged.
+- `spawned(&Child)` runs after spawn and before any input is written, for example to assign a Windows Job Object through the child handle. An error kills and reaps the child and fails the launch with that error.
+- Background, queue, job list and stop launchers are bounded exchanges owned and reaped by `coreq::process`; they get only `quiet` and no caller hooks, because the native background job they start is not their child.
 
 ## Session model
 
@@ -150,10 +167,10 @@ Native CLI turns keep the v0.17 arguments and behavior inside the adapters. `Cli
 |---|---|---|---|
 | `Turn` (default) | `turn` | all | One CLI turn, as in the sections above. |
 | `Background` | `background` | Claude | `--bg` launch; `Launch.input` is the caller's protected file reference. `poll` discovers the job from the launcher's job ID (or, on resume, the session), then binds the native transcript `<home>/projects/<canonical root, each non-alphanumeric character as ->/<session>.jsonl`. `cancel` sends the stop request for the verified job. |
-| `AppServer { initialize, thread }` | `app-server` | Codex | `launch`/`resume` start `app-server`, exchange `initialize`/`initialized` and open the thread with the caller's `thread` parameters plus the mapped policy (`write` as `sandbox`, `bypass` with write `any` as `approvalPolicy: never`) and `model`; non-empty `Launch.input` starts the first turn. `input` starts the next turn. `send` carries a reply to a server request (dynamic tools, approvals) or a `model/list` / `account/rateLimits/read` read. `progress` returns every native message unchanged, drafts and server requests included. `cancel` interrupts the active turn, else stops the server. `transcript` returns cause `no-transcript` (`Launch.log` holds stderr only). Recovery rebuilds observation only. |
+| `AppServer { initialize, thread }` | `app-server` | Codex | `launch`/`resume` start `app-server`, exchange `initialize`/`initialized` and open the thread with the caller's `thread` parameters plus the mapped policy (`write` as `sandbox`, `bypass` with write `any` and `deny` as `approvalPolicy: never`; `roots`, `unelevated` and `effort` refuse) and `model`; non-empty `Launch.input` starts the first turn. `input` starts the next turn. `send` carries a reply to a server request (dynamic tools, approvals) or a `model/list` / `account/rateLimits/read` read. `progress` returns every native message unchanged, drafts and server requests included. `cancel` interrupts the active turn, else stops the server. `transcript` returns cause `no-transcript` (`Launch.log` holds stderr only). Recovery rebuilds observation only. |
 | `Queue { transcript }` | `app-queue` | Codex | `resume` only: queues `Launch.input` (a reference) into the desktop thread and observes `transcript`. `cancel` returns cause `cancel-unsupported`: desktop cancellation stays a caller UI operation. |
 
-In both modes `launch` returns an error only before submission. A launcher or queue response that fails after submission keeps the `Run`; its state reads `unknown` until native evidence arrives, and nothing resubmits. `checkpoint(run)` returns the private recovery value (cause `no-checkpoint` for a CLI turn); `recover(saved, &Launch)` rebuilds the run from it and the same launch fields, without a native call. `session_url` returns the observed Remote Control URL or a cause. `progress` and `transcript` read the native transcript. `Launch.title` maps to Claude `--name <t> --remote-control <t>` and Antigravity `--title=<t>`; Codex refuses it. `Launch.deadline` stops a CLI turn at that instant; the run then reads `cancelled` with error `timeout`. A cancelled CLI turn reads `cancelled` with error `interrupted`.
+In both modes `launch` returns an error only before submission. A launcher or queue response that fails after submission keeps the `Run`; its state reads `unknown` until native evidence arrives, and nothing resubmits. `checkpoint(run)` returns the private recovery value (cause `no-checkpoint` for an `agentapi` submission; CLI turns: Turn recovery and process setup); `recover(saved, &Launch)` rebuilds the run from it and the same launch fields, without a native call. `session_url` returns the observed Remote Control URL or a cause. `progress` and `transcript` read the native transcript. `Launch.title` maps to Claude `--name <t> --remote-control <t>` and Antigravity `--title=<t>`; Codex refuses it. `Launch.deadline` stops a CLI turn at that instant; the run then reads `cancelled` with error `timeout`. A cancelled CLI turn reads `cancelled` with error `interrupted`.
 
 `ProtectedAppServer::open(session, &Launch)` opens a verified protected frontend as the same `AppServer` mode run; every write repeats the host authority check. These modes never switch Claude to `-p` or replace an app session with `exec`.
 

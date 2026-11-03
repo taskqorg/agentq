@@ -12,13 +12,14 @@ pub(crate) struct AppServer {
 }
 
 impl AppServer {
-    pub(super) fn spawn(mut command:Command,private_log:&Path)->Res<Self> {
+    pub(super) fn spawn(mut command:Command,private_log:&Path,process:&super::Process)->Res<Self> {
         let mut options=File::options();options.create(true).append(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(private_log).map_err(|e|format!("app-server log: {e}"))?;
         let mut diagnostics=log.try_clone().map_err(|e|format!("app-server log: {e}"))?;
         crate::telemetry::capture::inherit_context(&mut command);
-        let mut child=command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log).spawn().map_err(|e|format!("app-server spawn: {e}"))?;
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log);
+        let mut child=process.spawn(command,"app-server")?;
         let mut stdin=child.stdin.take().ok_or("app-server stdin unavailable")?;
         let stdout=child.stdout.take().ok_or("app-server stdout unavailable")?;
         let (input,writing)=mpsc::sync_channel::<WriteRequest>(1);

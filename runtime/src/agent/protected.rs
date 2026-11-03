@@ -130,7 +130,7 @@ impl ProtectedHost {
         // Inherited off wins, exactly as in ordinary runtime launches. No caller environment is forwarded.
         let intent = if std::env::var_os(optimization::ENV).is_some_and(|v| v == "off") { Intent::Off } else { intent };
         command.env(optimization::ENV, intent.code());
-        let server = AppServer::spawn(command, private_log)?;
+        let server = AppServer::spawn(command, private_log, &super::Process::default())?;
         Ok(ProtectedAppServer { host: self.clone(), request, expected, server, binding: None, fault: None, intent, prepared: None })
     }
 }

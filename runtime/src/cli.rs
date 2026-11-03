@@ -60,7 +60,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let optimization = optimization::prepare(intent, ctx.product, &mut spec, install.map(Path::to_path_buf).or_else(optimization::install_root).as_deref());
     let report = match &store {
         Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?)?,
-        None => { let mut t = agent::Turn::start(base, &spec, &log, input)?; t.wait(deadline)?; t.report() }
+        None => { let mut t = agent::Turn::start(base, &spec, &log, input, &agent::Process::default())?; t.wait(deadline)?; t.report() }
     };
     let mut out = report_json(&report);
     out["recorded"] = match (&store, &report.recorded) { (None, _) => json!("not-requested"), (Some(_), Ok(())) => json!("ok"), (Some(_), Err(e)) => json!(e) };
