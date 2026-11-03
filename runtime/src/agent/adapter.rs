@@ -31,6 +31,18 @@ pub enum Network { #[default] Native, On, Off }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Approval { #[default] Native, Plan, Edits, Auto, /** Never prompt; a request that needs approval is denied. */ Deny, Bypass }
 
+/// Extra writable folders beside the workspace; every path is absolute.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Roots {
+    /// The runtime's configured roots.
+    #[default]
+    Native,
+    /// Exactly these folders; configured roots never widen them.
+    Exact(Vec<PathBuf>),
+    /// These folders added to the configured roots.
+    Add(Vec<PathBuf>),
+}
+
 /// Abstract permissions. The adapter maps each part to native flags or refuses the launch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Policy {
@@ -40,8 +52,7 @@ pub struct Policy {
     /// None keeps the native tool set; Some is an allowlist.
     pub tools: Option<Vec<String>>,
     pub approval: Approval,
-    /// None keeps native writable roots; Some is the exact list of extra absolute writable folders.
-    pub roots: Option<Vec<PathBuf>>,
+    pub roots: Roots,
     /// The runtime's own Windows sandbox runs without elevation.
     pub unelevated: bool,
 }
@@ -286,7 +297,7 @@ fn thread_params(l: &Launch, thread: &Value) -> Res<Value> {
     if !matches!(p.read, Scope::Native | Scope::Any) { return refuse("read"); }
     if p.network != Network::Native { return refuse("network"); }
     if p.tools.is_some() { return refuse("tools"); }
-    if p.roots.is_some() { return refuse("roots"); }
+    if p.roots != Roots::Native { return refuse("roots"); }
     if p.unelevated { return refuse("unelevated"); }
     if l.effort.is_some() { return Err("effort unsupported by app-server".into()); }
     if l.title.is_some() || l.compact_hook.is_some() { return Err("title and compact-hook unsupported by app-server".into()); }
@@ -452,7 +463,7 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
             if p.read != Scope::Native { return refuse("read"); }
             if p.write != Scope::Native { return refuse("write"); }
             if p.network != Network::Native { return refuse("network"); }
-            if p.roots.is_some() { return refuse("roots"); }
+            if p.roots != Roots::Native { return refuse("roots"); }
             if p.unelevated { return refuse("unelevated"); }
             if let Some(tools) = &p.tools {
                 if tools.is_empty() || tools.iter().any(|t| t.is_empty() || t.starts_with('-')) { return refuse("tools"); }
@@ -486,16 +497,18 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
                 (Network::Off, Scope::Project) => c(&mut a, "sandbox_workspace_write.network_access=false"),
                 _ => {}
             }
-            if let Some(roots) = &p.roots {
-                if roots.iter().any(|r| !r.is_absolute()) { return refuse("roots"); }
-                c(&mut a, "sandbox_workspace_write.writable_roots=[]");
-                for r in roots { a.extend(["--add-dir".into(), r.clone().into_os_string()]); }
-            }
+            let roots = match &p.roots {
+                Roots::Native => &[][..],
+                Roots::Exact(r) => { c(&mut a, "sandbox_workspace_write.writable_roots=[]"); r }
+                Roots::Add(r) => r,
+            };
+            if roots.iter().any(|r| !r.is_absolute()) { return refuse("roots"); }
+            for r in roots { a.extend(["--add-dir".into(), r.clone().into_os_string()]); }
             if p.unelevated { c(&mut a, "windows.sandbox=unelevated"); }
         }
         Client::Antigravity => {
             for (part, native) in [("read", p.read == Scope::Native), ("write", p.write == Scope::Native), ("network", p.network == Network::Native), ("tools", p.tools.is_none()),
-                ("roots", p.roots.is_none()), ("unelevated", !p.unelevated)] {
+                ("roots", p.roots == Roots::Native), ("unelevated", !p.unelevated)] {
                 if !native { return refuse(part); }
             }
             match p.approval { Approval::Native => {}, Approval::Bypass => a.push("--dangerously-skip-permissions".into()), _ => return refuse("approval") }
@@ -905,19 +918,28 @@ mod tests {
         assert_eq!(args("codex", &l).unwrap_err(), "effort requires a plain word");
         let mut l = Launch::new("/p", "/l", "x", "fixtureq");
         let root = std::env::temp_dir();
-        l.policy = Policy { write: Scope::Project, network: Network::Off, approval: Approval::Deny, roots: Some(vec![]), unelevated: true, ..Policy::default() };
+        l.policy = Policy { write: Scope::Project, network: Network::Off, approval: Approval::Deny, roots: Roots::Exact(vec![]), unelevated: true, ..Policy::default() };
         assert_eq!(args("codex", &l).unwrap(), ["--sandbox", "workspace-write", "-c", "approval_policy=never", "-c", "sandbox_workspace_write.network_access=false",
             "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "windows.sandbox=unelevated"]);
         l.policy = Policy { write: Scope::None, ..Policy::default() };
         assert_eq!(args("codex", &l).unwrap(), ["--sandbox", "read-only"]);
-        l.policy = Policy { write: Scope::Project, approval: Approval::Auto, network: Network::On, roots: Some(vec![root.clone()]), ..Policy::default() };
+        l.policy = Policy { write: Scope::Project, approval: Approval::Auto, network: Network::On, roots: Roots::Exact(vec![root.clone()]), ..Policy::default() };
         assert_eq!(args("codex", &l).unwrap(), ["--full-auto".into(), "-c".into(), "sandbox_workspace_write.network_access=true".into(),
             "-c".into(), "sandbox_workspace_write.writable_roots=[]".into(), "--add-dir".into(), root.to_string_lossy().into_owned()]);
-        l.policy.roots = Some(vec!["relative".into()]);
-        assert_eq!(args("codex", &l).unwrap_err(), "policy roots unsupported by codex");
+        // Legacy `-s workspace-write --add-dir <abs>` adds to the configured roots: no reset.
+        l.policy = Policy { write: Scope::Project, roots: Roots::Add(vec![root.clone()]), ..Policy::default() };
+        assert_eq!(args("codex", &l).unwrap(), ["--sandbox".into(), "workspace-write".into(), "--add-dir".into(), root.to_string_lossy().into_owned()]);
+        l.policy.write = Scope::Any;
+        assert_eq!(args("codex", &l).unwrap(), ["--sandbox".into(), "danger-full-access".into(), "--add-dir".into(), root.to_string_lossy().into_owned()]);
+        for roots in [Roots::Exact(vec!["relative".into()]), Roots::Add(vec!["relative".into()])] {
+            l.policy.roots = roots;
+            assert_eq!(args("codex", &l).unwrap_err(), "policy roots unsupported by codex");
+        }
         for name in ["claude", "antigravity"] {
-            let l = Launch { policy: Policy { roots: Some(vec![root.clone()]), ..Policy::default() }, ..Launch::new("/p", "/l", "x", "q") };
-            assert_eq!(args(name, &l).unwrap_err(), format!("policy roots unsupported by {name}"));
+            for roots in [Roots::Exact(vec![root.clone()]), Roots::Add(vec![root.clone()])] {
+                let l = Launch { policy: Policy { roots, ..Policy::default() }, ..Launch::new("/p", "/l", "x", "q") };
+                assert_eq!(args(name, &l).unwrap_err(), format!("policy roots unsupported by {name}"));
+            }
             let l = Launch { policy: Policy { unelevated: true, ..Policy::default() }, ..Launch::new("/p", "/l", "x", "q") };
             assert_eq!(args(name, &l).unwrap_err(), format!("policy unelevated unsupported by {name}"));
         }
