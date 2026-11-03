@@ -14,7 +14,8 @@ mod native;
 mod app;
 mod protected;
 mod adapter;
-pub use adapter::{Account, Approval, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{Account, Approval, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
+pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
 type Res<T> = Result<T, String>;
@@ -59,10 +60,8 @@ impl Client {
 
 // ---------- executable ----------
 
-/// `name` on `PATH`; on Windows also `name.exe` and `name.cmd` (npm installs `.cmd` shims). Unresolved: the bare name.
-pub(crate) fn which(name: &str) -> PathBuf { which_in(name, &std::env::var_os("PATH").unwrap_or_default()) }
-
-pub(crate) fn which_in(name: &str, path: &OsStr) -> PathBuf {
+/// `name` on `path`; on Windows also `name.exe` and `name.cmd` (npm installs `.cmd` shims). Unresolved: the bare name.
+pub fn which_in(name: &str, path: &OsStr) -> PathBuf {
     let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ""] } else { &[""] };
     for dir in std::env::split_paths(path) {
         for e in exts {
@@ -75,7 +74,7 @@ pub(crate) fn which_in(name: &str, path: &OsStr) -> PathBuf {
 
 /// `PATH` with `<home>/.local/bin` appended when it is a directory `PATH` lacks; `None` when nothing changes.
 /// Linux user installs (codex, npm prefixes, pipx) land there, but a non-login shell or a service unit may lack it.
-pub(crate) fn user_bin_path(path: &OsStr, home: Option<&OsStr>) -> Option<OsString> {
+pub fn user_bin_path(path: &OsStr, home: Option<&OsStr>) -> Option<OsString> {
     let bin = Path::new(home.filter(|h| !h.is_empty())?).join(".local/bin");
     let mut dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
     if !bin.is_dir() || dirs.contains(&bin) { return None; }
@@ -83,11 +82,11 @@ pub(crate) fn user_bin_path(path: &OsStr, home: Option<&OsStr>) -> Option<OsStri
     std::env::join_paths(dirs).ok()
 }
 
-fn antigravity_executable() -> PathBuf {
+fn antigravity_executable(path: &OsStr) -> PathBuf {
     if let Some(path) = std::env::var_os("ANTIGRAVITY_AGENTAPI_EXE").filter(|s| !s.is_empty()) {
         return PathBuf::from(path);
     }
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = path.to_os_string();
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     let path = user_bin_path(&path, home.as_deref()).unwrap_or(path);
     let cli = which_in("agy", &path);
@@ -100,7 +99,7 @@ fn antigravity_executable() -> PathBuf {
             return p;
         }
     }
-    which("agy")
+    which_in("agy", &path)
 }
 
 /// The native Codex executor behind an npm `codex.js` launcher: a kill cannot reach the native child through Node.
@@ -136,11 +135,14 @@ pub(crate) fn codex_native(bin: PathBuf) -> Res<PathBuf> {
 
 /// The client's CLI executable: `claude` on `PATH`, Codex's native executor, or Antigravity's `agy` / `agentapi` CLI. A caller
 /// that wraps the client (a sandbox) builds its own base command around this path.
-pub(crate) fn executable(client: Client) -> Res<PathBuf> {
+pub(crate) fn executable(client: Client) -> Res<PathBuf> { executable_in(client, &std::env::var_os("PATH").unwrap_or_default()) }
+
+/// `executable` resolved on `path` instead of the process `PATH`.
+pub(crate) fn executable_in(client: Client, path: &OsStr) -> Res<PathBuf> {
     match client {
-        Client::Claude => Ok(which("claude")),
-        Client::Codex => codex_native(which("codex")),
-        Client::Antigravity => Ok(antigravity_executable()),
+        Client::Claude => Ok(which_in("claude", path)),
+        Client::Codex => codex_native(which_in("codex", path)),
+        Client::Antigravity => Ok(antigravity_executable(path)),
     }
 }
 
@@ -487,7 +489,7 @@ fn reap(pid: u32) -> Option<Option<i32>> {
 }
 
 /// One running turn: the client process with stdout and stderr appended to the caller's log.
-pub(crate) struct Turn {
+pub struct Turn {
     client: Client,
     /// The caller cancelled the run.
     cancelled: bool,
@@ -516,7 +518,7 @@ fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d|
 
 impl Turn {
     /// Spawn `command(base, spec)` with `text` on stdin; output appends to `log`, so a resume continues earlier turns.
-    pub fn start(mut base: Command, spec: &Spec, log: &Path, text: &str, process: &Process) -> Res<Turn> {
+    pub(crate) fn start(mut base: Command, spec: &Spec, log: &Path, text: &str, process: &Process) -> Res<Turn> {
         if let Some(dir) = log.parent() { std::fs::create_dir_all(dir).map_err(|e| format!("agent log directory: {e}"))?; }
         let out = File::options().create(true).append(true).open(log).map_err(|e| format!("agent log: {e}"))?;
         let err = out.try_clone().map_err(|e| format!("agent log: {e}"))?;
@@ -1016,6 +1018,8 @@ pub struct Report {
     /// Telemetry outcome code and error code.
     pub outcome: &'static str,
     pub error: &'static str,
+    /// The native reason of error `auth-rejected` or `model-capacity`.
+    pub detail: Option<String>,
     pub text: Option<String>,
     pub exit: Option<i32>,
     pub started_ms: i64,
@@ -1031,9 +1035,10 @@ impl Report {
         let end = if client == Client::Antigravity {
             events.iter().rev().find(|v| v["event"] == "result" || matches!(v["type"].as_str(), Some("PLANNER_RESPONSE" | "TOOL_RESPONSE" | "turn.failed" | "turn.cancelled"))).filter(|v| ends(v))
         } else { events.iter().rev().find(|v| ends(v)) };
+        let (mut detail, auth, capacity) = (None, auth_rejected(text), transient_failure(events));
         let (outcome, error) = if reached.is_some() { ("refused", "usage-limit") }
-            else if auth_rejected(text).is_some() { ("failed", "auth-rejected") }
-            else if transient_failure(events).is_some() { ("failed", "model-capacity") }
+            else if let Some(a) = auth { detail = Some(a.to_string()); ("failed", "auth-rejected") }
+            else if capacity.is_some() { detail = capacity; ("failed", "model-capacity") }
             else {
                 match end {
                     Some(v) if v["event"] == "result" && matches!(v["result"]["status"].as_str(), Some("CANCELED" | "INTERRUPTED")) => ("cancelled", "turn-cancelled"),
@@ -1045,7 +1050,7 @@ impl Report {
                     None => ("unknown", "no-end"),
                 }
             };
-        Report { session: session_of(client, text), usage: usage(events), limit: snapshot(client, events, rollout), reached, outcome, error,
+        Report { session: session_of(client, text), usage: usage(events), limit: snapshot(client, events, rollout), reached, outcome, error, detail,
             text: final_text(events), exit: None, started_ms: unix_ms(), duration_us: 0, recorded: Ok(()) }
     }
 
@@ -1092,7 +1097,7 @@ mod tests {
     fn native_agy_user_bin_and_homes() {
         if std::env::var_os("AGENTQ_TEST_AGY_HOME").is_some() {
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-            assert_eq!(antigravity_executable(), home.join(".local/bin/agy"));
+            assert_eq!(antigravity_executable(&std::env::var_os("PATH").unwrap_or_default()), home.join(".local/bin/agy"));
             assert!(executable(Client::Antigravity).unwrap().is_absolute());
             let legacy = home.join(".gemini/antigravity");
             let cli = home.join(".gemini/antigravity-cli");

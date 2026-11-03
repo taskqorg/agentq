@@ -36,7 +36,7 @@ pub(crate) fn background_jobs(mut base: Command, spec: &Spec, filtered: bool, bu
 
 /// Validated native readiness. This is neither accepted input nor an execution grant.
 #[derive(Clone, Debug)]
-pub(crate) struct BackgroundJob {
+pub struct BackgroundJob {
     pub id: String,
     pub session: String,
     pub pid: Option<u32>,
@@ -45,7 +45,7 @@ pub(crate) struct BackgroundJob {
 }
 
 impl BackgroundJob {
-    pub fn read(row: &Value, spec: &Spec, job: &str) -> Res<Self> {
+    pub(crate) fn read(row: &Value, spec: &Spec, job: &str) -> Res<Self> {
         if spec.client != Client::Claude || !plain_id(job) || row["id"] != job || row["kind"] != "background" {
             return Err("background job identity differs".into());
         }

@@ -39,6 +39,7 @@ fn main() {
         ("runtime_trait_runs_every_runtime_by_descriptor", runtime_trait_runs_every_runtime_by_descriptor),
         ("cli_turn_recovers_its_running_child", cli_turn_recovers_its_running_child),
         ("process_hooks_shape_the_child", process_hooks_shape_the_child),
+        ("runtime_trait_exposes_native_seams", runtime_trait_exposes_native_seams),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
@@ -948,4 +949,84 @@ fn fake_agentapi() {
     print!("{}",&receipt[..half]); std::io::stdout().flush().unwrap();
     std::thread::sleep(Duration::from_millis(40));
     print!("{}",&receipt[half..]); std::io::stdout().flush().unwrap();
+}
+
+// taskq#2271: a caller that builds its own native session reaches every native seam through the trait, and an optional
+// one refuses by capability. Risk: a consumer reimplements a native parser or command because the trait lacks it.
+fn runtime_trait_exposes_native_seams() {
+    use agent::{NativeSpec, Process};
+    use agentq_runtime::optimization::Intent;
+    let root=scratch("native-seams");
+    let (claude,codex)=(agent::runtime("claude").unwrap(),agent::runtime("codex").unwrap());
+    let env=|extra:&[(&str,&str)]| std::iter::once(("COREQ_FAKE_AGENT","claude")).chain(extra.iter().copied()).map(|(k,v)|(k.into(),v.into())).collect::<Vec<_>>();
+    let session="0c0ffee0-0000-4000-8000-000000000001";
+    let spec=NativeSpec {root:root.clone(),session:session.into(),env:env(&[]),..Default::default()};
+
+    // command and turn: the native start with the caller's spec, classified like a launched turn.
+    let args:Vec<_>=claude.command(Command::new(exe()),&spec).unwrap().get_args().map(|a|a.to_string_lossy().into_owned()).collect();
+    assert_eq!(args[args.len()-2..],["--session-id".to_string(),session.to_string()]);
+    let log=root.join("seam.log");
+    let mut turn=claude.turn(Command::new(exe()),&spec,&log,"hello",&Process::default()).unwrap();
+    assert!(turn.id()>0);
+    assert_eq!(turn.wait(Some(Instant::now()+Duration::from_secs(30))).unwrap(),0);
+    let r=turn.report();
+    assert_eq!((r.outcome,r.session.as_deref()),("ok",Some(session)));
+    let c=claude.classify(&std::fs::read_to_string(&log).unwrap());
+    assert_eq!((c.outcome,c.session.as_deref(),c.text),("ok",Some(session),r.text));
+
+    // classify: one event is its own log; native reasons arrive in `detail`.
+    let capacity=codex.classify(&json!({"type":"turn.failed","error":{"message":"Selected model is at capacity"}}).to_string());
+    assert_eq!((capacity.error,capacity.detail.as_deref()),("model-capacity",Some("Selected model is at capacity")));
+    let auth=codex.classify(&json!({"type":"error","message":"401 Unauthorized"}).to_string());
+    assert_eq!((auth.error,auth.detail.as_deref()),("auth-rejected",Some("401 Unauthorized")));
+    assert_eq!(codex.classify(&json!({"type":"thread.started","thread_id":"t-1"}).to_string()).session.as_deref(),Some("t-1"));
+    assert_eq!(codex.classify(&json!({"type":"error","message":"You've hit your usage limit"}).to_string()).reached,Some(None));
+
+    // executable, home and session transcript.
+    let bin=root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("claude"),"").unwrap();
+    assert_eq!(claude.executable(Some(bin.as_os_str())).unwrap(),bin.join("claude"));
+    assert_eq!(claude.executable(Some("".as_ref())).unwrap(),PathBuf::from("claude"),"unresolved stays bare");
+    assert_eq!(claude.home(),claude.protected_paths(None).into_iter().next());
+    let home=root.join("codex-home");
+    let rollout=home.join("sessions/2026/11/03/rollout-2026-11-03T00-00-00-t-1.jsonl");
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    std::fs::write(&rollout,"").unwrap();
+    assert_eq!(codex.session_transcript("t-1",Some(&home)),Some(rollout));
+    assert_eq!(codex.session_transcript("t-2",Some(&home)),None);
+    assert_eq!(claude.session_transcript(session,Some(&home)),None);
+
+    // prepare: `off` reaches the child environment of the caller's spec.
+    let mut off=spec.clone();
+    assert_eq!(claude.prepare(Intent::Off,"fixtureq",&mut off,None).intent,Intent::Off);
+    assert!(off.env.iter().any(|(k,v)|k=="AGENTQ_OPTIMIZATION"&&v=="off"));
+    assert!(off.env.iter().any(|(k,v)|k=="AGENTQ_LAUNCHER"&&v=="fixtureq"));
+
+    // background (Claude only): launch, list, validate and stop one job.
+    let row=json!({"id":"c37eb75a","kind":"background","cwd":root,"sessionId":"native-session","state":"working","pid":42});
+    let rows=json!([row]).to_string();
+    let bg=NativeSpec {env:env(&[("COREQ_FAKE_BACKGROUND","1"),("COREQ_FAKE_CONTROL","1"),("FAKE_JOB_ROWS",&rows)]),..spec.clone()};
+    let out=claude.background_launch(Command::new(exe()),&bg,"owned input",Duration::from_secs(30)).unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("backgrounded · c37eb75a"));
+    assert_eq!(claude.jobs(Command::new(exe()),&bg,true,Duration::from_secs(30)).unwrap(),vec![row.clone()]);
+    assert_eq!(control(&root)["args"][3],"--cwd");
+    let job=claude.job(&row,&bg,"c37eb75a").unwrap();
+    assert_eq!((job.id.as_str(),job.session.as_str(),job.pid),("c37eb75a","native-session",Some(42)));
+    claude.stop_job(Command::new(exe()),&bg,&job,Duration::from_secs(30)).unwrap();
+    assert_eq!(control(&root)["args"],json!(["stop","c37eb75a"]));
+    assert_eq!(claude.launch_refusal("Error: Workspace not trusted").map(|c|c.0),Some("workspace-untrusted"));
+    assert_eq!(codex.launch_refusal("Error: Workspace not trusted"),None);
+    assert_eq!(codex.background_launch(Command::new(exe()),&bg,"x",Duration::from_secs(1)).unwrap_err(),"background unsupported by codex");
+    assert_eq!(codex.jobs(Command::new(exe()),&bg,false,Duration::from_secs(1)).unwrap_err(),"background unsupported by codex");
+
+    // app queue and app-server (Codex only).
+    let thread=NativeSpec {session:"t-1".into(),resume:true,args:vec!["--flag".into()],env:vec![("COREQ_FAKE_AGENT".into(),"codex".into()),("COREQ_FAKE_CONTROL".into(),"1".into())],..spec.clone()};
+    codex.app_queue(Command::new(exe()),&thread,"queued input",Duration::from_secs(30)).unwrap();
+    assert_eq!(control(&root)["args"],json!(["queue","--thread","t-1","--message","queued input"]));
+    let server:Vec<_>=codex.app_server_command(Command::new(exe()),&thread).unwrap().get_args().map(|a|a.to_string_lossy().into_owned()).collect();
+    assert_eq!(server,["app-server","--flag"]);
+    assert_eq!(claude.app_queue(Command::new(exe()),&thread,"x",Duration::from_secs(1)).unwrap_err(),"app-queue unsupported by claude");
+    assert_eq!(claude.app_server_command(Command::new(exe()),&thread).unwrap_err(),"app-server unsupported by claude");
+    std::fs::remove_dir_all(root).unwrap();
 }
