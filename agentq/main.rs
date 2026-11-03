@@ -169,7 +169,8 @@ fn main() {
         ["configure", rest @ ..] => configure_cmd(&t, rest),
         ["hook", agent @ ("codex" | "claude" | "hermes" | "antigravity"), event] => {
             let data = t.install.join("data");
-            // A failed hook answers `{}` and exits 0; closed stdout is recorded without panicking.
+            let pass = || hooks::default_response(agent, event);
+            // A failed hook answers `{}` (or `{"decision": "allow"}` for Antigravity PreToolUse) and exits 0; closed stdout is recorded without panicking.
             let input = std::io::read_to_string(std::io::stdin());
             let response = input.as_ref().map_err(|e| format!("stdin: {e}")).and_then(|s| {
                 match control::disabled(&data, agent) {
@@ -177,15 +178,15 @@ fn main() {
                         if matches!(*agent, "claude" | "antigravity") && ["PreToolUse", "PostToolUse"].contains(event) {
                             let c = compression::policy(&data, agent)?;
                             // A wrapper can change native approval decisions even when its compression is paused.
-                            if c["enabled"] == false || c["agents"][*agent] == false { return Ok(serde_json::json!({})); }
+                            if c["enabled"] == false || c["agents"][*agent] == false { return Ok(pass()); }
                         }
                         hooks::response(agent,event,s,&t.install.join(t.exe_name()))
                     },
-                    Ok(true) => Ok(serde_json::json!({})),
+                    Ok(true) => Ok(pass()),
                     Err(e) => Err(e),
                 }
             });
-            let payload = response.as_ref().cloned().unwrap_or_else(|_| serde_json::json!({}));
+            let payload = response.as_ref().cloned().unwrap_or_else(|_| pass());
             let wrote = writeln!(std::io::stdout(), "{payload}").err().map(|e| format!("stdout: {e}"));
             let errors: Vec<String> = response.err().into_iter().chain(wrote).collect();
             if errors.is_empty() {
