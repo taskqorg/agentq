@@ -53,7 +53,8 @@ fn home() -> PathBuf {
 /// The client's own env, else the default home folder (§ 4).
 pub fn root(agent: &str) -> PathBuf {
     if agent == "antigravity" {
-        return agentq_runtime::agent::base_home(agentq_runtime::agent::Client::Antigravity)
+        // The runtime adapter owns the Antigravity home lookup; its first protected path is that home.
+        return agentq_runtime::agent::runtime("antigravity").and_then(|r| r.protected_paths(None).into_iter().next())
             .and_then(|h| h.parent().map(Path::to_path_buf)).unwrap_or_else(|| home().join(".gemini"));
     }
     let (var, dir) = match agent {

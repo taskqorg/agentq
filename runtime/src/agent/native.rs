@@ -74,6 +74,11 @@ pub fn app_queue(mut base: Command, spec: &Spec, reference: &str, budget: Durati
     crate::process::output("agent.app-queue", &mut environment(base, spec), budget).map_err(|e| e.to_string())
 }
 
+/// A native Remote Control session URL.
+pub(super) fn remote_url(url: &str) -> bool {
+    url.strip_prefix("https://claude.ai/code/session_").is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
 pub(super) fn plain_id(id: &str) -> bool { !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') }
 
 pub(super) fn scope(spec: &Spec) -> String {
@@ -238,7 +243,7 @@ impl NativeTurn {
                         return Err("native Claude session differs".into());
                     }
                     if v["subtype"] == "bridge_status" {
-                        if let Some(url) = v["url"].as_str().filter(|s| s.strip_prefix("https://claude.ai/code/session_").is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))) { self.remote = Some(url.into()); }
+                        if let Some(url) = v["url"].as_str().filter(|s| remote_url(s)) { self.remote = Some(url.into()); }
                     }
                     if v["type"] == "user" {
                         let content = &v["message"]["content"];

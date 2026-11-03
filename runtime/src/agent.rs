@@ -13,6 +13,8 @@ pub mod history;
 mod native;
 mod app;
 mod protected;
+mod adapter;
+pub use adapter::{Approval, Cause, Check, Descriptor, Launch, Network, Policy, Quota, Ready, Run, Runtime, Scope, State, runtime, runtimes};
 pub use native::{BackgroundJob, NativeTurn, background_command, background_launch, background_jobs, background_stop, app_queue};
 pub use app::{AppServer, AppSession, app_server_command};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
@@ -60,9 +62,9 @@ impl Client {
 // ---------- executable ----------
 
 /// `name` on `PATH`; on Windows also `name.exe` and `name.cmd` (npm installs `.cmd` shims). Unresolved: the bare name.
-pub fn which(name: &str) -> PathBuf { which_in(name, &std::env::var_os("PATH").unwrap_or_default()) }
+pub(crate) fn which(name: &str) -> PathBuf { which_in(name, &std::env::var_os("PATH").unwrap_or_default()) }
 
-pub fn which_in(name: &str, path: &OsStr) -> PathBuf {
+pub(crate) fn which_in(name: &str, path: &OsStr) -> PathBuf {
     let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ""] } else { &[""] };
     for dir in std::env::split_paths(path) {
         for e in exts {
@@ -75,21 +77,12 @@ pub fn which_in(name: &str, path: &OsStr) -> PathBuf {
 
 /// `PATH` with `<home>/.local/bin` appended when it is a directory `PATH` lacks; `None` when nothing changes.
 /// Linux user installs (codex, npm prefixes, pipx) land there, but a non-login shell or a service unit may lack it.
-pub fn user_bin_path(path: &OsStr, home: Option<&OsStr>) -> Option<OsString> {
+pub(crate) fn user_bin_path(path: &OsStr, home: Option<&OsStr>) -> Option<OsString> {
     let bin = Path::new(home.filter(|h| !h.is_empty())?).join(".local/bin");
     let mut dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
     if !bin.is_dir() || dirs.contains(&bin) { return None; }
     dirs.push(bin);
     std::env::join_paths(dirs).ok()
-}
-
-/// Why `client` cannot start here: its CLI does not resolve on `PATH`.
-pub fn missing_cli(client: Client) -> Option<String> {
-    if client == Client::Antigravity {
-        return (!antigravity_executable().is_absolute()).then(|| "antigravity CLI not found on the service PATH".into());
-    }
-    let bin = client.code();
-    (!which(bin).is_absolute()).then(|| format!("{bin} CLI not found on the service PATH"))
 }
 
 fn antigravity_executable() -> PathBuf {
@@ -113,7 +106,7 @@ fn antigravity_executable() -> PathBuf {
 }
 
 /// The native Codex executor behind an npm `codex.js` launcher: a kill cannot reach the native child through Node.
-pub fn codex_native(bin: PathBuf) -> Res<PathBuf> {
+pub(crate) fn codex_native(bin: PathBuf) -> Res<PathBuf> {
     if cfg!(windows) || !bin.exists() { return Ok(bin); }
     let bin = bin.canonicalize().map_err(|e| format!("Codex executable unavailable: {e}"))?;
     let native = |path: &Path| -> Res<bool> {
@@ -226,19 +219,8 @@ pub fn base_home(client: Client) -> Option<PathBuf> {
 
 /// `<base home>/<tool>-accounts/<label>` for a non-default account; None for `default` (the child keeps the
 /// caller's own home). `tool` is the consumer's `Tool.name`.
-pub fn account_home(client: Client, tool: &str, label: &str) -> Option<PathBuf> {
+pub(crate) fn account_home(client: Client, tool: &str, label: &str) -> Option<PathBuf> {
     (label != DEFAULT && valid_label(label)).then(|| base_home(client).map(|b| b.join(format!("{tool}-accounts")).join(label))).flatten()
-}
-
-/// Every home of `client`: the default first, then each existing account home in label order.
-pub fn account_homes(client: Client, tool: &str) -> Vec<PathBuf> {
-    let Some(b) = base_home(client) else { return vec![] };
-    let mut more: Vec<PathBuf> = std::fs::read_dir(b.join(format!("{tool}-accounts"))).into_iter().flatten().flatten()
-        .filter(|e| e.file_name().to_str().is_some_and(valid_label) && e.path().is_dir()).map(|e| e.path()).collect();
-    more.sort();
-    let mut v = vec![b];
-    v.extend(more);
-    v
 }
 
 // ---------- start and resume ----------
@@ -321,7 +303,7 @@ fn environment(mut base: Command, spec: &Spec) -> Command {
 
 /// Claude `--settings` JSON: a `SessionStart` hook on `compact` that runs `compact_hook` (rule re-delivery after
 /// compaction) and `env` for the session, which survives resume. None omits the hook.
-pub fn claude_settings(compact_hook: Option<&str>, env: &[(&str, &str)]) -> String {
+pub(crate) fn claude_settings(compact_hook: Option<&str>, env: &[(&str, &str)]) -> String {
     let env: serde_json::Map<String, Value> = env.iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
     let mut v = json!({"env": env});
     if let Some(cmd) = compact_hook {
@@ -716,7 +698,7 @@ pub struct Usage {
 /// output, the model of most calls), Codex `turn.completed` (`input_tokens` includes `cached_input_tokens`, no cache
 /// writes), Antigravity `PLANNER_RESPONSE` steps (each `step_index` once: `input_tokens`, `cache_read_tokens`,
 /// `output_tokens`). A counted call without a value makes that sum unknown, never smaller.
-pub fn usage(events: &[Value]) -> Usage {
+pub(crate) fn usage(events: &[Value]) -> Usage {
     let (mut ids, mut turns, mut models) = (std::collections::HashSet::new(), false, BTreeMap::<String, u64>::new());
     let mut sums = [Some(0u64); 4];
     let mut cli_usage = false;
@@ -776,7 +758,7 @@ fn model_code(m: &str) -> bool { !m.is_empty() && m.len() <= 64 && m.bytes().all
 
 /// A usage or quota limit reported before any work started: `Some(reset)` with the reset (unix seconds) when known;
 /// None after work started or without a limit.
-pub fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
+pub(crate) fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
     for v in events {
         if v["event"] == "step_update" && (v["step_update"]["step_type"] == "tool" || v["step_update"]["usage"].is_object()) { return None; }
         if v["event"] == "result" {
@@ -809,7 +791,7 @@ pub fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
 
 /// A Codex login the auth server rejected: Codex's own stderr `ERROR codex_` line or a top-level `error`/`turn.failed`
 /// event naming a rejected refresh token or a 401; worker output (`item.*`) never matches.
-pub fn auth_rejected(text: &str) -> Option<&'static str> {
+pub(crate) fn auth_rejected(text: &str) -> Option<&'static str> {
     text.lines().find_map(|l| {
         let m = match serde_json::from_str::<Value>(l) {
             Ok(v) if matches!(v["type"].as_str(), Some("error" | "turn.failed")) => v["message"].as_str().or(v["error"]["message"].as_str()).unwrap_or_default().to_lowercase(),
@@ -823,7 +805,7 @@ pub fn auth_rejected(text: &str) -> Option<&'static str> {
 }
 
 /// The last turn end is a Codex `turn.failed` naming model capacity: its message.
-pub fn transient_failure(events: &[Value]) -> Option<String> {
+pub(crate) fn transient_failure(events: &[Value]) -> Option<String> {
     let end = events.iter().filter(|v| matches!(v["type"].as_str(), Some("turn.completed" | "turn.failed"))).last()?;
     // ponytail: only the "Selected model is at capacity" text is verified; other overload texts read as failed.
     let m = end["error"]["message"].as_str().filter(|_| end["type"] == "turn.failed")?;
@@ -831,7 +813,7 @@ pub fn transient_failure(events: &[Value]) -> Option<String> {
 }
 
 /// The final text of a turn: Claude's last `result`, Codex's last `agent_message`, or Antigravity's last `PLANNER_RESPONSE` content.
-pub fn final_text(events: &[Value]) -> Option<String> {
+pub(crate) fn final_text(events: &[Value]) -> Option<String> {
     events.iter().rev().find_map(|v| {
         if v["event"] == "result" { v["result"]["response"].as_str().map(String::from) }
         else if v["type"] == "result" { v["result"].as_str().map(String::from) }
@@ -842,7 +824,7 @@ pub fn final_text(events: &[Value]) -> Option<String> {
 }
 
 /// Codex's thread ID: the first `thread.started` line.
-pub fn codex_thread(text: &str) -> Option<String> {
+pub(crate) fn codex_thread(text: &str) -> Option<String> {
     text.lines().find_map(|l| {
         let v: Value = serde_json::from_str(l).ok()?;
         (v["type"] == "thread.started").then(|| v["thread_id"].as_str().map(String::from)).flatten()
@@ -850,7 +832,7 @@ pub fn codex_thread(text: &str) -> Option<String> {
 }
 
 /// Antigravity's conversation ID from `agentapi` JSON output or a stream event.
-pub fn antigravity_session(text: &str) -> Option<String> {
+pub(crate) fn antigravity_session(text: &str) -> Option<String> {
     serde_json::from_str::<Value>(text).into_iter().chain(text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok())).find_map(|v| {
         v.pointer("/response/newConversation/conversationId").and_then(Value::as_str)
             .or_else(|| v.pointer("/response/sendMessage/recipientId").and_then(Value::as_str))
@@ -864,7 +846,7 @@ pub fn antigravity_session(text: &str) -> Option<String> {
 }
 
 /// The native session of a turn: Claude's `session_id` (init or result), Codex's thread, or Antigravity's `conversationId`.
-pub fn session_of(client: Client, text: &str) -> Option<String> {
+pub(crate) fn session_of(client: Client, text: &str) -> Option<String> {
     match client {
         Client::Codex => codex_thread(text),
         Client::Claude => text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -874,7 +856,7 @@ pub fn session_of(client: Client, text: &str) -> Option<String> {
 }
 
 /// The thread's rollout `<home>/sessions/**/rollout-*-<thread>.jsonl`, in `home` or the client's own home.
-pub fn rollout(thread: &str, home: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn rollout(thread: &str, home: Option<&Path>) -> Option<PathBuf> {
     fn find(dir: &Path, end: &str, depth: u8) -> Option<PathBuf> {
         if depth == 0 { return None; }
         std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
@@ -905,7 +887,7 @@ fn percent(v: f64) -> Option<u64> { (v.is_finite() && v >= 0.0).then(|| v.round(
 /// Claude: the last `rate_limit_event` (`rate_limit_info.utilization` 0-1, `resetsAt`, `rateLimitType`). Codex: the
 /// last `rate_limits` (`primary`/`secondary`: `used_percent` 0-100, `resets_at`, `window_minutes`) in the turn's events,
 /// else the last `token_count` of the thread rollout; the window with the higher use binds.
-pub fn snapshot(client: Client, events: &[Value], rollout: Option<&Path>) -> Snapshot {
+pub(crate) fn snapshot(client: Client, events: &[Value], rollout: Option<&Path>) -> Snapshot {
     let found = match client {
         Client::Claude | Client::Antigravity => events.iter().rev().find(|v| v["type"] == "rate_limit_event").map(|v| {
             let i = &v["rate_limit_info"];
@@ -1026,7 +1008,7 @@ mod tests {
         if std::env::var_os("AGENTQ_TEST_AGY_HOME").is_some() {
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
             assert_eq!(antigravity_executable(), home.join(".local/bin/agy"));
-            assert!(missing_cli(Client::Antigravity).is_none());
+            assert!(executable(Client::Antigravity).unwrap().is_absolute());
             let legacy = home.join(".gemini/antigravity");
             let cli = home.join(".gemini/antigravity-cli");
             std::fs::create_dir_all(&legacy).unwrap();

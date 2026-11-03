@@ -35,6 +35,7 @@ fn main() {
         ("json_turns_run_plain_without_the_optimizer", json_turns_run_plain_without_the_optimizer),
         ("off_reaches_codex_queue_and_app_server", off_reaches_codex_queue_and_app_server),
         ("external_consumer_builds_and_plans_turns", external_consumer_builds_and_plans_turns),
+        ("runtime_trait_runs_every_runtime_by_descriptor", runtime_trait_runs_every_runtime_by_descriptor),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
@@ -447,7 +448,7 @@ fn soon() -> Option<Instant> { Some(Instant::now() + Duration::from_secs(30)) }
 fn background_commands_preserve_native_mode() {
     let root = scratch("background-command");
     let mut spec = Spec { client:Client::Claude, root:root.clone(), session:"native-session".into(), resume:false,
-        args:vec!["--settings".into(),agent::claude_settings(Some("rules compact"), &[("FIXTURE_ATTEMPT","7")]).into(),"--name".into(),"fixture name".into(),
+        args:vec!["--settings".into(),r#"{"env":{"FIXTURE_ATTEMPT":"7"}}"#.into(),"--name".into(),"fixture name".into(),
             "--remote-control".into(),"fixture name".into(),"--permission-mode".into(),"dontAsk".into()],
         home:Some(root.join("account")),env:vec![("FAKE_EXTRA".into(),"preserved".into())] };
     let mut base = fake_client(Client::Claude); base.env("COREQ_FAKE_BACKGROUND","1");
@@ -479,7 +480,7 @@ fn claude_starts_and_resumes_one_session() {
     let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
     let log = root.join("logs").join("T1-1.log");
     let session = agent::new_session(Client::Claude);
-    let settings = agent::claude_settings(Some("tool rules compact"), &[]);
+    let settings = r#"{"env":{}}"#;
     let mut spec = Spec { client: Client::Claude, root: root.clone(), session: session.clone(), resume: false,
         args: vec!["--permission-mode".into(), "auto".into(), "--settings".into(), settings.into()], home: None, env: vec![("FAKE_EXTRA".into(), "x".into())] };
     let ctx = Context { product: "fixtureq", version: "1.0.0", project: "taskqorg/coreq", task: Some((1, 1)), route: None, account: "default" };
@@ -547,6 +548,65 @@ fn lingering_process_is_stopped_after_its_turn_ends() {
     assert!(started.elapsed() < Duration::from_secs(20), "stopped after its turn ended, not at the deadline");
     assert_eq!(turn.report().outcome, "ok", "the ended turn keeps its outcome");
     let _ = std::fs::remove_dir_all(root);
+}
+
+// #210 A1/A3/A4: a caller drives every runtime only through `agent::runtime(name)`: an abstract policy, launch, progress,
+// poll, report, resume, session ID, named session-URL causes and one recorded observation, without matching on a runtime.
+// Risk: a caller needs native flags or the client enum, progress repeats records, or an unsupported URL reads as success.
+fn runtime_trait_runs_every_runtime_by_descriptor() {
+    unsafe { std::env::remove_var("TASKQ_TASK"); std::env::remove_var("AGENTQ_LAUNCHER"); std::env::remove_var("AGENTQ_OPTIMIZATION"); }
+    for r in agent::runtimes() {
+        let d = r.descriptor();
+        let root = scratch(&format!("trait-{}", d.name));
+        let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
+        let mut l = agent::Launch::new(&root, root.join("worker.log"), "brief", "fixtureq");
+        l.command = vec![std::env::current_exe().unwrap().into()];
+        l.env = vec![("COREQ_FAKE_AGENT".into(), d.name.into())];
+        l.policy.approval = agent::Approval::Bypass;
+        if d.name == "codex" { l.policy.write = agent::Scope::Any; }
+        let before = r.running();
+        let mut run = r.launch(&l).unwrap();
+        assert_eq!((run.runtime(), r.running()), (d.name, before + 1));
+        assert_eq!(r.report(&run).unwrap_err(), "running");
+        let mut seen = vec![];
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let state = loop {
+            seen.extend(r.progress(&mut run).unwrap());
+            let s = r.poll(&mut run).unwrap();
+            if s != agent::State::Running { break s; }
+            assert!(Instant::now() < deadline, "{} turn ended", d.name);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        seen.extend(r.progress(&mut run).unwrap());
+        assert_eq!((state, r.running()), (agent::State::Finished, before), "{}", d.name);
+        assert!(!seen.is_empty() && r.progress(&mut run).unwrap().is_empty(), "{}: progress reads each record once", d.name);
+        let flags = record(&root, 1)["args"].clone();
+        let native = match d.name { "claude" => "bypassPermissions", "codex" => "--dangerously-bypass-approvals-and-sandbox", _ => "--dangerously-skip-permissions" };
+        assert!(flags.as_array().unwrap().iter().any(|a| a == native), "{}: policy maps to {native}: {flags}", d.name);
+        let session = r.session_id(&run).expect("native session named");
+        match r.session_url(&run) {
+            Err(agent::Cause(cause)) => assert_eq!(cause, if d.has("session-url") { "not-observed" } else { "no-session-url" }, "{}", d.name),
+            Ok(url) => panic!("{}: no URL was emitted, got {url}", d.name),
+        }
+        assert_eq!(r.transcript(&run).unwrap(), root.join("worker.log"));
+        let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: Some((210, 1)), route: None, account: "default" };
+        assert_eq!(run.record(&ctx, &store).unwrap().text.as_deref(), Some("turn 1"));
+        assert!(run.record(&ctx, &store).is_err(), "one observation per run");
+        let mut next = r.resume(&session, &l).unwrap();
+        while r.poll(&mut next).unwrap() == agent::State::Running { std::thread::sleep(Duration::from_millis(20)); }
+        let second = r.report(&next).unwrap();
+        assert_eq!((second.outcome, second.text.as_deref(), second.session.as_deref()), ("ok", Some("turn 2"), Some(session.as_str())), "{}", d.name);
+        assert!(r.input(&mut next, "more").unwrap_err().starts_with("input-unsupported"));
+        assert_eq!(observations(&store)[0]["runtime"].as_str(), Some(d.name));
+        let mut refused = l.clone();
+        refused.policy = agent::Policy { read: agent::Scope::Project, ..agent::Policy::default() };
+        assert!(r.launch(&refused).is_err_and(|e| e.starts_with("policy read unsupported")), "{}", d.name);
+        refused.policy = agent::Policy::default();
+        refused.accounts = Some(agent::Accounts { list: vec![agent::Entry { label: "default".into(), enabled: false }], limits: Default::default() });
+        assert_eq!(r.launch(&refused).err().as_deref(), Some("quota-exhausted"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 // Chain: coreq.md R49: a turn past its deadline is stopped and observed as cancelled/timeout, never ok.
