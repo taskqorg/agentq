@@ -1,4 +1,4 @@
-//! M12.9/M12.10: the one runtime trait, its descriptors and the per-runtime adapters (docs/spec/RUNTIME.md Â§ Runtime trait).
+//! M12.9/M12.10: the one runtime trait, its descriptors and the per-runtime adapters (docs/spec/RUNTIME.md § Runtime trait).
 //! Callers read only `Descriptor` data and pass an abstract `Policy`; every native flag, file and format stays here.
 use super::*;
 use crate::optimization::{self, Intent, Optimization};
@@ -293,8 +293,8 @@ fn claude_transcript(spec: &Spec, session: &str) -> Res<PathBuf> {
     Ok(spec_home(spec).ok_or("no client home")?.join("projects").join(project_dir(&root.to_string_lossy())).join(format!("{session}.jsonl")))
 }
 
-/// Claude's project folder name for a canonical root. Windows canonical paths are verbatim (`\\?\C:\â€¦`); Claude names the
-/// folder from the plain path (`C--â€¦`).
+/// Claude's project folder name for a canonical root. Windows canonical paths are verbatim (`\\?\C:\…`); Claude names the
+/// folder from the plain path (`C--…`).
 fn project_dir(root: &str) -> String {
     let plain = root.strip_prefix(r"\\?\UNC\").map(|p| format!(r"\\{p}")).or_else(|| root.strip_prefix(r"\\?\").map(String::from));
     plain.as_deref().unwrap_or(root).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
@@ -988,8 +988,8 @@ mod tests {
         mapped(Client::parse(name).unwrap(), name, l).map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect())
     }
 
-    // #216 A2: native Windows layout seen on Claude Code 2.1.317. Risk: a verbatim canonical root (`\\?\C:\â€¦`) names a
-    // project folder (`----C--â€¦`) Claude never writes, so a background run never attaches and never reads its URL.
+    // #216 A2: native Windows layout seen on Claude Code 2.1.317. Risk: a verbatim canonical root (`\\?\C:\…`) names a
+    // project folder (`----C--…`) Claude never writes, so a background run never attaches and never reads its URL.
     #[test]
     fn claude_project_dir_uses_the_plain_path() {
         assert_eq!(project_dir(r"\\?\C:\Users\a\agentq\.tmp\x"), "C--Users-a-agentq--tmp-x");
