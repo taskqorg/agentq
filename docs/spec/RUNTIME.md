@@ -33,6 +33,7 @@ Each adapter implements every operation. The sections below remain the binding d
 | `executable(path)` | The client executable resolved on `path` (none: the process `PATH`), as in Arguments; Codex resolves its native executor. Unresolved names come back bare; nothing is spawned. |
 | `home()` | The client's own home (Arguments, `protected_paths`). |
 | `session_transcript(session, home)` | The native transcript file of a session in `home` (none: the client's own): the Codex rollout. Other runtimes and an unknown session read none. |
+| `session_link(&NativeSpec, job)` | Capability `session-url`: the session URL of caller-built session `spec.session` (background `job`, if any) in `spec.home`, or its absence cause with native detail (Session observation). `--remote-control` in `spec.args` marks Remote Control requested. Other runtimes read `no-session-url`. |
 | `prepare(intent, product, &mut NativeSpec, install)` | The optimization intent applied to a caller-built spec, as `launch` applies it. |
 | `command(base, &NativeSpec)`, `turn(base, &NativeSpec, log, input, &Process)` | The native turn command (Arguments), and one `Turn` started with it: `id`, `poll`, `kill`, `wait`, `report`. For a caller that adds native arguments of its own; `launch` stays the default. |
 | `background_launch`, `jobs`, `job`, `stop_job` | Capability `background`: the launcher exchange, the job list (`filtered` adds the project filter), one validated `BackgroundJob` row and its stop request (Compatibility sessions). Other runtimes refuse with `background unsupported by <name>`. |
@@ -51,7 +52,7 @@ Descriptor data, the only runtime metadata a caller reads. `models` are the mode
 
 ### Session observation
 
-`observe(run)` and `session_url(run)` name the session link or exactly one cause. They read native records only; no launch, consumer log parsing or rewrite is involved, and a recovered run reads the same records.
+`observe(run)`, `session_url(run)` and `session_link(&NativeSpec, job)` name the session link or exactly one cause. They read native records only; no launch, consumer log parsing or rewrite is involved, and a recovered run reads the same records.
 
 | Cause | Meaning |
 |---|---|
