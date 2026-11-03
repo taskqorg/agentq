@@ -114,7 +114,7 @@ pub fn protected_frontend_is_not_scope_supervisor() {
     let home=root.join("account");std::fs::create_dir(&home).unwrap();
     save(&root.join("expected.json"),&json!({"profile_sha256":"b".repeat(64),"account_home":home,"approver":"invented-operator"}));
     std::fs::write(root.join("scope-mode"),b"invented separate supervisor").unwrap();
-    let host=ProtectedHost::taskq(&exe,&digest(&exe)).unwrap();let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
+    let host=ProtectedHost::new(&exe,&digest(&exe)).unwrap();let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
     let r=json!({"schema":"taskq.app-server/1","slot":{"binding":{"schema":"taskq.slots/1","caller":"invented-consumer","op_id":"job-scope",
         "root":root,"runtime":"codex","pid":owner.pid,"started":owner.started,"boot":1,"expires_at":9999999999u64},"key":"a".repeat(64)},"policy_revision":29,"account":"default"});
     let e=ProtectedIdentity{profile_sha256:"b".repeat(64),executable:exe.clone(),executable_sha256:digest(&exe),account_home:home,approver:"invented-operator".into()};
@@ -133,7 +133,7 @@ pub fn protected_preparation_and_completion_recover_original_operation() {
     let home=root.join("account");std::fs::create_dir(&home).unwrap();
     let expected=json!({"profile_sha256":"b".repeat(64),"account_home":home,"approver":"invented-operator"});
     save(&root.join("expected.json"),&expected);std::fs::write(root.join("scope-mode"),b"invented scope").unwrap();
-    let host=ProtectedHost::taskq(&exe,&digest(&exe)).unwrap();let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
+    let host=ProtectedHost::new(&exe,&digest(&exe)).unwrap();let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
     let slot=json!({"binding":{"schema":"taskq.slots/1","caller":"invented-consumer","op_id":"job-prepared",
         "root":root,"runtime":"codex","pid":owner.pid,"started":owner.started,"boot":10,"expires_at":9999999999u64},"key":"a".repeat(64)});
     let mut wrong=slot.clone();wrong["binding"]["started"]=json!("reused-consumer-pid");
@@ -238,8 +238,8 @@ pub fn protected_preparation_and_completion_recover_original_operation() {
 pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     let root=scratch("protected").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
     let home=root.join("account");std::fs::create_dir(&home).unwrap();
-    let host=ProtectedHost::taskq(&exe,&digest(&exe)).unwrap();
-    assert!(ProtectedHost::taskq(&exe,&"0".repeat(64)).is_err(),"untrusted adapter refused before execution");
+    let host=ProtectedHost::new(&exe,&digest(&exe)).unwrap();
+    assert!(ProtectedHost::new(&exe,&"0".repeat(64)).is_err(),"untrusted adapter refused before execution");
     let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
     let r=json!({"schema":"taskq.app-server/1","slot":{"binding":{"schema":"taskq.slots/1","caller":"invented-consumer","op_id":"job-1",
         "root":root,"runtime":"codex","pid":owner.pid,"started":owner.started,"boot":1,"expires_at":9999999999u64},"key":"a".repeat(64)},"policy_revision":29,"account":"default"});

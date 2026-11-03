@@ -29,7 +29,7 @@ impl ProtectedPreparation {
 }
 
 impl ProtectedHost {
-    pub fn taskq(executable: &Path, sha256: &str) -> Res<Self> {
+    pub fn new(executable: &Path, sha256: &str) -> Res<Self> {
         canonical(executable)?;
         if !hash(sha256) { return Err("protected adapter digest required".into()); }
         let host = Self { executable: executable.into(), sha256: sha256.into() };

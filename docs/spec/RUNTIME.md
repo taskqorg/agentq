@@ -2,6 +2,52 @@
 
 This page holds the binding detail of [agentq.md § 12](../../agentq.md#12-agent-runtime). The library moved unchanged from CoreQ v0.18.0 (`src/agent.rs`, `src/agent/`, `tests/agent.rs` and `docs/design/agent.md`), where CoreQ R47-R51 stated its rules; those rules hold here unchanged. Normal CLI behavior is TaskQ's CLI adapter (`src/runtime.rs` and `src/runtime/accounts.rs` at TaskQ v4.6.57), moved unchanged; compatibility APIs preserve its background and app boundaries.
 
+## Runtime trait
+
+M12.9/M12.10 apply the [specq agent-runtime rule](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md). The public surface is `agent::Runtime`, `agent::Descriptor`, `agent::Policy`, `agent::Launch`, `agent::Run` and the runtime-neutral `Report`, `Usage`, `Snapshot`, `Accounts`, `Context` and `history` types. `agent::runtimes()` lists every adapter; `agent::runtime(name)` finds one by descriptor name (alias `agy` selects `antigravity`). Callers treat names and session IDs as opaque data.
+
+Each adapter implements every operation. The sections below remain the binding detail of what each adapter does natively.
+
+| Operation | Contract in this runtime |
+|---|---|
+| `launch(&Launch)` | Check `quota` when `Launch.accounts` is set (none free: error `quota-exhausted`), map `Policy` (refusal names the part), apply optimization intent, start one turn and return a `Run`. |
+| `resume(session, &Launch)` | The same for an existing opaque session ID. |
+| `input(run, text)` | Send more user text to a running session. A one-process CLI turn returns cause `input-unsupported`; the next turn is a `resume`. |
+| `cancel(run)` | Request the stop; returns whether exit is already confirmed. `poll` confirms it later. It never proves server-side stop (see Arguments). |
+| `poll(run)` | `running`, `finished`, `failed` or `unknown` from the existing end detection. |
+| `report(run)` | The `Report` of a finished run; a running one returns cause `running`. |
+| `progress(run)` | Complete native JSON records appended to the run's log since the previous call, as raw values, each read at most once. |
+| `session_id(run)` | The native session once named, else none. |
+| `session_url(run)` | Claude: the native Remote Control `https://claude.ai/code/session_*` URL when one was observed, else cause `not-observed`. Codex and Antigravity: cause `no-session-url`. No session yet: cause `session-unknown`. |
+| `transcript(run)` | The caller log the run appends to. |
+| `ready(home)` | `install` (CLI resolves), `version` (`--version` within 5 s) and `login` (native credential file in the home); each `ok`, `missing` or `unknown` with a reason. Absent credential files read `unknown`, because keychains also hold logins. |
+| `quota(&Accounts, now)` | The account a launch takes, whether every account is disabled, and the hold end when every enabled account is limited. |
+| `running()` | Runs of this adapter in this process that have not reached a terminal poll and were not dropped. |
+| `protected_paths(home)` | Native home folders and files a run must not overwrite: Claude home and `.claude.json`, Codex home, Antigravity home and its sibling `config`. |
+| `home_env(tool, label)` | The home variable pointing at `<base home>/<tool>-accounts/<label>`; none for `default`, which keeps the caller's own home. |
+
+Descriptor data, the only runtime metadata a caller reads:
+
+| `name` | `label` | `brand` | `family` | `capabilities` |
+|---|---|---|---|---|
+| `claude` | Claude Code | Anthropic | `claude` | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot` |
+| `codex` | Codex CLI | OpenAI | `gpt` | `turn`, `resume`, `quota-snapshot` |
+| `antigravity` | Antigravity | Google | `gemini` | `turn`, `resume` |
+
+### Policy map
+
+`Policy` has `read` and `write` scope (`native`, `none`, `project`, `any`), `network` (`native`, `on`, `off`), `tools` (`native` or an allowlist) and `approval` (`native`, `plan`, `edits`, `auto`, `bypass`). `native` keeps the runtime's own default. Every value without a row below refuses launch with `policy <part> unsupported by <name>`.
+
+| Part | Claude | Codex | Antigravity |
+|---|---|---|---|
+| `read` | `native` | `native`, `any` | `native` |
+| `write` | `native` | `none` → `--sandbox read-only`, `project` → `--sandbox workspace-write`, `any` → `--sandbox danger-full-access` | `native` |
+| `network` | `native` | `on` with `project` → `-c sandbox_workspace_write.network_access=true`; `off` with `none`/`project`; `native` | `native` |
+| `tools` | `native`; allowlist → `--allowedTools <tool>..` | `native` | `native` |
+| `approval` | `plan`, `edits` (`acceptEdits`), `auto`, `bypass` (`bypassPermissions`) → `--permission-mode <mode>` | `bypass` with `write` `any` → `--dangerously-bypass-approvals-and-sandbox` instead of `--sandbox` | `bypass` → `--dangerously-skip-permissions` |
+
+`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.wrapper` is a caller sandbox command placed before the native executable. The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
+
 ## Session model
 
 - One native session belongs to one conversation or one task attempt.
@@ -96,7 +142,7 @@ A reached limit returns `Report::reached`: the reported reset in unix seconds, o
 
 ## Compatibility sessions
 
-Normal `Spec`, `Client`, `Turn`, `args`, `command` and `run` retain the v0.17 CLI interface and behavior. Compatibility APIs never switch Claude to `-p` or replace an app session with `exec`.
+Native CLI turns keep the v0.17 arguments and behavior inside the adapters. Background, desktop queue, app-server and protected modes are adapter internals selected by `Launch.mode`; `Turn`, `NativeTurn`, `AppSession` and the native parsers are private (M12.9). These modes never switch Claude to `-p` or replace an app session with `exec`.
 
 - `background_command` passes `--bg <caller args>` on start and only `--bg --resume <session>` on resume. Start arguments include the caller's settings, name, Remote Control name and permission mode in their original order. The native client assigns the start's session and job IDs. Input is the caller's file reference, not private task text: Claude forwards it to child argv. The caller durably binds and retains that input before submission.
 - `background_launch` uses bounded stdin exchange and returns launcher output or failure without interpreting either as completed work. A timeout, lost reply or malformed reply is uncertain; retain the original input and recover without resubmitting. `background_jobs` uses `agents --json --all --cwd <root>` in the same account. `BackgroundJob::read` verifies exact canonical root, job and session; readiness means a known native state, not accepted input or completion. Remote Control identity comes only from that session's native `bridge_status` URL.
@@ -115,7 +161,7 @@ Fake clients verify these boundaries on Linux, macOS and Windows. Native consume
 
 M12.8 adds `agent::ProtectedHost`, `ProtectedIdentity` and `ProtectedAppServer` alongside the unchanged `AppServer` API. There is no TaskQ Rust dependency or mandatory service for ordinary turns. The optional TaskQ adapter uses the existing operator grant resolver, protected process boundary and external slot protocol; the runtime owns neither grants nor slot admission/release.
 
-The caller selects an immutable, reviewed host executable by canonical path and SHA-256, outside task/environment/receipt inputs. `ProtectedHost::taskq` checks that artifact before every invocation. This is a trust anchor supplied by the operator, not proof that arbitrary caller-selected code is a host authority. It does not defend against an unrestricted same-user operator replacing the trusted executable between verification and execution.
+The caller selects an immutable, reviewed host executable by canonical path and SHA-256, outside task/environment/receipt inputs. `ProtectedHost::new` checks that artifact (the constructor names no product; the host wire schema stays `taskq.app-server/1`) before every invocation. This is a trust anchor supplied by the operator, not proof that arbitrary caller-selected code is a host authority. It does not defend against an unrestricted same-user operator replacing the trusted executable between verification and execution.
 
 For adapters predating required preparation, `launch` accepts the existing `taskq.app-server/1` request and a `ProtectedIdentity` match requirement: canonical account home and native executable/digest, generated profile digest and grant approver. The request binds canonical project, Codex runtime, account, policy revision and the existing slot's caller/operation/process identity. It accepts no native arguments, environment, model, executable override or serialized grant. Missing, extra or malformed request fields refuse before spawn; the host validates the protected grant and slot independently.
 
@@ -320,8 +366,8 @@ Consumers of CoreQ `agent` at the CoreQ v0.18.0 baseline (default branches read 
 - Compatibility example source pin: `513193c8a96f3de1c71a86291a679230817ce0b2`; its manifest/lockfile retain that baseline. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. Optionally, after a merged main commit passes the `Test` workflow on Linux, macOS and Windows, `scripts/tag_runtime.py` checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.
-- Forward: a consumer edits its contract, switches `coreq::agent` to `agentq_runtime::agent` at one immutable revision (same API and behavior), passes its own fake-client gates and qualifies its real native paths. A fake-client pass never substitutes for native qualification.
-- Rollback: the consumer selects its previous immutable build. Native sessions, persisted checkpoints and active work stay valid because the API, checkpoint formats and observation IDs are unchanged; no paid replay, credential, model, grant or capacity change.
+- Forward: a consumer edits its contract, switches `coreq::agent` to `agentq_runtime::agent` at one immutable revision, passes its own fake-client gates and qualifies its real native paths. A revision with the runtime trait (M12.9) replaces direct `Client`/`Spec`/`Turn` calls with `Runtime` operations, `Policy` and `Launch`; native behavior is unchanged. A fake-client pass never substitutes for native qualification.
+- Rollback: the consumer selects its previous immutable build. Native sessions, persisted checkpoints and active work stay valid because native arguments, checkpoint formats and observation IDs are unchanged; no paid replay, credential, model, grant or capacity change.
 - CoreQ keeps its `agent` module frozen and compatible during adoption. Its retirement is a separate CoreQ task, only after every consumer above adopted and qualified.
 - This repository changes no consumer's live install; installed services keep running until their owners adopt.
 
