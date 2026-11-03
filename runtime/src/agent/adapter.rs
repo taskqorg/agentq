@@ -1,4 +1,4 @@
-//! M12.9/M12.10: the one runtime trait, its descriptors and the per-runtime adapters (docs/spec/RUNTIME.md § Runtime trait).
+//! M12.9/M12.10: the one runtime trait, its descriptors and the per-runtime adapters (docs/spec/RUNTIME.md Â§ Runtime trait).
 //! Callers read only `Descriptor` data and pass an abstract `Policy`; every native flag, file and format stays here.
 use super::*;
 use crate::optimization::{self, Intent, Optimization};
@@ -220,8 +220,14 @@ fn base(command: &[OsString], client: Client) -> Res<Command> {
 /// Claude's native transcript of `session`: `<home>/projects/<root, each non-alphanumeric character as ->/<session>.jsonl`.
 fn claude_transcript(spec: &Spec, session: &str) -> Res<PathBuf> {
     let root = spec.root.canonicalize().map_err(|e| format!("project root: {e}"))?;
-    let dir: String = root.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    Ok(spec_home(spec).ok_or("no client home")?.join("projects").join(dir).join(format!("{session}.jsonl")))
+    Ok(spec_home(spec).ok_or("no client home")?.join("projects").join(project_dir(&root.to_string_lossy())).join(format!("{session}.jsonl")))
+}
+
+/// Claude's project folder name for a canonical root. Windows canonical paths are verbatim (`\\?\C:\â€¦`); Claude names the
+/// folder from the plain path (`C--â€¦`).
+fn project_dir(root: &str) -> String {
+    let plain = root.strip_prefix(r"\\?\UNC\").map(|p| format!(r"\\{p}")).or_else(|| root.strip_prefix(r"\\?\").map(String::from));
+    plain.as_deref().unwrap_or(root).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 /// The verified background job: the launcher's job ID, else on resume the job of the same session.
@@ -371,7 +377,7 @@ impl Native {
     }
 }
 
-/// The one trait every runtime adapter implements (specq agent-runtimes § Runtime trait).
+/// The one trait every runtime adapter implements (specq agent-runtimes Â§ Runtime trait).
 pub trait Runtime: Send + Sync {
     fn descriptor(&self) -> &Descriptor;
     fn launch(&self, launch: &Launch) -> Res<Run>;
@@ -565,7 +571,7 @@ impl Adapter {
                 // A new job's transcript is unknown until discovery; the alias path does not exist.
                 let turn = NativeTurn::before(&spec, &claude_transcript(&spec, &spec.session)?, &l.input)?;
                 let (job_id, fault) = match native::background_launch(command, &spec, &l.input, Duration::from_secs(30))? {
-                    Ok(o) if o.status.success() => (String::from_utf8_lossy(&o.stdout).split_whitespace().next_back().filter(|t| native::plain_id(t)).map(String::from), None),
+                    Ok(o) if o.status.success() => (native::background_job_id(&String::from_utf8_lossy(&o.stdout)), None),
                     Ok(o) => (None, uncertain("background launcher", &format!("exit {:?}", o.status.code()))),
                     Err(e) => (None, uncertain("background launcher", &e.class())),
                 };
@@ -825,6 +831,15 @@ mod tests {
 
     fn args(name: &str, l: &Launch) -> Res<Vec<String>> {
         mapped(Client::parse(name).unwrap(), name, l).map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect())
+    }
+
+    // #216 A2: native Windows layout seen on Claude Code 2.1.317. Risk: a verbatim canonical root (`\\?\C:\â€¦`) names a
+    // project folder (`----C--â€¦`) Claude never writes, so a background run never attaches and never reads its URL.
+    #[test]
+    fn claude_project_dir_uses_the_plain_path() {
+        assert_eq!(project_dir(r"\\?\C:\Users\a\agentq\.tmp\x"), "C--Users-a-agentq--tmp-x");
+        assert_eq!(project_dir(r"\\?\UNC\srv\share\p"), "--srv-share-p");
+        assert_eq!(project_dir("/Users/a/agentq"), "-Users-a-agentq");
     }
 
     // #210 A1/A4: the abstract policy maps to each runtime's native flags in the caller-argument position, and a part a
