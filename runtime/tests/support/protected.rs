@@ -290,21 +290,25 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     assert!(server.send(&message,until()).is_err());assert!(!root.join("app-input.jsonl").exists());
     std::fs::remove_file(root.join("lost-reply")).unwrap();server.verify(until()).unwrap();
     let mut changed=r.clone();changed["slot"]["key"]=json!("c".repeat(64));assert!(host.observe(&changed,until()).is_err());
-    let spec=Spec{client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(home),env:vec![]};
-    let mut app=agent::AppSession::new(&spec).unwrap();let req=app.initialize(json!({})).unwrap();server.send(&req,until()).unwrap();
-    app.observe(&server.receive(until()).unwrap().unwrap()).unwrap();server.send(&app.initialized().unwrap(),until()).unwrap();
-    let open=app.open(json!({"approvalPolicy":"never","sandbox":"read-only","dynamicTools":[{"name":"caller-tool"}],"developerInstructions":"private rules"})).unwrap();
-    server.send(&open,until()).unwrap();app.observe(&server.receive(until()).unwrap().unwrap()).unwrap();
-    let turn=app.start_turn(json!({"input":[],"model":"fixture-model"})).unwrap();server.send(&turn,until()).unwrap();
-    while app.report().is_none() {
-        let event=server.receive(until()).unwrap().unwrap();app.observe(&event).unwrap();
-        if event["method"]=="item/tool/call" {server.send(&json!({"id":event["id"],"result":{"success":true}}),until()).unwrap();}
+    let codex=agent::runtime("codex").unwrap();
+    let mut l=agent::Launch::new(&root,root.join("run.log"),"","fixtureq");
+    l.env=vec![("CODEX_HOME".into(),home.into())];l.model=Some("fixture-model".into());
+    l.mode=agent::Mode::AppServer {initialize:json!({}),thread:json!({"approvalPolicy":"never","sandbox":"read-only","dynamicTools":[{"name":"caller-tool"}],"developerInstructions":"private rules"})};
+    let frontend=server.id();
+    let mut run=server.open(None,&l).unwrap();
+    codex.input(&mut run,"protected request").unwrap();
+    let deadline=until();
+    while codex.poll(&mut run).unwrap()==agent::State::Running {
+        for event in codex.progress(&mut run).unwrap() {
+            if event["method"]=="item/tool/call" {codex.send(&mut run,&json!({"id":event["id"],"result":{"success":true}})).unwrap();}
+        }
+        assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(app.report().unwrap().outcome,"ok");
+    assert_eq!(codex.report(&run).unwrap().outcome,"ok");
     let store=coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
     let context=Context{product:"fixtureq",version:"1",project:"other",task:None,route:Some("job-1"),account:"default"};
-    app.record(&context,&store).unwrap().unwrap().recorded.unwrap();
-    let checkpoint=app.checkpoint();agent::AppSession::recover(&spec,&checkpoint).unwrap().record(&context,&store).unwrap().unwrap().recorded.unwrap();
+    run.record(&context,&store).unwrap().recorded.unwrap();
+    let checkpoint=codex.checkpoint(&run).unwrap();codex.recover(&checkpoint,&l).unwrap().record(&context,&store).unwrap().recorded.unwrap();
     assert_eq!(observations(&store).len(),1,"one usage observation across recovery");drop(store);
     let mut duplicate=host.launch(r.clone(),ProtectedIdentity{profile_sha256:"b".repeat(64),executable:exe.clone(),executable_sha256:digest(&exe),
         account_home:root.join("account"),approver:"invented-operator".into()},Intent::Off,&root.join("duplicate.log")).unwrap();
@@ -312,10 +316,10 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     assert!(duplicate.send(&message,until()).is_err(),"consumed operation cannot launch again even with a copied receipt");drop(duplicate);
     // A valid-looking new generation must fence the already-bound transport permanently.
     let mut changed=good.clone();changed["launch"]["host_instance"]=json!("invented-host-2");save(&path,&changed);
-    assert!(server.send(&message,until()).is_err());save(&path,&good);assert!(server.send(&message,until()).is_err());
+    assert!(codex.input(&mut run,"next").is_err());save(&path,&good);assert!(codex.input(&mut run,"next").is_err());
     assert_eq!(host.observe(&r,until()).unwrap(),good,"recovery observes same operation without relaunch");
-    server.cancel(until()).unwrap();let deadline=until();
-    while server.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
-    assert!(server.receive(until()).is_err(),"interruption/EOF never proves a turn or releases a slot");
-    drop(server);std::fs::remove_dir_all(root).unwrap();
+    assert!(!codex.cancel(&mut run).unwrap(),"a host cancel never proves exit");let deadline=until();
+    while matches!(coreq::process::identity(frontend),Ok(Some(_))) {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
+    assert_eq!(codex.poll(&mut run).unwrap(),agent::State::Unknown,"a fenced input and EOF never prove a turn or release a slot");
+    drop(run);std::fs::remove_dir_all(root).unwrap();
 }

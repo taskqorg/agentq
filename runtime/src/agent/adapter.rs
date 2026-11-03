@@ -3,6 +3,8 @@
 use super::*;
 use crate::optimization::{self, Intent, Optimization};
 use super::native::{BackgroundJob, NativeTurn};
+use super::app::{AppServer, AppSession, app_server_command};
+use super::protected::ProtectedAppServer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The only runtime metadata a caller reads. `name` is an opaque ID; `label` and `brand` are for people.
@@ -72,7 +74,7 @@ pub struct Launch {
 }
 
 /// How a run reaches the runtime; every mode but `Turn` needs the descriptor capability of the same name.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum Mode {
     /// One CLI turn (capability `turn`).
     #[default]
@@ -81,11 +83,14 @@ pub enum Mode {
     Background,
     /// Queue `Launch.input` (a reference) into a running desktop thread and observe its native `transcript` (capability `app-queue`).
     Queue { transcript: PathBuf },
+    /// A native app-server session (capability `app-server`): caller `initialize` and `thread` parameters pass through
+    /// unchanged, plus the mapped policy and model; `Launch.log` is the private stderr log.
+    AppServer { initialize: Value, thread: Value },
 }
 
 impl Mode {
     fn capability(&self) -> &'static str {
-        match self { Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "app-queue" }
+        match self { Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "app-queue", Mode::AppServer { .. } => "app-server" }
     }
 }
 
@@ -140,7 +145,7 @@ pub struct Run {
     deadline: Option<Instant>,
 }
 
-enum Body { Turn(Turn), Native(Box<Native>) }
+enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>) }
 
 /// A background or queue run: an observation cursor over the native transcript, never a process owner.
 struct Native {
@@ -165,7 +170,7 @@ impl Run {
     pub fn optimization(&self) -> &Optimization { &self.optimization }
     /// The direct child process ID of a CLI turn, or the verified background job's native process.
     pub fn id(&self) -> Option<u32> {
-        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid) }
+        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id) }
     }
     /// Append the finished run's one `agent.turn` observation (M12.4); a second call is refused, never counted twice.
     pub fn record(&mut self, ctx: &Context, store: &crate::telemetry::Store) -> Res<Report> {
@@ -181,6 +186,8 @@ impl Run {
                 if n.report.is_none() { return Err("running".into()); }
                 n.turn.record(ctx, store)?.ok_or("running")?
             }
+            // Each app-server turn records once under its native thread and turn identity.
+            Body::App(a) => return a.session.record(ctx, store)?.ok_or_else(|| "running".into()),
         };
         self.recorded = true;
         Ok(r)
@@ -214,6 +221,115 @@ fn discover(n: &Native) -> Res<Option<BackgroundJob>> {
 
 fn state(r: &Report) -> State { match r.outcome { "ok" => State::Finished, "unknown" => State::Unknown, _ => State::Failed } }
 
+/// The stdio transport of an app-server run: a plain child, or a protected host frontend that verifies authority per write.
+pub(crate) enum Transport { Plain(AppServer), Protected(Box<ProtectedAppServer>) }
+
+impl Transport {
+    fn send(&mut self, m: &Value, until: Instant) -> Res<()> { match self { Transport::Plain(s) => s.send(m, until), Transport::Protected(s) => s.send(m, until) } }
+    fn receive(&mut self, until: Instant) -> Res<Option<Value>> { match self { Transport::Plain(s) => s.receive(until), Transport::Protected(s) => s.receive(until) } }
+    fn id(&self) -> u32 { match self { Transport::Plain(s) => s.id(), Transport::Protected(s) => s.id() } }
+}
+
+/// An app-server session: the caller drives turns with `input`, answers server requests with `send`, reads `progress`.
+struct App {
+    transport: Option<Transport>,
+    session: AppSession,
+    /// Native messages received but not yet returned by `progress`.
+    pending: Vec<Value>,
+    model: Option<String>,
+    /// Why the transport ended; the turn outcome stays native evidence only.
+    closed: Option<String>,
+}
+
+fn reply_deadline(l: &Launch) -> Instant { l.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30)) }
+
+/// `thread` with the abstract policy and model as app-server thread parameters.
+fn thread_params(l: &Launch, thread: &Value) -> Res<Value> {
+    let p = &l.policy;
+    let refuse = |part: &str| Err(format!("policy {part} unsupported by app-server"));
+    if !thread.is_object() { return Err("app-server thread params must be an object".into()); }
+    if !matches!(p.read, Scope::Native | Scope::Any) { return refuse("read"); }
+    if p.network != Network::Native { return refuse("network"); }
+    if p.tools.is_some() { return refuse("tools"); }
+    if l.title.is_some() || l.compact_hook.is_some() { return Err("title and compact-hook unsupported by app-server".into()); }
+    let mut t = thread.clone();
+    match p.write { Scope::Native => {}, Scope::None => t["sandbox"] = json!("read-only"), Scope::Project => t["sandbox"] = json!("workspace-write"), Scope::Any => t["sandbox"] = json!("danger-full-access") }
+    match (p.approval, p.write) { (Approval::Native, _) => {}, (Approval::Bypass, Scope::Any) => t["approvalPolicy"] = json!("never"), _ => return refuse("approval") }
+    if let Some(m) = &l.model {
+        if !model_code(m) { return Err("model requires a model code".into()); }
+        t["model"] = json!(m);
+    }
+    Ok(t)
+}
+
+impl App {
+    /// Exchange one client request and read until its reply; every message read stays pending for `progress`.
+    fn exchange(&mut self, request: Value, until: Instant) -> Res<()> {
+        let transport = self.transport.as_mut().ok_or("app-server transport ended")?;
+        transport.send(&request, until)?;
+        loop {
+            let m = transport.receive(until)?.ok_or("app-server reply deadline; session state unknown")?;
+            self.session.observe(&m)?;
+            let reply = m["id"] == request["id"] && m.get("method").is_none();
+            self.pending.push(m);
+            if reply { return Ok(()); }
+        }
+    }
+
+    /// Initialize, open the thread and, with input, start the first turn.
+    /// A failed handshake stops a plain child; a protected frontend stays with its host.
+    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch) -> Res<App> {
+        let session = match AppSession::new(spec) {
+            Ok(s) => s,
+            Err(e) => { if let Transport::Plain(s) = &mut transport { let _ = s.kill(); } return Err(e); }
+        };
+        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None };
+        let opened = app.handshake(initialize, thread, l);
+        if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
+        opened.map(|_| app)
+    }
+
+    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch) -> Res<()> {
+        let params = thread_params(l, thread)?;
+        let until = reply_deadline(l);
+        let request = self.session.initialize(initialize.clone())?;
+        self.exchange(request, until)?;
+        let initialized = self.session.initialized()?;
+        self.transport.as_mut().ok_or("app-server transport ended")?.send(&initialized, until)?;
+        let request = self.session.open(params)?;
+        self.exchange(request, until)?;
+        if !self.session.ready() { return Err("app-server thread not ready".into()); }
+        if !l.input.is_empty() { self.input(&l.input, until)?; }
+        Ok(())
+    }
+
+    fn input(&mut self, text: &str, until: Instant) -> Res<()> {
+        if self.session.report().is_some() { self.session.finish_turn()?; }
+        let mut params = json!({"input": [{"type": "text", "text": text}]});
+        if let Some(m) = &self.model { params["model"] = json!(m); }
+        let request = self.session.start_turn(params)?;
+        self.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)
+    }
+
+    /// Read every message available now.
+    fn pump(&mut self) -> Res<()> {
+        let Some(transport) = self.transport.as_mut() else { return Ok(()) };
+        loop {
+            match transport.receive(Instant::now()) {
+                Ok(Some(m)) => { self.session.observe(&m)?; self.pending.push(m); }
+                Ok(None) => return Ok(()),
+                Err(e) => { self.closed = Some(e); return Ok(()); }
+            }
+        }
+    }
+
+    fn poll(&mut self) -> Res<State> {
+        self.pump()?;
+        if let Some(r) = self.session.report() { return Ok(state(&r)); }
+        Ok(if self.closed.is_some() || self.transport.is_none() { State::Unknown } else { State::Running })
+    }
+}
+
 impl Native {
     fn poll(&mut self) -> Res<State> {
         if let Some(r) = &self.report { return Ok(state(r)); }
@@ -242,6 +358,9 @@ pub trait Runtime: Send + Sync {
     fn launch(&self, launch: &Launch) -> Res<Run>;
     fn resume(&self, session: &str, launch: &Launch) -> Res<Run>;
     fn input(&self, run: &mut Run, text: &str) -> Res<()>;
+    /// Send one native protocol message of a session run: a reply to a server request from `progress`, or a
+    /// catalogue/account read (`model/list`, `account/rateLimits/read`). Other runs return cause `send-unsupported`.
+    fn send(&self, run: &mut Run, message: &Value) -> Res<()>;
     /// Request the stop; true when the exit is already confirmed.
     fn cancel(&self, run: &mut Run) -> Res<bool>;
     fn poll(&self, run: &mut Run) -> Res<State>;
@@ -269,7 +388,7 @@ static ADAPTERS: [Adapter; 3] = [
     Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "background", "title"] } },
     Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt",
-        capabilities: &["turn", "resume", "quota-snapshot", "app-queue"] } },
+        capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server"] } },
     Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini",
         capabilities: &["turn", "resume", "title"] } },
 ];
@@ -368,7 +487,9 @@ impl Adapter {
 
     /// The child spec for `l`: mapped policy, then the launch's optimization intent.
     fn spec(&self, l: &Launch, session: String, resume: bool) -> Res<(Spec, Optimization)> {
-        let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args: mapped(self.client, self.descriptor.name, l)?, home: None, env: l.env.clone() };
+        // App-server policy travels as thread parameters, never as CLI flags.
+        let args = if matches!(l.mode, Mode::AppServer { .. }) { vec![] } else { mapped(self.client, self.descriptor.name, l)? };
+        let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: None, env: l.env.clone() };
         let optimization = optimization::prepare(l.optimization, &l.product, &mut spec, l.install.as_deref());
         Ok((spec, optimization))
     }
@@ -416,6 +537,12 @@ impl Adapter {
                 let start = turn.start();
                 Ok(self.run(native(turn, true, None, true, fault), start, optimization, l))
             }
+            Mode::AppServer { initialize, thread } => {
+                thread_params(l, thread)?;
+                let server = AppServer::spawn(app_server_command(command, &spec)?, &l.log)?;
+                let app = App::open(&spec, Transport::Plain(server), initialize, thread, l)?;
+                Ok(self.run(Body::App(Box::new(app)), 0, optimization, l))
+            }
         }
     }
 }
@@ -427,9 +554,29 @@ impl Runtime for Adapter {
 
     fn resume(&self, session: &str, launch: &Launch) -> Res<Run> { table(self.client).start(launch, Some(session)) }
 
-    fn input(&self, run: &mut Run, _text: &str) -> Res<()> {
-        self.own(run)?;
-        Err("input-unsupported: a run reads one input; resume the session for the next turn".into())
+    fn input(&self, run: &mut Run, text: &str) -> Res<()> {
+        let run = self.own_mut(run)?;
+        let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+        match &mut run.body {
+            Body::App(a) => { a.pump()?; a.input(text, until)?; run.live.get_or_insert(Live(&table(self.client).live)).0.fetch_add(1, Ordering::SeqCst); Ok(()) }
+            _ => Err("input-unsupported: a CLI run reads one input; resume the session for the next turn".into()),
+        }
+    }
+
+    fn send(&self, run: &mut Run, message: &Value) -> Res<()> {
+        let run = self.own_mut(run)?;
+        let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+        let Body::App(a) = &mut run.body else { return Err("send-unsupported: only session runs take native messages".into()) };
+        let request = match message["method"].as_str() {
+            Some(m @ ("model/list" | "account/rateLimits/read")) => {
+                let method = if m == "model/list" { "model/list" } else { "account/rateLimits/read" };
+                a.session.request(method, message.get("params").cloned().unwrap_or_else(|| json!({})))?
+            }
+            Some(m) => return Err(format!("send-unsupported: method {m}")),
+            None if message.get("id").is_some() && (message.get("result").is_some() || message.get("error").is_some()) => message.clone(),
+            None => return Err("send requires a server-request reply or a catalogue/account read".into()),
+        };
+        a.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)
     }
 
     fn cancel(&self, run: &mut Run) -> Res<bool> {
@@ -440,6 +587,17 @@ impl Runtime for Adapter {
                 Ok(t.exit.is_some())
             }
             Body::Native(n) if n.queue => Err("cancel-unsupported: desktop cancellation is a caller UI operation".into()),
+            Body::App(a) => {
+                let until = Instant::now() + Duration::from_secs(5);
+                if let Ok(request) = a.session.interrupt() {
+                    a.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)?;
+                    return Ok(false);
+                }
+                match a.transport.as_mut().ok_or("app-server transport ended")? {
+                    Transport::Plain(s) => { s.kill()?; Ok(s.poll()?.is_some()) }
+                    Transport::Protected(s) => { s.cancel(until)?; Ok(false) }
+                }
+            }
             Body::Native(n) => {
                 if n.job.is_none() { n.job = discover(n)?; }
                 let job = n.job.as_ref().ok_or("background job unknown; nothing to stop")?;
@@ -463,6 +621,7 @@ impl Runtime for Adapter {
                 state(&t.report())
             }
             Body::Native(n) => n.poll()?,
+            Body::App(a) => a.poll()?,
         };
         if s != State::Running && s != State::Unknown { run.live = None; }
         Ok(s)
@@ -472,6 +631,7 @@ impl Runtime for Adapter {
         match &self.own(run)?.body {
             Body::Turn(t) if t.exit.is_some() => Ok(t.report()),
             Body::Native(n) if n.report.is_some() => Ok(n.report.clone().expect("report")),
+            Body::App(a) => a.session.report().ok_or_else(|| "running".into()),
             _ => Err("running".into()),
         }
     }
@@ -482,6 +642,7 @@ impl Runtime for Adapter {
             Body::Turn(t) => { t.sync_antigravity_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
+            Body::App(a) => { a.pump()?; return Ok(std::mem::take(&mut a.pending)); }
         };
         let (values, next) = lines_from(&path, run.progress)?;
         run.progress = next;
@@ -493,6 +654,7 @@ impl Runtime for Adapter {
             Body::Turn(t) => session_of(self.client, &read_from(&t.log, t.start).unwrap_or_default())
                 .or_else(|| t.ag.session.clone()).or_else(|| t.resumed.clone()),
             Body::Native(n) => n.attached.then(|| n.turn.session().to_string()),
+            Body::App(a) => a.session.session().map(String::from),
         }
     }
 
@@ -507,6 +669,7 @@ impl Runtime for Adapter {
                     .filter_map(|v| v["url"].as_str().filter(|u| native::remote_url(u)).map(String::from)).next_back().ok_or(Cause("not-observed"))
             }
             Body::Native(n) => n.turn.remote_url().map(String::from).ok_or(Cause("not-observed")),
+            Body::App(_) => Err(Cause("no-session-url")),
         }
     }
 
@@ -515,6 +678,8 @@ impl Runtime for Adapter {
             Body::Turn(t) => Ok(t.log.clone()),
             Body::Native(n) if n.attached => Ok(n.turn.path().to_path_buf()),
             Body::Native(_) => Err(Cause("transcript-unknown")),
+            // The private log holds stderr only; `progress` is the session stream.
+            Body::App(_) => Err(Cause("no-transcript")),
         }
     }
 
@@ -572,7 +737,8 @@ impl Runtime for Adapter {
     fn checkpoint(&self, run: &Run) -> Result<Value, Cause> {
         match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
             Body::Turn(_) => Err(Cause("no-checkpoint")),
-            Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "queue": n.queue, "native": n.turn.checkpoint(),
+            Body::App(a) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "app", "app": a.session.checkpoint(), "model": a.model})),
+            Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
                 "session": n.turn.session(), "resume": n.spec.resume, "job": n.job_id, "attached": n.attached, "fault": n.fault})),
         }
     }
@@ -580,8 +746,17 @@ impl Runtime for Adapter {
     fn recover(&self, saved: &Value, l: &Launch) -> Res<Run> {
         let me = table(self.client);
         let queue = matches!(l.mode, Mode::Queue { .. });
-        if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["queue"] != queue || l.mode == Mode::Turn {
+        let kind = match l.mode { Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
+        if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["kind"] != kind || kind == "turn" {
             return Err("run recovery scope differs".into());
+        }
+        if kind == "app" {
+            // Observation only: the transport ended with its process, so the run reports and records but takes no input.
+            let app = &saved["app"];
+            let (spec, optimization) = me.spec(l, app["session"].as_str().ok_or("run recovery session invalid")?.into(), app["session"] != "-")?;
+            let session = AppSession::recover(&spec, app)?;
+            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()) };
+            return Ok(me.run(Body::App(Box::new(a)), 0, optimization, l));
         }
         let session = saved["session"].as_str().filter(|s| native::plain_id(s)).ok_or("run recovery session invalid")?;
         let (spec, optimization) = me.spec(l, session.into(), saved["resume"].as_bool().ok_or("run recovery state invalid")?)?;
@@ -593,6 +768,17 @@ impl Runtime for Adapter {
             attached: saved["attached"].as_bool().ok_or("run recovery state invalid")?, fault: text("fault"), report: None }));
         Ok(me.run(body, start, optimization, l))
     }
+}
+
+/// A protected host frontend opened as a Codex app-server run (`ProtectedAppServer::open`).
+pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
+    let codex = table(Client::Codex);
+    let Mode::AppServer { initialize, thread } = &l.mode else { return Err("protected open requires mode app-server".into()) };
+    if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
+    let (spec, _) = codex.spec(l, session.unwrap_or("-").into(), session.is_some())?;
+    let optimization = server.optimization();
+    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l)?;
+    Ok(codex.run(Body::App(Box::new(app)), 0, optimization, l))
 }
 
 fn table(client: Client) -> &'static Adapter { ADAPTERS.iter().find(|a| a.client == client).expect("adapter in table") }

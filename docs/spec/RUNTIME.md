@@ -12,7 +12,8 @@ Each adapter implements every operation. The sections below remain the binding d
 |---|---|
 | `launch(&Launch)` | Check `quota` when `Launch.accounts` is set (none free: error `quota-exhausted`), map `Policy` (refusal names the part), apply optimization intent, start one turn and return a `Run`. |
 | `resume(session, &Launch)` | The same for an existing opaque session ID. |
-| `input(run, text)` | Send more user text to a running session. A one-process CLI turn returns cause `input-unsupported`; the next turn is a `resume`. |
+| `input(run, text)` | Send more user text to a running session: an app-server run starts its next turn. A one-process CLI, background or queue run returns cause `input-unsupported`; the next turn is a `resume`. |
+| `send(run, message)` | One native protocol message of an app-server run: a server-request reply or a catalogue/account read. Other runs return cause `send-unsupported`. |
 | `cancel(run)` | Request the stop; returns whether exit is already confirmed. `poll` confirms it later. It never proves server-side stop (see Arguments). |
 | `poll(run)` | `running`, `finished`, `failed` or `unknown` from the existing end detection. |
 | `report(run)` | The `Report` of a finished run; a running one returns cause `running`. |
@@ -143,17 +144,18 @@ A reached limit returns `Report::reached`: the reported reset in unix seconds, o
 
 ## Compatibility sessions
 
-Native CLI turns keep the v0.17 arguments and behavior inside the adapters. `Turn`, `NativeTurn`, `BackgroundJob`, the background and queue helpers, the output parsers, `which`, `codex_native`, `claude_settings` and `rollout` are private. `Launch.mode` selects a compatibility mode. Each mode needs the descriptor capability of the same name; otherwise launch refuses with `mode <mode> unsupported by <name>`.
+Native CLI turns keep the v0.17 arguments and behavior inside the adapters. `Client`, `Spec`, `Turn`, `NativeTurn`, `BackgroundJob`, `AppSession`, `AppServer`, the background, queue and app-server helpers, the output parsers, `which`, `codex_native`, `claude_settings` and `rollout` are private. `Launch.mode` selects a compatibility mode. Each mode needs the descriptor capability of the same name; otherwise launch refuses with `mode <mode> unsupported by <name>`.
 
 | Mode | Capability | Runtimes | Behavior |
 |---|---|---|---|
 | `Turn` (default) | `turn` | all | One CLI turn, as in the sections above. |
 | `Background` | `background` | Claude | `--bg` launch; `Launch.input` is the caller's protected file reference. `poll` discovers the job from the launcher's job ID (or, on resume, the session), then binds the native transcript `<home>/projects/<canonical root, each non-alphanumeric character as ->/<session>.jsonl`. `cancel` sends the stop request for the verified job. |
+| `AppServer { initialize, thread }` | `app-server` | Codex | `launch`/`resume` start `app-server`, exchange `initialize`/`initialized` and open the thread with the caller's `thread` parameters plus the mapped policy (`write` as `sandbox`, `bypass` with write `any` as `approvalPolicy: never`) and `model`; non-empty `Launch.input` starts the first turn. `input` starts the next turn. `send` carries a reply to a server request (dynamic tools, approvals) or a `model/list` / `account/rateLimits/read` read. `progress` returns every native message unchanged, drafts and server requests included. `cancel` interrupts the active turn, else stops the server. `transcript` returns cause `no-transcript` (`Launch.log` holds stderr only). Recovery rebuilds observation only. |
 | `Queue { transcript }` | `app-queue` | Codex | `resume` only: queues `Launch.input` (a reference) into the desktop thread and observes `transcript`. `cancel` returns cause `cancel-unsupported`: desktop cancellation stays a caller UI operation. |
 
 In both modes `launch` returns an error only before submission. A launcher or queue response that fails after submission keeps the `Run`; its state reads `unknown` until native evidence arrives, and nothing resubmits. `checkpoint(run)` returns the private recovery value (cause `no-checkpoint` for a CLI turn); `recover(saved, &Launch)` rebuilds the run from it and the same launch fields, without a native call. `session_url` returns the observed Remote Control URL or a cause. `progress` and `transcript` read the native transcript. `Launch.title` maps to Claude `--name <t> --remote-control <t>` and Antigravity `--title=<t>`; Codex refuses it. `Launch.deadline` stops a CLI turn at that instant; the run then reads `cancelled` with error `timeout`. A cancelled CLI turn reads `cancelled` with error `interrupted`.
 
-App-server and protected launches stay on the public `AppSession`, `AppServer` and `ProtectedAppServer`, with the `Client` and `Spec` they take, until they become the `app-server` mode; new callers use the trait. These modes never switch Claude to `-p` or replace an app session with `exec`.
+`ProtectedAppServer::open(session, &Launch)` opens a verified protected frontend as the same `AppServer` mode run; every write repeats the host authority check. These modes never switch Claude to `-p` or replace an app session with `exec`.
 
 - `background_command` passes `--bg <caller args>` on start and only `--bg --resume <session>` on resume. Start arguments include the caller's settings, name, Remote Control name and permission mode in their original order. The native client assigns the start's session and job IDs. Input is the caller's file reference, not private task text: Claude forwards it to child argv. The caller durably binds and retains that input before submission.
 - `background_launch` uses bounded stdin exchange and returns launcher output or failure without interpreting either as completed work. A timeout, lost reply or malformed reply is uncertain; retain the original input and recover without resubmitting. `background_jobs` uses `agents --json --all --cwd <root>` in the same account. `BackgroundJob::read` verifies exact canonical root, job and session; readiness means a known native state, not accepted input or completion. Remote Control identity comes only from that session's native `bridge_status` URL.
@@ -170,7 +172,7 @@ Fake clients verify these boundaries on Linux, macOS and Windows. Native consume
 
 ## Protected app-server
 
-M12.8 adds `agent::ProtectedHost`, `ProtectedIdentity` and `ProtectedAppServer` alongside the unchanged `AppServer` API. There is no TaskQ Rust dependency or mandatory service for ordinary turns. The optional TaskQ adapter uses the existing operator grant resolver, protected process boundary and external slot protocol; the runtime owns neither grants nor slot admission/release.
+M12.8 adds `agent::ProtectedHost`, `ProtectedIdentity` and `ProtectedAppServer`; `ProtectedAppServer::open` turns a verified frontend into an app-server `Run`. There is no TaskQ Rust dependency or mandatory service for ordinary turns. The optional TaskQ adapter uses the existing operator grant resolver, protected process boundary and external slot protocol; the runtime owns neither grants nor slot admission/release.
 
 The caller selects an immutable, reviewed host executable by canonical path and SHA-256, outside task/environment/receipt inputs. `ProtectedHost::new` checks that artifact (the constructor names no product; the host wire schema stays `taskq.app-server/1`) before every invocation. This is a trust anchor supplied by the operator, not proof that arbitrary caller-selected code is a host authority. It does not defend against an unrestricted same-user operator replacing the trusted executable between verification and execution.
 
@@ -182,7 +184,7 @@ In `taskq.app-server/1` readback, `launch.authority.resolved` carries the host r
 
 Unknown, failed or mismatched readback refuses sending and retains the original binding; `verify` may reconcile that same binding without resubmission. A fully validated readback with a changed binding (authority, native/supervisor incarnation, profile or host generation), or an uncertain write, permanently fences the handle. `ProtectedHost::observe` and `cancel` support recovery of the original operation without launching again. Cancellation uses the host's exact-child authority and never releases a slot or proves descendants/turn completion. Dropping a handle, EOF, a timeout or supervisor exit leaves work uncertain; callers retain ownership and reconcile before the original whole-turn slot release.
 
-Native stdio uses the existing bounded transport. `AppSession` still owns thread/turn correlation, interruption, checkpoints and its one idempotent `agent.turn` observation. Server requests and native account/model/permission parameters remain caller-owned. The adapter preserves the host's model/account and approved outer boundary; caller protocol parameters cannot widen it. Optimization intent travels only as child `AGENTQ_OPTIMIZATION`; the host prepares native `off` env/header and launcher marking. `optimization` reports configuration, never actual compression or enforcement.
+Native stdio uses the existing bounded transport. The run's private `AppSession` still owns thread/turn correlation, interruption, checkpoints and its one idempotent `agent.turn` observation. Server requests and native account/model/permission parameters remain caller-owned. The adapter preserves the host's model/account and approved outer boundary; caller protocol parameters cannot widen it. Optimization intent travels only as child `AGENTQ_OPTIMIZATION`; the host prepares native `off` env/header and launcher marking. `optimization` reports configuration, never actual compression or enforcement.
 
 The supported host protocol/source pin and consumer sequence are in [the protected consumer recipe](../evidence/runtime-186.md); [receipt wire correction evidence](../evidence/runtime-193.md) supplies the corrected runtime revision. Its current adapter supports existing explicit Mac Codex Workspace grants only; there is no Full fallback, new grant or Windows containment enablement. Portable fake-adapter checks prove the runtime gate and compatibility, not Mac containment. Live Mac image/sandbox/stdio, filesystem/network/child and outside write/delete/rename/control-store probes remain a separate native qualification gate. Do not replay the retained AssetQ crate.
 
@@ -204,13 +206,13 @@ The additive TaskQ prerequisite and launchd optimization-intent correction are p
 
 `agent::history` is the shared read-only observation API for TaskQ and other callers.
 It does not submit input, change sessions, grant authority or migrate live workers.
-Existing `Turn`, `NativeTurn` and `AppSession` remain the execution and receipt APIs.
+`Runtime` runs (with their private `Turn`, `NativeTurn` and `AppSession`) remain the execution and receipt APIs.
 
 ### Required functions and ownership
 
 | Function | Runtime boundary and receipt |
 |---|---|
-| Launch, resume, session ID | `command`/`Turn`; native session receipt, never a generated ID treated as acceptance |
+| Launch, resume, session ID | `Runtime::launch`/`resume`; native session receipt, never a generated ID treated as acceptance |
 | Input, files, images | Caller retains input and file/image references; CLI passes caller arguments; app-server passes typed input unchanged |
 | Ask, reply, result | Native tool/request records are observations; app-server caller replies with original request ID; CLI has no added interactive reply channel |
 | Tools and outputs | History blocks retain native calls/results and IDs; dynamic tools remain app-server caller-owned |
@@ -343,7 +345,7 @@ The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `start
 
 ## Optimization intent
 
-`optimization::prepare(intent, product, spec, install)` resolves the effective state and adapts the child; `observe` resolves only. Both read and never write. The JSON command selects `optimization::install_root()` (agentq.md § 5 layout); library callers pass an installation or `None` for no installation; the client home is `Spec::home`, else the last child `env` home override, else the client's own home. An inherited `AGENTQ_OPTIMIZATION=off` is observed as `off` and carried into every Codex launch mode.
+`optimization::prepare(intent, product, spec, install)` resolves the effective state and adapts the child; `observe` resolves only. Both read and never write. The JSON command selects `optimization::install_root()` (agentq.md § 5 layout); library callers pass an installation or `None` for no installation; the client home is the account home, else the last child `env` home override, else the client's own home. An inherited `AGENTQ_OPTIMIZATION=off` is observed as `off` and carried into every Codex launch mode.
 
 | Order | Condition | Effective | Reason |
 |---|---|---|---|

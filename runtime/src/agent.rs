@@ -15,14 +15,13 @@ mod app;
 mod protected;
 mod adapter;
 pub use adapter::{Approval, Cause, Check, Descriptor, Launch, Mode, Network, Policy, Quota, Ready, Run, Runtime, Scope, State, runtime, runtimes};
-pub use app::{AppServer, AppSession, app_server_command};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
 type Res<T> = Result<T, String>;
 
 /// A supported client: Claude Code (`claude -p`), Codex CLI (`codex exec`), or Antigravity (`agentapi` / `agy`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Client { Claude, Codex, Antigravity }
+pub(crate) enum Client { Claude, Codex, Antigravity }
 
 impl Client {
     pub fn parse(code: &str) -> Option<Client> {
@@ -207,7 +206,7 @@ impl Accounts {
 /// The client's own home: `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `ANTIGRAVITY_HOME` (or `ANTIGRAVITY_APP_DATA_DIR`)
 /// of this process, else `~/.claude` / `~/.codex` / `~/.gemini/antigravity-cli` when present, else the legacy
 /// `~/.gemini/antigravity` (a Windows service has no `HOME`, so `USERPROFILE`).
-pub fn base_home(client: Client) -> Option<PathBuf> {
+pub(crate) fn base_home(client: Client) -> Option<PathBuf> {
     std::env::var_os(client.home_var()).filter(|v| !v.is_empty()).map(PathBuf::from)
         .or_else(|| (client == Client::Antigravity).then(|| std::env::var_os("ANTIGRAVITY_APP_DATA_DIR")).flatten().filter(|v| !v.is_empty()).map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| {
@@ -231,7 +230,7 @@ pub(crate) fn new_session(client: Client) -> String {
 
 /// One turn of one session.
 #[derive(Clone, Debug)]
-pub struct Spec {
+pub(crate) struct Spec {
     pub client: Client,
     /// The project root: working directory of the client and Codex `-C` on a new start.
     pub root: PathBuf,
@@ -943,7 +942,7 @@ pub struct Report {
 
 impl Report {
     /// Classify the turn's log text.
-    pub fn read(client: Client, text: &str, events: &[Value], rollout: Option<&Path>) -> Report {
+    pub(crate) fn read(client: Client, text: &str, events: &[Value], rollout: Option<&Path>) -> Report {
         let reached = limit_reached(events);
         let end = if client == Client::Antigravity {
             events.iter().rev().find(|v| v["event"] == "result" || matches!(v["type"].as_str(), Some("PLANNER_RESPONSE" | "TOOL_RESPONSE" | "turn.failed" | "turn.cancelled"))).filter(|v| ends(v))
@@ -967,7 +966,7 @@ impl Report {
     }
 
     /// The `agent.turn` observation: codes and numbers only; every null names its reason.
-    pub fn observation(&self, client: Client, ctx: &Context) -> Value {
+    pub(crate) fn observation(&self, client: Client, ctx: &Context) -> Value {
         let mut unknown = serde_json::Map::new();
         let mut num = |name: &str, v: Option<u64>, why: &str| -> Value {
             if v.is_none() { unknown.insert(name.into(), json!(why)); }

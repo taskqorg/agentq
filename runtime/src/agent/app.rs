@@ -5,17 +5,13 @@ use std::sync::mpsc::{self, Receiver, SyncSender, RecvTimeoutError};
 type WriteRequest=(Vec<u8>,mpsc::Sender<Res<()>>);
 
 /// Shared native stdio transport. Dropping the handle does not kill an active session; callers own its lifecycle.
-pub struct AppServer {
+pub(crate) struct AppServer {
     child:Child,
     input:SyncSender<WriteRequest>,
     events:Receiver<Res<Value>>,
 }
 
 impl AppServer {
-    pub fn start(base:Command,spec:&Spec,private_log:&Path)->Res<Self> {
-        Self::spawn(app_server_command(base,spec)?,private_log)
-    }
-
     pub(super) fn spawn(mut command:Command,private_log:&Path)->Res<Self> {
         let mut options=File::options();options.create(true).append(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
@@ -88,7 +84,7 @@ impl AppServer {
 }
 
 /// Caller-owned server transport: preserve all policy arguments and the account, without CLI `exec` flags.
-pub fn app_server_command(mut base: Command, spec: &Spec) -> Res<Command> {
+pub(crate) fn app_server_command(mut base: Command, spec: &Spec) -> Res<Command> {
     if spec.client != Client::Codex {return Err("app-server requires Codex".into());}
     base.arg("app-server").args(&spec.args);
     Ok(environment(base,spec))
@@ -96,7 +92,7 @@ pub fn app_server_command(mut base: Command, spec: &Spec) -> Res<Command> {
 
 /// One app-server session. Feed every native response/notification to `observe`; forward unhandled server requests
 /// to the caller's existing tool/approval policy. This state machine never approves a server request.
-pub struct AppSession {
+pub(crate) struct AppSession {
     spec: Spec,
     next: u64,
     pending: Option<(u64, &'static str)>,
@@ -160,7 +156,6 @@ impl AppSession {
 
     pub fn ready(&self) -> bool { self.ready && self.fault.is_none() }
     pub fn session(&self) -> Option<&str> { self.thread.as_deref() }
-    pub fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
 
     /// Save the returned state before writing this request to the transport. A lost reply remains pending.
     pub fn start_turn(&mut self, mut params: Value) -> Res<Value> {
@@ -358,5 +353,95 @@ impl AppSession {
             return Err("app-server recovery state inconsistent".into());
         }
         Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observations(store: &crate::telemetry::Store) -> Vec<Value> {
+        store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
+    }
+
+    // R47-R50: app-server protocol shares session/turn ownership while caller policy and server requests stay intact.
+    // Risk: wrong-thread completion, restored cumulative usage, policy rewriting, or recovery charges another turn.
+    #[test]
+    fn app_server_preserves_session_policy_and_counts_turns() {
+        let root=crate::scratch("app-server");
+        let mut spec=Spec {client:Client::Codex,root:root.clone(),session:"native-thread".into(),resume:true,args:vec![],home:Some(root.join("account")),env:vec![]};
+        let mut app=AppSession::new(&spec).unwrap();
+        let init=app.initialize(json!({"clientInfo":{"name":"fixtureq","version":"1"},"capabilities":{"experimentalApi":true}})).unwrap();
+        assert!(app.open(json!({})).is_err());
+        app.observe(&json!({"id":init["id"],"result":{}})).unwrap();assert_eq!(app.initialized().unwrap(),json!({"method":"initialized"}));
+        let policy=json!({"model":"fixture-model","modelProvider":"fixture-provider","effort":"high","sandbox":"read-only","approvalPolicy":"never","developerInstructions":"private rules"});
+        let open=app.open(policy.clone()).unwrap();assert_eq!(open["method"],"thread/resume");
+        for (k,v) in policy.as_object().unwrap() {assert_eq!(&open["params"][k],v);}
+        let saved=app.checkpoint();
+        assert!(AppSession::recover(&Spec {resume:false,..spec.clone()},&saved).is_err(),"recovery cannot turn resume into start");
+        app.observe(&json!({"id":open["id"],"result":{"thread":{"id":"foreign"}}})).unwrap_err();
+        assert!(!app.ready());assert!(app.report().is_none());
+        app=AppSession::recover(&spec,&saved).unwrap();
+        app.observe(&json!({"id":open["id"],"result":{"thread":{"id":"native-thread"},"model":"fixture-model"}})).unwrap();assert!(app.ready());
+        for method in ["model/list","account/rateLimits/read"] {
+            let optional=app.request(method,json!({})).unwrap();
+            app.observe(&json!({"id":optional["id"],"error":{"code":-32601,"message":"invented unsupported optional read"}})).unwrap();assert!(app.ready());
+        }
+        let request=app.start_turn(json!({"input":[{"type":"text","text":"private input"}],"model":"fixture-model","effort":"high"})).unwrap();
+        assert!(app.start_turn(json!({})).is_err(),"uncertain start is never replayed");
+        app.observe(&json!({"method":"thread/tokenUsage/updated","params":{"threadId":"native-thread","turnId":"old","tokenUsage":{"total":{"inputTokens":999},"last":{"inputTokens":999}}}})).unwrap();
+        for method in ["turn/started","turn/completed"] {
+            app.observe(&json!({"method":method,"params":{"threadId":"native-thread","turn":{"id":"unrelated","status":"completed"}}})).unwrap();
+        }
+        assert!(app.report().is_none(),"same-thread notifications cannot bind a pending turn request");
+        app.observe(&json!({"id":request["id"],"result":{"turn":{"id":"owned"}}})).unwrap();
+        let before=app.checkpoint();let mut cold=AppSession::recover(&spec,&before).unwrap();
+        for current in [&mut app,&mut cold] {
+            current.observe(&json!({"method":"turn/completed","params":{"threadId":"foreign","turn":{"id":"owned","status":"completed"}}})).unwrap();
+            assert!(current.report().is_none());
+            current.observe(&json!({"method":"item/tool/call","id":999,"params":{"tool":"caller-owned"}})).unwrap();
+            let first=json!({"method":"thread/tokenUsage/updated","params":{"threadId":"native-thread","turnId":"owned","tokenUsage":{"total":{"inputTokens":130,"cachedInputTokens":100,"outputTokens":14},"last":{"inputTokens":30,"cachedInputTokens":20,"outputTokens":4}}}});
+            current.observe(&first).unwrap();current.observe(&first).unwrap();
+            current.observe(&json!({"method":"thread/tokenUsage/updated","params":{"threadId":"native-thread","turnId":"owned","tokenUsage":{"total":{"inputTokens":145,"cachedInputTokens":110,"outputTokens":16},"last":{"inputTokens":15,"cachedInputTokens":10,"outputTokens":2}}}})).unwrap();
+            current.observe(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":25,"resetsAt":1793700000u64,"windowDurationMins":300}}}})).unwrap();
+            current.observe(&json!({"method":"item/completed","params":{"threadId":"native-thread","turnId":"owned","item":{"type":"agentMessage","text":"private answer"}}})).unwrap();
+            current.observe(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"owned","status":"completed"}}})).unwrap();
+        }
+        let report=app.report().unwrap(); assert_eq!(report.usage.input,Some(15)); assert_eq!(report.usage.output,Some(6));assert_eq!(report.text.as_deref(),Some("private answer"));
+        assert_eq!(report.limit.used_percent,Some(25));
+        let ctx=Context {product:"fixtureq",version:"1.0.0",project:"other",task:None,route:Some("manager"),account:"work"};
+        let store=crate::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
+        app.record(&ctx,&store).unwrap().unwrap().recorded.unwrap(); cold.record(&ctx,&store).unwrap().unwrap().recorded.unwrap();
+        app.observe(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":99}}}})).unwrap();
+        app.record(&ctx,&store).unwrap().unwrap().recorded.unwrap();
+        assert_eq!(observations(&store).len(),1);
+        let mut conflict=AppSession::recover(&spec,&app.checkpoint()).unwrap();
+        assert!(conflict.observe(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"owned","status":"interrupted"}}})).is_err());
+        assert!(conflict.report().is_none());assert!(conflict.record(&ctx,&store).unwrap().is_none());
+        assert!(AppSession::recover(&spec,&conflict.checkpoint()).unwrap().report().is_none(),"conflict survives recovery");
+        app.finish_turn().unwrap();let next=app.start_turn(json!({"input":[],"model":"another-model"})).unwrap();
+        app.observe(&json!({"id":next["id"],"result":{"turn":{"id":"second"}}})).unwrap();
+        let stop=app.interrupt().unwrap();assert_eq!(stop["params"],json!({"threadId":"native-thread","turnId":"second"}));
+        assert!(app.report().is_none(),"interrupt request does not prove terminal");
+        app.observe(&json!({"id":stop["id"],"result":{}})).unwrap();
+        app.observe(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":[]}})).unwrap();
+        app.observe(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"second","status":"interrupted"}}})).unwrap();
+        assert_eq!(app.report().unwrap().outcome,"cancelled");
+        assert_eq!(app.report().unwrap().usage.model,None,"an override invalidates previous model attribution");
+        for phase in [None,Some("item/started"),Some("item/completed")] {
+            let worked=phase.is_some();
+            app.finish_turn().unwrap();let req=app.start_turn(json!({"input":[]})).unwrap();
+            let id=if worked {"limit-after-work"} else {"limit-before-work"};
+            app.observe(&json!({"id":req["id"],"result":{"turn":{"id":id}}})).unwrap();
+            if let Some(phase)=phase {app.observe(&json!({"method":phase,"params":{"threadId":"native-thread","turnId":id,"item":{"type":"commandExecution"}}})).unwrap();}
+            app.observe(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":id,"status":"failed","error":{"message":"usage limit reached","resetsAt":1793700000u64}}}})).unwrap();
+            let report=app.report().unwrap();
+            if worked {assert_eq!(report.reached,None);assert_eq!(report.outcome,"failed");}
+            else {assert_eq!(report.reached,Some(Some(1793700000)));assert_eq!(report.outcome,"refused");}
+        }
+        spec.resume=false;spec.session="-".into();let mut new=AppSession::new(&spec).unwrap();
+        let req=new.initialize(json!({})).unwrap();new.observe(&json!({"id":req["id"],"result":{}})).unwrap();
+        assert_eq!(new.open(json!({"dynamicTools":[{"name":"caller-tool"}]})).unwrap()["method"],"thread/start");
+        drop(store);std::fs::remove_dir_all(root).unwrap();
     }
 }
