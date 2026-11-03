@@ -14,7 +14,7 @@ mod native;
 mod app;
 mod protected;
 mod adapter;
-pub use adapter::{Approval, Cause, Check, Descriptor, Launch, Mode, Network, Policy, Quota, Ready, Run, Runtime, Scope, State, runtime, runtimes};
+pub use adapter::{Approval, Cause, Check, Descriptor, Launch, Mode, Network, Observation, Policy, Quota, Ready, Run, Runtime, Scope, State, runtime, runtimes};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
 type Res<T> = Result<T, String>;

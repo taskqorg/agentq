@@ -362,6 +362,18 @@ fn background_commands_preserve_native_mode() {
     assert_eq!(record["inherited"],false); assert_eq!(record["extra"],"preserved");
     assert_eq!(claude.checkpoint(&run).unwrap()["job"], "c37eb75a", "the launcher names the job");
     claude.poll(&mut run).unwrap();
+    // #213 A2/A3: a background run names the Claude log cause, and its recovered run reads the job's URL without a launch.
+    let seen = claude.observe(&mut run);
+    assert_eq!((seen.session.as_deref(), seen.cause, seen.url), (Some("native-session"), Some(agent::Cause("unlogged")), None));
+    std::fs::create_dir_all(account.join("debug")).unwrap();
+    std::fs::write(account.join("debug/native-session.txt"), "[bridge:repl] Init failed: Remote Control requires a claude.ai subscription.; consecutive failures: 1\n").unwrap();
+    let seen = claude.observe(&mut run);
+    assert_eq!((seen.cause, seen.detail.as_deref()), (Some(agent::Cause("disabled")), Some("Remote Control requires a claude.ai subscription.")));
+    let mut recovered = claude.recover(&claude.checkpoint(&run).unwrap(), &l).unwrap();
+    std::fs::create_dir_all(account.join("jobs/c37eb75a")).unwrap();
+    std::fs::write(account.join("jobs/c37eb75a/state.json"), json!({"bridgeSessionId":"cse_01Recovered"}).to_string()).unwrap();
+    let seen = claude.observe(&mut recovered);
+    assert_eq!((seen.url.as_deref(), seen.cause), (Some("https://claude.ai/code/session_01Recovered"), None));
     let history = claude.transcript(&run).unwrap();
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     append(&history, &[json!({"type":"system","subtype":"init","sessionId":"native-session"})]);
@@ -497,10 +509,10 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         let native = match d.name { "claude" => "bypassPermissions", "codex" => "--dangerously-bypass-approvals-and-sandbox", _ => "--dangerously-skip-permissions" };
         assert!(flags.as_array().unwrap().iter().any(|a| a == native), "{}: policy maps to {native}: {flags}", d.name);
         let session = r.session_id(&run).expect("native session named");
-        match r.session_url(&run) {
-            Err(agent::Cause(cause)) => assert_eq!(cause, if d.has("session-url") { "not-observed" } else { "no-session-url" }, "{}", d.name),
-            Ok(url) => panic!("{}: no URL was emitted, got {url}", d.name),
-        }
+        let cause = if d.has("session-url") { "not-requested" } else { "no-session-url" };
+        assert_eq!(r.session_url(&run), Err(agent::Cause(cause)), "{}", d.name);
+        let seen = r.observe(&mut run);
+        assert_eq!((seen.state, seen.error, seen.session.as_deref(), seen.url, seen.cause), (agent::State::Finished, None, Some(session.as_str()), None, Some(agent::Cause(cause))), "{}", d.name);
         assert_eq!(r.transcript(&run).unwrap(), root.join("worker.log"));
         let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: Some((210, 1)), route: None, account: "default" };
         assert_eq!(run.record(&ctx, &store).unwrap().text.as_deref(), Some("turn 1"));
