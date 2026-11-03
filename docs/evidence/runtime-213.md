@@ -60,6 +60,21 @@ Procedure: the same `AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agen
 - The test printed `live result: ok https://claude.ai/code/session_017XK7FUHRdK6oU6EkUX2Cj5`.
 - No macOS defect was found: the launcher-line job parser and the project folder name from task 216 hold on macOS.
 
+## Native macOS proof from `.claude/worktrees` (task 222)
+
+Source: [task 222](https://github.com/taskqorg/agentq/issues/222), A2. Host: native macOS (arm64), Claude Code 2.1.316, candidate `a1c9ade8b2d6dcdd1b378b16f55c9956fdfb33c5` checked out as a detached Git worktree at `.claude/worktrees/taskq-222-live`. This is a live client run, separate from the fake-client check `background_job_found_when_cwd_listing_misses_it`.
+
+Defect before the fix: `claude agents --json --all --cwd <root>` lists `[]` for a root under `.claude/worktrees`, so discovery found no job. The fix retries the unfiltered `claude agents --json --all` listing; `BackgroundJob::read` still binds the exact root, job ID and session.
+
+Procedure: `AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent` from that checkout. The workspace was `benchmarks/.tmp/live-bg-2289`. No trust was granted and no working profile or client configuration changed.
+
+### Live run (job `1b6b8db9`)
+
+- The first `observe` read `Running`, session `1b6b8db9-fe63-4f11-a47c-29219a65aceb`, cause `unlogged`. The next `observe` read `Finished` with `url: https://claude.ai/code/session_017XK7FSzMw23rTJxM81hGJr`.
+- The checkpoint held `"job":"1b6b8db9"`, `"attached":true` and the transcript under `-Users-kirs-Projects-agentq--claude-worktrees-taskq-222-live-benchmarks--tmp-live-bg-2289`. The recovered run returned the same URL through `observe` with no launch. `cancel` returned `Ok(false)`.
+- The test printed `live result: ok https://claude.ai/code/session_017XK7FSzMw23rTJxM81hGJr`.
+- After the run, `claude agents --json --all --cwd <root>` still printed `[]` for this root, while the unfiltered listing held job `1b6b8db9` with that exact `cwd`. So the run attached through the fallback.
+
 ## Open
 
 - Native platform proof: macOS and Windows each have one live background run with a registered Remote Control link. No live failed or disabled registration was observed on either platform.

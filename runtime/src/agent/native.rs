@@ -24,9 +24,12 @@ pub(crate) fn background_job_id(stdout: &str) -> Option<String> {
     line.split('·').nth(1).map(str::trim).filter(|t| plain_id(t)).map(String::from)
 }
 
-pub(crate) fn background_jobs(mut base: Command, spec: &Spec, budget: Duration) -> Res<Vec<Value>> {
+/// `filtered` adds `--cwd <root>`; Claude's filter misses roots under `.claude/worktrees` (#222), so callers retry
+/// unfiltered and `BackgroundJob::read` still binds the exact root.
+pub(crate) fn background_jobs(mut base: Command, spec: &Spec, filtered: bool, budget: Duration) -> Res<Vec<Value>> {
     if spec.client != Client::Claude { return Err("background requires Claude".into()); }
-    base.args(["agents", "--json", "--all", "--cwd"]).arg(&spec.root);
+    base.args(["agents", "--json", "--all"]);
+    if filtered { base.arg("--cwd").arg(&spec.root); }
     let output = crate::process::output("agent.background-jobs", &mut environment(base, spec), budget).map_err(|e| e.to_string())?;
     serde_json::from_slice::<Vec<Value>>(&output.stdout).map_err(|e| format!("background jobs invalid: {e}"))
 }
