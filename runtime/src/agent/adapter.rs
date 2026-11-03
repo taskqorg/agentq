@@ -228,6 +228,7 @@ impl Transport {
     fn send(&mut self, m: &Value, until: Instant) -> Res<()> { match self { Transport::Plain(s) => s.send(m, until), Transport::Protected(s) => s.send(m, until) } }
     fn receive(&mut self, until: Instant) -> Res<Option<Value>> { match self { Transport::Plain(s) => s.receive(until), Transport::Protected(s) => s.receive(until) } }
     fn id(&self) -> u32 { match self { Transport::Plain(s) => s.id(), Transport::Protected(s) => s.id() } }
+    fn exit(&mut self) -> Res<Option<i32>> { match self { Transport::Plain(s) => s.poll(), Transport::Protected(s) => s.poll() } }
 }
 
 /// An app-server session: the caller drives turns with `input`, answers server requests with `send`, reads `progress`.
@@ -326,6 +327,8 @@ impl App {
     fn poll(&mut self) -> Res<State> {
         self.pump()?;
         if let Some(r) = self.session.report() { return Ok(state(&r)); }
+        // Reap an exited server; an exit without a native report never proves a turn.
+        if let Some(code) = self.transport.as_mut().map(Transport::exit).transpose()?.flatten() { self.closed.get_or_insert(format!("app-server exited {code}")); }
         Ok(if self.closed.is_some() || self.transport.is_none() { State::Unknown } else { State::Running })
     }
 }
@@ -611,7 +614,8 @@ impl Runtime for Adapter {
         let run = self.own_mut(run)?;
         let s = match &mut run.body {
             Body::Turn(t) => {
-                if run.deadline.is_some_and(|d| Instant::now() >= d) && !t.timed_out && t.exit.is_none() {
+                // An agentapi submitter exits after its receipt while the turn continues, so the deadline applies after exit too.
+                if run.deadline.is_some_and(|d| Instant::now() >= d) && !t.timed_out {
                     t.timed_out = true;
                     let _ = t.kill();
                 }

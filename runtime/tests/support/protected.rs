@@ -319,7 +319,7 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     assert!(codex.input(&mut run,"next").is_err());save(&path,&good);assert!(codex.input(&mut run,"next").is_err());
     assert_eq!(host.observe(&r,until()).unwrap(),good,"recovery observes same operation without relaunch");
     assert!(!codex.cancel(&mut run).unwrap(),"a host cancel never proves exit");let deadline=until();
-    while matches!(coreq::process::identity(frontend),Ok(Some(_))) {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
+    while matches!(coreq::process::identity(frontend),Ok(Some(_))) {codex.poll(&mut run).unwrap();assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     assert_eq!(codex.poll(&mut run).unwrap(),agent::State::Unknown,"a fenced input and EOF never prove a turn or release a slot");
     drop(run);std::fs::remove_dir_all(root).unwrap();
 }
