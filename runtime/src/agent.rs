@@ -14,7 +14,7 @@ mod native;
 mod app;
 mod protected;
 mod adapter;
-pub use adapter::{Account, Approval, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, Network, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{Account, Approval, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
 type Res<T> = Result<T, String>;
@@ -717,11 +717,13 @@ impl Turn {
     }
 }
 
-fn read_from(log: &Path, pos: u64) -> Option<String> {
-    let mut f = File::open(log).ok()?;
+fn read_from(log: &Path, pos: u64) -> Option<String> { read_log(log, pos).ok() }
+
+fn read_log(log: &Path, pos: u64) -> std::io::Result<String> {
+    let mut f = File::open(log)?;
     let mut b = vec![];
-    f.seek(SeekFrom::Start(pos)).and_then(|_| f.read_to_end(&mut b)).ok()?;
-    Some(String::from_utf8_lossy(&b).into_owned())
+    f.seek(SeekFrom::Start(pos)).and_then(|_| f.read_to_end(&mut b))?;
+    Ok(String::from_utf8_lossy(&b).into_owned())
 }
 
 /// A turn-end event: Claude `result`, Codex `turn.completed` or `turn.failed`, Antigravity terminal `PLANNER_RESPONSE` or `turn.cancelled`.

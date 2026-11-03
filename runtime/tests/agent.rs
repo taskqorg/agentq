@@ -17,6 +17,7 @@ fn main() {
     if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
     if std::env::args().nth(1).as_deref()==Some("service") { return protected::fake_host(); }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
+    if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
         ("antigravity_wrapped_submission_keeps_prompt_and_tail", antigravity_wrapped_submission_keeps_prompt_and_tail),
         ("antigravity_native_submission_tails_and_resumes", antigravity_native_submission_tails_and_resumes),
@@ -72,7 +73,9 @@ fn fake(client: &str) {
         assert_eq!(args.first().map(String::as_str), Some("--bg"), "background worker must not switch to -p");
         std::fs::write("background-command.json", json!({"args":args,"input":input,"home":std::env::var("CLAUDE_CONFIG_DIR").ok(),
             "inherited":std::env::var("CLAUDE_CODE_SESSION_ID").is_ok(),"extra":std::env::var("FAKE_EXTRA").ok()}).to_string()).unwrap();
-        println!("backgrounded · c37eb75a");
+        // Claude Code 2.1.317 launcher output: the job ID is not the last token (#216).
+        let name = args.iter().position(|a| a == "--name").and_then(|i| args.get(i + 1)).map(|n| format!(" · {n}")).unwrap_or_default();
+        println!("backgrounded · c37eb75a{name}\n  claude agents             list sessions\n  claude stop c37eb75a      stop this session\n");
         return;
     }
     let store = PathBuf::from("fake-sessions.json");
@@ -430,6 +433,18 @@ fn background_commands_preserve_native_mode() {
     assert_eq!(record["inherited"],false); assert_eq!(record["extra"],"preserved");
     assert_eq!(claude.checkpoint(&run).unwrap()["job"], "c37eb75a", "the launcher names the job");
     claude.poll(&mut run).unwrap();
+    // #213 A2/A3: a background run names the Claude log cause, and its recovered run reads the job's URL without a launch.
+    let seen = claude.observe(&mut run);
+    assert_eq!((seen.session.as_deref(), seen.cause, seen.url), (Some("native-session"), Some(agent::Cause("unlogged")), None));
+    std::fs::create_dir_all(account.join("debug")).unwrap();
+    std::fs::write(account.join("debug/native-session.txt"), "[bridge:repl] Init failed: Remote Control requires a claude.ai subscription.; consecutive failures: 1\n").unwrap();
+    let seen = claude.observe(&mut run);
+    assert_eq!((seen.cause, seen.detail.as_deref()), (Some(agent::Cause("disabled")), Some("Remote Control requires a claude.ai subscription.")));
+    let mut recovered = claude.recover(&claude.checkpoint(&run).unwrap(), &l).unwrap();
+    std::fs::create_dir_all(account.join("jobs/c37eb75a")).unwrap();
+    std::fs::write(account.join("jobs/c37eb75a/state.json"), json!({"bridgeSessionId":"cse_01Recovered"}).to_string()).unwrap();
+    let seen = claude.observe(&mut recovered);
+    assert_eq!((seen.url.as_deref(), seen.cause), (Some("https://claude.ai/code/session_01Recovered"), None));
     let history = claude.transcript(&run).unwrap();
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     append(&history, &[json!({"type":"system","subtype":"init","sessionId":"native-session"})]);
@@ -438,6 +453,41 @@ fn background_commands_preserve_native_mode() {
     assert_eq!(record["args"],json!(["--bg","--resume","native-session"]));
     assert_eq!(agent::runtime("codex").unwrap().launch(&l).err().as_deref(), Some("mode background unsupported by codex"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// #213 A3 / #216 native proof, not CI: launches one real Claude background job with Remote Control through the trait, reads
+// its URL through `observe`, then rebuilds the run from its checkpoint and reads the same URL without a launch.
+// Run: AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent
+fn live_claude_background_link() {
+    let claude = agent::runtime("claude").unwrap();
+    println!("claude version: {:?}", claude.ready(None).version);
+    // A trusted project folder: Claude refuses `--bg` in an untrusted workspace, and accepting trust edits client configuration.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("benchmarks").join(".tmp").join(format!("live-bg-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut l = agent::Launch::new(&root, root.join("caller.log"), "Reply with the single word OK and stop.", "agentq-live");
+    l.mode = agent::Mode::Background;
+    l.title = Some("agentq live 216 remote control".into());
+    l.model = Some("haiku".into());
+    let mut run = claude.launch(&l).unwrap();
+    let until = Instant::now() + Duration::from_secs(180);
+    let seen = loop {
+        let seen = claude.observe(&mut run);
+        println!("observe: {seen:?}");
+        if seen.url.is_some() || Instant::now() >= until { break seen; }
+        std::thread::sleep(Duration::from_secs(5));
+    };
+    let saved = claude.checkpoint(&run).unwrap();
+    println!("checkpoint: {saved}");
+    drop(run);
+    let mut recovered = claude.recover(&saved, &l).unwrap();
+    let again = claude.observe(&mut recovered);
+    println!("recovered observe: {again:?}");
+    let stopped = claude.cancel(&mut recovered);
+    println!("stop: {stopped:?}");
+    let url = seen.url.expect("a live Remote Control background job names its URL");
+    assert!(url.starts_with("https://claude.ai/code/session_"), "{url}");
+    assert_eq!(again.url.as_deref(), Some(url.as_str()), "the recovered run reads the same URL without a launch");
+    println!("live result: ok {url}");
 }
 
 // ---------- tests ----------
@@ -565,10 +615,10 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         let native = match d.name { "claude" => "bypassPermissions", "codex" => "--dangerously-bypass-approvals-and-sandbox", _ => "--dangerously-skip-permissions" };
         assert!(flags.as_array().unwrap().iter().any(|a| a == native), "{}: policy maps to {native}: {flags}", d.name);
         let session = r.session_id(&run).expect("native session named");
-        match r.session_url(&run) {
-            Err(agent::Cause(cause)) => assert_eq!(cause, if d.has("session-url") { "not-observed" } else { "no-session-url" }, "{}", d.name),
-            Ok(url) => panic!("{}: no URL was emitted, got {url}", d.name),
-        }
+        let cause = if d.has("session-url") { "not-requested" } else { "no-session-url" };
+        assert_eq!(r.session_url(&run), Err(agent::Cause(cause)), "{}", d.name);
+        let seen = r.observe(&mut run);
+        assert_eq!((seen.state, seen.error, seen.session.as_deref(), seen.url, seen.cause), (agent::State::Finished, None, Some(session.as_str()), None, Some(agent::Cause(cause))), "{}", d.name);
         assert_eq!(r.transcript(&run).unwrap(), root.join("worker.log"));
         let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: Some((210, 1)), route: None, account: "default" };
         assert_eq!(run.record(&ctx, &store).unwrap().text.as_deref(), Some("turn 1"));
@@ -577,6 +627,18 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         while r.poll(&mut next).unwrap() == agent::State::Running { std::thread::sleep(Duration::from_millis(20)); }
         let second = r.report(&next).unwrap();
         assert_eq!((second.outcome, second.text.as_deref(), second.session.as_deref()), ("ok", Some("turn 2"), Some(session.as_str())), "{}", d.name);
+        if d.has("session-url") {
+            // #213 A2 review: a finished transcript replaced by a directory reads `evidence-unreadable` with its error, never `session-unknown`.
+            let log = r.transcript(&next).unwrap();
+            let kept = root.join("worker.log.kept");
+            std::fs::rename(&log, &kept).unwrap();
+            std::fs::create_dir(&log).unwrap();
+            let seen = r.observe(&mut next);
+            assert_eq!(seen.cause, Some(agent::Cause("evidence-unreadable")), "{}: {seen:?}", d.name);
+            assert!(seen.detail.as_deref().is_some_and(|t| t.starts_with("transcript: ")), "{}: {seen:?}", d.name);
+            std::fs::remove_dir(&log).unwrap();
+            std::fs::rename(&kept, &log).unwrap();
+        }
         // #217 A1: a one-process CLI run refuses further input before any native write; images need capability `image-input`.
         let refused = |c: &'static str| Err(agent::Failure::Refused(agent::Cause(c)));
         assert_eq!(r.input(&mut next, &[agent::Part::Text("more".into())]), refused("input-unsupported"), "{}", d.name);

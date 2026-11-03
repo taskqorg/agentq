@@ -183,6 +183,20 @@ pub struct Account { pub login: Login, pub plan: Option<String> }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State { Running, Finished, Failed, Unknown }
 
+/// One runtime-neutral observation of a run (RUNTIME.md Session observation).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Observation {
+    pub state: State,
+    /// Why `state` reads `unknown` when the poll failed.
+    pub error: Option<String>,
+    pub session: Option<String>,
+    /// The session URL, else `cause` names its absence.
+    pub url: Option<String>,
+    pub cause: Option<Cause>,
+    /// Native evidence text behind `cause`, such as Claude's logged registration error.
+    pub detail: Option<String>,
+}
+
 impl State {
     pub fn code(self) -> &'static str {
         match self { State::Running => "running", State::Finished => "finished", State::Failed => "failed", State::Unknown => "unknown" }
@@ -213,6 +227,8 @@ pub struct Run {
     live: Option<Live>,
     recorded: bool,
     deadline: Option<Instant>,
+    /// The launch requested Claude Remote Control (`title`).
+    remote: bool,
 }
 
 enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>) }
@@ -274,8 +290,14 @@ fn base(command: &[OsString], client: Client) -> Res<Command> {
 /// Claude's native transcript of `session`: `<home>/projects/<root, each non-alphanumeric character as ->/<session>.jsonl`.
 fn claude_transcript(spec: &Spec, session: &str) -> Res<PathBuf> {
     let root = spec.root.canonicalize().map_err(|e| format!("project root: {e}"))?;
-    let dir: String = root.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    Ok(spec_home(spec).ok_or("no client home")?.join("projects").join(dir).join(format!("{session}.jsonl")))
+    Ok(spec_home(spec).ok_or("no client home")?.join("projects").join(project_dir(&root.to_string_lossy())).join(format!("{session}.jsonl")))
+}
+
+/// Claude's project folder name for a canonical root. Windows canonical paths are verbatim (`\\?\C:\…`); Claude names the
+/// folder from the plain path (`C--…`).
+fn project_dir(root: &str) -> String {
+    let plain = root.strip_prefix(r"\\?\UNC\").map(|p| format!(r"\\{p}")).or_else(|| root.strip_prefix(r"\\?\").map(String::from));
+    plain.as_deref().unwrap_or(root).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 /// The verified background job: the launcher's job ID, else on resume the job of the same session.
@@ -485,6 +507,8 @@ pub trait Runtime: Send + Sync {
     fn progress(&self, run: &mut Run) -> Res<Vec<Value>>;
     fn session_id(&self, run: &Run) -> Option<String>;
     fn session_url(&self, run: &Run) -> Result<String, Cause>;
+    /// Poll, then the native session and session URL or its absence cause, in one record.
+    fn observe(&self, run: &mut Run) -> Observation;
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause>;
     fn ready(&self, home: Option<&Path>) -> Ready;
     fn quota(&self, accounts: &Accounts, now: i64) -> Quota;
@@ -614,6 +638,26 @@ fn lines_from(log: &Path, from: u64) -> Res<(Vec<Value>, u64)> {
 }
 
 impl Adapter {
+    fn link(&self, run: &Run) -> Result<String, native::Absence> {
+        let none = |c| Err((Cause(c), None));
+        let Ok(run) = self.own(run) else { return none("foreign-run") };
+        if !self.descriptor.has("session-url") { return none("no-session-url"); }
+        // An unreadable transcript names its error rather than reading as an unknown session (P2).
+        let text = match &run.body {
+            Body::Turn(t) => read_log(&t.log, t.start).map_err(|e| (Cause("evidence-unreadable"), Some(format!("transcript: {e}"))))?,
+            _ => String::new(),
+        };
+        let Some(session) = self.session_id(run) else { return none("session-unknown") };
+        let bridge = |v: &Value| (v["subtype"] == "bridge_status").then(|| v["url"].as_str().filter(|u| native::remote_url(u)).map(String::from)).flatten();
+        let (home, job, seen) = match &run.body {
+            Body::Turn(t) => (t.home.clone(), None, text.lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| bridge(&v)).next_back()),
+            Body::Native(n) => (spec_home(&n.spec), n.job.as_ref().map(|j| j.id.clone()).or_else(|| n.job_id.clone()), n.turn.remote_url().map(String::from)),
+            Body::App(_) => return none("no-session-url"),
+        };
+        native::claude_link(home.as_deref(), &session, job.as_deref(), run.remote, seen)
+    }
+
     fn own<'r>(&self, run: &'r Run) -> Res<&'r Run> {
         if run.runtime != self.descriptor.name { return Err(format!("run belongs to {}, not {}", run.runtime, self.descriptor.name)); }
         Ok(run)
@@ -635,7 +679,8 @@ impl Adapter {
 
     fn run(&'static self, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
         self.live.fetch_add(1, Ordering::SeqCst);
-        Run { runtime: self.descriptor.name, body, progress, optimization, live: Some(Live(&self.live)), recorded: false, deadline: l.deadline }
+        Run { runtime: self.descriptor.name, body, progress, optimization, live: Some(Live(&self.live)), recorded: false, deadline: l.deadline,
+            remote: l.title.is_some() }
     }
 
     fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {
@@ -662,7 +707,7 @@ impl Adapter {
                 // A new job's transcript is unknown until discovery; the alias path does not exist.
                 let turn = NativeTurn::before(&spec, &claude_transcript(&spec, &spec.session)?, &l.input)?;
                 let (job_id, fault) = match native::background_launch(command, &spec, &l.input, Duration::from_secs(30))? {
-                    Ok(o) if o.status.success() => (String::from_utf8_lossy(&o.stdout).split_whitespace().next_back().filter(|t| native::plain_id(t)).map(String::from), None),
+                    Ok(o) if o.status.success() => (native::background_job_id(&String::from_utf8_lossy(&o.stdout)), None),
                     Ok(o) => (None, uncertain("background launcher", &format!("exit {:?}", o.status.code()))),
                     Err(e) => (None, uncertain("background launcher", &e.class())),
                 };
@@ -809,19 +854,12 @@ impl Runtime for Adapter {
         }
     }
 
-    fn session_url(&self, run: &Run) -> Result<String, Cause> {
-        self.own(run).map_err(|_| Cause("foreign-run"))?;
-        if !self.descriptor.has("session-url") { return Err(Cause("no-session-url")); }
-        if self.session_id(run).is_none() { return Err(Cause("session-unknown")); }
-        match &run.body {
-            Body::Turn(t) => {
-                let text = read_from(&t.log, t.start).unwrap_or_default();
-                text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["subtype"] == "bridge_status")
-                    .filter_map(|v| v["url"].as_str().filter(|u| native::remote_url(u)).map(String::from)).next_back().ok_or(Cause("not-observed"))
-            }
-            Body::Native(n) => n.turn.remote_url().map(String::from).ok_or(Cause("not-observed")),
-            Body::App(_) => Err(Cause("no-session-url")),
-        }
+    fn session_url(&self, run: &Run) -> Result<String, Cause> { self.link(run).map_err(|(cause, _)| cause) }
+
+    fn observe(&self, run: &mut Run) -> Observation {
+        let (state, error) = match self.poll(run) { Ok(s) => (s, None), Err(e) => (State::Unknown, Some(e)) };
+        let (url, cause, detail) = match self.link(run) { Ok(u) => (Some(u), None, None), Err((c, d)) => (None, Some(c), d) };
+        Observation { state, error, session: self.session_id(run), url, cause, detail }
     }
 
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause> {
@@ -948,6 +986,15 @@ mod tests {
 
     fn args(name: &str, l: &Launch) -> Res<Vec<String>> {
         mapped(Client::parse(name).unwrap(), name, l).map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect())
+    }
+
+    // #216 A2: native Windows layout seen on Claude Code 2.1.317. Risk: a verbatim canonical root (`\\?\C:\…`) names a
+    // project folder (`----C--…`) Claude never writes, so a background run never attaches and never reads its URL.
+    #[test]
+    fn claude_project_dir_uses_the_plain_path() {
+        assert_eq!(project_dir(r"\\?\C:\Users\a\agentq\.tmp\x"), "C--Users-a-agentq--tmp-x");
+        assert_eq!(project_dir(r"\\?\UNC\srv\share\p"), "--srv-share-p");
+        assert_eq!(project_dir("/Users/a/agentq"), "-Users-a-agentq");
     }
 
     // #210 A1/A4: the abstract policy maps to each runtime's native flags in the caller-argument position, and a part a

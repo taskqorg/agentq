@@ -20,7 +20,8 @@ Each adapter implements every operation. The sections below remain the binding d
 | `report(run)` | The `Report` of a finished run; a running one returns cause `running`. |
 | `progress(run)` | Complete native JSON records appended to the run's log since the previous call, as raw values, each read at most once. |
 | `session_id(run)` | The native session once named, else none. |
-| `session_url(run)` | Claude: the native Remote Control `https://claude.ai/code/session_*` URL when one was observed, else cause `not-observed`. Codex and Antigravity: cause `no-session-url`. No session yet: cause `session-unknown`. |
+| `session_url(run)` | The URL or cause of `observe` (Session observation), without polling. |
+| `observe(run)` | One runtime-neutral `Observation`: `poll` state (a failed poll reads `unknown` with its error), native session, and session URL or absence cause with its native detail (Session observation). |
 | `transcript(run)` | The caller log the run appends to. |
 | `ready(home)` | `install` (CLI resolves), `version` (`--version` within 5 s) and `login` (native credential file in the home); each `ok`, `missing` or `unknown` with a reason. Absent credential files read `unknown`, because keychains also hold logins. |
 | `quota(&Accounts, now)` | The account a launch takes, whether every account is disabled, and the hold end when every enabled account is limited. |
@@ -36,6 +37,29 @@ Descriptor data, the only runtime metadata a caller reads:
 | `claude` | Claude Code | Anthropic | `claude` | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title` |
 | `codex` | Codex CLI | OpenAI | `gpt` | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort`, `image-input`, `account` |
 | `antigravity` | Antigravity | Google | `gemini` | `turn`, `resume`, `title` |
+
+### Session observation
+
+`observe(run)` and `session_url(run)` name the session link or exactly one cause. They read native records only; no launch, consumer log parsing or rewrite is involved, and a recovered run reads the same records.
+
+| Cause | Meaning |
+|---|---|
+| `no-session-url` | Codex, Antigravity and app-server runs have no session URL. |
+| `session-unknown` | No native session is named yet. |
+| `not-requested` | Claude: the launch had no `title`, so no `--remote-control`, and no native record shows Remote Control. |
+| `pending` | Claude: Remote Control was requested and the debug log records neither a URL nor a failure yet. |
+| `unlogged` | Claude: Remote Control was requested, no URL is recorded and no debug log exists, so registration state is unknown (P2). |
+| `disabled` | Claude: the debug log records a policy, plan or login refusal; detail holds the native text. |
+| `failed` | Claude: the debug log records another registration or connection failure; detail holds the native text. |
+| `evidence-unreadable` | Claude: a job state or debug log exists but cannot be read or parsed; detail holds the error. |
+
+Claude sources, each in the client home (`CLAUDE_CONFIG_DIR` or `~/.claude`, the same layout on macOS and Windows), latest evidence first:
+
+1. A `system` `bridge_status` record with an `https://claude.ai/code/session_*` URL in the run's log or native transcript.
+2. A background job's `jobs/<job>/state.json`: `bridgeSessionId` `cse_<id>` gives `https://claude.ai/code/session_<id>`; `respawnFlags` containing `--remote-control` marks it requested.
+3. The debug log `debug/<session>.txt` (written when Claude debug logging is on), last 16 MiB, lines whose marker follows only the logger's `<time> [<LEVEL>] ` prefix: the last of `[bridge:repl] Hook initialized, session=cse_<id>` or `Mirror initialized` (URL), `[bridge:repl] Init failed: <detail>`, `notifyBridgeFailed detail="<detail>"` and `Org policy now refuses the connected bridge` decides. A detail naming a policy, plan, subscription, login or `disabled` reads `disabled`, any other `failed`.
+
+The runtime never enables Claude debug logging; turning it on for workers is a separate launch decision with its own native qualification.
 
 ### Policy map
 
@@ -167,11 +191,11 @@ Native CLI turns keep the v0.17 arguments and behavior inside the adapters. `Cli
 | Mode | Capability | Runtimes | Behavior |
 |---|---|---|---|
 | `Turn` (default) | `turn` | all | One CLI turn, as in the sections above. |
-| `Background` | `background` | Claude | `--bg` launch; `Launch.input` is the caller's protected file reference. `poll` discovers the job from the launcher's job ID (or, on resume, the session), then binds the native transcript `<home>/projects/<canonical root, each non-alphanumeric character as ->/<session>.jsonl`. `cancel` sends the stop request for the verified job. |
+| `Background` | `background` | Claude | `--bg` launch; `Launch.input` is the caller's protected file reference. `poll` discovers the job from the launcher's job ID (first line `backgrounded · <job>`; or, on resume, the session), then binds the native transcript `<home>/projects/<canonical root without the Windows verbatim prefix, each non-alphanumeric character as ->/<session>.jsonl`. `cancel` sends the stop request for the verified job. |
 | `AppServer { initialize, thread }` | `app-server` | Codex | `launch`/`resume` start `app-server`, exchange `initialize`/`initialized` and open the thread with the caller's `thread` parameters plus the mapped policy (`write` as `sandbox`, `bypass` with write `any` and `deny` as `approvalPolicy: never`; `roots`, `unelevated` and `effort` refuse) and `model`; non-empty `Launch.input` starts the first turn. `input` starts the next turn with native `text` and `localImage` (path) items in the caller's order. `account` sends one `account/read` with `refreshToken: false` and maps `chatgpt` to `subscription` (with `planType`), `apiKey` to `api-key` and no account to `none`. `send` carries a reply to a server request (dynamic tools, approvals) or a `model/list` / `account/rateLimits/read` read. `progress` returns every native message unchanged, drafts and server requests included. `cancel` interrupts the active turn, else stops the server. `transcript` returns cause `no-transcript` (`Launch.log` holds stderr only). Recovery rebuilds observation only. |
 | `Queue { transcript }` | `app-queue` | Codex | `resume` only: queues `Launch.input` (a reference) into the desktop thread and observes `transcript`. `cancel` returns cause `cancel-unsupported`: desktop cancellation stays a caller UI operation. |
 
-In both modes `launch` returns an error only before submission. A launcher or queue response that fails after submission keeps the `Run`; its state reads `unknown` until native evidence arrives, and nothing resubmits. `checkpoint(run)` returns the private recovery value (cause `no-checkpoint` for an `agentapi` submission; CLI turns: Turn recovery and process setup); `recover(saved, &Launch)` rebuilds the run from it and the same launch fields, without a native call. `session_url` returns the observed Remote Control URL or a cause. `progress` and `transcript` read the native transcript. `Launch.title` maps to Claude `--name <t> --remote-control <t>` and Antigravity `--title=<t>`; Codex refuses it. `Launch.deadline` stops a CLI turn at that instant; the run then reads `cancelled` with error `timeout`. A cancelled CLI turn reads `cancelled` with error `interrupted`.
+In both modes `launch` returns an error only before submission. A launcher or queue response that fails after submission keeps the `Run`; its state reads `unknown` until native evidence arrives, and nothing resubmits. `checkpoint(run)` returns the private recovery value (cause `no-checkpoint` for an `agentapi` submission; CLI turns: Turn recovery and process setup); `recover(saved, &Launch)` rebuilds the run from it and the same launch fields, without a native call. `session_url` returns the observed Remote Control URL or a cause (Session observation). `progress` and `transcript` read the native transcript. `Launch.title` maps to Claude `--name <t> --remote-control <t>` and Antigravity `--title=<t>`; Codex refuses it. `Launch.deadline` stops a CLI turn at that instant; the run then reads `cancelled` with error `timeout`. A cancelled CLI turn reads `cancelled` with error `interrupted`.
 
 `ProtectedAppServer::open(session, &Launch)` opens a verified protected frontend as the same `AppServer` mode run; every write repeats the host authority check. These modes never switch Claude to `-p` or replace an app session with `exec`.
 
