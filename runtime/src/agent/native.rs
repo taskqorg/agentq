@@ -18,6 +18,12 @@ pub(crate) fn background_launch(base: Command, spec: &Spec, reference: &str, bud
     Ok(crate::process::exchange("agent.background-launch", &mut background_command(base, spec)?, reference.as_bytes(), budget))
 }
 
+/// The job ID from the launcher's first line `backgrounded · <job>[ · <name>]`; the command hints after it are not IDs.
+pub(crate) fn background_job_id(stdout: &str) -> Option<String> {
+    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
+    line.split('·').nth(1).map(str::trim).filter(|t| plain_id(t)).map(String::from)
+}
+
 pub(crate) fn background_jobs(mut base: Command, spec: &Spec, budget: Duration) -> Res<Vec<Value>> {
     if spec.client != Client::Claude { return Err("background requires Claude".into()); }
     base.args(["agents", "--json", "--all", "--cwd"]).arg(&spec.root);

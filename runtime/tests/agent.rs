@@ -17,6 +17,7 @@ fn main() {
     if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
     if std::env::args().nth(1).as_deref()==Some("service") { return protected::fake_host(); }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
+    if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
         ("antigravity_wrapped_submission_keeps_prompt_and_tail", antigravity_wrapped_submission_keeps_prompt_and_tail),
         ("antigravity_native_submission_tails_and_resumes", antigravity_native_submission_tails_and_resumes),
@@ -72,7 +73,9 @@ fn fake(client: &str) {
         assert_eq!(args.first().map(String::as_str), Some("--bg"), "background worker must not switch to -p");
         std::fs::write("background-command.json", json!({"args":args,"input":input,"home":std::env::var("CLAUDE_CONFIG_DIR").ok(),
             "inherited":std::env::var("CLAUDE_CODE_SESSION_ID").is_ok(),"extra":std::env::var("FAKE_EXTRA").ok()}).to_string()).unwrap();
-        println!("backgrounded · c37eb75a");
+        // Claude Code 2.1.317 launcher output: the job ID is not the last token (#216).
+        let name = args.iter().position(|a| a == "--name").and_then(|i| args.get(i + 1)).map(|n| format!(" · {n}")).unwrap_or_default();
+        println!("backgrounded · c37eb75a{name}\n  claude agents             list sessions\n  claude stop c37eb75a      stop this session\n");
         return;
     }
     let store = PathBuf::from("fake-sessions.json");
@@ -450,6 +453,41 @@ fn background_commands_preserve_native_mode() {
     assert_eq!(record["args"],json!(["--bg","--resume","native-session"]));
     assert_eq!(agent::runtime("codex").unwrap().launch(&l).err().as_deref(), Some("mode background unsupported by codex"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// #213 A3 / #216 native proof, not CI: launches one real Claude background job with Remote Control through the trait, reads
+// its URL through `observe`, then rebuilds the run from its checkpoint and reads the same URL without a launch.
+// Run: AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent
+fn live_claude_background_link() {
+    let claude = agent::runtime("claude").unwrap();
+    println!("claude version: {:?}", claude.ready(None).version);
+    // A trusted project folder: Claude refuses `--bg` in an untrusted workspace, and accepting trust edits client configuration.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("benchmarks").join(".tmp").join(format!("live-bg-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut l = agent::Launch::new(&root, root.join("caller.log"), "Reply with the single word OK and stop.", "agentq-live");
+    l.mode = agent::Mode::Background;
+    l.title = Some("agentq live 216 remote control".into());
+    l.model = Some("haiku".into());
+    let mut run = claude.launch(&l).unwrap();
+    let until = Instant::now() + Duration::from_secs(180);
+    let seen = loop {
+        let seen = claude.observe(&mut run);
+        println!("observe: {seen:?}");
+        if seen.url.is_some() || Instant::now() >= until { break seen; }
+        std::thread::sleep(Duration::from_secs(5));
+    };
+    let saved = claude.checkpoint(&run).unwrap();
+    println!("checkpoint: {saved}");
+    drop(run);
+    let mut recovered = claude.recover(&saved, &l).unwrap();
+    let again = claude.observe(&mut recovered);
+    println!("recovered observe: {again:?}");
+    let stopped = claude.cancel(&mut recovered);
+    println!("stop: {stopped:?}");
+    let url = seen.url.expect("a live Remote Control background job names its URL");
+    assert!(url.starts_with("https://claude.ai/code/session_"), "{url}");
+    assert_eq!(again.url.as_deref(), Some(url.as_str()), "the recovered run reads the same URL without a launch");
+    println!("live result: ok {url}");
 }
 
 // ---------- tests ----------
