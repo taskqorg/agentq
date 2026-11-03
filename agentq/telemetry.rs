@@ -96,8 +96,9 @@ pub fn emit_all(data: &Path, name: &str, stage: &str, events: Vec<(Value, u128)>
     emit_until(data, name, stage, events, None).1
 }
 
-/// `emit_all` in chunks of `EMIT_CHUNK` events, one local transaction each; after the first chunk, none starts past
-/// `deadline`. Returns how many leading events were handled and the IDs written.
+/// `emit_all` in chunks of `EMIT_CHUNK` events, one local transaction each; after the first chunk, none starts that
+/// would end past `deadline` if it took as long as the slowest chunk so far. Returns how many leading events were
+/// handled and the IDs written.
 pub fn emit_until(data: &Path, name: &str, stage: &str, events: Vec<(Value, u128)>, deadline: Option<std::time::Instant>) -> (usize, Vec<String>) {
     let (inst, host) = (installation(data), crate::host());
     let secs = |ns: u128| (ns / 1_000_000_000).min(u64::MAX as u128) as u64;
@@ -108,9 +109,11 @@ pub fn emit_until(data: &Path, name: &str, stage: &str, events: Vec<(Value, u128
     }
     // An unwritable queue still keeps the local copy; its file writes fail one by one.
     let _ = std::fs::create_dir_all(&q);
-    let (mut handled, mut written) = (0, std::collections::HashMap::new());
+    let (mut handled, mut written, mut slowest) = (0, std::collections::HashMap::new(), std::time::Duration::ZERO);
     for chunk in spans.chunks(EMIT_CHUNK) {
-        if handled > 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        let start = std::time::Instant::now();
+        // ponytail: the slowest chunk predicts the next; a single spike past it still overruns by that spike.
+        if handled > 0 && deadline.is_some_and(|d| start + slowest >= d) {
             break;
         }
         if name != "agentq.compress" {
@@ -127,6 +130,7 @@ pub fn emit_until(data: &Path, name: &str, stage: &str, events: Vec<(Value, u128
             }
         }
         handled += chunk.len();
+        slowest = slowest.max(start.elapsed());
     }
     for (_, p, _) in prune(&q, spans[..handled].iter().map(|s| secs(s.1)).max().unwrap_or(0)) {
         let id = p.file_name().and_then(|n| n.to_str()?.strip_suffix(".json")?.split_once('-').map(|x| x.1.to_string()));

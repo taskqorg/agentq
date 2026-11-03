@@ -202,11 +202,12 @@ fn mark(state: &Path, file: &Path) -> PathBuf {
     state.join(&event_id("transcript", &file.to_string_lossy())[..16])
 }
 
-/// Process `file` in batches from its saved offset to its last complete line. A batch starts only before `deadline`,
-/// or as the first batch of a pass (`progressed` false); inside a batch no event chunk but the first starts past
-/// `deadline`, so every pass makes progress, and the offset stops at the first line of the first call left. A shorter file was
-/// rewritten and reads from the start. The mark records the bytes left; returns them.
-fn drain_file(data: &Path, installation: &str, file: &Path, deadline: Instant, progressed: &mut bool) -> Result<u64, String> {
+/// Process `file` in batches from its saved offset to its last complete line. The first batch of a pass (`slowest`
+/// none) always starts; a later one starts only when the slowest batch of the pass so far would still end before
+/// `deadline`. Inside a batch event chunks follow the same rule (`emit_until`), so every pass makes progress, a slow
+/// host stops early instead of past the hook budget, and the offset stops at the first line of the first call left.
+/// A shorter file was rewritten and reads from the start. The mark records the bytes left; returns them.
+fn drain_file(data: &Path, installation: &str, file: &Path, deadline: Instant, slowest: &mut Option<Duration>) -> Result<u64, String> {
     let err = |e: std::io::Error| format!("transcript: {e}");
     let mark = mark(&data.join("model"), file);
     let saved: Value = std::fs::read_to_string(&mark).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
@@ -218,7 +219,8 @@ fn drain_file(data: &Path, installation: &str, file: &Path, deadline: Instant, p
     let mut r = std::io::BufReader::new(f);
     let save = |offset: u64, left: u64| coreq::write_atomic(&mark, &json!({"path": file, "offset": offset, "left": left}).to_string()).map_err(|e| format!("model state: {e}"));
     loop {
-        if *progressed && Instant::now() >= deadline {
+        let start = Instant::now();
+        if slowest.is_some_and(|d| start + d >= deadline) {
             let left = len.saturating_sub(offset);
             if saved["offset"] != offset || saved["left"] != left { save(offset, left)?; }
             return Ok(left);
@@ -246,8 +248,8 @@ fn drain_file(data: &Path, installation: &str, file: &Path, deadline: Instant, p
         let (handled, _) = crate::telemetry::emit_until(data, "agentq.model", "call", events.collect(), Some(deadline));
         // A call already sent whose correction lies past the cut is sent again under its own event ID.
         offset += firsts.get(handled).map_or(text.len() as u64, |&n| starts[n]);
-        *progressed = true;
         save(offset, len.saturating_sub(offset))?;
+        *slowest = Some(slowest.unwrap_or_default().max(start.elapsed()));
     }
 }
 
@@ -269,9 +271,9 @@ fn observe_until(data: &Path, input: &Value, deadline: Instant) -> Result<(), St
     }
     std::fs::create_dir_all(data.join("model")).map_err(|e| format!("model state: {e}"))?;
     let installation = crate::telemetry::installation(data);
-    let mut progressed = false;
+    let mut slowest = None;
     for file in files {
-        drain_file(data, &installation, &file, deadline, &mut progressed)?;
+        drain_file(data, &installation, &file, deadline, &mut slowest)?;
     }
     expire(&data.join("model"));
     Ok(())
@@ -298,9 +300,9 @@ fn marks(data: &Path) -> Vec<Result<(PathBuf, u64), String>> {
 /// The service's pass over transcripts a hook pass left unfinished (a session that ended mid-backlog included).
 pub fn drain(data: &Path, deadline: Instant) {
     let installation = crate::telemetry::installation(data);
-    let mut progressed = false;
+    let mut slowest = None;
     for (file, _) in marks(data).into_iter().flatten().filter(|m| m.1 > 0) {
-        if let Err(e) = drain_file(data, &installation, &file, deadline, &mut progressed) {
+        if let Err(e) = drain_file(data, &installation, &file, deadline, &mut slowest) {
             eprintln!("agentq: model calls of a transcript unknown: {e}");
         }
     }
