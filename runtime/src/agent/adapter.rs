@@ -659,8 +659,9 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
     match client {
         Client::Claude => {
             if p.read != Scope::Native { return refuse("read"); }
-            // Full write only without prompts; no write only without built-in tools, so both are enforced.
-            if !matches!((p.write, p.approval, p.builtin), (Scope::Native, _, _) | (Scope::Any, Approval::Bypass, _) | (Scope::None, _, Builtin::Off)) { return refuse("write"); }
+            // Full write only without prompts. No write stays refused: MCP servers and project hooks can write whatever the
+            // built-in tools are, so Claude has no flag that enforces it.
+            if !matches!((p.write, p.approval), (Scope::Native, _) | (Scope::Any, Approval::Bypass)) { return refuse("write"); }
             if p.network != Network::Native { return refuse("network"); }
             if p.roots != Roots::Native { return refuse("roots"); }
             if p.unelevated { return refuse("unelevated"); }
@@ -1299,10 +1300,11 @@ mod tests {
         l.policy = Policy { write: Scope::Any, approval: Approval::Bypass, builtin: Builtin::On, isolated: true, subscription: true, ..Policy::default() };
         assert_eq!(args("claude", &l).unwrap(), ["--strict-mcp-config", "--setting-sources", "project", "--disable-slash-commands", "--system-prompt-snapshot", "off",
             "--permission-mode", "bypassPermissions"], "`on` is Claude's default tool set");
-        l.policy = Policy { write: Scope::None, approval: Approval::Deny, builtin: Builtin::Off, ..Policy::default() };
+        l.policy = Policy { approval: Approval::Deny, builtin: Builtin::Off, ..Policy::default() };
         assert_eq!(args("claude", &l).unwrap(), ["--tools", "", "--permission-mode", "dontAsk"]);
-        l.policy.builtin = Builtin::Native;
-        assert_eq!(args("claude", &l).unwrap_err(), "policy write unsupported by claude", "no write needs built-in tools off");
+        // Read-only is not enforceable: MCP servers and project hooks still write without built-in tools.
+        l.policy = Policy { write: Scope::None, approval: Approval::Deny, builtin: Builtin::Off, isolated: true, ..Policy::default() };
+        assert_eq!(args("claude", &l).unwrap_err(), "policy write unsupported by claude");
         let mut l = Launch::new("/p", "/l", "x", "fixtureq");
         l.policy = Policy { write: Scope::None, builtin: Builtin::Off, isolated: true, subscription: true, ..Policy::default() };
         let codex = args("codex", &l).unwrap();

@@ -79,7 +79,7 @@ The runtime never enables Claude debug logging; turning it on for workers is a s
 | Part | Claude | Codex | Antigravity |
 |---|---|---|---|
 | `read` | `native` | `native`, `any` | `native` |
-| `write` | `native`; `any` with `approval` `bypass`; `none` with `builtin` `off` | `none` → `--sandbox read-only`, `project` → `--sandbox workspace-write`, `any` → `--sandbox danger-full-access` | `native` |
+| `write` | `native`; `any` with `approval` `bypass` (no flag enforces `none`: MCP servers and project hooks still write) | `none` → `--sandbox read-only`, `project` → `--sandbox workspace-write`, `any` → `--sandbox danger-full-access` | `native` |
 | `network` | `native` | `on` with `project` → `-c sandbox_workspace_write.network_access=true`; `off` with `project` → `-c sandbox_workspace_write.network_access=false`; `off` with `none`; `native` | `native` |
 | `tools` | `native`; allowlist → `--allowedTools <tool>..` | `native` | `native` |
 | `approval` | `plan`, `edits` (`acceptEdits`), `auto`, `deny` (`dontAsk`), `bypass` (`bypassPermissions`) → `--permission-mode <mode>` | `deny` → `-c approval_policy=never` after the `write` sandbox; `auto` with `write` `project` → `--full-auto` instead of `--sandbox`; `bypass` with `write` `any` → `--dangerously-bypass-approvals-and-sandbox` instead of `--sandbox` | `bypass` → `--dangerously-skip-permissions` |
