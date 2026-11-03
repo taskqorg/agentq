@@ -153,7 +153,7 @@ fn antigravity_attached(home: &Path, root: Option<&Path>) -> Result<bool, ()> {
 
 /// The effective state for `client` in `home` from the read-only installation state (M12.5). Host disable and the
 /// host and agent switches win; `on` never enables anything.
-pub fn observe(intent: Intent, client: Client, install: Option<&Path>, home: Option<&Path>) -> Optimization {
+pub(crate) fn observe(intent: Intent, client: Client, install: Option<&Path>, home: Option<&Path>) -> Optimization {
     observe_state(intent, client, install, home, None, intent == Intent::Off || std::env::var(ENV).is_ok_and(|v| v == "off"))
 }
 
@@ -184,7 +184,7 @@ fn observe_state(intent: Intent, client: Client, install: Option<&Path>, home: O
 
 /// Observe the state for `spec` and carry `off` and the launcher marker into the child (M12.4, M12.6). Adds only child
 /// environment and, for a Codex home routed through agentq, one per-launch header override; nothing is written.
-pub fn prepare(intent: Intent, product: &str, spec: &mut Spec, install: Option<&Path>) -> Optimization {
+pub(crate) fn prepare(intent: Intent, product: &str, spec: &mut Spec, install: Option<&Path>) -> Optimization {
     let home = spec_home(spec);
     let off = intent == Intent::Off || child_env(spec, ENV).is_some_and(|v| v == "off");
     let o = observe_state(intent, spec.client, install, home.as_deref(), Some(&spec.root), off);

@@ -2,6 +2,7 @@
 use super::*;
 use crate::optimization::{self, Intent, Optimization};
 use coreq::process::Identity;
+use super::app::AppServer;
 
 const SCHEMA: &str = "taskq.app-server/1";
 
@@ -29,7 +30,7 @@ impl ProtectedPreparation {
 }
 
 impl ProtectedHost {
-    pub fn taskq(executable: &Path, sha256: &str) -> Res<Self> {
+    pub fn new(executable: &Path, sha256: &str) -> Res<Self> {
         canonical(executable)?;
         if !hash(sha256) { return Err("protected adapter digest required".into()); }
         let host = Self { executable: executable.into(), sha256: sha256.into() };
@@ -189,6 +190,10 @@ impl ProtectedAppServer {
     pub fn receive(&mut self, until: Instant) -> Res<Option<Value>> { self.server.receive(until) }
     pub fn poll(&mut self) -> Res<Option<i32>> { self.server.poll() }
     pub fn cancel(&self, until: Instant) -> Res<Value> { self.host.cancel(&self.request, until) }
+
+    /// Open this verified frontend as a Codex app-server `Run` (`Launch.mode` `AppServer`); `session` resumes a thread.
+    /// Every later write repeats the authority check; a failed handshake leaves the frontend with its host.
+    pub fn open(self, session: Option<&str>, launch: &super::Launch) -> Res<super::Run> { super::adapter::open_protected(self, session, launch) }
 }
 
 fn fields(value: &Value, names: &[&str]) -> bool {
