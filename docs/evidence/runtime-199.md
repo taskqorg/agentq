@@ -93,4 +93,10 @@ Production runtime sources and dependencies remain identical to `33cd5046c234dac
 | 5: adversarial lifecycle models | Retained host models plus new runtime preparation/transport/completion regressions | Native failure/recovery receipts remain separate |
 | 6: publication/CI and PM proof | Source candidate, green prior-head push/PR CI and published TaskQ intent correction | Green AgentQ merge-result CI, exact installed source/artifact and PM native proof |
 
-Task #199 and AssetQ #4 remain incomplete until criterion 6 and the native evidence above are satisfied. Portable success never closes them (P2, M12.8, R12, TaskQ §7).
+Portable success never closes AssetQ #4 (P2, M12.8, R12, TaskQ §7).
+
+### Owner split of native qualification
+
+The worker app-server boundary still refuses (`Error: a worker cannot launch or control external app servers`, exit 1, installed TaskQ 4.6.62), and no Root native run followed publication. The owner answered the #199 ask with: "Split native to Root task - + frees #199; - narrows A1/A3 acceptance". Task #199 therefore closes on the published source result: `4540d8352f144b8a05f1bf027e7955221bac35e4` with green `merge_group` run `41421595013` and the owner-route packet above.
+
+Root native qualification moves unchanged to [task #208](https://github.com/taskqorg/agentq/issues/208): exact installed source/artifact readback, native preparation and drift refusal, launch revalidation, descendant completion through interruption, sealed certification, cleanup recovery and original-slot release acknowledgment, with no replay, paid work or new grant. Criteria 1–6 above stay unknown on native paths until #208 records them; AssetQ #4 stays open until then.
