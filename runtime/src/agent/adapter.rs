@@ -347,6 +347,11 @@ fn base(command: &[OsString], client: Client) -> Res<Command> {
     })
 }
 
+/// The Remote Control URL of a `system` `bridge_status` record.
+fn bridge(v: &Value) -> Option<String> {
+    (v["subtype"] == "bridge_status").then(|| v["url"].as_str().filter(|u| native::remote_url(u)).map(String::from)).flatten()
+}
+
 /// Claude's native transcript of `session`: `<home>/projects/<root, each non-alphanumeric character as ->/<session>.jsonl`.
 fn claude_transcript(spec: &Spec, session: &str) -> Res<PathBuf> {
     let root = spec.root.canonicalize().map_err(|e| format!("project root: {e}"))?;
@@ -591,6 +596,9 @@ pub trait Runtime: Send + Sync {
     fn home(&self) -> Option<PathBuf>;
     /// The native transcript file of `session` in `home` (None: the client's own); none where the runtime keeps none.
     fn session_transcript(&self, session: &str, home: Option<&Path>) -> Option<PathBuf>;
+    /// Capability `session-url`: the link of caller-built session `spec.session` (background `job`, if any) in `spec.home`,
+    /// or its absence cause with native detail (Session observation).
+    fn session_link(&self, spec: &NativeSpec, job: Option<&str>) -> Result<String, (Cause, Option<String>)>;
     /// The optimization intent applied to `spec`, as `launch` applies it.
     fn prepare(&self, intent: Intent, product: &str, spec: &mut NativeSpec, install: Option<&Path>) -> Optimization;
     /// `base` with the native turn arguments, working directory and environment of `spec`.
@@ -803,7 +811,6 @@ impl Adapter {
             _ => String::new(),
         };
         let Some(session) = self.session_id(run) else { return none("session-unknown") };
-        let bridge = |v: &Value| (v["subtype"] == "bridge_status").then(|| v["url"].as_str().filter(|u| native::remote_url(u)).map(String::from)).flatten();
         let (home, job, seen) = match &run.body {
             Body::Turn(t) => (t.home.clone(), None, text.lines()
                 .filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| bridge(&v)).next_back()),
@@ -1178,6 +1185,16 @@ impl Runtime for Adapter {
         (self.client == Client::Codex).then(|| rollout(session, home)).flatten()
     }
 
+    fn session_link(&self, spec: &NativeSpec, job: Option<&str>) -> Result<String, (Cause, Option<String>)> {
+        if !self.descriptor.has("session-url") { return Err((Cause("no-session-url"), None)); }
+        let native = self.native(spec);
+        let requested = spec.args.iter().any(|a| a == "--remote-control");
+        // ponytail: whole transcript read; the last bridge_status URL wins, a missing transcript falls to the job and debug log.
+        let seen = claude_transcript(&native, &spec.session).ok().and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| t.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| bridge(&v)).next_back());
+        native::claude_link(spec_home(&native).as_deref(), &spec.session, job, requested, seen)
+    }
+
     fn prepare(&self, intent: Intent, product: &str, spec: &mut NativeSpec, install: Option<&Path>) -> Optimization {
         let mut native = self.native(spec);
         let optimization = optimization::prepare(intent, product, &mut native, install);
@@ -1432,5 +1449,26 @@ mod tests {
         assert_eq!(runtime("claude").unwrap().protected_paths(Some(Path::new("/h/.claude"))), [PathBuf::from("/h/.claude"), PathBuf::from("/h/.claude.json")]);
         let env = runtime("codex").unwrap().home_env("fixtureq", "work");
         assert!(env.iter().all(|(k, v)| k == "CODEX_HOME" && Path::new(v).ends_with("fixtureq-accounts/work")));
+    }
+
+    #[test]
+    fn session_link_reads_caller_session_records() {
+        let base = std::env::temp_dir().join(format!("agentq-session-link-{}", std::process::id()));
+        let (root, home) = (base.join("root"), base.join("home"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(home.join("jobs/ab12cd34")).unwrap();
+        let spec = |args: &[&str]| NativeSpec { root: root.clone(), session: "s-1".into(), resume: false,
+            args: args.iter().map(OsString::from).collect(), home: Some(home.clone()), env: vec![] };
+        let claude = runtime("claude").unwrap();
+        assert_eq!(runtime("codex").unwrap().session_link(&spec(&[]), None), Err((Cause("no-session-url"), None)));
+        assert_eq!(claude.session_link(&spec(&[]), None), Err((Cause("not-requested"), None)));
+        assert_eq!(claude.session_link(&spec(&["--remote-control", "t"]), None), Err((Cause("unlogged"), None)));
+        std::fs::write(home.join("jobs/ab12cd34/state.json"), r#"{"bridgeSessionId":"cse_J0b"}"#).unwrap();
+        assert_eq!(claude.session_link(&spec(&[]), Some("ab12cd34")).unwrap(), "https://claude.ai/code/session_J0b");
+        let dir = home.join("projects").join(project_dir(&root.canonicalize().unwrap().to_string_lossy()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s-1.jsonl"), r#"{"type":"system","subtype":"bridge_status","url":"https://claude.ai/code/session_Tr"}"#).unwrap();
+        assert_eq!(claude.session_link(&spec(&[]), Some("ab12cd34")).unwrap(), "https://claude.ai/code/session_Tr");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
