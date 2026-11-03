@@ -27,6 +27,7 @@ fn main() {
         ("deadline_stops_a_turn_that_never_ends", deadline_stops_a_turn_that_never_ends),
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
+        ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
         ("protected_launch_refuses_tampering_and_preserves_native_transport", protected::protected_launch_refuses_tampering_and_preserves_native_transport),
@@ -66,7 +67,9 @@ fn fake(client: &str) {
     if std::env::var("COREQ_FAKE_CONTROL").is_ok() && args.first().is_some_and(|a| matches!(a.as_str(), "agents" | "stop" | "queue")) {
         let record=json!({"args":args,"home":std::env::var(if client=="claude" {"CLAUDE_CONFIG_DIR"} else {"CODEX_HOME"}).ok()});
         std::fs::write("native-control.json",record.to_string()).unwrap();
-        if args.first().is_some_and(|s|s=="agents") {println!("{}",std::env::var("FAKE_JOB_ROWS").unwrap());}
+        // Claude's `--cwd` filter lists nothing for roots under `.claude/worktrees` (#222).
+        let missed=std::env::var_os("FAKE_CWD_FILTER_EMPTY").is_some() && args.iter().any(|a|a=="--cwd");
+        if args.first().is_some_and(|s|s=="agents") {println!("{}",if missed {"[]".into()} else {std::env::var("FAKE_JOB_ROWS").unwrap()});}
         return;
     }
     if std::env::var("COREQ_FAKE_BACKGROUND").is_ok() {
@@ -453,6 +456,28 @@ fn background_commands_preserve_native_mode() {
     assert_eq!(record["args"],json!(["--bg","--resume","native-session"]));
     assert_eq!(agent::runtime("codex").unwrap().launch(&l).err().as_deref(), Some("mode background unsupported by codex"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// #222 A1: Claude's `agents --cwd <root>` lists nothing for a root under `.claude/worktrees`.
+// Risk: the job stays unattached, so observe reads session-unknown and cancel finds no job; or a foreign job attaches.
+fn background_job_found_when_cwd_listing_misses_it() {
+    let base=scratch("cwd-miss");
+    let root=base.join(".claude").join("worktrees").join("w1");
+    std::fs::create_dir_all(&root).unwrap();
+    let claude=agent::runtime("claude").unwrap();
+    let foreign=json!({"id":"0badc0de","kind":"background","cwd":root,"sessionId":"foreign-session","state":"working","pid":7});
+    let row=json!({"id":"c37eb75a","kind":"background","cwd":root,"sessionId":"native-session","state":"working","pid":42});
+    let rows=json!([foreign,row]).to_string();
+    let mut l=fake_launch("claude",&root,"owned",&[("COREQ_FAKE_BACKGROUND","1".as_ref()),("COREQ_FAKE_CONTROL","1".as_ref()),
+        ("FAKE_CWD_FILTER_EMPTY","1".as_ref()),("FAKE_JOB_ROWS",rows.as_ref()),("CLAUDE_CONFIG_DIR",root.join("account").as_os_str())]);
+    l.mode=agent::Mode::Background;
+    let mut run=claude.launch(&l).unwrap();
+    assert_eq!(claude.poll(&mut run).unwrap(),agent::State::Running);
+    assert_eq!(control(&root)["args"],json!(["agents","--json","--all"]),"a filtered miss retries the unfiltered listing");
+    assert_eq!(claude.session_id(&run).as_deref(),Some("native-session"),"attached by exact job id and cwd");
+    assert!(!claude.cancel(&mut run).unwrap());
+    assert_eq!(control(&root)["args"],json!(["stop","c37eb75a"]),"cancel stops the attached job");
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 // #213 A3 / #216 native proof, not CI: launches one real Claude background job with Remote Control through the trait, reads

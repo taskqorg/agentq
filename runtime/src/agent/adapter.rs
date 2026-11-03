@@ -302,13 +302,14 @@ fn project_dir(root: &str) -> String {
 
 /// The verified background job: the launcher's job ID, else on resume the job of the same session.
 fn discover(n: &Native) -> Res<Option<BackgroundJob>> {
-    let rows = native::background_jobs(base(&n.command, n.spec.client)?, &n.spec, Duration::from_secs(5))?;
-    let row = rows.iter().find(|r| match &n.job_id {
+    let find = |rows: &[Value]| rows.iter().find(|r| match &n.job_id {
         Some(id) => r["id"] == id.as_str(),
         None => n.spec.resume && r["kind"] == "background" && r["sessionId"] == n.turn.session(),
-    });
+    }).cloned();
+    let mut row = find(&native::background_jobs(base(&n.command, n.spec.client)?, &n.spec, true, Duration::from_secs(5))?);
+    if row.is_none() { row = find(&native::background_jobs(base(&n.command, n.spec.client)?, &n.spec, false, Duration::from_secs(5))?); }
     let Some(row) = row else { return Ok(None) };
-    BackgroundJob::read(row, &n.spec, row["id"].as_str().unwrap_or_default()).map(Some)
+    BackgroundJob::read(&row, &n.spec, row["id"].as_str().unwrap_or_default()).map(Some)
 }
 
 fn state(r: &Report) -> State { match r.outcome { "ok" => State::Finished, "unknown" => State::Unknown, _ => State::Failed } }
