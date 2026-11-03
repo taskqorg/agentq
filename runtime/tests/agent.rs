@@ -16,6 +16,9 @@ fn main() {
     }
     if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
     if std::env::args().nth(1).as_deref()==Some("service") { return protected::fake_host(); }
+    if let Some(file) = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].iter().find_map(|k| std::env::var_os(k)).map(|h| PathBuf::from(h).join("fake-ready.json")).filter(|f| f.is_file()) {
+        return fake_ready(&file);
+    }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
@@ -40,6 +43,7 @@ fn main() {
         ("cli_turn_recovers_its_running_child", cli_turn_recovers_its_running_child),
         ("process_hooks_shape_the_child", process_hooks_shape_the_child),
         ("runtime_trait_exposes_native_seams", runtime_trait_exposes_native_seams),
+        ("ready_reads_native_login_and_minimum_version", ready_reads_native_login_and_minimum_version),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
@@ -486,7 +490,7 @@ fn background_job_found_when_cwd_listing_misses_it() {
 // Run: AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent
 fn live_claude_background_link() {
     let claude = agent::runtime("claude").unwrap();
-    println!("claude version: {:?}", claude.ready(None).version);
+    println!("claude version: {:?}", claude.ready(None, None).version);
     // A trusted project folder: Claude refuses `--bg` in an untrusted workspace, and accepting trust edits client configuration.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("benchmarks").join(".tmp").join(format!("live-bg-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
@@ -1017,6 +1021,11 @@ fn runtime_trait_exposes_native_seams() {
     assert_eq!(control(&root)["args"],json!(["stop","c37eb75a"]));
     assert_eq!(claude.launch_refusal("Error: Workspace not trusted").map(|c|c.0),Some("workspace-untrusted"));
     assert_eq!(codex.launch_refusal("Error: Workspace not trusted"),None);
+    for (rt,text,cause) in [(&claude,"Not logged in · Please run /login",Some("login-required")),(&claude,"No conversation found with session ID: x",Some("session-missing")),
+        (&codex,"unexpected status 401 Unauthorized",Some("login-required")),(&codex,"Please Log In again",Some("login-required")),
+        (&codex,"app-server thread/resume refused: gone",Some("session-missing")),(&codex,"rate limited",None),(&claude,"Please log in",None)] {
+        assert_eq!(rt.launch_refusal(text).map(|c|c.0),cause,"{text}");
+    }
     assert_eq!(codex.background_launch(Command::new(exe()),&bg,"x",Duration::from_secs(1)).unwrap_err(),"background unsupported by codex");
     assert_eq!(codex.jobs(Command::new(exe()),&bg,false,Duration::from_secs(1)).unwrap_err(),"background unsupported by codex");
 
@@ -1029,4 +1038,39 @@ fn runtime_trait_exposes_native_seams() {
     assert_eq!(claude.app_queue(Command::new(exe()),&thread,"x",Duration::from_secs(1)).unwrap_err(),"app-queue unsupported by claude");
     assert_eq!(claude.app_server_command(Command::new(exe()),&thread).unwrap_err(),"app-server unsupported by claude");
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// Readiness fake: `fake-ready.json` in the login home maps `--version` and the status command to their output.
+fn fake_ready(file: &Path) {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let key = if args == ["--version"] { "version" } else { "status" };
+    if key == "status" { assert_eq!(args, v["expect"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect::<Vec<_>>()); }
+    print!("{}", v[key].as_str().unwrap_or(""));
+    std::process::exit(v["code"].as_i64().unwrap_or(0) as i32);
+}
+
+// pilotq#363 / taskq#2324: `ready` reads the native login status and minimum version through the trait, so products keep
+// no status command, login text or version floor. Risk: an API-key login or an old CLI reads as ready.
+fn ready_reads_native_login_and_minimum_version() {
+    let home = std::env::temp_dir().join(format!("agentq-ready-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let claude_status = ["auth", "status", "--json"];
+    let codex_status = ["-c", "forced_login_method=\"chatgpt\"", "login", "status"];
+    let cases: &[(&str, &[&str], &str, &str, &str, &str)] = &[
+        ("claude", &claude_status, "2.1.5 (Claude Code)", r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#, "ok", "ok"),
+        ("claude", &claude_status, "2.0.9 (Claude Code)", r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}"#, "outdated", "api-key"),
+        ("claude", &claude_status, "2.1.5", r#"{"loggedIn":false}"#, "ok", "missing"),
+        ("codex", &codex_status, "codex-cli 0.162.0", "Logged in using ChatGPT\n", "ok", "ok"),
+        ("codex", &codex_status, "codex-cli 0.161.9", "Logged in using an API key - sk-***\n", "outdated", "api-key"),
+        ("codex", &codex_status, "codex-cli 0.170.0", "Not logged in\n", "ok", "missing"),
+    ];
+    for (name, expect, version, status, want_version, want_login) in cases {
+        std::fs::write(home.join("fake-ready.json"), json!({"version": version, "status": status, "expect": expect}).to_string()).unwrap();
+        let r = agent::runtime(name).unwrap().ready(Some(Path::new(&exe())), Some(&home));
+        assert_eq!((r.install.state, r.version.state, r.login.state), ("ok", *want_version, *want_login), "{name} {version} {status}");
+    }
+    let r = agent::runtime("codex").unwrap().ready(Some(&home.join("absent")), Some(&home));
+    assert_eq!((r.install.state, r.login.state), ("missing", "unknown"));
+    std::fs::remove_dir_all(&home).unwrap();
 }

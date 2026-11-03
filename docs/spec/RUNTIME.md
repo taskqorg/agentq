@@ -23,7 +23,7 @@ Each adapter implements every operation. The sections below remain the binding d
 | `session_url(run)` | The URL or cause of `observe` (Session observation), without polling. |
 | `observe(run)` | One runtime-neutral `Observation`: `poll` state (a failed poll reads `unknown` with its error), native session, and session URL or absence cause with its native detail (Session observation). |
 | `transcript(run)` | The caller log the run appends to. |
-| `ready(home)` | `install` (CLI resolves), `version` (`--version` within 5 s) and `login` (native credential file in the home); each `ok`, `missing` or `unknown` with a reason. Absent credential files read `unknown`, because keychains also hold logins. |
+| `ready(executable, home)` | `install` (the given executable, else the CLI on `PATH`), `version` (`--version` within 5 s; `outdated` below the descriptor `minimum`) and `login` in `home` (none: the client's own). Login runs the native status command within 10 s: Claude `auth status --json` reads `ok` only for `loggedIn` with `authMethod` `claude.ai` and `apiProvider` `firstParty`; Codex `-c forced_login_method="chatgpt" login status` reads `ok` for `Logged in using ChatGPT`. Another login reads `api-key`, none reads `missing`, and a failed or unreadable status reads `unknown`. Antigravity has no status command: its credential file is absent and reads `unknown`. Each check carries a reason. |
 | `quota(&Accounts, now)` | The account a launch takes, whether every account is disabled, and the hold end when every enabled account is limited. |
 | `running()` | Runs of this adapter in this process that have not reached a terminal poll and were not dropped. |
 | `protected_paths(home)` | Native home folders and files a run must not overwrite: Claude home and `.claude.json`, Codex home, Antigravity home and its sibling `config`. |
@@ -36,18 +36,18 @@ Each adapter implements every operation. The sections below remain the binding d
 | `prepare(intent, product, &mut NativeSpec, install)` | The optimization intent applied to a caller-built spec, as `launch` applies it. |
 | `command(base, &NativeSpec)`, `turn(base, &NativeSpec, log, input, &Process)` | The native turn command (Arguments), and one `Turn` started with it: `id`, `poll`, `kill`, `wait`, `report`. For a caller that adds native arguments of its own; `launch` stays the default. |
 | `background_launch`, `jobs`, `job`, `stop_job` | Capability `background`: the launcher exchange, the job list (`filtered` adds the project filter), one validated `BackgroundJob` row and its stop request (Compatibility sessions). Other runtimes refuse with `background unsupported by <name>`. |
-| `launch_refusal(stderr)` | The named cause of a launcher refusal: Claude `Workspace not trusted` reads `workspace-untrusted`; otherwise none. |
+| `launch_refusal(text)` | The named cause of a launch failure, from its stderr or `launch`/`resume` error text: `workspace-untrusted` (Claude `Workspace not trusted`), `session-missing` (Claude `No conversation found with session ID`, Codex `app-server thread/resume refused`), `login-required` (Claude `Not logged in` or `/login`; Codex `401`, `login` or `log in`, any case); otherwise none. Callers match the cause, never the text. |
 | `app_queue`, `app_server_command` | Capabilities `app-queue` and `app-server`: the desktop-thread queue exchange and the app-server command for a caller-owned host. Other runtimes refuse with `<capability> unsupported by <name>`. |
 
 `NativeSpec` is the caller's view of one native session for these operations: `root`, `session`, `resume`, `args` (native client arguments in the Arguments position), `home` and `env`; the adapter adds its own client. Callers gate each optional operation on `descriptor().has(capability)`.
 
-Descriptor data, the only runtime metadata a caller reads:
+Descriptor data, the only runtime metadata a caller reads. `models` are the model aliases a caller may offer when it has no catalogue read; `minimum` is the oldest supported CLI version (empty: none).
 
-| `name` | `label` | `brand` | `family` | `capabilities` |
-|---|---|---|---|---|
-| `claude` | Claude Code | Anthropic | `claude` | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title` |
-| `codex` | Codex CLI | OpenAI | `gpt` | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort`, `image-input`, `account` |
-| `antigravity` | Antigravity | Google | `gemini` | `turn`, `resume`, `title` |
+| `name` | `label` | `brand` | `family` | `models` | `minimum` | `capabilities` |
+|---|---|---|---|---|---|---|
+| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas` |
+| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort`, `image-input`, `account` |
+| `antigravity` | Antigravity | Google | `gemini` | | | `turn`, `resume`, `title` |
 
 ### Session observation
 
@@ -74,19 +74,31 @@ The runtime never enables Claude debug logging; turning it on for workers is a s
 
 ### Policy map
 
-`Policy` has `read` and `write` scope (`native`, `none`, `project`, `any`), `network` (`native`, `on`, `off`), `tools` (`native` or an allowlist), `approval` (`native`, `plan`, `edits`, `auto`, `deny`, `bypass`), `roots` (`native`, `exact` list or `add` list of extra absolute writable folders) and `unelevated` (the runtime's own Windows sandbox runs without elevation). `native` keeps the runtime's own default. Every value without a row below refuses launch with `policy <part> unsupported by <name>`.
+`Policy` has `read` and `write` scope (`native`, `none`, `project`, `any`), `network` (`native`, `on`, `off`), `tools` (`native` or an allowlist), `approval` (`native`, `plan`, `edits`, `auto`, `deny`, `bypass`), `roots` (`native`, `exact` list or `add` list of extra absolute writable folders), `unelevated` (the runtime's own Windows sandbox runs without elevation), `builtin` (`native`, `on`, `off`: the runtime's own shell and web tools), `isolated` (no user settings, plugins, slash commands or extra MCP servers) and `subscription` (subscription login only, never an API key). `native` keeps the runtime's own default. Every value without a row below refuses launch with `policy <part> unsupported by <name>`.
 
 | Part | Claude | Codex | Antigravity |
 |---|---|---|---|
 | `read` | `native` | `native`, `any` | `native` |
-| `write` | `native` | `none` → `--sandbox read-only`, `project` → `--sandbox workspace-write`, `any` → `--sandbox danger-full-access` | `native` |
+| `write` | `native`; `any` with `approval` `bypass`; `none` with `builtin` `off` | `none` → `--sandbox read-only`, `project` → `--sandbox workspace-write`, `any` → `--sandbox danger-full-access` | `native` |
 | `network` | `native` | `on` with `project` → `-c sandbox_workspace_write.network_access=true`; `off` with `project` → `-c sandbox_workspace_write.network_access=false`; `off` with `none`; `native` | `native` |
 | `tools` | `native`; allowlist → `--allowedTools <tool>..` | `native` | `native` |
 | `approval` | `plan`, `edits` (`acceptEdits`), `auto`, `deny` (`dontAsk`), `bypass` (`bypassPermissions`) → `--permission-mode <mode>` | `deny` → `-c approval_policy=never` after the `write` sandbox; `auto` with `write` `project` → `--full-auto` instead of `--sandbox`; `bypass` with `write` `any` → `--dangerously-bypass-approvals-and-sandbox` instead of `--sandbox` | `bypass` → `--dangerously-skip-permissions` |
 | `roots` | `native` | `exact` → `-c sandbox_workspace_write.writable_roots=[]` then `--add-dir <root>` per absolute root, so config-defined roots never widen it; `add` → only `--add-dir <root>` per absolute root, added to config-defined roots | `native` |
 | `unelevated` | `false` | `true` → `-c windows.sandbox=unelevated` | `false` |
+| `builtin` | `native`, `on` (Claude's default tool set); `off` → `--tools ""` | `on` → `--enable shell_tool -c web_search="live"`; `off` → `--disable shell_tool -c web_search="disabled"` | `native` |
+| `isolated` | `true` → `--strict-mcp-config --setting-sources project --disable-slash-commands --system-prompt-snapshot off`; user hooks are excluded, so optimization reads `off` | `true` → `--disable` `apps`, `plugins`, `browser_use`, `computer_use`, `multi_agent` and `image_generation` | `false` |
+| `subscription` | `true` → child `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` empty | `true` → `-c forced_login_method="chatgpt"` | `false` |
 
-`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.effort` (capability `effort`, a plain word) maps to Codex `-c model_reasoning_effort=<e>`; other runtimes refuse it. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
+Codex `builtin`, `isolated` and `subscription` flags follow the `exec` or `app-server` subcommand, so they hold in app-server mode too.
+
+`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.effort` (capability `effort`, a plain word) maps to Codex `-c model_reasoning_effort=<e>`; other runtimes refuse it. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.home` is the login home of the run (the client's home variable; none keeps the caller's own). A CLI turn also takes caller relay data, each behind its capability; another runtime and app-server mode refuse it with `<capability> unsupported by <name>`:
+
+- `Launch.mcp` (`mcp-config`): an MCP config file → Claude `--mcp-config <file>`, and every server named in its `mcpServers` joins the `tools` allowlist as `mcp__<server>`.
+- `Launch.instructions` (`instructions-file`): a file appended to the system prompt → Claude `--append-system-prompt-file <file>`.
+- `Launch.parts` (`turn-parts`): ordered `Part`s as the turn input instead of `input` → Claude `--input-format stream-json` and one stdin user message, images as base64 blocks (`png`, `webp`, `gif`, else `jpeg`); an unreadable image fails the launch before spawn.
+- `Launch.deltas` (`turn-deltas`): partial text records in `progress` → Claude `--include-partial-messages`. App-server runs always stream deltas and ignore it.
+
+`Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
 
 ### Turn recovery and process setup
 
