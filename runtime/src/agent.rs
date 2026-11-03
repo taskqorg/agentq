@@ -14,7 +14,7 @@ mod native;
 mod app;
 mod protected;
 mod adapter;
-pub use adapter::{Approval, Cause, Check, Descriptor, Launch, Mode, Network, Policy, Quota, Ready, Run, Runtime, Scope, State, runtime, runtimes};
+pub use adapter::{Approval, Cause, Check, Configure, Descriptor, Launch, Mode, Network, Policy, Process, Quota, Ready, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
 type Res<T> = Result<T, String>;
@@ -440,12 +440,62 @@ impl AntigravityTranscript {
     }
 }
 
+/// The turn's client process: the owned child, or after recovery the child observed by its native identity.
+enum Proc { Own(Child), Seen(crate::process::Identity) }
+
+impl Proc {
+    fn id(&self) -> u32 { match self { Proc::Own(c) => c.id(), Proc::Seen(i) => i.pid } }
+
+    /// The exit once observed: Some(code) for an owned child, Some(None) when a recovered child's incarnation is gone.
+    fn try_wait(&mut self) -> Res<Option<Option<i32>>> {
+        match self {
+            Proc::Own(c) => Ok(c.try_wait().map_err(|e| format!("agent wait: {e}"))?.map(|s| Some(s.code().unwrap_or(-1)))),
+            Proc::Seen(i) => {
+                let now = crate::process::identity(i.pid);
+                if now.as_ref().is_ok_and(|n| n.as_ref() != Some(&*i)) { return Ok(Some(None)); }
+                // A re-executed parent keeps its children: reap our own exited child and read its code.
+                // Our own child still running (an exiting process may have no identity yet) reads running.
+                #[cfg(unix)]
+                match reap(i.pid) { Some(Some(code)) => return Ok(Some(Some(code))), Some(None) => return Ok(None), None => {} }
+                now.map(|_| None).map_err(|e| format!("agent process identity unknown: {e}"))
+            }
+        }
+    }
+
+    /// Request the stop; a recovered child is signalled only through its identity, never by a reused PID.
+    fn kill(&mut self) -> Res<()> {
+        match self {
+            Proc::Own(c) => c.kill().map_err(|e| format!("agent kill: {e}")),
+            Proc::Seen(i) => match crate::process::terminate(i) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("agent kill: {e}")),
+                _ => Ok(()),
+            },
+        }
+    }
+}
+
+/// Our own child `pid`: Some(Some(code)) once reaped, Some(None) while it runs; None when it is not our child.
+#[cfg(unix)]
+fn reap(pid: u32) -> Option<Option<i32>> {
+    let mut status = 0;
+    // SAFETY: WNOHANG never blocks; the call only reaps a child of this process.
+    match unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) } {
+        0 => Some(None),
+        r if r == pid as libc::pid_t => Some(Some(if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { -1 })),
+        _ => None,
+    }
+}
+
 /// One running turn: the client process with stdout and stderr appended to the caller's log.
 pub(crate) struct Turn {
     client: Client,
     /// The caller cancelled the run.
     cancelled: bool,
-    child: Child,
+    child: Proc,
+    /// The exit was not observed (a recovered child), so `exit` holds no code.
+    exit_unknown: bool,
+    /// `native::scope` of the launch, bound into a checkpoint.
+    scope: String,
     log: PathBuf,
     start: u64,
     pos: u64,
@@ -466,7 +516,7 @@ fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d|
 
 impl Turn {
     /// Spawn `command(base, spec)` with `text` on stdin; output appends to `log`, so a resume continues earlier turns.
-    pub fn start(mut base: Command, spec: &Spec, log: &Path, text: &str) -> Res<Turn> {
+    pub fn start(mut base: Command, spec: &Spec, log: &Path, text: &str, process: &Process) -> Res<Turn> {
         if let Some(dir) = log.parent() { std::fs::create_dir_all(dir).map_err(|e| format!("agent log directory: {e}"))?; }
         let out = File::options().create(true).append(true).open(log).map_err(|e| format!("agent log: {e}"))?;
         let err = out.try_clone().map_err(|e| format!("agent log: {e}"))?;
@@ -495,7 +545,8 @@ impl Turn {
         crate::telemetry::capture::inherit_context(&mut base);
         let started = Instant::now();
         let started_ms = unix_ms();
-        let mut child = base.stdin(Stdio::piped()).stdout(if native_agentapi {Stdio::piped()} else {Stdio::from(out)}).stderr(err).spawn().map_err(|e| format!("{} spawn: {e}", spec.client.code()))?;
+        base.stdin(Stdio::piped()).stdout(if native_agentapi {Stdio::piped()} else {Stdio::from(out)}).stderr(err);
+        let mut child = process.spawn(base, spec.client.code())?;
         let receipt = if native_agentapi {
             let mut stdout = child.stdout.take().ok_or("agentapi stdout unavailable")?;
             let (send, receive) = std::sync::mpsc::channel();
@@ -514,11 +565,41 @@ impl Turn {
         } else {
             drop(stdin);
         }
-        Ok(Turn { client: spec.client, cancelled: false, child, log: log.to_path_buf(), start, pos: start, ended: false, stopping: false, timed_out: false,
-            started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt })
+        Ok(Turn { client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
+            ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }
+
+    /// Private recovery value of a running turn (docs/spec/RUNTIME.md § Turn recovery and process setup).
+    pub(crate) fn checkpoint(&self) -> Result<Value, adapter::Cause> {
+        if self.ag.native_agentapi { return Err(adapter::Cause("no-checkpoint")); }
+        if self.exit.is_some() { return Err(adapter::Cause("turn-ended")); }
+        let identity = match &self.child {
+            Proc::Seen(i) => i.clone(),
+            Proc::Own(c) => crate::process::identity(c.id()).ok().flatten().ok_or(adapter::Cause("identity-unknown"))?,
+        };
+        Ok(json!({"pid": identity.pid, "started": identity.started, "client": self.client.code(), "log": self.log, "start": self.start,
+            "started_ms": self.started_ms, "resumed": self.resumed, "cancelled": self.cancelled, "timed_out": self.timed_out, "scope": self.scope}))
+    }
+
+    /// An observation-only turn rebuilt from `checkpoint` for `spec` and `log`: no process starts and no input is sent.
+    pub(crate) fn recover(spec: &Spec, log: &Path, saved: &Value) -> Res<Turn> {
+        if saved["client"] != spec.client.code() || saved["log"] != json!(log) || saved["scope"] != native::scope(spec) {
+            return Err("turn recovery scope differs".into());
+        }
+        let invalid = || "turn recovery state invalid".to_string();
+        let pid = saved["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).ok_or_else(invalid)?;
+        let identity = crate::process::Identity { pid, started: saved["started"].as_str().ok_or_else(invalid)?.into() };
+        let start = saved["start"].as_u64().ok_or_else(invalid)?;
+        let started_ms = saved["started_ms"].as_i64().filter(|s| *s >= 0).ok_or_else(invalid)?;
+        let flag = |k: &str| saved[k].as_bool().ok_or_else(invalid);
+        let resumed = match &saved["resumed"] { Value::Null => None, v => Some(v.as_str().filter(|s| native::plain_id(s)).ok_or_else(invalid)?.to_string()) };
+        let age = Duration::from_millis(unix_ms().saturating_sub(started_ms).max(0) as u64);
+        Ok(Turn { client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(),
+            start, pos: start, ended: false, stopping: false, timed_out: flag("timed_out")?, started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+            started_ms, exit: None, home: spec_home(spec), resumed, ag: AntigravityTranscript::default(), receipt: None })
+    }
 
     fn sync_antigravity_transcript(&mut self) -> Res<()> {
         if !self.ag.native_agentapi {
@@ -569,7 +650,7 @@ impl Turn {
     pub fn poll(&mut self) -> Res<Option<i32>> {
         if self.ag.native_agentapi {
             if self.exit.is_none() {
-                self.exit = self.child.try_wait().map_err(|e| format!("agent wait: {e}"))?.map(|s| s.code().unwrap_or(-1));
+                self.exit = self.child.try_wait()?.map(|c| c.unwrap_or(-1));
             }
             self.read()?;
             return Ok(self.exit.filter(|code| self.stopping || (self.receipt.is_none() && (*code != 0 || self.ag.session.is_none() || self.ended))));
@@ -577,8 +658,9 @@ impl Turn {
         if self.exit.is_some() { return Ok(self.exit); }
         self.read()?;
         if self.exit.is_none() {
-            if let Some(status) = self.child.try_wait().map_err(|e| format!("agent wait: {e}"))? {
-                let code = status.code().unwrap_or(-1);
+            if let Some(code) = self.child.try_wait()? {
+                self.exit_unknown = code.is_none();
+                let code = code.unwrap_or(-1);
                 self.read()?;
                 self.exit = Some(code);
                 return Ok(self.exit);
@@ -594,7 +676,7 @@ impl Turn {
         if self.exit.is_some() {
             return Ok(());
         }
-        self.child.kill().map_err(|e| format!("agent kill: {e}"))
+        self.child.kill()
     }
 
     /// Poll until exit; at `deadline` stop the process, and the turn reads as timed out.
@@ -627,10 +709,10 @@ impl Turn {
         r.session = session;
         r.duration_us = self.started.elapsed().as_micros() as u64;
         r.started_ms = self.started_ms;
-        r.exit = self.exit;
+        r.exit = if self.exit_unknown { None } else { self.exit };
         if self.timed_out { (r.outcome, r.error) = ("cancelled", "timeout"); }
         else if self.cancelled { (r.outcome, r.error) = ("cancelled", "interrupted"); }
-        else if r.outcome == "unknown" && self.exit.is_some_and(|c| c != 0) && r.error == "no-end" { (r.outcome, r.error) = ("failed", "exit"); }
+        else if r.outcome == "unknown" && r.exit.is_some_and(|c| c != 0) && r.error == "no-end" { (r.outcome, r.error) = ("failed", "exit"); }
         r
     }
 }
@@ -672,7 +754,7 @@ pub struct Context<'a> {
 /// Start, wait and report one turn, then append its `agent.turn` observation to `store`. A failed append is kept in
 /// `Report::recorded` and never changes the turn's result (R30).
 pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store) -> Res<Report> {
-    let mut turn = Turn::start(base, spec, log, text)?;
+    let mut turn = Turn::start(base, spec, log, text, &Process::default())?;
     turn.wait(deadline)?;
     let mut r = turn.report();
     r.recorded = crate::telemetry::Event::new(r.observation(spec.client, ctx)).and_then(|e| store.append(&[e])).map(|_| ());

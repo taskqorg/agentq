@@ -34,6 +34,8 @@ fn main() {
         ("off_reaches_codex_queue_and_app_server", off_reaches_codex_queue_and_app_server),
         ("external_consumer_builds_and_plans_turns", external_consumer_builds_and_plans_turns),
         ("runtime_trait_runs_every_runtime_by_descriptor", runtime_trait_runs_every_runtime_by_descriptor),
+        ("cli_turn_recovers_its_running_child", cli_turn_recovers_its_running_child),
+        ("process_hooks_shape_the_child", process_hooks_shape_the_child),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
@@ -104,6 +106,8 @@ fn fake(client: &str) {
         "extra": std::env::var("FAKE_EXTRA").ok(),
         "optimization": std::env::var("AGENTQ_OPTIMIZATION").ok(), "launcher": std::env::var("AGENTQ_LAUNCHER").ok()});
     std::fs::write(format!("fake-turn-{turn}.json"), record.to_string()).unwrap();
+    // A gated turn runs until the test creates the gate file, so the caller can checkpoint and recover it mid-turn.
+    if let Ok(gate) = std::env::var("COREQ_FAKE_GATE") { while !Path::new(&gate).exists() { std::thread::sleep(Duration::from_millis(20)); } }
     if client == "claude" {
         emit(json!({"type": "system", "subtype": "init", "session_id": session}));
         emit(json!({"type": "assistant", "message": {"id": format!("m{turn}"), "model": "claude-opus-5-5",
@@ -520,6 +524,94 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
+}
+
+fn wait_for(path: &Path) {
+    let until = Instant::now() + Duration::from_secs(30);
+    while !path.exists() { assert!(Instant::now() < until, "{} appeared", path.display()); std::thread::sleep(Duration::from_millis(20)); }
+}
+
+// #212 A1: a consumer that re-executes drops its Run while the CLI turn child keeps running; the checkpoint rebuilds an
+// observation-only run of that child (identity, log offset, session) without a native call, and cancel reaches only
+// that incarnation. Risk: a re-exec loses or resubmits live turns, double counts them, or signals a reused PID.
+fn cli_turn_recovers_its_running_child() {
+    use agent::State::{Finished, Running};
+    unsafe { std::env::remove_var("TASKQ_TASK"); std::env::remove_var("AGENTQ_LAUNCHER"); std::env::remove_var("AGENTQ_OPTIMIZATION"); }
+    for r in agent::runtimes() {
+        let name = r.descriptor().name;
+        let root = scratch(&format!("turn-recover-{name}"));
+        let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
+        let gate = root.join("gate");
+        let l = fake_launch(name, &root, "brief", &[("COREQ_FAKE_GATE", gate.as_os_str())]);
+        let mut run = r.launch(&l).unwrap();
+        let pid = run.id();
+        wait_for(&root.join("fake-turn-1.json"));
+        let saved = r.checkpoint(&run).unwrap();
+        assert_eq!((saved["kind"].as_str(), saved["turn"]["pid"].as_u64()), (Some("turn"), pid.map(u64::from)), "{name}");
+        assert_eq!(r.poll(&mut run).unwrap(), Running);
+        drop(run);
+        let mut moved = l.clone();
+        moved.log = root.join("other.log");
+        assert_eq!(r.recover(&saved, &moved).err().as_deref(), Some("turn recovery scope differs"), "{name}: another log is another turn");
+        let mut cold = r.recover(&saved, &l).unwrap();
+        assert_eq!((cold.id(), r.poll(&mut cold).unwrap()), (pid, Running), "{name}: the live child is observed, not restarted");
+        std::fs::write(&gate, "").unwrap();
+        assert_eq!(finish(r, &mut cold), Finished, "{name}");
+        let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: Some((212, 1)), route: None, account: "default" };
+        let report = cold.record(&ctx, &store).unwrap();
+        assert_eq!((report.outcome, report.text.as_deref()), ("ok", Some("turn 1")), "{name}");
+        // A re-executed Unix parent reaps its own child and reads the code; elsewhere an unobserved exit stays unknown.
+        assert_eq!(report.exit, if cfg!(unix) { Some(0) } else { None }, "{name}");
+        assert!(r.session_id(&cold).is_some() && !root.join("fake-turn-2.json").exists(), "{name}: recovery made no native call");
+        assert_eq!(observations(&store).len(), 1, "{name}: one observation");
+        assert_eq!(r.checkpoint(&cold).unwrap_err(), agent::Cause("turn-ended"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+    let root = scratch("turn-recover-cancel");
+    let claude = agent::runtime("claude").unwrap();
+    let l = fake_launch("claude", &root, "x", &[("COREQ_FAKE_HANG", "1".as_ref())]);
+    let run = claude.launch(&l).unwrap();
+    let saved = claude.checkpoint(&run).unwrap();
+    drop(run);
+    let mut cold = claude.recover(&saved, &l).unwrap();
+    claude.cancel(&mut cold).unwrap();
+    finish(claude, &mut cold);
+    let r = claude.report(&cold).unwrap();
+    assert_eq!((r.outcome, r.error), ("cancelled", "interrupted"), "the identity-bound stop ends the recovered child");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// #212 A2: caller hooks run on the child Command after the adapter's own setup and on the spawned Child before input,
+// so creation flags, process groups and Job Objects survive; a failing hook fails the launch.
+// Risk: the adapter overwrites caller process setup, or a child the caller could not contain keeps running.
+fn process_hooks_shape_the_child() {
+    use std::sync::{Arc, Mutex};
+    let root = scratch("process-hooks");
+    let gate = root.join("gate");
+    let codex = agent::runtime("codex").unwrap();
+    let mut l = fake_launch("codex", &root, "x", &[("FAKE_EXTRA", "adapter".as_ref()), ("COREQ_FAKE_GATE", gate.as_os_str())]);
+    let seen = Arc::new(Mutex::new(None));
+    let spawned = seen.clone();
+    l.process.configure = Some(Arc::new(|c: &mut Command| {
+        c.env("FAKE_EXTRA", "hooked");
+        #[cfg(unix)] { use std::os::unix::process::CommandExt; c.process_group(0); }
+        #[cfg(windows)] { use std::os::windows::process::CommandExt; c.creation_flags(0x0800_0000 | 0x0000_0200); }
+    }));
+    l.process.spawned = Some(Arc::new(move |child: &std::process::Child| { *spawned.lock().unwrap() = Some(child.id()); Ok(()) }));
+    let mut run = codex.launch(&l).unwrap();
+    assert_eq!(run.id(), *seen.lock().unwrap(), "the spawned hook sees the child");
+    wait_for(&root.join("fake-turn-1.json"));
+    #[cfg(unix)]
+    assert_eq!(unsafe { libc::getpgid(run.id().unwrap() as libc::pid_t) }, run.id().unwrap() as libc::pid_t, "the caller's process group survives");
+    std::fs::write(&gate, "").unwrap();
+    assert_eq!(finish(codex, &mut run), agent::State::Finished);
+    assert_eq!(record(&root, 1)["extra"], "hooked", "configure runs after the adapter's environment");
+    let before = codex.running();
+    l.process.spawned = Some(Arc::new(|_: &std::process::Child| Err("job object refused".into())));
+    assert_eq!(codex.launch(&l).err().as_deref(), Some("job object refused"));
+    assert_eq!(codex.running(), before);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 // Chain: coreq.md R49: a turn past its deadline is stopped and observed as cancelled/timeout, never ok; a caller

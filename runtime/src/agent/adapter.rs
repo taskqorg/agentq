@@ -29,7 +29,7 @@ pub enum Scope { #[default] Native, None, Project, Any }
 pub enum Network { #[default] Native, On, Off }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Approval { #[default] Native, Plan, Edits, Auto, Bypass }
+pub enum Approval { #[default] Native, Plan, Edits, Auto, /** Never prompt; a request that needs approval is denied. */ Deny, Bypass }
 
 /// Abstract permissions. The adapter maps each part to native flags or refuses the launch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,6 +40,36 @@ pub struct Policy {
     /// None keeps the native tool set; Some is an allowlist.
     pub tools: Option<Vec<String>>,
     pub approval: Approval,
+    /// None keeps native writable roots; Some is the exact list of extra absolute writable folders.
+    pub roots: Option<Vec<PathBuf>>,
+    /// The runtime's own Windows sandbox runs without elevation.
+    pub unelevated: bool,
+}
+
+/// Runs on the child `Command` after the adapter's own setup, directly before spawn.
+pub type Configure = std::sync::Arc<dyn Fn(&mut Command) + Send + Sync>;
+/// Runs on the spawned child before any input; an error kills the child and fails the launch.
+pub type Spawned = std::sync::Arc<dyn Fn(&std::process::Child) -> Result<(), String> + Send + Sync>;
+
+/// Caller process setup of a CLI turn or app-server child (docs/spec/RUNTIME.md § Turn recovery and process setup).
+#[derive(Clone, Default)]
+pub struct Process { pub configure: Option<Configure>, pub spawned: Option<Spawned> }
+
+impl std::fmt::Debug for Process {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Process").field("configure", &self.configure.is_some()).field("spawned", &self.spawned.is_some()).finish()
+    }
+}
+
+impl Process {
+    pub(crate) fn spawn(&self, mut command: Command, what: &str) -> Res<std::process::Child> {
+        if let Some(c) = &self.configure { c(&mut command); }
+        let mut child = command.spawn().map_err(|e| format!("{what} spawn: {e}"))?;
+        if let Some(s) = &self.spawned {
+            if let Err(e) = s(&child) { let _ = child.kill(); let _ = child.wait(); return Err(e); }
+        }
+        Ok(child)
+    }
 }
 
 /// One launch or resume request. Every field is runtime-neutral.
@@ -53,6 +83,8 @@ pub struct Launch {
     pub input: String,
     pub policy: Policy,
     pub model: Option<String>,
+    /// Reasoning effort, a plain word (capability `effort`).
+    pub effort: Option<String>,
     /// Command run after native context compaction (capability `compact-hook`).
     pub compact_hook: Option<String>,
     /// Child environment, including `home_env` of a non-default account.
@@ -71,6 +103,8 @@ pub struct Launch {
     pub title: Option<String>,
     /// A CLI turn still running at this instant is stopped and reads `cancelled`/`timeout`.
     pub deadline: Option<Instant>,
+    /// Caller setup of the child process.
+    pub process: Process,
 }
 
 /// How a run reaches the runtime; every mode but `Turn` needs the descriptor capability of the same name.
@@ -96,9 +130,9 @@ impl Mode {
 
 impl Launch {
     pub fn new(root: impl Into<PathBuf>, log: impl Into<PathBuf>, input: impl Into<String>, product: impl Into<String>) -> Self {
-        Launch { root: root.into(), log: log.into(), input: input.into(), policy: Policy::default(), model: None, compact_hook: None,
+        Launch { root: root.into(), log: log.into(), input: input.into(), policy: Policy::default(), model: None, effort: None, compact_hook: None,
             env: vec![], command: vec![], optimization: Intent::Inherit, product: product.into(), install: None, accounts: None,
-            mode: Mode::Turn, title: None, deadline: None }
+            mode: Mode::Turn, title: None, deadline: None, process: Process::default() }
     }
 }
 
@@ -252,10 +286,13 @@ fn thread_params(l: &Launch, thread: &Value) -> Res<Value> {
     if !matches!(p.read, Scope::Native | Scope::Any) { return refuse("read"); }
     if p.network != Network::Native { return refuse("network"); }
     if p.tools.is_some() { return refuse("tools"); }
+    if p.roots.is_some() { return refuse("roots"); }
+    if p.unelevated { return refuse("unelevated"); }
+    if l.effort.is_some() { return Err("effort unsupported by app-server".into()); }
     if l.title.is_some() || l.compact_hook.is_some() { return Err("title and compact-hook unsupported by app-server".into()); }
     let mut t = thread.clone();
     match p.write { Scope::Native => {}, Scope::None => t["sandbox"] = json!("read-only"), Scope::Project => t["sandbox"] = json!("workspace-write"), Scope::Any => t["sandbox"] = json!("danger-full-access") }
-    match (p.approval, p.write) { (Approval::Native, _) => {}, (Approval::Bypass, Scope::Any) => t["approvalPolicy"] = json!("never"), _ => return refuse("approval") }
+    match (p.approval, p.write) { (Approval::Native, _) => {}, (Approval::Bypass, Scope::Any) | (Approval::Deny, _) => t["approvalPolicy"] = json!("never"), _ => return refuse("approval") }
     if let Some(m) = &l.model {
         if !model_code(m) { return Err("model requires a model code".into()); }
         t["model"] = json!(m);
@@ -391,7 +428,7 @@ static ADAPTERS: [Adapter; 3] = [
     Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "background", "title"] } },
     Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt",
-        capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server"] } },
+        capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server", "effort"] } },
     Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini",
         capabilities: &["turn", "resume", "title"] } },
 ];
@@ -415,13 +452,15 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
             if p.read != Scope::Native { return refuse("read"); }
             if p.write != Scope::Native { return refuse("write"); }
             if p.network != Network::Native { return refuse("network"); }
+            if p.roots.is_some() { return refuse("roots"); }
+            if p.unelevated { return refuse("unelevated"); }
             if let Some(tools) = &p.tools {
                 if tools.is_empty() || tools.iter().any(|t| t.is_empty() || t.starts_with('-')) { return refuse("tools"); }
                 a.push("--allowedTools".into());
                 a.extend(tools.iter().map(OsString::from));
             }
             let mode = match p.approval { Approval::Native => None, Approval::Plan => Some("plan"), Approval::Edits => Some("acceptEdits"),
-                Approval::Auto => Some("auto"), Approval::Bypass => Some("bypassPermissions") };
+                Approval::Auto => Some("auto"), Approval::Deny => Some("dontAsk"), Approval::Bypass => Some("bypassPermissions") };
             if let Some(m) = mode { a.extend(["--permission-mode".into(), m.into()]); }
         }
         Client::Codex => {
@@ -431,18 +470,32 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
                 (Network::Native, _) | (Network::On, Scope::Project) | (Network::Off, Scope::None | Scope::Project) => {}
                 _ => return refuse("network"),
             }
+            let c = |a: &mut Vec<OsString>, v: &str| a.extend(["-c".into(), v.into()]);
             match (p.approval, p.write) {
                 (Approval::Bypass, Scope::Any) => a.push("--dangerously-bypass-approvals-and-sandbox".into()),
-                (Approval::Native, w) => {
+                (Approval::Auto, Scope::Project) => a.push("--full-auto".into()),
+                (Approval::Native | Approval::Deny, w) => {
                     let sandbox = match w { Scope::Native => None, Scope::None => Some("read-only"), Scope::Project => Some("workspace-write"), Scope::Any => Some("danger-full-access") };
                     if let Some(s) = sandbox { a.extend(["--sandbox".into(), s.into()]); }
-                    if p.network == Network::On { a.extend(["-c".into(), "sandbox_workspace_write.network_access=true".into()]); }
+                    if p.approval == Approval::Deny { c(&mut a, "approval_policy=never"); }
                 }
                 _ => return refuse("approval"),
             }
+            match (p.network, p.write) {
+                (Network::On, _) => c(&mut a, "sandbox_workspace_write.network_access=true"),
+                (Network::Off, Scope::Project) => c(&mut a, "sandbox_workspace_write.network_access=false"),
+                _ => {}
+            }
+            if let Some(roots) = &p.roots {
+                if roots.iter().any(|r| !r.is_absolute()) { return refuse("roots"); }
+                c(&mut a, "sandbox_workspace_write.writable_roots=[]");
+                for r in roots { a.extend(["--add-dir".into(), r.clone().into_os_string()]); }
+            }
+            if p.unelevated { c(&mut a, "windows.sandbox=unelevated"); }
         }
         Client::Antigravity => {
-            for (part, native) in [("read", p.read == Scope::Native), ("write", p.write == Scope::Native), ("network", p.network == Network::Native), ("tools", p.tools.is_none())] {
+            for (part, native) in [("read", p.read == Scope::Native), ("write", p.write == Scope::Native), ("network", p.network == Network::Native), ("tools", p.tools.is_none()),
+                ("roots", p.roots.is_none()), ("unelevated", !p.unelevated)] {
                 if !native { return refuse(part); }
             }
             match p.approval { Approval::Native => {}, Approval::Bypass => a.push("--dangerously-skip-permissions".into()), _ => return refuse("approval") }
@@ -451,6 +504,11 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
     if let Some(m) = &l.model {
         if !model_code(m) { return Err("model requires a model code".into()); }
         if client == Client::Antigravity { a.push(format!("--model={m}").into()); } else { a.extend(["--model".into(), m.into()]); }
+    }
+    if let Some(e) = &l.effort {
+        if client != Client::Codex { return Err(format!("effort unsupported by {name}")); }
+        if e.is_empty() || !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err("effort requires a plain word".into()); }
+        a.extend(["-c".into(), format!("model_reasoning_effort={e}").into()]);
     }
     if let Some(t) = &l.title {
         match client {
@@ -518,7 +576,7 @@ impl Adapter {
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
         match &l.mode {
             Mode::Turn => {
-                let turn = Turn::start(command, &spec, &l.log, &l.input)?;
+                let turn = Turn::start(command, &spec, &l.log, &l.input, &l.process)?;
                 let start = turn.start;
                 Ok(self.run(Body::Turn(turn), start, optimization, l))
             }
@@ -542,7 +600,7 @@ impl Adapter {
             }
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
-                let server = AppServer::spawn(app_server_command(command, &spec)?, &l.log)?;
+                let server = AppServer::spawn(app_server_command(command, &spec)?, &l.log, &l.process)?;
                 let app = App::open(&spec, Transport::Plain(server), initialize, thread, l)?;
                 Ok(self.run(Body::App(Box::new(app)), 0, optimization, l))
             }
@@ -740,7 +798,7 @@ impl Runtime for Adapter {
 
     fn checkpoint(&self, run: &Run) -> Result<Value, Cause> {
         match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
-            Body::Turn(_) => Err(Cause("no-checkpoint")),
+            Body::Turn(t) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "turn", "turn": t.checkpoint()?})),
             Body::App(a) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "app", "app": a.session.checkpoint(), "model": a.model})),
             Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
                 "session": n.turn.session(), "resume": n.spec.resume, "job": n.job_id, "attached": n.attached, "fault": n.fault})),
@@ -751,8 +809,16 @@ impl Runtime for Adapter {
         let me = table(self.client);
         let queue = matches!(l.mode, Mode::Queue { .. });
         let kind = match l.mode { Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
-        if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["kind"] != kind || kind == "turn" {
+        if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["kind"] != kind {
             return Err("run recovery scope differs".into());
+        }
+        if kind == "turn" {
+            // Observation only: the saved child keeps running; a resumed turn's session is the saved one.
+            let resumed = saved["turn"]["resumed"].as_str();
+            let (spec, optimization) = me.spec(l, resumed.map_or_else(|| new_session(self.client), String::from), resumed.is_some())?;
+            let turn = Turn::recover(&spec, &l.log, &saved["turn"])?;
+            let start = turn.start;
+            return Ok(me.run(Body::Turn(turn), start, optimization, l));
         }
         if kind == "app" {
             // Observation only: the transport ended with its process, so the run reports and records but takes no input.
@@ -820,6 +886,47 @@ mod tests {
         assert_eq!(args("antigravity", &l).unwrap_err(), "compact-hook unsupported by antigravity");
         l.policy.tools = Some(vec!["Read".into()]);
         assert_eq!(args("antigravity", &l).unwrap_err(), "policy tools unsupported by antigravity");
+    }
+
+    // #212 A3: every permission request TaskQ passes today maps without loss: Claude `dontAsk`, Codex sandbox modes, network,
+    // never-approve, exact writable roots, full-auto, the unelevated Windows sandbox and effort; others refuse by part.
+    // Risk: a consumer's owner-configured permission silently widens, narrows or disappears in the abstract policy.
+    #[test]
+    fn consumer_permission_requests_map_without_loss() {
+        let mut l = Launch::new("/p", "/l", "x", "fixtureq");
+        l.policy.approval = Approval::Deny;
+        assert_eq!(args("claude", &l).unwrap(), ["--permission-mode", "dontAsk"]);
+        assert_eq!(args("antigravity", &l).unwrap_err(), "policy approval unsupported by antigravity");
+        l.policy = Policy { write: Scope::Any, ..Policy::default() };
+        l.model = Some("gpt-5".into()); l.effort = Some("high".into());
+        assert_eq!(args("codex", &l).unwrap(), ["--sandbox", "danger-full-access", "--model", "gpt-5", "-c", "model_reasoning_effort=high"]);
+        assert_eq!(args("claude", &Launch { effort: Some("high".into()), ..Launch::new("/p", "/l", "x", "q") }).unwrap_err(), "effort unsupported by claude");
+        l.effort = Some("high; rm".into());
+        assert_eq!(args("codex", &l).unwrap_err(), "effort requires a plain word");
+        let mut l = Launch::new("/p", "/l", "x", "fixtureq");
+        let root = std::env::temp_dir();
+        l.policy = Policy { write: Scope::Project, network: Network::Off, approval: Approval::Deny, roots: Some(vec![]), unelevated: true, ..Policy::default() };
+        assert_eq!(args("codex", &l).unwrap(), ["--sandbox", "workspace-write", "-c", "approval_policy=never", "-c", "sandbox_workspace_write.network_access=false",
+            "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "windows.sandbox=unelevated"]);
+        l.policy = Policy { write: Scope::None, ..Policy::default() };
+        assert_eq!(args("codex", &l).unwrap(), ["--sandbox", "read-only"]);
+        l.policy = Policy { write: Scope::Project, approval: Approval::Auto, network: Network::On, roots: Some(vec![root.clone()]), ..Policy::default() };
+        assert_eq!(args("codex", &l).unwrap(), ["--full-auto".into(), "-c".into(), "sandbox_workspace_write.network_access=true".into(),
+            "-c".into(), "sandbox_workspace_write.writable_roots=[]".into(), "--add-dir".into(), root.to_string_lossy().into_owned()]);
+        l.policy.roots = Some(vec!["relative".into()]);
+        assert_eq!(args("codex", &l).unwrap_err(), "policy roots unsupported by codex");
+        for name in ["claude", "antigravity"] {
+            let l = Launch { policy: Policy { roots: Some(vec![root.clone()]), ..Policy::default() }, ..Launch::new("/p", "/l", "x", "q") };
+            assert_eq!(args(name, &l).unwrap_err(), format!("policy roots unsupported by {name}"));
+            let l = Launch { policy: Policy { unelevated: true, ..Policy::default() }, ..Launch::new("/p", "/l", "x", "q") };
+            assert_eq!(args(name, &l).unwrap_err(), format!("policy unelevated unsupported by {name}"));
+        }
+        let mut l = Launch::new("/p", "/l", "x", "fixtureq");
+        l.policy = Policy { write: Scope::Project, approval: Approval::Deny, ..Policy::default() };
+        let t = thread_params(&l, &json!({})).unwrap();
+        assert_eq!((t["sandbox"].as_str(), t["approvalPolicy"].as_str()), (Some("workspace-write"), Some("never")));
+        l.policy.unelevated = true;
+        assert_eq!(thread_params(&l, &json!({})).unwrap_err(), "policy unelevated unsupported by app-server");
     }
 
     // #210 A1/A3: descriptors are the only metadata; every runtime answers session_url and home/quota operations or names a

@@ -19,6 +19,7 @@ name = "agentq-runtime"
 version = "0.1.0"
 dependencies = [
  "coreq 0.18.0",
+ "libc",
  "ring",
  "serde_json",
 ]
