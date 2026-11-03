@@ -124,7 +124,10 @@ pub(crate) fn claude_link(home: Option<&Path>, session: &str, job: Option<&str>,
     };
     let mut last = None;
     for line in String::from_utf8_lossy(&log).lines() {
+        // Only Claude's own logger prefix (`<time> [<LEVEL>] `) may precede the marker, so logged content cannot spoof it.
         let Some(at) = line.find("[bridge:repl] ") else { continue };
+        let prefix = &line[..at];
+        if !(prefix.is_empty() || prefix.ends_with("] ") && prefix.split_whitespace().count() <= 2) { continue; }
         let rest = &line[at + 14..];
         let found = if let Some(id) = ["Hook initialized, session=", "Mirror initialized, session="].iter().find_map(|p| rest.strip_prefix(p)) {
             bridge_url(id.trim()).map(Ok)
@@ -497,6 +500,8 @@ mod tests {
         assert_eq!(cause(link(None,true)),(Cause("disabled"),Some("Remote Control is disabled by your organization's policy.".into())));
         write("[bridge:repl] notifyBridgeFailed detail=\"Session ingress unreachable\" outboundOnly=false wasConnected=false");
         assert_eq!(cause(link(None,false)),(Cause("failed"),Some("Session ingress unreachable".into())),"the latest logged event wins");
+        write("[DEBUG] tool output quoted [bridge:repl] Hook initialized, session=cse_01Spoof");
+        assert_eq!(cause(link(None,true)).0,Cause("failed"),"a marker inside logged content is not evidence");
         write("[bridge:repl] Hook initialized, session=cse_01Abc");
         assert_eq!(link(None,true).unwrap(),"https://claude.ai/code/session_01Abc");
         let state=home.join("jobs/c37eb75a/state.json");std::fs::create_dir_all(state.parent().unwrap()).unwrap();
