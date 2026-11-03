@@ -332,17 +332,139 @@
       ]
     }
   ],
-  "matrix_started": false,
-  "paid_calls": 6,
-  "remaining_prerequisites": [
-    "Update installed <installed-agentq>/agentq (sha256 3851ee14a623f7dcb0e917f1c4076047cd9132e0cec4c1adb6a4863b3ff17d2b, pre-#198) to >= db11d38f67cda29edf01fac2d9dbaeb391caafb6 so PreToolUse returns {\"decision\":\"allow\"} under AGENTQ_OPTIMIZATION=off",
-    "Permit <installed-agentq>/data writes in the antigravity Workspace Seatbelt profile or route benchmark child launches through an isolated writable AGENTQ_INSTALL root so agentq run and agentq stats --records can acquire lifecycle.lock and record attributable compression"
-  ],
+  "owner_resolution": {
+    "ask_note": 6600024887,
+    "answer_note": 6600049505,
+    "choice": "Refresh host hook + temp root - + Fixes off PreToolUse allow and writable data lock; - Needs host binary update",
+    "temp_install_root": "/tmp/agentq-bench-install",
+    "candidate_source_sha": "94798c28e6caa74d81cfbcbe2f19ae7d3515f962",
+    "candidate_binary_sha256": "1567891ce6c7b7ca7df15df56f53d9ef0d1f07aa30e19ab67740ab54d75da979",
+    "gemini_dir_arg": "--gemini_dir=/tmp/agentq-bench-install/gemini",
+    "probes_after_resolution": [
+      {
+        "client": "antigravity",
+        "intent": "off",
+        "args": [
+          "--dangerously-skip-permissions",
+          "--gemini_dir=/tmp/agentq-bench-install/gemini"
+        ],
+        "report": {
+          "schema": 1,
+          "session": "389e1d58-05a6-4d1b-b2c8-0224fed73d91",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"outer_sandbox\": true, \"read\": true, \"write\": true, \"cargo_exit\": 101, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\", \"original_ref\": null}\n",
+          "exit": -1,
+          "started_ms": 1793699345873,
+          "duration_us": 23763063,
+          "usage": {
+            "calls": null,
+            "input": 10066,
+            "cache_read": 7606,
+            "cache_write": null,
+            "output": 147,
+            "model": null,
+            "unknown": null
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 23772
+        },
+        "fixture_native_write": true,
+        "passed": true,
+        "compression_records": []
+      },
+      {
+        "client": "antigravity",
+        "intent": "on",
+        "args": [
+          "--dangerously-skip-permissions",
+          "--gemini_dir=/tmp/agentq-bench-install/gemini"
+        ],
+        "report": {
+          "schema": 1,
+          "session": "e00b2a59-1061-489a-8aa9-dc467553455d",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"outer_sandbox\": true, \"read\": true, \"write\": true, \"cargo_exit\": 101, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\", \"original_ref\": \"rtk:000018e4-8016-caee-22e0-0000db600000\"}\n",
+          "exit": -1,
+          "started_ms": 1793699369666,
+          "duration_us": 26525279,
+          "usage": {
+            "calls": null,
+            "input": 10035,
+            "cache_read": 7642,
+            "cache_write": null,
+            "output": 300,
+            "model": null,
+            "unknown": null
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "on",
+            "reason": "configured"
+          },
+          "wall_ms": 26541
+        },
+        "fixture_native_write": true,
+        "passed": true,
+        "compression_records": [
+          {
+            "schema": 1,
+            "event_id": "000018e48016e30ab6900000db600001",
+            "time": 1793699387,
+            "agent": "antigravity",
+            "adapter": "run",
+            "tool": "shell",
+            "runner": "cargo test",
+            "engine": "rtk",
+            "outcome": "compressed",
+            "reason": "compressed",
+            "bytes_in": 4192,
+            "bytes_out": 293,
+            "est_tokens_in": 1048,
+            "est_tokens_out": 74,
+            "duration_ms": 621,
+            "ref": "rtk:000018e4-8016-caee-22e0-0000db600000",
+            "session": "e00b2a59-1061-489a-8aa9-dc467553455d",
+            "turn": null,
+            "tool_call": "step-3",
+            "version": "0.0.0-dev",
+            "engine_version": "0.51.0",
+            "exit_code": 101
+          }
+        ]
+      }
+    ]
+  },
+  "matrix_started": true,
+  "matrix_run_id": "20261103T095413876971Z-94798c28e6ca-live",
+  "paid_calls": 14,
+  "remaining_prerequisites": [],
   "acceptance": {
     "A1": "retained; evaluator selftest passes",
-    "A2": "incomplete; matrix prohibited after failed antigravity off/on prerequisites",
-    "A3": "incomplete; no completed native SDD pair",
-    "A4": "incomplete: root-suite legacy.rs:473 and control.rs ps/launchctl sandbox-blocked; offline selftest, Python suites and pinned contract_lint pass; PR #191 merge_group pending"
+    "A2": "complete; all 6 live SDD cells completed with outcome ok, quality 100 and adherence 100.0 in benchmarks/runs/20261103T095413876971Z-94798c28e6ca-live.json and benchmarks/viewer/data.js",
+    "A3": "complete; off vs on adapter behavior documented in docs/research/190.md",
+    "A4": "offline selftest, Python suites and pinned contract_lint pass; root-suite legacy.rs:473 and control.rs ps/launchctl sandbox-blocked in worker Seatbelt; PR #191 merge_group pending"
   },
   "privacy": {
     "tcc_attribution": "unknown",
