@@ -27,6 +27,7 @@ fn main() {
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
+        ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
         ("protected_launch_refuses_tampering_and_preserves_native_transport", protected::protected_launch_refuses_tampering_and_preserves_native_transport),
         ("protected_frontend_is_not_scope_supervisor", protected::protected_frontend_is_not_scope_supervisor),
         ("protected_preparation_and_completion_recover_original_operation", protected::protected_preparation_and_completion_recover_original_operation),
@@ -149,6 +150,10 @@ fn fake_app_server() {
             Some("initialize")=>println!("{}",json!({"id":id,"result":{}})),
             Some("initialized")=>{},
             Some("model/list")=>println!("{}",json!({"id":id,"result":{"data":[{"model":"fixture-model","hidden":false}],"nextCursor":null}})),
+            Some("account/read")=>{
+                assert_eq!(value["params"],json!({"refreshToken":false}),"identity read never refreshes a token");
+                println!("{}",json!({"id":id,"result":{"account":{"type":"chatgpt","email":"private@example.invalid","planType":"plus"},"requiresOpenaiAuth":true}}));
+            },
             Some("thread/start")=>{
                 assert_eq!(value["params"]["dynamicTools"][0]["name"],"caller-tool");
                 assert_eq!(value["params"]["developerInstructions"],"private rules");
@@ -206,7 +211,7 @@ fn app_transport_preserves_native_tools_drafts_and_catalogue() {
             assert!(Instant::now()<until);std::thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(models["result"]["data"][0]["model"],"fixture-model");
-        codex.input(&mut run,"private request").unwrap();
+        codex.input(&mut run,&[agent::Part::Text("private request".into())]).unwrap();
         let mut drafts=vec![];let mut handled=0;
         loop {
             for event in codex.progress(&mut run).unwrap() {
@@ -237,6 +242,65 @@ fn app_transport_preserves_native_tools_drafts_and_catalogue() {
     assert!(std::fs::read_to_string(root.join("private.log")).unwrap().contains("fixture startup diagnostic"));
     #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;assert_eq!(std::fs::metadata(root.join("private.log")).unwrap().permissions().mode()&0o777,0o600);}
     drop(store);std::fs::remove_dir_all(root).unwrap();
+}
+
+// #217 A1/A2: `input` forwards ordered text and verified local images as one native turn, exactly once, and a recovered
+// run never replays them; `account` reads identity with `account/read` (`refreshToken: false`) only, and `send` carries
+// no account method. Risk: AssetQ's attachment reaches the worker twice or not at all, a refusal still writes to the
+// native session, or the subscription guard refreshes, writes or leaks a credential.
+fn app_input_forwards_images_once_and_reads_account_only() {
+    use agent::{Failure, Part, State::Finished};
+    let root=scratch("app-input");
+    let codex=agent::runtime("codex").unwrap();
+    let png=root.join("ref.png");
+    std::fs::write(&png,b"\x89PNG\r\n\x1a\n").unwrap();
+    let mut l=fake_launch("codex",&root,"",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("CODEX_HOME",root.join("account").as_os_str())]);
+    l.log=root.join("private.log");
+    l.mode=agent::Mode::AppServer {initialize:json!({}),thread:json!({"dynamicTools":[{"name":"caller-tool"}],"developerInstructions":"private rules"})};
+    l.policy.write=agent::Scope::None;
+    let mut run=codex.launch(&l).unwrap();
+    let written=||std::fs::read_to_string(root.join("app-input.jsonl")).unwrap().lines().map(|l|serde_json::from_str::<Value>(l).unwrap()).collect::<Vec<_>>();
+    let account=codex.account(&mut run).unwrap();
+    assert_eq!((account.login,account.plan.as_deref()),(agent::Login::Subscription,Some("plus")));
+    for method in ["account/read","account/login/start","account/logout","account/apiKey/set"] {
+        assert!(codex.send(&mut run,&json!({"method":method,"params":{}})).unwrap_err().starts_with("send-unsupported"),"{method}: send has no account path");
+    }
+    let before=written().len();
+    let refused=|c:&'static str|Err(Failure::Refused(agent::Cause(c)));
+    assert_eq!(codex.input(&mut run,&[]),refused("input-empty"));
+    assert_eq!(codex.input(&mut run,&[Part::Text(String::new())]),refused("input-empty"));
+    assert_eq!(codex.input(&mut run,&[Part::Text("x".into()),Part::Image("ref.png".into())]),refused("image-invalid"));
+    assert_eq!(codex.input(&mut run,&[Part::Image(root.join("missing.png"))]),refused("image-invalid"));
+    assert_eq!(written().len(),before,"a refusal writes nothing to the native session");
+    let mut seen=vec![];
+    for parts in [vec![Part::Text("describe".into()),Part::Image(png.clone())],vec![Part::Text("second".into())]] {
+        codex.input(&mut run,&parts).unwrap();
+        let until=Instant::now()+Duration::from_secs(10);
+        loop {
+            for event in codex.progress(&mut run).unwrap() {
+                if event["method"]=="item/tool/call" {codex.send(&mut run,&json!({"id":event["id"],"result":{"success":true,"contentItems":[]}})).unwrap();}
+                seen.push(event);
+            }
+            if codex.poll(&mut run).unwrap()==Finished {break;}
+            assert!(Instant::now()<until,"turn ended");std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    seen.extend(codex.progress(&mut run).unwrap());
+    let turns:Vec<_>=written().into_iter().filter(|m|m["method"]=="turn/start").map(|m|m["params"]["input"].clone()).collect();
+    assert_eq!(turns,vec![json!([{"type":"text","text":"describe"},{"type":"localImage","path":png}]),json!([{"type":"text","text":"second"}])],"each part once, in order");
+    let account_methods:Vec<_>=written().into_iter().filter(|m|m["method"].as_str().is_some_and(|m|m.starts_with("account/"))).collect();
+    assert_eq!(account_methods,vec![json!({"id":account_methods[0]["id"],"method":"account/read","params":{"refreshToken":false}})],"one read, no write");
+    assert!(seen.iter().all(|e|!e.to_string().contains("private@example.invalid")),"identity reply stays private");
+    // Recovery observes only: it neither replays the image turn nor accepts new input or reads.
+    let saved=codex.checkpoint(&run).unwrap();
+    let mut cold=codex.recover(&saved,&l).unwrap();
+    let sent=written().len();
+    assert!(matches!(codex.input(&mut cold,&[Part::Text("describe".into()),Part::Image(png.clone())]),Err(Failure::Failed(_))));
+    assert!(matches!(codex.account(&mut cold),Err(Failure::Failed(_))));
+    assert_eq!(written().len(),sent,"no replay after recovery");
+    codex.cancel(&mut run).unwrap();
+    drop((run,cold));
+    let _=std::fs::remove_dir_all(root);
 }
 
 // ---------- helpers ----------
@@ -513,7 +577,12 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         while r.poll(&mut next).unwrap() == agent::State::Running { std::thread::sleep(Duration::from_millis(20)); }
         let second = r.report(&next).unwrap();
         assert_eq!((second.outcome, second.text.as_deref(), second.session.as_deref()), ("ok", Some("turn 2"), Some(session.as_str())), "{}", d.name);
-        assert!(r.input(&mut next, "more").unwrap_err().starts_with("input-unsupported"));
+        // #217 A1: a one-process CLI run refuses further input before any native write; images need capability `image-input`.
+        let refused = |c: &'static str| Err(agent::Failure::Refused(agent::Cause(c)));
+        assert_eq!(r.input(&mut next, &[agent::Part::Text("more".into())]), refused("input-unsupported"), "{}", d.name);
+        let image = agent::Part::Image(root.join("worker.log"));
+        assert_eq!(r.input(&mut next, &[image]), refused(if d.has("image-input") { "input-unsupported" } else { "image-unsupported" }), "{}", d.name);
+        assert_eq!(r.account(&mut next).unwrap_err(), agent::Failure::Refused(agent::Cause("account-unsupported")), "{}", d.name);
         assert_eq!(observations(&store)[0]["runtime"].as_str(), Some(d.name));
         let mut refused = l.clone();
         refused.policy = agent::Policy { read: agent::Scope::Project, ..agent::Policy::default() };

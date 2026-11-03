@@ -193,7 +193,7 @@ impl AppSession {
         if let Some((id, method)) = self.pending {
             if message["id"].as_u64() == Some(id) {
                 if !message["error"].is_null() {
-                    if matches!(method,"model/list"|"account/rateLimits/read") {
+                    if matches!(method,"model/list"|"account/read"|"account/rateLimits/read") {
                         if method=="account/rateLimits/read" {self.latest_limits=None;if self.active && self.terminal.is_none() {self.limits=None;}}
                         self.pending=None;return Ok(());
                     }

@@ -296,7 +296,7 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     l.mode=agent::Mode::AppServer {initialize:json!({}),thread:json!({"approvalPolicy":"never","sandbox":"read-only","dynamicTools":[{"name":"caller-tool"}],"developerInstructions":"private rules"})};
     let frontend=server.id();
     let mut run=server.open(None,&l).unwrap();
-    codex.input(&mut run,"protected request").unwrap();
+    codex.input(&mut run,&[agent::Part::Text("protected request".into())]).unwrap();
     let deadline=until();
     while codex.poll(&mut run).unwrap()==agent::State::Running {
         for event in codex.progress(&mut run).unwrap() {
@@ -316,7 +316,7 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     assert!(duplicate.send(&message,until()).is_err(),"consumed operation cannot launch again even with a copied receipt");drop(duplicate);
     // A valid-looking new generation must fence the already-bound transport permanently.
     let mut changed=good.clone();changed["launch"]["host_instance"]=json!("invented-host-2");save(&path,&changed);
-    assert!(codex.input(&mut run,"next").is_err());save(&path,&good);assert!(codex.input(&mut run,"next").is_err());
+    assert!(codex.input(&mut run,&[agent::Part::Text("next".into())]).is_err());save(&path,&good);assert!(codex.input(&mut run,&[agent::Part::Text("next".into())]).is_err());
     assert_eq!(host.observe(&r,until()).unwrap(),good,"recovery observes same operation without relaunch");
     assert!(!codex.cancel(&mut run).unwrap(),"a host cancel never proves exit");let deadline=until();
     while matches!(coreq::process::identity(frontend),Ok(Some(_))) {codex.poll(&mut run).unwrap();assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
