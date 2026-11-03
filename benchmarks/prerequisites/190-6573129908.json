@@ -1,0 +1,203 @@
+{
+  "task": 190,
+  "attempt": 6573129908,
+  "kind": "bounded-native-prerequisites",
+  "created_at": "2026-11-02T09:03:04.661837+00:00",
+  "source_sha": "dd8c38c5217db8315b30fb4cd2e1bc97f87db806",
+  "binary_sha256": "793168afb699c7c6619fa0bda1bdd3963d2453c898c3697e5c668b03cdbed9df",
+  "outer_sandbox": 1,
+  "dependency": {
+    "task": 198,
+    "merge_sha": "db11d38f67cda29edf01fac2d9dbaeb391caafb6",
+    "receipts": "benchmarks/prerequisites/198-6567141002.json"
+  },
+  "probes": [
+    {
+      "client": "claude",
+      "intent": "off",
+      "args": [],
+      "report": {
+        "schema": 1,
+        "session": "01f2b17b-c3bf-432e-8508-de680f1168a0",
+        "outcome": "ok",
+        "error": "none",
+        "text": "{\"outer_sandbox\": true, \"read\": true, \"write\": true, \"cargo_exit\": 101, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\"}",
+        "exit": -1,
+        "started_ms": 1793610185230,
+        "duration_us": 14422284,
+        "usage": {
+          "calls": 3,
+          "input": 6,
+          "cache_read": 80672,
+          "cache_write": 25869,
+          "output": 92,
+          "model": "claude-opus-5-5",
+          "unknown": null
+        },
+        "limit": {
+          "used_percent": null,
+          "resets_at": 1794200400,
+          "window": "seven_day",
+          "unknown": "partial-snapshot"
+        },
+        "reached": null,
+        "recorded": "not-requested",
+        "optimization": {
+          "intent": "off",
+          "effective": "off",
+          "reason": "launch_off"
+        },
+        "wall_ms": 14860
+      },
+      "fixture_native_write": true,
+      "passed": true,
+      "diagnostics": []
+    },
+    {
+      "client": "codex",
+      "intent": "off",
+      "args": [
+        "--skip-git-repo-check",
+        "-s",
+        "danger-full-access"
+      ],
+      "report": {
+        "schema": 1,
+        "session": "01a19b7f-b37d-7d71-808e-63c3a5f6c687",
+        "outcome": "ok",
+        "error": "none",
+        "text": "{\"outer_sandbox\": true, \"read\": true, \"write\": true, \"cargo_exit\": 101, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\"}",
+        "exit": -1,
+        "started_ms": 1793610199677,
+        "duration_us": 20470187,
+        "usage": {
+          "calls": null,
+          "input": 22254,
+          "cache_read": 40320,
+          "cache_write": 0,
+          "output": 237,
+          "model": null,
+          "unknown": null
+        },
+        "limit": {
+          "used_percent": 30,
+          "resets_at": 1794162456,
+          "window": "10080m",
+          "unknown": null
+        },
+        "reached": null,
+        "recorded": "not-requested",
+        "optimization": {
+          "intent": "off",
+          "effective": "off",
+          "reason": "launch_off"
+        },
+        "wall_ms": 20480
+      },
+      "fixture_native_write": true,
+      "passed": true,
+      "diagnostics": []
+    },
+    {
+      "client": "antigravity",
+      "intent": "off",
+      "args": [],
+      "report": {
+        "schema": 1,
+        "session": "b0780eff-f500-4d01-9248-599598a159b6",
+        "outcome": "ok",
+        "error": "none",
+        "text": "Encountered error in tool execution: tool call denied by pre-tool hook:\n",
+        "exit": -1,
+        "started_ms": 1793610220201,
+        "duration_us": 26252594,
+        "usage": {
+          "calls": null,
+          "input": 12027,
+          "cache_read": 11019,
+          "cache_write": null,
+          "output": 344,
+          "model": null,
+          "unknown": null
+        },
+        "limit": {
+          "used_percent": null,
+          "resets_at": null,
+          "window": null,
+          "unknown": "not-reported"
+        },
+        "reached": null,
+        "recorded": "not-requested",
+        "optimization": {
+          "intent": "off",
+          "effective": "off",
+          "reason": "launch_off"
+        },
+        "wall_ms": 26271
+      },
+      "fixture_native_write": false,
+      "passed": false,
+      "diagnostics": [
+        "E1102 16:04:06.294169     132 errorreport.go:224] open <home>/.gemini/antigravity-cli/conversations/b0780eff-f500-4d01-9248-599598a159b6.c83d213d-73b1-4b16-ab5e-e66fba98c9af.tmp: operation not permitted",
+        "E1102 16:04:06.295167     132 stager.go:117] Failed to save message for b0780eff-f500-4d01-9248-599598a159b6: open <home>/.gemini/antigravity-cli/conversations/b0780eff-f500-4d01-9248-599598a159b6.d1ccd082-205b-4204-8665-7f2746a0930b.tmp: operation not permitted",
+        "E1102 16:04:06.297814     132 errorreport.go:224] open <home>/.gemini/antigravity-cli/conversations/b0780eff-f500-4d01-9248-599598a159b6.d1ccd082-205b-4204-8665-7f2746a0930b.tmp: operation not permitted",
+        "{\"event\":\"result\",\"result\":{\"conversation_id\":\"b0780eff-f500-4d01-9248-599598a159b6\",\"status\":\"SUCCESS\",\"response\":\"Encountered error in tool execution: tool call denied by pre-tool hook:\\n\",\"duration_seconds\":21.978663,\"num_turns\":1,\"usage\":{\"input_tokens\":12027,\"output_tokens\":344,\"thinking_tokens\":226,\"cache_read_tokens\":11019,\"total_tokens\":12371}}}",
+        "E1102 16:04:06.323628       1 cache_manager.go:17] failed to persist last conversation to cache: failed to write last conversations: open <home>/.gemini/antigravity-cli/cache/last_conversations.json.23d0aaa8-f7cc-4503-858b-d596553e8952.tmp: operation not permitted",
+        "E1102 16:04:06.327060      42 errorreport.go:224] [Hub Summaries] failed to write summaries file in persist: open <home>/.gemini/antigravity-cli/jetbox_summaries_proto.pb.551c1b74-d998-4973-a24c-c0e34377f503.tmp: operation not permitted"
+      ]
+    }
+  ],
+  "matrix_started": false,
+  "schema": 1,
+  "paid_calls": 3,
+  "remaining_prerequisites": [
+    "native agy off tools and persistence in this caller",
+    "native agy on transport and attributable compression"
+  ],
+  "acceptance": {
+    "A1": "retained; evaluator selftest passes",
+    "A2": "incomplete; matrix prohibited after failed prerequisite",
+    "A3": "incomplete; no completed native SDD pair",
+    "A4": "incomplete: root-suite sandbox-blocked; selftest and pinned lint pass; PR merge_group pending"
+  },
+  "privacy": {
+    "tcc_attribution": "unknown",
+    "notification_route": "service notices; no TCC owner ask",
+    "notification_delivery": "unknown"
+  },
+  "changes": {
+    "credentials_read_or_copied": false,
+    "login": false,
+    "model_effort_capacity_provider": false,
+    "grants_or_approval_policy": false,
+    "native_or_global_settings": false,
+    "installation_or_deployment": false,
+    "outer_sandbox_disabled": false
+  },
+  "checks": {
+    "cargo_test_locked": {
+      "outcome": "sandbox-blocked",
+      "exit": 101,
+      "passed": 117,
+      "failed": 1,
+      "failure": "legacy::tests::edited_after_journal_is_stripped_not_refused at agentq/legacy.rs:473: Operation not permitted",
+      "duration_s": 147.816,
+      "remaining_suites": "not reached"
+    },
+    "offline_selftest": {
+      "outcome": "pass",
+      "exit": 0,
+      "duration_s": 1.185
+    },
+    "contract_lint": {
+      "outcome": "pass",
+      "exit": 0,
+      "revision": "7e9adf57287553176d8b3be61c2b22565543dc51",
+      "sha256": "77badc19c6a67f550fab1bdd1dffe20aff6f996443362ddc4703aa70bdd8d2df",
+      "errors": 0,
+      "warnings": 2
+    },
+    "benchmark_selftest": "pass; SDD/T2/T4/provenance/unknown/no-fallback guards unchanged",
+    "merge_group": "not observed for PR #191"
+  }
+}

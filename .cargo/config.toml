@@ -1,0 +1,3 @@
+# Keep the 50 ms live resource probe free of competing Rust test subprocesses.
+[env]
+RUST_TEST_THREADS = "1"

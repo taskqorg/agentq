@@ -1,0 +1,548 @@
+{
+  "schema": 1,
+  "task": 190,
+  "attempt": 6599231554,
+  "kind": "bounded-native-prerequisites-antigravity-workspace",
+  "created_at": "2026-11-03T09:25:35.909565+00:00",
+  "source_sha": "dd773bbca8d4be5c342da99ba1da03c1a545ddba",
+  "binary_sha256": "793168afb699c7c6619fa0bda1bdd3963d2453c898c3697e5c668b03cdbed9df",
+  "installed_agentq_sha256": "3851ee14a623f7dcb0e917f1c4076047cd9132e0cec4c1adb6a4863b3ff17d2b",
+  "outer_sandbox": 1,
+  "dependency": {
+    "task": 198,
+    "merge_sha": "db11d38f67cda29edf01fac2d9dbaeb391caafb6",
+    "receipts": "benchmarks/prerequisites/198-6567141002.json"
+  },
+  "admission": {
+    "prior_codex_attempt": 6599015515,
+    "prior_release_event": "[6599090337] taskq: released 6599015515 exit attempt 6599015515",
+    "reroute_note": 6599194344,
+    "admitted_attempt": 6599231554,
+    "admitted_session": "antigravity:- mac",
+    "runtime": "antigravity",
+    "service_version": "4.6.66-261103-20",
+    "policy_revision": 34,
+    "access": [
+      {
+        "runtime": "codex",
+        "grant": "workspace (project) rev 34 by kirs",
+        "effective": "workspace",
+        "enforcement": "taskq seatbelt, writes only to the workspace set"
+      },
+      {
+        "runtime": "antigravity",
+        "grant": "workspace (host) rev 34 by kirs",
+        "effective": "workspace",
+        "enforcement": "taskq seatbelt, writes only to the workspace set"
+      }
+    ]
+  },
+  "probes": [
+    {
+      "client": "claude",
+      "intent": "off",
+      "args": [],
+      "report": {
+        "schema": 1,
+        "session": "8f52f17b-e0d4-4e3b-94a3-32a66d74c8c8",
+        "outcome": "ok",
+        "error": "none",
+        "text": "{\"outer_sandbox\": true, \"read\": true, \"write\": true, \"cargo_exit\": 101, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\"}",
+        "exit": -1,
+        "started_ms": 1793697536387,
+        "duration_us": 12803970,
+        "usage": {
+          "calls": 2,
+          "input": 4,
+          "cache_read": 49245,
+          "cache_write": 19578,
+          "output": 80,
+          "model": "claude-opus-5-5",
+          "unknown": null
+        },
+        "limit": {
+          "used_percent": null,
+          "resets_at": 1794200400,
+          "window": "seven_day",
+          "unknown": "partial-snapshot"
+        },
+        "reached": null,
+        "recorded": "not-requested",
+        "optimization": {
+          "intent": "off",
+          "effective": "off",
+          "reason": "launch_off"
+        },
+        "wall_ms": 12845
+      },
+      "fixture_native_write": true,
+      "passed": true,
+      "diagnostics": []
+    },
+    {
+      "client": "codex",
+      "intent": "off",
+      "args": [
+        "--skip-git-repo-check",
+        "-s",
+        "danger-full-access"
+      ],
+      "report": {
+        "schema": 1,
+        "session": "01a1a0b4-8c3a-70c3-93e9-7d06d82ea857",
+        "outcome": "ok",
+        "error": "none",
+        "text": "{\"outer_sandbox\": true, \"read\": true, \"write\": true, \"cargo_exit\": 101, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\"}",
+        "exit": -1,
+        "started_ms": 1793697549218,
+        "duration_us": 15832493,
+        "usage": {
+          "calls": null,
+          "input": 14738,
+          "cache_read": 25600,
+          "cache_write": 0,
+          "output": 87,
+          "model": null,
+          "unknown": null
+        },
+        "limit": {
+          "used_percent": 76,
+          "resets_at": 1794162456,
+          "window": "10080m",
+          "unknown": null
+        },
+        "reached": null,
+        "recorded": "not-requested",
+        "optimization": {
+          "intent": "off",
+          "effective": "off",
+          "reason": "launch_off"
+        },
+        "wall_ms": 15845
+      },
+      "fixture_native_write": true,
+      "passed": true,
+      "diagnostics": []
+    },
+    {
+      "client": "antigravity",
+      "intent": "off",
+      "args": [],
+      "report": {
+        "schema": 1,
+        "session": "5ad47418-e158-427d-b880-698e745acb27",
+        "outcome": "ok",
+        "error": "none",
+        "text": "{\"read\": null, \"write\": null, \"outer_sandbox\": null, \"passed\": null, \"failed\": null, \"marker\": null, \"original_ref\": null}\n",
+        "exit": -1,
+        "started_ms": 1793696401479,
+        "duration_us": 25021931,
+        "usage": {
+          "calls": null,
+          "input": 13352,
+          "cache_read": 15714,
+          "cache_write": null,
+          "output": 438,
+          "model": null,
+          "unknown": null
+        },
+        "limit": {
+          "used_percent": null,
+          "resets_at": null,
+          "window": null,
+          "unknown": "not-reported"
+        },
+        "reached": null,
+        "recorded": "not-requested",
+        "optimization": {
+          "intent": "off",
+          "effective": "off",
+          "reason": "launch_off"
+        },
+        "wall_ms": 25031
+      },
+      "fixture_native_write": false,
+      "passed": false,
+      "native_storage": {
+        "storage_persistence_errors": 0,
+        "transcript_jsonl_exists": true,
+        "transcript_jsonl_bytes": 3460,
+        "transcript_full_jsonl_exists": true,
+        "transcript_full_jsonl_bytes": 3442,
+        "steps": [
+          {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+              {
+                "name": "run_command",
+                "args": {
+                  "CommandLine": "python3 probe.py",
+                  "WaitMsBeforeAsync": 5000,
+                  "toolSummary": "Run probe.py"
+                }
+              }
+            ]
+          },
+          {
+            "step_index": 2,
+            "type": "GENERIC",
+            "status": "ERROR",
+            "hook_denied": true,
+            "hook_rewrote_command": false,
+            "content_preview": "Created At: 2026-11-03T16:00:08+07:00\nCompleted At: 2026-11-03T16:00:08+07:00\nEncountered error in step execution: tool call denied by pre-tool hook: "
+          },
+          {
+            "step_index": 3,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+              {
+                "name": "run_command",
+                "args": {
+                  "CommandLine": "cargo test --offline --color never",
+                  "WaitMsBeforeAsync": 10000,
+                  "toolSummary": "Run cargo test"
+                }
+              }
+            ]
+          },
+          {
+            "step_index": 4,
+            "type": "GENERIC",
+            "status": "ERROR",
+            "hook_denied": true,
+            "hook_rewrote_command": false,
+            "content_preview": "Created At: 2026-11-03T16:00:13+07:00\nCompleted At: 2026-11-03T16:00:13+07:00\nEncountered error in step execution: tool call denied by pre-tool hook: "
+          }
+        ]
+      },
+      "diagnostics": [
+        "Global <native-gemini-config>/hooks.json invokes \"<installed-agentq>/agentq\" hook antigravity PreToolUse.",
+        "Installed binary sha256 3851ee14a623f7dcb0e917f1c4076047cd9132e0cec4c1adb6a4863b3ff17d2b predates #198 (db11d38f67cda29edf01fac2d9dbaeb391caafb6) and returns {} when AGENTQ_OPTIMIZATION=off.",
+        "agy 1.4.12 denies PreToolUse output {} with 'tool call denied by pre-tool hook:' on both python3 probe.py and cargo test --offline --color never."
+      ]
+    },
+    {
+      "client": "antigravity",
+      "intent": "on",
+      "args": [],
+      "report": {
+        "schema": 1,
+        "session": "a103e273-95bf-4808-9053-70d934393784",
+        "outcome": "ok",
+        "error": "none",
+        "text": "{\"read\": true, \"write\": true, \"outer_sandbox\": true, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\", \"original_ref\": null}\n",
+        "exit": -1,
+        "started_ms": 1793697565079,
+        "duration_us": 23879044,
+        "usage": {
+          "calls": null,
+          "input": 9881,
+          "cache_read": 7482,
+          "cache_write": null,
+          "output": 399,
+          "model": null,
+          "unknown": null
+        },
+        "limit": {
+          "used_percent": null,
+          "resets_at": null,
+          "window": null,
+          "unknown": "not-reported"
+        },
+        "reached": null,
+        "recorded": "not-requested",
+        "optimization": {
+          "intent": "on",
+          "effective": "on",
+          "reason": "configured"
+        },
+        "wall_ms": 23890
+      },
+      "fixture_native_write": true,
+      "passed": false,
+      "native_storage": {
+        "storage_persistence_errors": 0,
+        "transcript_jsonl_exists": true,
+        "transcript_jsonl_bytes": 6890,
+        "transcript_full_jsonl_exists": true,
+        "transcript_full_jsonl_bytes": 7895,
+        "steps": [
+          {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "tool_calls": [
+              {
+                "name": "run_command",
+                "args": {
+                  "CommandLine": "python3 probe.py",
+                  "WaitMsBeforeAsync": 5000,
+                  "toolSummary": "Run probe.py"
+                }
+              },
+              {
+                "name": "run_command",
+                "args": {
+                  "CommandLine": "cargo test --offline --color never",
+                  "WaitMsBeforeAsync": 10000,
+                  "toolSummary": "Run cargo test"
+                }
+              }
+            ]
+          },
+          {
+            "step_index": 2,
+            "type": "GENERIC",
+            "status": "DONE",
+            "hook_denied": false,
+            "hook_rewrote_command": false,
+            "contains_marker": false,
+            "contains_agentq_ref": false,
+            "lifecycle_lock_eperm": false,
+            "stats_marker_eperm": false,
+            "content_preview": "Created At: 2026-11-03T16:19:37+07:00\nCompleted At: 2026-11-03T16:19:39+07:00\nCommand exited with code 0.\n\nCommand output:\n{\"outer_sandbox\": true, \"read\": true, \"write\": true}\r\n"
+          },
+          {
+            "step_index": 3,
+            "type": "GENERIC",
+            "status": "DONE",
+            "hook_denied": false,
+            "hook_rewrote_command": true,
+            "contains_marker": true,
+            "contains_agentq_ref": false,
+            "lifecycle_lock_eperm": true,
+            "stats_marker_eperm": true,
+            "content_preview": "Created At: 2026-11-03T16:19:37+07:00\nCompleted At: 2026-11-03T16:19:42+07:00\nA pre-tool hook changed the arguments of this tool call before it ran. Changed: CommandLine.\n\nCommand exited with code 101.\n\nCommand output:\n   Compiling probe_190 v0.1.0 (<home>/Projects/agentq/.worktrees/taskq-190/benchmarks/.tmp/prereq-190-antigravity-on-xqjuq6x2)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.51s\r\n     Running unittests src/lib.rs (target/debug/deps/probe_190-39275b429af02043"
+          },
+          {
+            "step_index": 4,
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE"
+          }
+        ]
+      },
+      "diagnostics": [
+        "Step 2 (python3 probe.py) passed: exit 0, {\"outer_sandbox\": true, \"read\": true, \"write\": true}.",
+        "Step 3 (cargo test --offline --color never) was rewritten by PreToolUse to '<installed-agentq>/agentq' run -- cargo test --offline --color never and ran all 181 tests (180 passed; 1 failed; MARKER_SDD_BOUNDARY, exit 101).",
+        "Installed '<installed-agentq>/agentq' run printed: 'agentq: stats coverage marker: Operation not permitted (os error 1)' and 'agentq: stats unknown: lifecycle lock: Operation not permitted (os error 1)'.",
+        "Parent '<candidate-agentq> stats --records' also fails with 'Error: lifecycle lock: Operation not permitted (os error 1)' because <installed-agentq>/data is outside the antigravity Workspace Seatbelt writable set under TaskQ 4.6.66-261103-20."
+      ]
+    }
+  ],
+  "owner_resolution": {
+    "ask_note": 6600024887,
+    "answer_note": 6600049505,
+    "choice": "Refresh host hook + temp root - + Fixes off PreToolUse allow and writable data lock; - Needs host binary update",
+    "temp_install_root": "/tmp/agentq-bench-install",
+    "candidate_source_sha": "94798c28e6caa74d81cfbcbe2f19ae7d3515f962",
+    "candidate_binary_sha256": "1567891ce6c7b7ca7df15df56f53d9ef0d1f07aa30e19ab67740ab54d75da979",
+    "gemini_dir_arg": "--gemini_dir=/tmp/agentq-bench-install/gemini",
+    "probes_after_resolution": [
+      {
+        "client": "antigravity",
+        "intent": "off",
+        "args": [
+          "--dangerously-skip-permissions",
+          "--gemini_dir=/tmp/agentq-bench-install/gemini"
+        ],
+        "report": {
+          "schema": 1,
+          "session": "389e1d58-05a6-4d1b-b2c8-0224fed73d91",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"outer_sandbox\": true, \"read\": true, \"write\": true, \"cargo_exit\": 101, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\", \"original_ref\": null}\n",
+          "exit": -1,
+          "started_ms": 1793699345873,
+          "duration_us": 23763063,
+          "usage": {
+            "calls": null,
+            "input": 10066,
+            "cache_read": 7606,
+            "cache_write": null,
+            "output": 147,
+            "model": null,
+            "unknown": null
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "off",
+            "effective": "off",
+            "reason": "launch_off"
+          },
+          "wall_ms": 23772
+        },
+        "fixture_native_write": true,
+        "passed": true,
+        "compression_records": []
+      },
+      {
+        "client": "antigravity",
+        "intent": "on",
+        "args": [
+          "--dangerously-skip-permissions",
+          "--gemini_dir=/tmp/agentq-bench-install/gemini"
+        ],
+        "report": {
+          "schema": 1,
+          "session": "e00b2a59-1061-489a-8aa9-dc467553455d",
+          "outcome": "ok",
+          "error": "none",
+          "text": "{\"outer_sandbox\": true, \"read\": true, \"write\": true, \"cargo_exit\": 101, \"passed\": 180, \"failed\": 1, \"marker\": \"MARKER_SDD_BOUNDARY\", \"original_ref\": \"rtk:000018e4-8016-caee-22e0-0000db600000\"}\n",
+          "exit": -1,
+          "started_ms": 1793699369666,
+          "duration_us": 26525279,
+          "usage": {
+            "calls": null,
+            "input": 10035,
+            "cache_read": 7642,
+            "cache_write": null,
+            "output": 300,
+            "model": null,
+            "unknown": null
+          },
+          "limit": {
+            "used_percent": null,
+            "resets_at": null,
+            "window": null,
+            "unknown": "not-reported"
+          },
+          "reached": null,
+          "recorded": "not-requested",
+          "optimization": {
+            "intent": "on",
+            "effective": "on",
+            "reason": "configured"
+          },
+          "wall_ms": 26541
+        },
+        "fixture_native_write": true,
+        "passed": true,
+        "compression_records": [
+          {
+            "schema": 1,
+            "event_id": "000018e48016e30ab6900000db600001",
+            "time": 1793699387,
+            "agent": "antigravity",
+            "adapter": "run",
+            "tool": "shell",
+            "runner": "cargo test",
+            "engine": "rtk",
+            "outcome": "compressed",
+            "reason": "compressed",
+            "bytes_in": 4192,
+            "bytes_out": 293,
+            "est_tokens_in": 1048,
+            "est_tokens_out": 74,
+            "duration_ms": 621,
+            "ref": "rtk:000018e4-8016-caee-22e0-0000db600000",
+            "session": "e00b2a59-1061-489a-8aa9-dc467553455d",
+            "turn": null,
+            "tool_call": "step-3",
+            "version": "0.0.0-dev",
+            "engine_version": "0.51.0",
+            "exit_code": 101
+          }
+        ]
+      }
+    ]
+  },
+  "matrix_started": true,
+  "matrix_run_id": "20261103T095413876971Z-94798c28e6ca-live",
+  "paid_calls": 14,
+  "remaining_prerequisites": [],
+  "acceptance": {
+    "A1": "retained; evaluator selftest passes",
+    "A2": "complete; all 6 live SDD cells completed with outcome ok, quality 100 and adherence 100.0 in benchmarks/runs/20261103T095413876971Z-94798c28e6ca-live.json and benchmarks/viewer/data.js",
+    "A3": "complete; off vs on adapter behavior documented in docs/research/190.md",
+    "A4": "offline selftest, Python suites and pinned contract_lint pass; root-suite legacy.rs:473 and control.rs ps/launchctl sandbox-blocked in worker Seatbelt; PR #191 merge_group pending"
+  },
+  "privacy": {
+    "tcc_attribution": "unknown",
+    "notification_route": "service notices; no TCC owner ask",
+    "notification_delivery": "unknown"
+  },
+  "changes": {
+    "credentials_read_or_copied": false,
+    "login": false,
+    "model_effort_capacity_provider": false,
+    "grants_or_approval_policy": false,
+    "native_or_global_settings": false,
+    "installation_or_deployment": false,
+    "outer_sandbox_disabled": false
+  },
+  "checks": {
+    "cargo_test_bin_agentq": {
+      "outcome": "sandbox-blocked-on-one-test",
+      "passed": 117,
+      "failed": 1,
+      "failure": "legacy::tests::edited_after_journal_is_stripped_not_refused at agentq/legacy.rs:473: Operation not permitted"
+    },
+    "cargo_test_runtime_lib": {
+      "outcome": "pass",
+      "passed": 15,
+      "failed": 0
+    },
+    "cargo_test_integration": {
+      "compression": {
+        "outcome": "pass",
+        "passed": 2,
+        "failed": 0
+      },
+      "hook": {
+        "outcome": "pass",
+        "passed": 1,
+        "failed": 0
+      },
+      "control": {
+        "outcome": "sandbox-blocked",
+        "passed": 1,
+        "failed": 2,
+        "failure": "ps -axo pid=,args=: Operation not permitted (os error 1)"
+      }
+    },
+    "python_suites": {
+      "client_compression_check": {
+        "ran": 8,
+        "skipped": 1,
+        "outcome": "pass"
+      },
+      "provider_adapter": {
+        "ran": 11,
+        "outcome": "pass"
+      },
+      "hermes_adapter": {
+        "ran": 2,
+        "outcome": "pass"
+      },
+      "telemetry_qualification": {
+        "ran": 4,
+        "outcome": "pass"
+      }
+    },
+    "offline_selftest": {
+      "outcome": "pass",
+      "exit": 0,
+      "output": "selftest: ok 0.0.0-dev macos-aarch64"
+    },
+    "contract_lint": {
+      "outcome": "pass",
+      "exit": 0,
+      "revision": "7e9adf57287553176d8b3be61c2b22565543dc51",
+      "sha256": "77badc19c6a67f550fab1bdd1dffe20aff6f996443362ddc4703aa70bdd8d2df",
+      "errors": 0,
+      "warnings": 2
+    },
+    "benchmark_selftest": "pass; SDD/T2/T4/provenance/unknown/no-fallback guards unchanged",
+    "merge_group": "not observed for PR #191"
+  }
+}
