@@ -12,29 +12,43 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-latest
+          - hosted: '"macos-latest"'
+            local: '["self-hosted", "macOS", "ARM64", "taskq-mac"]'
             triple: aarch64-apple-darwin
             target: macos-aarch64
-          - os: macos-15-intel
+          # No local Intel Mac or Linux arm64 host.
+          - hosted: '"macos-15-intel"'
+            local: '"macos-15-intel"'
             triple: x86_64-apple-darwin
             target: macos-x86_64
-          - os: windows-latest
+          - hosted: '"windows-latest"'
+            local: '["self-hosted", "Windows", "X64", "agentq-win"]'
             triple: x86_64-pc-windows-msvc
             target: windows-x86_64
             ext: .exe
-          - os: ubuntu-latest
+          - hosted: '"ubuntu-latest"'
+            local: '["self-hosted", "Linux", "X64", "agentq-wsl"]'
             triple: x86_64-unknown-linux-musl
             target: linux-x86_64
-          - os: ubuntu-24.04-arm
+          - hosted: '"ubuntu-24.04-arm"'
+            local: '"ubuntu-24.04-arm"'
             triple: aarch64-unknown-linux-musl
             target: linux-aarch64
-    runs-on: ${{ matrix.os }}
+    # A release builds on our hosts; pull requests, forks included, stay on disposable GitHub runners.
+    runs-on: ${{ fromJSON(github.event_name == 'push' && matrix.local || matrix.hosted) }}
+    # The Windows host keeps its default PowerShell execution policy, which refuses the runner's script files.
+    defaults:
+      run:
+        shell: bash
     env:
       AGENTQ_SELFTEST_OFFLINE: '1'
     steps:
       - uses: actions/checkout@v6
+      # The Mac runner's .env also serves tests.yml, which expects target/ in the workspace.
+      - if: runner.environment == 'self-hosted' && runner.os == 'macOS'
+        run: echo "CARGO_TARGET_DIR=$HOME/release-target" >> "$GITHUB_ENV"
       - run: rustup default stable && rustup target add ${{ matrix.triple }}
-      - if: runner.os == 'Linux'
+      - if: runner.os == 'Linux' && runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Version from tag
         shell: bash
@@ -51,11 +65,13 @@ jobs:
       - name: Selftest and stage
         shell: bash
         run: |
-          bin="target/${{ matrix.triple }}/release/agentq${{ matrix.ext }}"
+          bin="${CARGO_TARGET_DIR:-target}/${{ matrix.triple }}/release/agentq${{ matrix.ext }}"
           "$bin" selftest
           mkdir dist
           cp "$bin" "dist/agentq-$VER-${{ matrix.target }}${{ matrix.ext }}"
+      # The script installs a real OS service, so it runs only on a disposable runner: each pull request.
       - name: Service lifecycle
+        if: runner.environment == 'github-hosted'
         shell: bash
         run: scripts/service-lifecycle.sh "dist/agentq-$VER-${{ matrix.target }}${{ matrix.ext }}"
       - uses: actions/upload-artifact@v4
