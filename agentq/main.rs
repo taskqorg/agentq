@@ -65,18 +65,24 @@ fn main() {
     if let Some(code) = compression::replay() { std::process::exit(code); }
     let t = tool();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Recovery can rename the executing launcher; remember its role before current_exe changes on Unix.
+    let is_launcher = std::env::current_exe().ok().is_some_and(|exe| t.is_launcher(&exe));
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    if matches!(a.as_slice(), ["update"] | ["update", "--check"] | ["service", "install" | "run" | "restart"])
+        || (a.first() == Some(&"onboard") && a.contains(&"--yes")) {
+        if let Err(e) = release::recover(&t) { fail(&e, "retry after the installation becomes writable; active state is unknown"); }
+    }
     // the launcher copy only picks a release (coreq.md § Launcher); hooks run in place, so a release mid-update or a
     // failed start never fails the client's hook (#132)
-    if std::env::current_exe().ok() == Some(t.install.join(t.exe_name())) && t.current().is_some() && args.first().map(String::as_str) != Some("hook") {
+    if is_launcher && t.current().is_some() && args.first().map(String::as_str) != Some("hook") {
         coreq::launcher::launch(&t, &args);
     }
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match a.as_slice() {
         ["--version"] => {
             println!("agentq {VERSION}");
             0
         }
-        ["update"] | ["update", "--check"] => match update::update(&t, a.len() == 2) {
+        ["update"] | ["update", "--check"] => match if a.len() == 2 { release::check(&t) } else { release::update(&t) } {
             Ok(Some(v)) if a.len() == 2 => println_code(&format!("update: {v} available")),
             Ok(Some(v)) => println_code(&format!("update: {v} installed")),
             Ok(None) => println_code(&format!("update: {} is the latest", t.current().unwrap_or(VERSION.into()))),
@@ -631,7 +637,7 @@ fn service_cmd(t: &Tool, cmd: &str) -> i32 {
 
 /// `service install` before the unit: the release, each failing host requirement with its fix, then the engines.
 fn install_release(t: &Tool) -> Result<(), String> {
-    install_self(t).and_then(|_| command_path::register(&t.install))
+    release::install_self(t).and_then(|_| command_path::register(&t.install))
         .map(|_| host::problems().iter().chain(&engines::ensure(&t.install)).for_each(|l| println!("{l}")))
 }
 
@@ -674,40 +680,6 @@ fn route_and_start<'a>(
     start()?;
     let silent = routing::await_proxies(&ports.iter().map(|p| p.1).collect::<Vec<_>>(), limit, restart);
     Ok(ports.into_iter().map(|(a, p)| (a, p, !silent.contains(&p))).collect())
-}
-
-/// coreq `install_self` that skips copies already in place (agentq.md § 5): Windows refuses to overwrite a running exe.
-fn install_self(t: &Tool) -> Result<(), String> {
-    let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    copy_unless_same(&me, &t.release_exe(VERSION))?;
-    let launcher = t.install.join(t.exe_name());
-    match copy_unless_same(&me, &launcher) {
-        // the launcher only reads `current`: an older running one keeps working
-        Err(e) if launcher.exists() => println!("launcher: kept the running one ({e})"),
-        r => r.map(|_| ())?,
-    }
-    match t.current() {
-        Some(c) if !update::newer(VERSION, &c) => {}
-        old => {
-            if let Some(c) = old {
-                write_atomic(&t.install.join("previous"), &c)?;
-            }
-            write_atomic(&t.install.join("current"), VERSION)?;
-        }
-    }
-    Ok(())
-}
-
-/// Copies `me` to `dst` unless `dst` already holds the same bytes; true when it copied.
-fn copy_unless_same(me: &Path, dst: &Path) -> Result<bool, String> {
-    let bytes = std::fs::read(me).map_err(|e| format!("{}: {e}", me.display()))?;
-    if std::fs::read(dst).is_ok_and(|d| d == bytes) {
-        return Ok(false);
-    }
-    if let Some(d) = dst.parent() {
-        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-    }
-    std::fs::copy(me, dst).map(|_| true).map_err(|e| format!("{}: {e}", dst.display()))
 }
 
 /// `schtasks /End` ends only the launcher; end every service run tree too, orphans included (agentq.md § 5).
@@ -822,7 +794,7 @@ fn serve(t: &Tool) -> ! {
         let maintenance = control::host_disabled(&t.install.join("data")) == Ok(false);
         if maintenance && now() >= checked + UPDATE_EVERY {
             checked = now();
-            error = match update::update(t, false) {
+            error = match release::update(t) {
                 Ok(Some(v)) => {
                     eprintln!("agentq: updated to {v}");
                     None
@@ -893,8 +865,7 @@ fn selftest(t: &Tool) -> i32 {
         ("status", status::common(t, "h", PROJECT, 1, None, None)["version"] == VERSION),
         ("mcp tools", mcp::tools().as_array().is_some_and(|a| a.len() == 3)),
         ("telemetry event", telemetry::span("agentq.verify", "selftest", Value::Null, 1, "i", "h")["attributes"].as_array().is_some_and(|a| a.len() == 7)),
-        // the running binary is locked on Windows: the installed copy that equals it is read, never overwritten
-        ("self copy skip", std::env::current_exe().is_ok_and(|me| copy_unless_same(&me, &me) == Ok(false))),
+        ("transactional install", release::selftest()),
         ("json bom", onboard::selftest()),
         ("single service run", single_instance_selftest()),
         ("configuration fixtures", configure::selftest()),
@@ -1148,23 +1119,6 @@ mod tests {
         assert_eq!(date(0), "1970-01-01");
         assert_eq!(date(1_791_849_600), "2026-10-13");
         assert_eq!(date(951_782_400), "2000-02-29");
-    }
-
-    /// #71 A1: an installed copy equal to the running binary is not rewritten; a differing one is replaced.
-    #[test]
-    fn self_copy_skips_equal_bytes() {
-        let d = std::env::temp_dir().join(format!("agentq-copy-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let (me, dst) = (d.join("me"), d.join("releases").join("agentq"));
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(&me, "v1").unwrap();
-        assert_eq!(copy_unless_same(&me, &dst), Ok(true));
-        assert_eq!(copy_unless_same(&me, &dst), Ok(false));
-        assert_eq!(copy_unless_same(&me, &me), Ok(false));
-        std::fs::write(&me, "v2").unwrap();
-        assert_eq!(copy_unless_same(&me, &dst), Ok(true));
-        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "v2");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// #111 A2/A3: a new `current` restarts at once when idle, defers on open or unknown connections, at most 15 min.
