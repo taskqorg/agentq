@@ -46,6 +46,12 @@ fn main() {
         ("process_hooks_shape_the_child", process_hooks_shape_the_child),
         ("runtime_trait_exposes_native_seams", runtime_trait_exposes_native_seams),
         ("ready_reads_native_login_and_minimum_version", ready_reads_native_login_and_minimum_version),
+        ("host_args_reach_codex_turns_only", host_args_reach_codex_turns_only),
+        ("settings_env_reaches_the_session", settings_env_reaches_the_session),
+        ("settings_env_preserves_subscription_policy", settings_env_preserves_subscription_policy),
+        ("settings_env_off_precedes_state_read", settings_env_off_precedes_state_read),
+        ("settings_env_keeps_inherited_launch_markers", settings_env_keeps_inherited_launch_markers),
+        ("launcher_output_is_handed_over_once", launcher_output_is_handed_over_once),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
@@ -83,6 +89,7 @@ fn fake(client: &str) {
         assert_eq!(args.first().map(String::as_str), Some("--bg"), "background worker must not switch to -p");
         std::fs::write("background-command.json", json!({"args":args,"input":input,"home":std::env::var("CLAUDE_CONFIG_DIR").ok(),
             "inherited":std::env::var("CLAUDE_CODE_SESSION_ID").is_ok(),"extra":std::env::var("FAKE_EXTRA").ok()}).to_string()).unwrap();
+        if std::env::var("FAKE_LAUNCH_REFUSED").is_ok() { eprintln!("Error: Workspace not trusted"); std::process::exit(1); }
         // Claude Code 2.1.317 launcher output: the job ID is not the last token (#216).
         let name = args.iter().position(|a| a == "--name").and_then(|i| args.get(i + 1)).map(|n| format!(" · {n}")).unwrap_or_default();
         println!("backgrounded · c37eb75a{name}\n  claude agents             list sessions\n  claude stop c37eb75a      stop this session\n");
@@ -328,6 +335,10 @@ fn scratch(tag: &str) -> PathBuf {
 fn record(root: &Path, turn: u64) -> Value { serde_json::from_str(&std::fs::read_to_string(root.join(format!("fake-turn-{turn}.json"))).unwrap()).unwrap() }
 
 fn observations(store: &coreq::telemetry::Store) -> Vec<Value> {
+    records(store).into_iter().filter(|o| o["kind"] == "agent.turn").collect()
+}
+
+fn records(store: &coreq::telemetry::Store) -> Vec<Value> {
     store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
 }
 
@@ -465,6 +476,208 @@ fn background_commands_preserve_native_mode() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// #240 A1: host-configured Codex arguments sit in the Arguments position of start and resume, and only there.
+// Risk: TaskQ keeps a native launch path, or host flags silently override a Policy the adapter claims to enforce.
+fn host_args_reach_codex_turns_only() {
+    let root = scratch("host-args");
+    let home = root.join("home");
+    let codex = agent::runtime("codex").unwrap();
+    let mut l = fake_launch("codex", &root, "x", &[("CODEX_HOME", home.as_os_str())]);
+    l.host_args = ["--sandbox", "workspace-write", "-c", "approval_policy=never"].map(Into::into).to_vec();
+    let mut run = codex.launch(&l).unwrap();
+    finish(codex, &mut run);
+    assert_eq!(record(&root, 1)["args"], json!(["exec", "--json", "--sandbox", "workspace-write", "-c", "approval_policy=never", "-C", root, "-"]));
+    let thread = codex.session_id(&run).unwrap();
+    let mut next = codex.resume(&thread, &l).unwrap();
+    finish(codex, &mut next);
+    assert_eq!(record(&root, 2)["args"], json!(["exec", "--json", "--sandbox", "workspace-write", "-c", "approval_policy=never", "resume", thread, "-"]));
+    let refused = |l: &agent::Launch, name: &str| agent::runtime(name).unwrap().launch(l).err();
+    let mut policy = l.clone();
+    policy.policy.write = agent::Scope::Project;
+    assert_eq!(refused(&policy, "codex").as_deref(), Some("host-args require the native policy on codex"));
+    assert_eq!(refused(&l, "claude").as_deref(), Some("host-args unsupported by claude"));
+    assert_eq!(refused(&l, "antigravity").as_deref(), Some("host-args unsupported by antigravity"));
+    let mut queue = l.clone();
+    queue.mode = agent::Mode::Queue { transcript: root.join("t.jsonl") };
+    assert_eq!(codex.resume(&thread, &queue).err().as_deref(), Some("host-args unsupported by codex"));
+    assert!(!root.join("native-control.json").exists(), "a refusal starts nothing");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn settings_of(args: &Value) -> Value {
+    let args = args.as_array().unwrap();
+    let at: Vec<_> = args.iter().enumerate().filter(|(_, a)| *a == "--settings").map(|(i, _)| i).collect();
+    assert_eq!(at.len(), 1, "one --settings");
+    serde_json::from_str(args[at[0] + 1].as_str().unwrap()).unwrap()
+}
+
+// #240 A1: caller settings reach the session: Claude through one `--settings` that survives the daemon, Codex through its child.
+// Risk: a `--bg` session misses TaskQ's variables or `off`, a second `--settings` drops the compact hook, or settings values leak into child env.
+fn settings_env_reaches_the_session() {
+    use agentq_runtime::optimization::Intent;
+    // This fixture supplies its own launcher identity; inherited TaskQ identity has a separate regression below.
+    let task = std::env::var_os("TASKQ_TASK");
+    unsafe { std::env::remove_var("TASKQ_TASK"); }
+    let root = scratch("settings-env");
+    let account = root.join("account");
+    let claude = agent::runtime("claude").unwrap();
+    // An explicit child marker: `prepare` also reads the test process's own environment, which a worker sets.
+    let mut l = fake_launch("claude", &root, "x", &[("CLAUDE_CONFIG_DIR", account.as_os_str()), ("AGENTQ_LAUNCHER", "child".as_ref())]);
+    l.settings_env = vec![("FAKE_EXTRA".into(), "settings".into()), ("AGENTQ_LAUNCHER".into(), "caller".into())];
+    l.compact_hook = Some("rules".into());
+    l.optimization = Intent::Off;
+    let mut run = claude.launch(&l).unwrap();
+    finish(claude, &mut run);
+    let turn = record(&root, 1);
+    let settings = settings_of(&turn["args"]);
+    assert_eq!(settings["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child", "AGENTQ_OPTIMIZATION": "off"}), "the optimizer's own values win");
+    assert_eq!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"], "rules");
+    assert_eq!(turn["extra"], Value::Null, "settings values stay out of the child environment");
+
+    let mut bg = fake_launch("claude", &root, "reference", &[("COREQ_FAKE_BACKGROUND", "1".as_ref()), ("COREQ_FAKE_CONTROL", "1".as_ref()), ("FAKE_JOB_ROWS", "[]".as_ref()), ("CLAUDE_CONFIG_DIR", account.as_os_str()), ("AGENTQ_LAUNCHER", "child".as_ref())]);
+    bg.mode = agent::Mode::Background;
+    bg.optimization = Intent::Off;
+    bg.settings_env = vec![("FAKE_EXTRA".into(), "settings".into())];
+    claude.launch(&bg).unwrap();
+    let launched: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
+    assert_eq!(settings_of(&launched["args"])["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child", "AGENTQ_OPTIMIZATION": "off"}), "off reaches the daemon's session");
+    bg.settings_env.clear();
+    claude.launch(&bg).unwrap();
+    let plain: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
+    assert_eq!(plain["args"], json!(["--bg"]), "a launch without settings keeps its native arguments");
+
+    let codex = agent::runtime("codex").unwrap();
+    let home = root.join("codex-home");
+    let codex_root = scratch("settings-env-codex");
+    let mut c = fake_launch("codex", &codex_root, "x", &[("CODEX_HOME", home.as_os_str()), ("FAKE_EXTRA", "child".as_ref())]);
+    c.settings_env = vec![("FAKE_EXTRA".into(), "settings".into())];
+    let mut run = codex.launch(&c).unwrap();
+    finish(codex, &mut run);
+    let turn = record(&codex_root, 1);
+    assert_eq!(turn["extra"], "settings", "a settings value wins over the child value");
+    assert!(!turn["args"].as_array().unwrap().iter().any(|a| a == "--settings"), "Codex has no settings flag");
+    let mut queue = c.clone();
+    queue.mode = agent::Mode::Queue { transcript: codex_root.join("t.jsonl") };
+    assert_eq!(codex.resume(&codex.session_id(&run).unwrap(), &queue).err().as_deref(), Some("settings-env unsupported by codex"));
+    assert_eq!(agent::runtime("antigravity").unwrap().launch(&c).err().as_deref(), Some("settings-env unsupported by antigravity"));
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(codex_root).unwrap();
+    if let Some(task) = task { unsafe { std::env::set_var("TASKQ_TASK", task); } }
+}
+
+// #240 A1 / M12.10: settings must not restore API auth after subscription policy cleared the child.
+fn settings_env_preserves_subscription_policy() {
+    let root = scratch("settings-subscription");
+    let claude = agent::runtime("claude").unwrap();
+    for mode in [agent::Mode::Turn, agent::Mode::Background] {
+        let mut l = fake_launch("claude", &root, "x", &[]);
+        l.mode = mode.clone();
+        if mode == agent::Mode::Background { l.env.push(("COREQ_FAKE_BACKGROUND".into(), "1".into())); }
+        l.policy.subscription = true;
+        l.settings_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].map(|k| (k.into(), "invented-fixture".into())).to_vec();
+        let mut run = claude.launch(&l).unwrap();
+        let turn = if mode == agent::Mode::Turn {
+            finish(claude, &mut run);
+            record(&root, 1)
+        } else { serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap() };
+        let settings = settings_of(&turn["args"]);
+        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+            assert_eq!(settings["env"][key], "", "subscription policy wins over settings: {mode:?} {key}");
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// #240 A1 / M12.5-M12.7: settings off must be observed before installed state and reach both native sessions.
+fn settings_env_off_precedes_state_read() {
+    for name in ["claude", "codex"] {
+        let root = scratch(&format!("settings-off-{name}"));
+        let home = root.join("home");
+        let install = root.join("install");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(install.join("data")).unwrap();
+        std::fs::write(home.join("config.toml"), "model_provider = \"agentq\"\n").unwrap();
+        std::fs::write(home.join("settings.json"), r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"/i/agentq hook claude PreToolUse"}]}]}}"#).unwrap();
+        let runtime = agent::runtime(name).unwrap();
+        let mut l = fake_launch(name, &root, "x", &[("AGENTQ_OPTIMIZATION", "on".as_ref())]);
+        l.home = Some(home);
+        l.install = Some(install.clone());
+        l.settings_env = vec![("AGENTQ_OPTIMIZATION".into(), "off".into())];
+        for invalid in [false, true] {
+            if invalid { std::fs::write(install.join("data/config.json"), "not JSON").unwrap(); }
+            let mut run = runtime.launch(&l).unwrap();
+            finish(runtime, &mut run);
+            assert_eq!((run.optimization().effective, run.optimization().reason), ("off", "launch_off"), "{name} invalid={invalid}");
+            let turn = record(&root, 1);
+            assert_eq!(turn["optimization"], "off");
+            if name == "claude" { assert_eq!(settings_of(&turn["args"])["env"]["AGENTQ_OPTIMIZATION"], "off"); }
+            else { assert!(turn["args"].as_array().unwrap().iter().any(|a| a == "model_providers.agentq.http_headers.x-agentq-optimization=\"off\"")); }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// #240 A1 / M12.4, M6.9: a daemon session must retain inherited launcher identity to prevent double counting.
+fn settings_env_keeps_inherited_launch_markers() {
+    let keys = ["TASKQ_TASK", "AGENTQ_LAUNCHER", "AGENTQ_OPTIMIZATION"];
+    let saved = keys.map(|k| (k, std::env::var_os(k)));
+    for key in keys { unsafe { std::env::remove_var(key); } }
+    let root = scratch("settings-markers");
+    let claude = agent::runtime("claude").unwrap();
+    for key in ["TASKQ_TASK", "AGENTQ_LAUNCHER"] {
+        unsafe { std::env::set_var(key, "inherited-fixture"); }
+        let mut l = fake_launch("claude", &root, "x", &[("COREQ_FAKE_BACKGROUND", "1".as_ref())]);
+        l.mode = agent::Mode::Background;
+        l.settings_env = vec![(key.into(), "caller-fixture".into())];
+        claude.launch(&l).unwrap();
+        let turn: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
+        assert_eq!(settings_of(&turn["args"])["env"][key], "inherited-fixture");
+        unsafe { std::env::remove_var(key); }
+    }
+    for (key, value) in saved { unsafe { match value { Some(v) => std::env::set_var(key, v), None => std::env::remove_var(key) } } }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// #240 A1, TaskQ #1555/#1557: the caller reads the launcher's own stdout, stderr and status from a launched run, once.
+// Risk: a refused launch reads only as an uncertain fault, so a confirmed no-start blocks its task forever.
+fn launcher_output_is_handed_over_once() {
+    use coreq::process::Failure;
+    let root = scratch("launcher-output");
+    let account = root.join("account");
+    let claude = agent::runtime("claude").unwrap();
+    let codex = agent::runtime("codex").unwrap();
+    let env = [("COREQ_FAKE_BACKGROUND", "1".as_ref()), ("COREQ_FAKE_CONTROL", "1".as_ref()), ("FAKE_JOB_ROWS", "[]".as_ref()), ("CLAUDE_CONFIG_DIR", account.as_os_str())];
+    let mut l = fake_launch("claude", &root, "reference", &env);
+    l.mode = agent::Mode::Background;
+    let mut run = claude.launch(&l).unwrap();
+    let saved = claude.checkpoint(&run).unwrap();
+    let out = claude.launcher_output(&mut run).unwrap().unwrap();
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("backgrounded · c37eb75a"));
+    assert_eq!(claude.launcher_output(&mut run).err(), Some(agent::Cause("launcher-output-unavailable")), "handed over once");
+    assert_eq!(codex.launcher_output(&mut run).err(), Some(agent::Cause("foreign-run")));
+    let mut recovered = claude.recover(&saved, &l).unwrap();
+    assert_eq!(claude.launcher_output(&mut recovered).err(), Some(agent::Cause("launcher-output-unavailable")), "not part of the checkpoint");
+
+    l.env.push(("FAKE_LAUNCH_REFUSED".into(), "1".into()));
+    let mut refused = claude.launch(&l).unwrap();
+    let out = match claude.launcher_output(&mut refused).unwrap() { Ok(o) | Err(Failure::Exit(o)) => o, Err(e) => panic!("launcher exchange: {e}") };
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!((out.status.success(), out.stdout.is_empty(), claude.launch_refusal(&stderr)), (false, true, Some(agent::Cause("workspace-untrusted"))));
+    assert_eq!(claude.poll(&mut refused).unwrap(), agent::State::Unknown, "the run itself never resubmits");
+
+    let mut turn = fake_launch("claude", &root, "x", &[("CLAUDE_CONFIG_DIR", account.as_os_str())]);
+    turn.log = root.join("turn.log");
+    let mut run = claude.launch(&turn).unwrap();
+    finish(claude, &mut run);
+    assert_eq!(claude.launcher_output(&mut run).err(), Some(agent::Cause("no-launcher")));
+    let codex_root = scratch("launcher-output-codex");
+    let mut run = codex.launch(&fake_launch("codex", &codex_root, "x", &[("CODEX_HOME", codex_root.join("home").as_os_str())])).unwrap();
+    finish(codex, &mut run);
+    assert_eq!(codex.launcher_output(&mut run).err(), Some(agent::Cause("no-launcher")));
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(codex_root).unwrap();
+}
+
 // #222 A1: Claude's `agents --cwd <root>` lists nothing for a root under `.claude/worktrees`.
 // Risk: the job stays unattached, so observe reads session-unknown and cancel finds no job; or a foreign job attaches.
 fn background_job_found_when_cwd_listing_misses_it() {
@@ -560,6 +773,14 @@ fn claude_starts_and_resumes_one_session() {
     assert_eq!((o["input_tokens"].as_u64(), o["cache_read_tokens"].as_u64(), o["cache_write_tokens"].as_u64(), o["output_tokens"].as_u64()), (Some(3), Some(100), Some(20), Some(7)));
     assert_eq!((o["limit_used_percent"].as_u64(), o["limit_resets_at"].as_u64(), o["limit_window"].as_str()), (Some(25), Some(1792386000), Some("five_hour")));
     assert!(o["duration_us"].as_u64().is_some());
+    // A2, A3: a real child turn through `Run::record`. Risk: the fields exist in unit tests but never reach the store.
+    assert_eq!((o["schema"].as_u64(), o["exit_code"].as_u64(), o["session_id"].as_str().is_some()), (Some(1), Some(0), true));
+    let measured = o["peak_rss_bytes"].as_u64().is_some() && o["user_cpu_us"].as_u64().is_some() && o["system_cpu_us"].as_u64().is_some();
+    assert!(measured || o["unknown"]["peak_rss_bytes"] == "not-sampled", "{o}");
+    let calls: Vec<_> = records(&store).into_iter().filter(|r| r["kind"] == "agent.call").collect();
+    assert!(calls.len() >= 2, "each turn's model requests are recorded: {calls:?}");
+    let last = calls.last().unwrap();
+    assert_eq!((last["runtime"].as_str(), last["model"].as_str(), last["session_id"].clone(), last["task"].as_u64()), (Some("claude"), Some("claude-opus-5-5"), o["session_id"].clone(), Some(1)));
     drop(store);
     let _ = std::fs::remove_dir_all(root);
 }

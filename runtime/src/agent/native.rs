@@ -442,7 +442,7 @@ impl NativeTurn {
         let mut observation = report.observation(self.spec.client, ctx);
         if self.duration.is_none() { observation["duration_us"] = Value::Null; observation["unknown"]["duration_us"] = json!("not-reported"); }
         let key = crate::sha256_hex(format!("{}\0{}\0{}\0{}\0{}\0{}", self.spec.client.code(), self.spec.root.display(), self.scope, self.spec.session, self.start, self.input).as_bytes());
-        report.recorded = crate::telemetry::Event::identified("agent.native", &key, observation).and_then(|e| store.append(&[e])).map(|_| ());
+        report.recorded = crate::telemetry::Event::identified("agent.native", &key, crate::telemetry::shared(&observation)).and_then(|e| super::capture::record(store, e, &report, self.spec.client, ctx, &key));
         Ok(Some(report))
     }
 }
@@ -450,6 +450,7 @@ impl NativeTurn {
 // `last` is one model-call increment, not the whole turn. Repeated total snapshots carry no new usage.
 pub(super) fn append_codex_usage(events:&mut Vec<Value>,last:&Value,total:&Value,camel:bool) {
     let fields=if camel {["inputTokens","cachedInputTokens","outputTokens"]} else {["input_tokens","cached_input_tokens","output_tokens"]};
+    let reasoning=&last[if camel {"reasoningOutputTokens"} else {"reasoning_output_tokens"}];
     let totals:Vec<_>=fields.iter().map(|k|total[k].as_u64()).collect();
     let increments:Vec<_>=fields.iter().map(|k|last[k].as_u64()).collect();
     let key=json!(totals);
@@ -459,7 +460,7 @@ pub(super) fn append_codex_usage(events:&mut Vec<Value>,last:&Value,total:&Value
         && prior.is_none_or(|previous|totals.iter().zip(&increments).zip(previous).all(|((total,increment),old)|
             total.zip(old.as_u64()).and_then(|(t,o)|t.checked_sub(o))==*increment));
     let value=|i|if consistent {json!(increments[i])} else {Value::Null};
-    events.push(json!({"type":"turn.completed","total_usage":key,"usage":{"input_tokens":value(0),"cached_input_tokens":value(1),"output_tokens":value(2)}}));
+    events.push(json!({"type":"turn.completed","call":true,"total_usage":key,"usage":{"input_tokens":value(0),"cached_input_tokens":value(1),"output_tokens":value(2),"reasoning_output_tokens":reasoning}}));
 }
 
 pub(super) fn digest_prefix(file:&mut File,length:u64)->Res<String> {
@@ -488,7 +489,7 @@ mod tests {
     }
 
     fn observations(store: &crate::telemetry::Store) -> Vec<Value> {
-        store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
+        store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).filter(|o| o["kind"] == "agent.turn").collect()
     }
 
     // #213 A3 native proof, not CI: reads a live background job of this host through the same reader.
@@ -586,7 +587,11 @@ mod tests {
                 assert_eq!(recovered.remote_url(),Some("https://claude.ai/code/session_fixture123"));
             } else {assert_eq!(report.usage.input,None,"foreign usage never becomes this turn's usage");assert_eq!(report.usage.unknown,Some("no-usage"));}
             let payload=observations(&store)[0].to_string();
-            for private in ["owned input","native-session","native.jsonl","session_fixture123","answer"] {assert!(!payload.contains(private));}
+            for private in ["owned input","native.jsonl","session_fixture123","answer"] {assert!(!payload.contains(private));}
+            // A3 names the session id as an `agent.turn` field; no process is owned here.
+            let turn=&observations(&store)[0];
+            assert_eq!(turn["session_id"],"native-session");
+            assert!(turn["peak_rss_bytes"].is_null()&&turn["exit_code"].is_null()&&turn["unknown"]["peak_rss_bytes"]=="not-owned");
             let changed=Spec {home:Some(root.join("foreign-account")),..spec.clone()};
             assert!(NativeTurn::recover(&changed,&saved).is_err());
             let changed=Spec {resume:!spec.resume,..spec.clone()};assert!(NativeTurn::recover(&changed,&saved).is_err());

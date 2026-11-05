@@ -19,6 +19,7 @@ Each adapter implements every operation. The sections below remain the binding d
 | `poll(run)` | `running`, `finished`, `failed` or `unknown` from the existing end detection. |
 | `report(run)` | The `Report` of a finished run; a running one returns cause `running`. |
 | `progress(run)` | Complete native JSON records appended to the run's log since the previous call, as raw values, each read at most once. |
+| `launcher_output(run)` | The raw `background` launcher exchange of this run, once (Caller launch data). |
 | `session_id(run)` | The native session once named, else none. |
 | `session_url(run)` | The URL or cause of `observe` (Session observation), without polling. |
 | `observe(run)` | One runtime-neutral `Observation`: `poll` state (a failed poll reads `unknown` with its error), native session, and session URL or absence cause with its native detail (Session observation). |
@@ -46,8 +47,8 @@ Descriptor data, the only runtime metadata a caller reads. `models` are the mode
 
 | `name` | `label` | `brand` | `family` | `models` | `minimum` | `capabilities` |
 |---|---|---|---|---|---|---|
-| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas` |
-| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort`, `image-input`, `account` |
+| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas`, `settings-env` |
+| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort`, `image-input`, `account`, `host-args`, `settings-env` |
 | `antigravity` | Antigravity | Google | `gemini` | | | `turn`, `resume`, `title` |
 
 ### Session observation
@@ -101,6 +102,18 @@ Codex `builtin`, `isolated` and `subscription` flags follow the `exec` or `app-s
 
 `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
 
+### Caller launch data
+
+M12.12 lets a caller launch through the trait when its host configuration holds native data. A launch that sets none of these keeps its native arguments unchanged.
+
+- `Launch.host_args` (`host-args`, Codex turns only): operator-configured arguments, passed verbatim after the mapped arguments and before the optimizer override. They refuse a non-default `Policy` with `host-args require the native policy on <name>`, because they could override any part of it. Another runtime or mode refuses with `host-args unsupported by <name>`.
+- `Launch.settings_env` (`settings-env`, CLI turn and background modes): environment of the session, as text.
+  - Claude: one `--settings` JSON `env`, joined with `Launch.compact_hook` and the effective child's `AGENTQ_OPTIMIZATION`, `TASKQ_TASK` and `AGENTQ_LAUNCHER` (including inherited values), which win over a caller value. Settings `AGENTQ_OPTIMIZATION=off` reaches optimization resolution before installation state is read and forces child and session `off`. Subscription-only policy clears `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` in both child and settings after caller values. A background session runs under the Claude daemon, whose environment is not the launcher child's; settings `env` reaches it and survives resume. Other settings values do not join the child environment, so `Launch.env` stays the place for child variables.
+  - Codex: child environment after `Launch.env`, so a settings value wins.
+  - The values of a Claude launch enter argv, so a caller never puts secrets here. Secrets stay in `Launch.env`.
+  - Antigravity, queue and app-server launches refuse with `settings-env unsupported by <name>`.
+- `Runtime::launcher_output(run)` (`background`): the raw `Result<Output, Failure>` of the launcher exchange that `background_launch` returns, handed over once so the caller can record it and tell a refusal from an uncertain response with `launch_refusal`. A run without a launcher reads cause `no-launcher`. A second call and a recovered run read cause `launcher-output-unavailable`, because the output is not part of the checkpoint. A foreign run reads `foreign-run`. The run's own state does not change: an unobserved job stays `unknown` and never resubmits.
+
 ### Turn recovery and process setup
 
 A consumer service that re-executes itself reattaches its live CLI turn children through `checkpoint` and `recover`:
@@ -144,7 +157,7 @@ The caller builds the base command: the client executable from `agent::executabl
 - An existing `agentapi` server does not inherit submission environment. A launch with optimization `off` (explicit or inherited) fails before submission rather than reporting suppression it cannot deliver; use the owned `agy` CLI for off/on comparisons. No server configuration is edited.
 - `kill` and a deadline stop the owned submission process and observation. They do not prove that server-side execution stopped; callers retain native cancellation and capacity ownership until their own readback. A submission without a session or terminal remains unknown. Native platform/account qualification remains open until a real caller-owned turn is observed.
 - Optimization attachment reads enabled matching hooks in the selected home/global config and the caller project's `.agents/hooks.json`; no file is edited.
-- Antigravity hooks use `toolCall.args.CommandLine`, `conversationId` and `stepIdx`; the response shallow-merges `overwrite.CommandLine` when wrapping a qualified simple command, and always delegates to native permissions with `decision: "allow"` (never `auto_approve`), including pass-through, `off`, disabled and error fallback paths so `PreToolUse` never denies native execution (P1, M1.2, M12.6, M12.7). Shell composition and Windows command shells remain native. [Hook schema](https://antigravity.google/docs/hooks).
+- Antigravity `PreToolUse` hooks use `toolCall.args.CommandLine`, `conversationId` and `stepIdx`; the response shallow-merges `overwrite.CommandLine` when wrapping a qualified simple command, and always delegates to native permissions with `decision: "allow"` (never `auto_approve`), including pass-through, `off`, disabled and error fallback paths so `PreToolUse` never denies native execution (P1, M1.2, M12.6, M12.7). Shell composition and Windows command shells remain native. [Hook schema](https://antigravity.google/docs/hooks).
 
 
 ## End of a turn
@@ -194,11 +207,39 @@ A reached limit returns `Report::reached`: the reported reset in unix seconds, o
 
 ## Observation
 
-`Run::record` appends the one observation of a finished run; a second call is refused.
+`Run::record` appends the records of a finished run in one call: one `agent.turn` and one `agent.call` per model request ([specq telemetry contract](https://github.com/taskqorg/specq/blob/main/engineering/profiling.md#telemetry-contract)). A second call on a CLI run is refused. Every record is the shared CoreQ `coreq-observation/1` shape, so a shared field not collected reads null with reason `not-collected`.
 
-- Keys: `product`, `version`, `operation` and `kind` = `agent.turn`, `started_ms`, `duration_us`, `outcome`, `error`, `project`, `runtime`, `account`, `task`, `attempt`, `route`, `model`, `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `limit_used_percent`, `limit_resets_at`, `limit_window`, `unknown`.
+- `agent.turn` keys: `product`, `version`, `operation` and `kind` = `agent.turn`, `started_ms`, `duration_us`, `outcome`, `error`, `project`, `host`, `runtime`, `account`, `task`, `attempt`, `route`, `model`, `session_id`, `exit_code`, `user_cpu_us`, `system_cpu_us`, `peak_rss_bytes`, `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `reasoning_tokens`, `limit_used_percent`, `limit_resets_at`, `limit_window`, `unknown`.
+- `agent.call` keys: the identity keys above with `operation` and `kind` = `agent.call`, `model`, the five token buckets, `started_ms` (the record's native `timestamp`, else null with `not-reported`), `duration_us` (null with `not-reported`), `outcome`, `error` and `session_id`. `agent.turn` totals and `agent.call` records describe the same tokens: sum one kind, never both.
 - `trace` and `span` are null with reason `not-traced`. A task turn has `route` null with reason `task-turn`; a route turn has `task` and `attempt` null with reason `no-task`.
-- A failed append is kept in `Report::recorded`; it never changes the turn's result.
+- A failed append is kept in `Report::recorded`; it never changes the turn's result. A repeated record keeps the first payload of each immutable id, so recovery never counts twice and never fails on a value only the first process could measure.
+
+### Model requests
+
+| Runtime and mode | One `agent.call` per | Reasoning tokens |
+|---|---|---|
+| Claude turn, background | `assistant` message id | null `not-reported` |
+| Codex turn | `token_count` of the turn in the thread rollout, with a distinct cumulative total | `reasoning_output_tokens` |
+| Codex queue, app-server | attributable `last` increment with a distinct cumulative total | `reasoning_output_tokens` |
+| Antigravity `agy`, sidecar | completed step index | null `not-reported` |
+
+- A Codex `exec` turn without a rollout has only its `turn.completed` totals. It writes one `agent.call` with `source` `turn-aggregate`, so that record may cover several requests; the rollout is the source of per-request records.
+- A call or bucket the client did not report reads null with its reason. No model request observed writes no `agent.call`, and the turn's tokens read null with `no-usage`.
+
+### Process fields
+
+| Run | `exit_code` | CPU and `peak_rss_bytes` |
+|---|---|---|
+| CLI turn | native exit code; Windows reads it as its unsigned DWORD; a signalled child is null `signalled` | sampled |
+| Recovered CLI turn | as observed, else null `exit-unknown` | null `recovered` |
+| Plain app-server turn | null `session-process` | sampled, per turn inside the session process |
+| Protected or recovered app-server turn | null `session-process` | null `not-owned` |
+| Antigravity sidecar | submission exit code | null `sidecar-server` |
+| Background, queue | null `not-owned` | null `not-owned` |
+
+- One thread per owned process samples its live tree at start and each second, on Linux (`/proc`), macOS (`proc_pidinfo`) and Windows (Toolhelp, `GetProcessTimes`, `K32GetProcessMemoryInfo`), and ends with the root process. No host tool runs. No successful sample reads null `not-sampled`; another platform reads null `unsupported-platform`.
+- Peak RSS is the largest sum of one sample. CPU sums the last sampled time of each process that was in the tree.
+- `ponytail:` both are sampled, so a process that lives between samples and the CPU after the last sample are missing, and a process reparented out of the tree stops counting. Exit accounting per process replaces this when the measured gap matters.
 
 ## Accounts
 
@@ -232,7 +273,7 @@ In both modes `launch` returns an error only before submission. A launcher or qu
 - `AppServer` owns the shared stdio transport: start, bounded send/receive, process polling and explicit direct-child stop. Each record is at most 8 MiB; a 16-record queue applies backpressure without dropping events. A timed-out write is uncertain and never retried. Stderr goes only to the caller's private log. Native notifications and server requests reach the caller unchanged, including dynamic-tool calls and private `item/agentMessage/delta` drafts. `AppSession::request` also carries native `model/list` and `account/rateLimits/read` requests; callers select models, page/filter catalogue results and handle tools without a second transport or an MCP replacement. No terminal event automatically kills the server. Callers retain their existing process-group supervision and startup serialization.
 - Stop requests do not prove exit or completion. `background_stop` targets only a verified job and returns the request response; the caller reads jobs and its owned process identity back before releasing capacity. App-server interrupt targets the exact accepted thread/turn. Desktop native cancellation remains a caller-owned UI/control operation using the native turn ID of the run's `progress` records; the runtime observes its matching abort. No process tree or grant is inferred from these identities.
 
-Compatibility reports reuse `Report`, `Usage`, `Snapshot`, `Context` and `agent.turn`. Claude usage counts assistant IDs within the matched input's turn. Codex usage adds attributable model-call increments (`last_token_usage` / `last`) once per distinct cumulative snapshot (`total_token_usage` / `total`); it never reports the thread total as turn usage. Missing counters or inconsistent increments make the affected sums unknown. App-server usage/limits normalize native field names; absent values remain null with reasons. Native formats without attributable usage return `no-usage`; unreported duration is null with `not-reported` in the observation. Readiness and launcher/queue responses emit no completed-turn observation. Protocol references: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [OpenAI token accounting](https://github.com/openai/symphony/blob/main/elixir/docs/token_accounting.md).
+Compatibility reports reuse `Report`, `Usage`, `Snapshot`, `Context`, `agent.turn` and `agent.call`. Claude usage counts assistant IDs within the matched input's turn. Codex usage adds attributable model-call increments (`last_token_usage` / `last`) once per distinct cumulative snapshot (`total_token_usage` / `total`); it never reports the thread total as turn usage. Missing counters or inconsistent increments make the affected sums unknown. App-server usage/limits normalize native field names; absent values remain null with reasons. Native formats without attributable usage return `no-usage`; unreported duration is null with `not-reported` in the observation. Readiness and launcher/queue responses emit no completed-turn observation. Protocol references: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [OpenAI token accounting](https://github.com/openai/symphony/blob/main/elixir/docs/token_accounting.md).
 
 Fake clients verify these boundaries on Linux, macOS and Windows. Native consumer qualification and UI behavior remain with each consumer (TaskQ #2094, PilotQ #265).
 
@@ -251,6 +292,8 @@ The prepared authority adds write protection for the private host root, native a
 Preparation is non-launching and authenticates the actual parent PID/creation/boot against the signed permit. It saves independent grant, profile, account/image and approver/revision evidence before returning its digest. The caller durably retains the original permit, independent checkpoint and a one-shot dispatch intent before launch. The host consumes durable intent before launchd registration. Every input revalidates the original preparation, current signed policy, grant/profile/artifacts and exact native/supervisor/frontend incarnations. Missing or changed proof refuses effects. A timed-out input permanently fences the transport; no path retries it.
 
 One launchd generation, sealed input, kernel coalition accounting, durable descendant certificate and acknowledged exact-generation cleanup retain the existing lifetime guarantees. Root/frontend/caller exit, EOF, cancellation and terminal model events never prove descendants or external tool effects ended. Unknown cleanup retains occupancy. The caller alone releases its original permit after both host completion and its external effects finish. Recovery never launches or resends input.
+
+Native stdio uses the existing bounded transport. The run's private `AppSession` still owns thread/turn correlation, interruption, checkpoints and its one idempotent `agent.turn` and `agent.call` records. Server requests and native account/model/permission parameters remain caller-owned. The adapter preserves the host's model/account and approved outer boundary; caller protocol parameters cannot widen it. Optimization intent travels only as child `AGENTQ_OPTIMIZATION`; the host prepares native `off` env/header and launcher marking. `optimization` reports configuration, never actual compression or enforcement.
 
 Previously retained TaskQ-shaped checkpoints and receipts are recovery-only evidence, never a launch format for the independent host. Operator-authenticated import retains their exact bytes and operation identities; reconciliation records independent cleanup evidence separately. It does not invoke TaskQ or replace an old adapter identity with the new one. Missing original proof remains unknown and occupied; a copied receipt alone provides no authority. One durable bootout fence and one durable cancellation fence share an operation-wide native-incarnation binding, never request or receipt bytes: a reformatted request or another signed snapshot, older or newer, shares the fence and never repeats a stop. Either action's existing journal record binds both actions; conflicting records refuse without rewriting them. A snapshot carrying original cleanup intent consumes the fence, and a changed incarnation refuses.
 
@@ -393,9 +436,9 @@ History lifecycle events are descriptive only; existing terminal/identity parser
 | `timeout_s` | Optional deadline, 1-86400 s; past it the turn reads `cancelled`/`timeout` |
 | `optimization` | `inherit` (default), `off` or `on` |
 | `context` | `product`, `version` (required), `project` (default `other`), `task` `[task, attempt]` or null, `route`, `account` (default `default`) |
-| `store` | Absolute CoreQ telemetry store path for the `agent.turn` observation; null records nothing |
+| `store` | Absolute CoreQ telemetry store path for the `agent.turn` and `agent.call` records; null records nothing |
 
-The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `started_ms`, `duration_us`, `usage` (`calls`, `input`, `cache_read`, `cache_write`, `output`, `model`, `unknown`), `limit` (`used_percent`, `resets_at`, `window`, `unknown`), `reached` (`{"reset": n|null}` or null), `recorded` (`ok`, `not-requested` or the append error) and `optimization`. Background, app and app-server modes stay library APIs: they need caller-owned checkpoints and transports that one stdin request cannot carry.
+The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `started_ms`, `duration_us`, `usage` (`calls`, `input`, `cache_read`, `cache_write`, `output`, `reasoning`, `model`, `unknown`), `process` (`user_cpu_us`, `system_cpu_us`, `peak_rss_bytes`, `unknown`), `limit` (`used_percent`, `resets_at`, `window`, `unknown`), `reached` (`{"reset": n|null}` or null), `recorded` (`ok`, `not-requested` or the append error) and `optimization`. Background, app and app-server modes stay library APIs: they need caller-owned checkpoints and transports that one stdin request cannot carry.
 
 ## Optimization intent
 
@@ -421,7 +464,7 @@ The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `start
 
 ## Adoption and rollback
 
-Consumers of the runtime and CoreQ on their default branches when this page changed. This repository and its runtime use CoreQ v0.19.2:
+Consumers of the runtime and CoreQ on their default branches when this page changed. This repository and its runtime use CoreQ v0.21.0:
 
 | Consumer | Current use | Adoption |
 |---|---|---|
@@ -430,7 +473,7 @@ Consumers of the runtime and CoreQ on their default branches when this page chan
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
 | AssetQ | `coreq` v0.19.2, `agentq-runtime` tag `runtime-v0.2.0` (which resolves its own `coreq` v0.18.0) | Pinned; a newer revision follows its own contract and qualification |
 
-- Runtime crate version 0.4.1. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
+- Runtime crate version 0.6.0. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. Optionally, after a merged main commit passes the `Test` workflow on Linux, macOS and Windows, `scripts/tag_runtime.py` checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.
 - Forward: a consumer edits its contract, switches `coreq::agent` to `agentq_runtime::agent` at one immutable revision, passes its own fake-client gates and qualifies its real native paths. A revision with the runtime trait (M12.9) replaces direct `Client`/`Spec`/`Turn` calls with `Runtime` operations, `Policy` and `Launch`; native behavior is unchanged. A fake-client pass never substitutes for native qualification.

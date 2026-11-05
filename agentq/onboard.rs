@@ -91,6 +91,8 @@ pub fn wants(agent: &str, root: &Path, claude_json: &Path, exe: &Path) -> Vec<Wa
         "antigravity" => vec![
             w(root.join("config/hooks.json"), &["agentq", "enabled"], json!(true), false),
             w(root.join("config/hooks.json"), &["agentq", "PreToolUse"], json!({"matcher": "run_command", "hooks": [hook("PreToolUse")]}), true),
+            // `Stop` takes a flat handler list; Antigravity ignores a matcher on it.
+            w(root.join("config/hooks.json"), &["agentq", "Stop"], hook("Stop"), true),
         ],
         // Desktop Chat is MCP-only (CONFIGURATION A1), with its own control identity.
         "claude-desktop" => vec![w(root.join("claude_desktop_config.json"), &["mcpServers", "agentq"], json!({"command": exe, "args": ["mcp", "claude-desktop"]}), false)],

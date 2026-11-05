@@ -416,6 +416,7 @@ mod tests {
         assert!(!lines.iter().any(|l| l.starts_with("conflict:")), "{lines:?}");
         assert!(onboard::apply(&ws, &journal).unwrap().iter().all(|l| l.starts_with("kept:")));
         let read = || serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(read()["agentq"]["Stop"][0]["command"].as_str().unwrap().ends_with(" hook antigravity Stop"), "Stop takes a flat handler list (M6.11)");
         let status = || profiles::status_with(&h.clients, &h.data, crate::now())["profiles"].as_array().unwrap().iter().find(|p| p["kind"] == "antigravity").unwrap().clone();
         assert_eq!(status()["hooks"], "registered");
         assert_eq!(status()["effective"]["state"], "configured");

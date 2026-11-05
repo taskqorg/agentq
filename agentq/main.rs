@@ -14,6 +14,7 @@ mod executor;
 mod local;
 mod mcp;
 mod model;
+mod observe;
 mod onboard;
 mod profile;
 mod profiles;
