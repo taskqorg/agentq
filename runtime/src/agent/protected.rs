@@ -84,11 +84,20 @@ impl ProtectedHost {
 
     /// Reconcile operator-authenticated retained bytes through the independent host, never the old runtime.
     pub fn reconcile_retained(&self, checkpoint: &str, receipt: &str, until: Instant) -> Res<Value> {
+        self.retained("retained",checkpoint,receipt,until)
+    }
+
+    /// Exact native cancellation using the original authenticated retained identity; never completion or release.
+    pub fn cancel_retained(&self, checkpoint: &str, receipt: &str, until: Instant) -> Res<Value> {
+        self.retained("retained-cancel",checkpoint,receipt,until)
+    }
+
+    fn retained(&self, action:&str, checkpoint:&str, receipt:&str, until:Instant) -> Res<Value> {
         if self.signature.is_none() || checkpoint.len()>1024*1024 || receipt.len()>1024*1024 {return Err("signed retained recovery required".into());}
         self.checked()?;
         let request=json!({"checkpoint":checkpoint,"receipt":receipt});
         let mut command=Command::new(&self.executable);
-        command.args(["agent","host","--action","retained","--request",&request.to_string()]);
+        command.args(["agent","host","--action",action,"--request",&request.to_string()]);
         let budget=until.checked_duration_since(Instant::now()).filter(|d|!d.is_zero()).ok_or("retained recovery deadline")?.min(Duration::from_secs(5));
         let output=coreq::process::output("agent.protected.retained",&mut command,budget).map_err(|_|"retained recovery unknown; occupancy retained")?;
         let answer:Value=serde_json::from_slice(&output.stdout).map_err(|_|"retained recovery invalid")?;

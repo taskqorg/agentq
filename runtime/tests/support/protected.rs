@@ -26,6 +26,14 @@ pub fn fake_host() {
     assert!(args[1..4]==["service","app-server","--action"] || args[1..4]==["agent","host","--action"]);
     assert_eq!(args[5],"--request"); assert_eq!(args.len(),7,"no native flags or caller environment");
     let wire:Value=serde_json::from_str(&args[6]).unwrap();
+    if matches!(args[4].as_str(),"retained"|"retained-cancel") {
+        assert_eq!(&args[1..3],["agent","host"],"retained recovery never invokes a TaskQ runtime");
+        let checkpoint:Value=serde_json::from_str(wire["checkpoint"].as_str().unwrap()).unwrap();
+        let root=PathBuf::from(checkpoint["slot"]["binding"]["root"].as_str().unwrap());
+        assert_eq!(std::fs::read_to_string(root.join("retained-checkpoint")).unwrap(),wire["checkpoint"]);
+        assert_eq!(std::fs::read_to_string(root.join("retained-receipt")).unwrap(),wire["receipt"]);
+        println!("{}",json!({"schema":"agentq.retained-operation/1","checkpoint":wire["checkpoint"],"receipt":wire["receipt"],"state":"unknown","cleanup":{"requested":args[4]}}));return;
+    }
     let modern=wire["schema"]=="agentq.app-server/1";
     let mut r=wire.clone();if modern {r["slot"]=r["permit"].take();r.as_object_mut().unwrap().remove("permit");}
     let root=PathBuf::from(r["slot"]["binding"]["root"].as_str().unwrap());
@@ -362,4 +370,17 @@ fn signed_host(exe:&Path)->ProtectedHost {
     assert!(ProtectedHost::signed(exe,&hash,&public,&"00".repeat(64)).is_err(),"invalid signature refuses before dispatch");
     assert!(ProtectedHost::signed(exe,&"00".repeat(32),&public,&signature).is_err(),"signature cannot replace the digest pin");
     ProtectedHost::signed(exe,&hash,&public,&signature).unwrap()
+}
+
+// M12.8 / #241 A2/A3: immutable recovery/cancellation crosses only the signed independent command boundary.
+pub fn signed_retained_recovery_preserves_original_bytes() {
+    let root=scratch("signed-retained").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
+    let host=signed_host(&exe);
+    let checkpoint=json!({"slot":{"binding":{"root":root}}}).to_string();let receipt=r#"{ "invented": "retained receipt" }"#;
+    std::fs::write(root.join("retained-checkpoint"),&checkpoint).unwrap();std::fs::write(root.join("retained-receipt"),receipt).unwrap();
+    assert_eq!(host.reconcile_retained(&checkpoint,receipt,until()).unwrap()["state"],"unknown");
+    assert_eq!(host.cancel_retained(&checkpoint,receipt,until()).unwrap()["state"],"unknown");
+    assert!(!root.join("app-input.jsonl").exists());assert!(!root.join("request.json").exists());
+    assert_eq!(std::fs::read_to_string(root.join("retained-receipt")).unwrap(),receipt);
+    std::fs::remove_dir_all(root).unwrap();
 }

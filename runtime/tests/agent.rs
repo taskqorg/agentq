@@ -34,6 +34,7 @@ fn main() {
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
         ("protected_launch_refuses_tampering_and_preserves_native_transport", protected::protected_launch_refuses_tampering_and_preserves_native_transport),
+        ("signed_retained_recovery_preserves_original_bytes", protected::signed_retained_recovery_preserves_original_bytes),
         ("independent_signed_host_recovers_without_taskq", protected::independent_signed_host_recovers_without_taskq),
         ("protected_frontend_is_not_scope_supervisor", protected::protected_frontend_is_not_scope_supervisor),
         ("protected_preparation_and_completion_recover_original_operation", protected::protected_preparation_and_completion_recover_original_operation),

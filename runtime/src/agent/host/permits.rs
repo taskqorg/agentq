@@ -28,7 +28,7 @@ pub(super) fn reserved(install:&Path,s:&resources::State,permit:&Value,runtime:&
 }
 pub(super) fn prepare(install:&Path,s:&mut resources::State,permit:&Value)->Res<String> {
     let key=validate(install,permit)?;let b=&permit["binding"];
-    if install.join("retained").join(format!("{key}.json")).try_exists().map_err(|_|"retained operation inventory unknown")? {return Err("retained operation is recovery-only; never relaunch".into());}
+    if install.join("retained").join(&key).try_exists().map_err(|_|"retained operation inventory unknown")? {return Err("retained operation is recovery-only; never relaunch".into());}
     #[cfg(unix)] if native(b)?.pid!=unsafe{libc::getppid()} as u32 {return Err("preparation caller differs from actual parent".into());}
     if !s.ops.contains_key(&key) {
         let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|"clock unknown")?.as_secs();

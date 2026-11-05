@@ -24,7 +24,7 @@ impl Request {
 }
 /// Execute the independent host protocol; native containment remains macOS-only.
 pub fn dispatch(action:&str,text:&str)->Res<()> {
-    #[cfg(target_os="macos")] { if action=="retained" {return mac::retained(text);} mac::dispatch(action,text) }
+    #[cfg(target_os="macos")] { if matches!(action,"retained"|"retained-cancel") {return mac::retained(action,text);} mac::dispatch(action,text) }
     #[cfg(not(target_os="macos"))] {let _=(action,text);Err("protected native launch requires qualified macOS containment".into())}
 }
 /// Verify a domain-separated Ed25519 signature without an OS certificate authority.
@@ -260,7 +260,7 @@ fn cancel(s:&mut resources::State,key:&str,r:&Request)->Res<Value> {
     launch["cancel_requested"]=json!(true);Ok(launch.clone())
 }
 fn native(value:&Value)->Res<coreq::process::Identity> {
-    Ok(coreq::process::Identity{pid:value["pid"].as_u64().and_then(|v|u32::try_from(v).ok()).filter(|v|*v>0).ok_or("native identity unknown")?,
+    Ok(coreq::process::Identity{pid:value["pid"].as_u64().and_then(|v|u32::try_from(v).ok()).filter(|v|*v>0&&*v<=i32::MAX as u32).ok_or("native identity unknown")?,
         started:value["started"].as_str().filter(|s|!s.is_empty()).ok_or("native identity unknown")?.into()})
 }
 fn exact(expected:&coreq::process::Identity,seen:Res<Option<coreq::process::Identity>>)->Res<()> {
@@ -300,12 +300,27 @@ mod mac {
     #[link(name="sandbox")]
     unsafe extern "C" {fn sandbox_check(pid:i32,operation:*const libc::c_char,filter:i32,...)->i32;static SANDBOX_CHECK_NO_REPORT:i32;}
 
-    pub(super) fn retained(text:&str)->Res<()> {
+    pub(super) fn retained(action:&str,text:&str)->Res<()> {
         let (install,_home)=host_paths()?;
         let input:Value=serde_json::from_str(text).map_err(|_|"retained request invalid")?;
         let original=retained_original(&install,&input)?;
         let archive=digest(text.as_bytes());
-        let cleanup=scope::cleanup_retained(&install,&original,&archive)?;
+        let cleanup=if action=="retained-cancel" {
+            let key=format!("retained-cancel-{archive}");
+            let result=(||->Res<()> {
+                let child=native(&original["native"])?;let supervisor=native(&original["supervisor"])?;
+                child_of(&child,&supervisor)?;scope::membership(&child,&original["scope"]["binding"])?;
+                let program=Path::new(original["authority"]["executable"].as_str().ok_or("retained native image unknown")?);
+                image(&child,program)?;
+                if file_digest(program)?!=original["authority"]["executable_sha256"] {return Err("retained native image changed".into());}
+                resources::within(&install,resources::WAIT,|s| {
+                    if s.ops.contains_key(&key) {return Err("retained cancellation already requested; observe without retry".into());}
+                    s.ops.insert(key.clone(),resources::Op{bound:json!({"original_sha256":digest(original.to_string().as_bytes())}),receipt:json!({"cancel_intent":true})});Ok(())
+                })?;
+                coreq::process::terminate(&child).map_err(|_|"retained native stop unknown".into())
+            })();
+            json!({"state":"unknown","reason":result.err().unwrap_or_else(||"exact native cancellation requested; completion unproved".into())})
+        }else{scope::cleanup_retained(&install,&original,&archive)?};
         println!("{}",json!({"schema":"agentq.retained-operation/1","checkpoint":input["checkpoint"],"receipt":input["receipt"],
             "state":if cleanup["cleanup_verified"]==true {"completed"}else{"unknown"},"cleanup":cleanup}));Ok(())
     }
@@ -502,7 +517,7 @@ fn retained_original(install:&Path,input:&Value)->Res<Value> {
     let permit=&checkpoint["slot"];super::protected::validate_slot(permit)?;
     let r=Request{schema:SCHEMA.into(),permit:permit.clone(),policy_revision:1,account:"recovery".into(),preparation:String::new()};
     let key=operation_id(&r)?;
-    let archived=envelope(install,&install.join("retained").join(format!("{key}.json")),"agentq.retained-operation/1")?;
+    let archived=envelope(install,&install.join("retained").join(&key).join(format!("{}.json",digest(receipt.as_bytes()))),"agentq.retained-operation/1")?;
     let prepared=&checkpoint["receipt"]["prepared"];
     if archived!=*input||prepared["schema"]!="taskq.app-server-preparation/1"||prepared["binding"]!=permit["binding"]
         ||checkpoint["receipt"]["preparation"]!=digest(prepared.to_string().as_bytes())

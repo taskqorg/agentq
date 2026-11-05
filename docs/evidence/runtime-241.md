@@ -2,6 +2,8 @@
 
 Owner request: [AgentQ #241](https://github.com/taskqorg/agentq/issues/241), acceptance A1–A4. Signing decision: [accepted answer](https://github.com/taskqorg/agentq/issues/241#issuecomment-6665555869). Applied rules: §12 M12.2, M12.3, M12.6–M12.8 and P2/P3; TaskQ R12/R13 and §7; specq Testing development/candidate policy.
 
+The native gate and scope code derive from the immutable [TaskQ source](https://github.com/taskqorg/taskq/tree/5292e63ffaeda41ca90d1b2e21b93f78fe2d3e39/src/runtime), with product-owned admission, policy, account and signing dependencies removed. This is source provenance, not a runtime dependency.
+
 The independent host is part of the existing AgentQ binary and runtime library. It requires no TaskQ binary, command, slot service or certificate authority. Its Ed25519 signature and pinned digest do not provide macOS signature checks or TCC grants. Windows verifies the same signature; native containment remains macOS-only. No live policy, account, model, capacity, integration, service or grant was changed here.
 
 ## API and authority
@@ -18,9 +20,9 @@ A policy payload has `schema: "agentq.protected-policy/1"`, `authority`, `profil
 
 ## Retained operations
 
-`ProtectedHost::reconcile_retained(checkpoint_bytes, receipt_bytes, deadline)` invokes only the independent `retained` action. Operator authentication wraps the two exact original JSON strings in a signed envelope under `retained/op-<sha256(caller + NUL + op_id)>.json`. No TaskQ runtime or CA is used. Original receipts and the old adapter identity remain unchanged. Import does not manufacture a certificate, grant or dispatch authority. A matching new permit cannot launch an archived operation.
+`ProtectedHost::reconcile_retained(checkpoint_bytes, receipt_bytes, deadline)` invokes only the independent `retained` action. Operator authentication wraps the two exact original JSON strings in a signed envelope under `retained/op-<sha256(caller + NUL + op_id)>/<sha256 of exact receipt bytes>.json`. No TaskQ runtime or CA is used. Later retained observations append signed snapshots to the same operation directory; they never overwrite an earlier receipt. Original receipts and the old adapter identity remain unchanged. `cancel_retained` requests exact native stop only after live parent, image/hash and scope readback; its durable one-shot intent never proves completion. Import does not manufacture a certificate, grant or dispatch authority. A matching new permit cannot launch an archived operation.
 
-A missing or changed archive, private key/binding mismatch, missing descendant certificate or uncertain original-generation cleanup remains unknown and occupied. A valid original certificate can be checked against the same-boot kernel coalition and exact launchd job; independent bootout intent, acknowledgment and exit proof live separately in the host journal, keyed to the archive digest. Lost bootout acknowledgment is never retried. The caller's original retained bytes are returned unchanged; replay is never part of recovery.
+A missing or changed archive, private key/binding mismatch, missing descendant certificate or uncertain original-generation cleanup remains unknown and occupied. A valid original certificate can be checked against the same-boot kernel coalition and exact launchd job; independent bootout intent, acknowledgment and exit proof live separately in the host journal, keyed to the archive digest. Lost bootout acknowledgment, including an interrupted original-host cleanup, is never retried. The caller's original retained bytes are returned unchanged; replay is never part of recovery.
 
 ## Operator provisioning
 
@@ -37,3 +39,5 @@ The existing preparation process scenario now runs against both explicit legacy 
 Before the digest fix, `cargo test --locked -p agentq-runtime --test agent -- protected_preparation` failed at `/receipt/preparation`: a different well-formed digest recovered successfully. Recovery now recomputes and checks the independent preparation digest; the same assertion is retained. Initial independent-double runs also exposed incomplete fixture schema conversion; only the invented wire serialization was corrected, with the original no-replay assertions retained.
 
 Local native authority is unqualified. The new authority-snapshot fixture was sandbox-blocked writing its temporary `.codex/config.toml` (`PermissionDenied`, `Operation not permitted`); it was not weakened or labeled PASS. Neither portable checks nor artifact signing prove native Mac boundaries, TCC grants, Windows containment or consumer Pipe integration. No model turn, image generation, accepted-crate replay, new grant or account/capacity change occurred. Merge-result CI remains mandatory for publication; the worker does not wait for it (TaskQ §7).
+
+The candidate review also found that importing an interrupted original-host cleanup must preserve its consumed intent. The independent reader now refuses another bootout when the original acknowledgment is missing; an existing acknowledgment allows only exit observation. Retained snapshots append under their receipt digests, so later evidence does not rewrite an original receipt. A separate exact-incarnation retained cancellation path persists one-shot intent and never reports completion from a stop request.

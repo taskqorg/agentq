@@ -96,7 +96,8 @@ fn protected_retained_import_authenticates_exact_original_bytes() {
     let input=json!({"checkpoint":checkpoint,"receipt":receipt});
     assert!(retained_original(&f.root,&input).is_err(),"unsigned copied receipts grant nothing");
     let key=operation_id(&Request{schema:SCHEMA.into(),permit:slot,policy_revision:29,account:"default".into(),preparation:String::new()}).unwrap();
-    let path=f.root.join("retained").join(format!("{key}.json"));f.signed(&path,"agentq.retained-operation/1",&input);
+    let directory=f.root.join("retained").join(&key);fs::create_dir(&directory).unwrap();
+    let path=directory.join(format!("{}.json",digest(receipt.as_bytes())));f.signed(&path,"agentq.retained-operation/1",&input);
     let before=fs::read(&path).unwrap();let recovered=retained_original(&f.root,&input).unwrap();
     assert_eq!(recovered["authority"]["adapter"],"invented-original-adapter");assert_eq!(fs::read(&path).unwrap(),before);
     let mut changed=input.clone();changed["receipt"]=json!(format!("{} ",receipt));
@@ -129,6 +130,9 @@ fn protected_retained_lost_cleanup_ack_never_retries() {
     let f=Fixture::new();let binding=json!({"boot":10,"coalition":101});let supervisor=json!({"pid":17,"started":"invented-supervisor"});let native=json!({"pid":18,"started":"invented-native"});
     let original=json!({"supervisor":supervisor,"native":native,"input_closed":true,"scope":{"binding":binding,"dispatch_ack":true,"label":"org.taskq.protected.invented","domain":format!("gui/{}",unsafe{libc::geteuid()}),"certificate":{"schema":"taskq.native-completion/1","scope":binding,"supervisor":supervisor,"native":native,"counts":[9,8]}}});
     resources::within(&f.root,resources::WAIT,|s| {s.ops.insert("retained-invented-archive".into(),resources::Op{bound:json!({"original_sha256":digest(original.to_string().as_bytes())}),receipt:json!({"cleanup_intent":true})});Ok(())}).unwrap();
+    let mut interrupted=original.clone();interrupted["scope"]["cleanup_intent"]=json!(true);
+    let outcome=scope::cleanup_retained(&f.root,&interrupted,"invented-archive").unwrap();
+    assert_eq!(outcome["reason"],"original cleanup unacknowledged; never repeat");
     let before=fs::read(f.root.join("operations.json")).unwrap();
     let outcome=scope::cleanup_retained(&f.root,&original,"invented-archive").unwrap();
     assert_eq!(outcome["state"],"unknown");assert_eq!(outcome["reason"],"retained cleanup unacknowledged; never repeat");

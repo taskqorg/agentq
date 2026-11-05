@@ -272,6 +272,14 @@ pub(super) fn cleanup_retained(install:&Path,original:&Value,archive:&str)->Res<
     if scope["cleanup_intent"]==true&&scope["bootout_ack"]==true&&scope["cleanup_verified"]==true {
         return Ok(json!({"cleanup_verified":true,"source":"operator-authenticated retained completion"}));
     }
+    if scope["cleanup_intent"]==true {
+        if scope["bootout_ack"]!=true {return Ok(json!({"state":"unknown","reason":"original cleanup unacknowledged; never repeat"}));}
+        return Ok(match coreq::process::identity(supervisor.pid) {
+            Ok(None)=>json!({"cleanup_verified":true,"source":"original acknowledged cleanup and observed exit"}),
+            Ok(Some(id)) if id!=supervisor=>json!({"cleanup_verified":true,"source":"original acknowledged cleanup and observed exit"}),
+            _=>json!({"state":"unknown","reason":"original acknowledged cleanup exit unproved"}),
+        });
+    }
     let key=format!("retained-{archive}");
     let saved=resources::within(install,resources::WAIT,|s| {
         match s.ops.get(&key) {
