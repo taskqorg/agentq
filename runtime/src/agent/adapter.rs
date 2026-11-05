@@ -140,6 +140,10 @@ pub struct Launch {
     pub parts: Vec<Part>,
     /// Partial text records in `progress` (capability `turn-deltas`; app-server runs always stream them).
     pub deltas: bool,
+    /// Operator-configured native arguments of a turn (capability `host-args`); needs the default `Policy`.
+    pub host_args: Vec<OsString>,
+    /// Session environment (capability `settings-env`). A Claude launch puts it in argv: never secrets; use `env` for those.
+    pub settings_env: Vec<(String, String)>,
 }
 
 /// How a run reaches the runtime; every mode but `Turn` needs the descriptor capability of the same name.
@@ -167,7 +171,7 @@ impl Launch {
     pub fn new(root: impl Into<PathBuf>, log: impl Into<PathBuf>, input: impl Into<String>, product: impl Into<String>) -> Self {
         Launch { root: root.into(), log: log.into(), input: input.into(), policy: Policy::default(), model: None, effort: None, compact_hook: None,
             env: vec![], command: vec![], optimization: Intent::Inherit, product: product.into(), install: None, accounts: None,
-            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false }
+            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![] }
     }
 }
 
@@ -307,6 +311,8 @@ struct Native {
     /// An uncertain launcher or queue response; the run never resubmits.
     fault: Option<String>,
     report: Option<Report>,
+    /// The launcher exchange until `launcher_output` takes it; not part of the checkpoint.
+    launcher: Option<Result<Output, crate::process::Failure>>,
 }
 
 impl Run {
@@ -571,6 +577,8 @@ pub trait Runtime: Send + Sync {
     fn report(&self, run: &Run) -> Res<Report>;
     /// Complete native JSON records appended since the previous call.
     fn progress(&self, run: &mut Run) -> Res<Vec<Value>>;
+    /// Capability `background`: the raw launcher exchange of this run, handed over once.
+    fn launcher_output(&self, run: &mut Run) -> Result<Result<Output, crate::process::Failure>, Cause>;
     fn session_id(&self, run: &Run) -> Option<String>;
     fn session_url(&self, run: &Run) -> Result<String, Cause>;
     /// Poll, then the native session and session URL or its absence cause, in one record.
@@ -643,9 +651,9 @@ static ADAPTERS: [Adapter; 3] = [
     Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
         capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "background", "title", "mcp-config",
-            "instructions-file", "turn-parts", "turn-deltas"] } },
+            "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } },
     Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt", models: &[], minimum: "0.162.0",
-        capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server", "effort", "image-input", "account"] } },
+        capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env"] } },
     Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "",
         capabilities: &["turn", "resume", "title"] } },
 ];
@@ -755,7 +763,8 @@ fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
     }
     if let Some(hook) = &l.compact_hook {
         if client != Client::Claude { return Err(format!("compact-hook unsupported by {name}")); }
-        a.extend(["--settings".into(), claude_settings(Some(hook), &[]).into()]);
+        // `settings_env` shares one `--settings` with the hook, added once the child environment is final.
+        if l.settings_env.is_empty() { a.extend(["--settings".into(), claude_settings(Some(hook), &[]).into()]); }
     }
     Ok(a)
 }
@@ -835,17 +844,34 @@ impl Adapter {
         let name = self.descriptor.name;
         let app = matches!(l.mode, Mode::AppServer { .. });
         for (capability, set) in [("mcp-config", l.mcp.is_some()), ("instructions-file", l.instructions.is_some()), ("turn-parts", !l.parts.is_empty()),
-            ("turn-deltas", l.deltas && !app)] {
+            ("turn-deltas", l.deltas && !app), ("host-args", !l.host_args.is_empty())] {
             if set && (l.mode != Mode::Turn || !self.descriptor.has(capability)) { return Err(format!("{capability} unsupported by {name}")); }
         }
+        if !l.host_args.is_empty() && l.policy != Policy::default() { return Err(format!("host-args require the native policy on {name}")); }
+        if !l.settings_env.is_empty() && (!matches!(l.mode, Mode::Turn | Mode::Background) || !self.descriptor.has("settings-env")) {
+            return Err(format!("settings-env unsupported by {name}"));
+        }
         // App-server policy travels as thread parameters; only the Codex extras stay flags.
-        let args = if !app { mapped(self.client, name, l)? } else if self.client == Client::Codex { codex_extras(&l.policy) } else { vec![] };
+        let mut args = if !app { mapped(self.client, name, l)? } else if self.client == Client::Codex { codex_extras(&l.policy) } else { vec![] };
+        args.extend(l.host_args.iter().cloned());
         let mut env = l.env.clone();
+        if self.client != Client::Claude { env.extend(l.settings_env.iter().map(|(k, v)| (k.into(), v.into()))); }
+        else if l.settings_env.iter().rev().find(|(k, _)| k == optimization::ENV).is_some_and(|(_, v)| v == "off") {
+            env.push((optimization::ENV.into(), "off".into()));
+        }
         if l.policy.subscription && self.client == Client::Claude { env.extend(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].map(|k| (k.into(), OsString::new()))); }
         let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: l.home.clone(), env };
         // Isolation excludes the user hooks that carry optimization, so it cannot be effective.
         let intent = if l.policy.isolated && self.client == Client::Claude { Intent::Off } else { l.optimization };
         let optimization = optimization::prepare(intent, &l.product, &mut spec, l.install.as_deref());
+        if self.client == Client::Claude && !l.settings_env.is_empty() {
+            // A `--bg` session runs under the Claude daemon, whose environment is not this child's: settings `env` reaches it.
+            let child: Vec<(String, String)> = [optimization::ENV, "TASKQ_TASK", "AGENTQ_LAUNCHER"].into_iter()
+                .filter_map(|k| child_env(&spec, k).map(|v| (k.into(), v.to_string_lossy().into_owned()))).collect();
+            let mut vars: Vec<(&str, &str)> = l.settings_env.iter().chain(&child).map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            if l.policy.subscription { vars.extend([("ANTHROPIC_API_KEY", ""), ("ANTHROPIC_AUTH_TOKEN", "")]); }
+            spec.args.extend(["--settings".into(), claude_settings(l.compact_hook.as_deref(), &vars).into()]);
+        }
         Ok((spec, optimization))
     }
 
@@ -866,8 +892,8 @@ impl Adapter {
         if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let command = base(&l.command, self.client)?;
-        let native = |turn: NativeTurn, queue, job_id, attached, fault| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
-            job_id, job: None, attached, fault, report: None }));
+        let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
+            job_id, job: None, attached, fault, report: None, launcher }));
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
         match &l.mode {
             Mode::Turn => {
@@ -879,20 +905,21 @@ impl Adapter {
             Mode::Background => {
                 // A new job's transcript is unknown until discovery; the alias path does not exist.
                 let turn = NativeTurn::before(&spec, &claude_transcript(&spec, &spec.session)?, &l.input)?;
-                let (job_id, fault) = match native::background_launch(command, &spec, &l.input, Duration::from_secs(30))? {
+                let exchange = native::background_launch(command, &spec, &l.input, Duration::from_secs(30))?;
+                let (job_id, fault) = match &exchange {
                     Ok(o) if o.status.success() => (native::background_job_id(&String::from_utf8_lossy(&o.stdout)), None),
                     Ok(o) => (None, uncertain("background launcher", &format!("exit {:?}", o.status.code()))),
                     Err(e) => (None, uncertain("background launcher", &e.class())),
                 };
                 let start = turn.start();
-                Ok(self.run(native(turn, false, job_id, spec.resume, fault), start, optimization, l))
+                Ok(self.run(native(turn, false, job_id, spec.resume, fault, Some(exchange)), start, optimization, l))
             }
             Mode::Queue { transcript } => {
                 if !spec.resume { return Err("queue requires the session of a running desktop thread".into()); }
                 let turn = NativeTurn::before(&spec, transcript, &l.input)?;
                 let fault = native::app_queue(command, &spec, &l.input, Duration::from_secs(30)).err().and_then(|e| uncertain("queue", &e));
                 let start = turn.start();
-                Ok(self.run(native(turn, true, None, true, fault), start, optimization, l))
+                Ok(self.run(native(turn, true, None, true, fault, None), start, optimization, l))
             }
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
@@ -1016,6 +1043,14 @@ impl Runtime for Adapter {
         let (values, next) = lines_from(&path, run.progress)?;
         run.progress = next;
         Ok(values)
+    }
+
+    fn launcher_output(&self, run: &mut Run) -> Result<Result<Output, crate::process::Failure>, Cause> {
+        let run = self.own_mut(run).map_err(|_| Cause("foreign-run"))?;
+        match &mut run.body {
+            Body::Native(n) if !n.queue => n.launcher.take().ok_or(Cause("launcher-output-unavailable")),
+            _ => Err(Cause("no-launcher")),
+        }
     }
 
     fn session_id(&self, run: &Run) -> Option<String> {
@@ -1166,7 +1201,7 @@ impl Runtime for Adapter {
         if !saved["job"].is_null() && text("job").is_none_or(|j| !native::plain_id(&j)) { return Err("run recovery job invalid".into()); }
         let start = turn.start();
         let body = Body::Native(Box::new(Native { queue, turn, spec, command: l.command.clone(), job_id: text("job"), job: None,
-            attached: saved["attached"].as_bool().ok_or("run recovery state invalid")?, fault: text("fault"), report: None }));
+            attached: saved["attached"].as_bool().ok_or("run recovery state invalid")?, fault: text("fault"), report: None, launcher: None }));
         Ok(me.run(body, start, optimization, l))
     }
 
