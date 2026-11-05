@@ -13,6 +13,7 @@ pub mod history;
 mod native;
 mod app;
 mod protected;
+pub mod host;
 mod adapter;
 pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
