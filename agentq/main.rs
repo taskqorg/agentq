@@ -39,7 +39,7 @@ const UPDATE_EVERY: u64 = 3600;
 const DRAIN: u64 = 900;
 /// `onboard --yes` waits this long for a started proxy to answer, before and after one restart (#137).
 const PROXY_START: Duration = Duration::from_secs(60);
-const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | agent turn | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes|antigravity..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--dry-run] | --version";
+const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | agent turn | agent host --action <action> --request <json> | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes|antigravity..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -74,8 +74,9 @@ fn main() {
         if let Err(e) = release::recover(&t) { fail(&e, "retry after the installation becomes writable; active state is unknown"); }
     }
     // the launcher copy only picks a release (coreq.md § Launcher); hooks run in place, so a release mid-update or a
-    // failed start never fails the client's hook (#132)
-    if is_launcher && t.current().is_some() && args.first().map(String::as_str) != Some("hook") {
+    // failed start never fails the client's hook (#132). Protected host dispatch keeps the checked artifact (M12.8).
+    if is_launcher && t.current().is_some() && args.first().map(String::as_str) != Some("hook")
+        && !matches!(a.as_slice(), ["agent", "host", ..]) {
         coreq::launcher::launch(&t, &args);
     }
     let code = match a.as_slice() {
@@ -99,6 +100,10 @@ fn main() {
             Err(e) => fail(&e, "resolve the command registration error and run `agentq setup-path` again"),
         },
         ["run", "--", cmd @ ..] if !cmd.is_empty() => engines::run(&t.install, &args[2..]),
+        ["agent", "host", "--action", action, "--request", request] => match agentq_runtime::agent::host::dispatch(action, request) {
+            Ok(()) => 0,
+            Err(e) => fail(&e, "retain the original permit and reconcile; never replay uncertain work"),
+        },
         ["agent", "turn"] => match std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string()).and_then(|s| agentq_runtime::cli::turn(&s, Some(&t.install))) {
             Ok(v) => println_code(&v.to_string()),
             Err(e) => fail(&e, "send one JSON turn request on stdin (docs/spec/RUNTIME.md § JSON command)"),

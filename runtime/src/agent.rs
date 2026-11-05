@@ -13,6 +13,7 @@ pub mod history;
 mod native;
 mod app;
 mod protected;
+pub mod host;
 mod adapter;
 mod capture;
 pub use capture::{APPEND_CHUNK, Call, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};

@@ -8,7 +8,7 @@ const SCHEMA: &str = "taskq.app-server/1";
 
 /// Operator-selected immutable adapter. Never build this trust anchor from task text or a receipt.
 #[derive(Clone)]
-pub struct ProtectedHost { executable: PathBuf, sha256: String }
+pub struct ProtectedHost { executable: PathBuf, sha256: String, signature: Option<(String, String)> }
 
 /// Expected operator/native identity, obtained independently of this operation's receipt.
 #[derive(Clone)]
@@ -26,32 +26,47 @@ pub struct ProtectedPreparation { request: Value, prepared: Value, expected: Pro
 
 impl ProtectedPreparation {
     pub fn request(&self) -> &Value { &self.request }
-    pub fn checkpoint(&self) -> Value { json!({"slot":self.request["slot"],"receipt":self.receipt}) }
+    pub fn checkpoint(&self) -> Value { json!({if self.request["schema"] == SCHEMA { "slot" } else { "permit" }:permit(&self.request),"receipt":self.receipt}) }
 }
 
 impl ProtectedHost {
     pub fn new(executable: &Path, sha256: &str) -> Res<Self> {
         canonical(executable)?;
         if !hash(sha256) { return Err("protected adapter digest required".into()); }
-        let host = Self { executable: executable.into(), sha256: sha256.into() };
+        let host = Self { executable: executable.into(), sha256: sha256.into(), signature: None };
         host.checked()?;
         Ok(host)
     }
 
+    /// Independent adapter trust is pinned by the operator, never learned from a receipt.
+    pub fn signed(executable: &Path, sha256: &str, public_key: &str, signature: &str) -> Res<Self> {
+        let host = Self { executable: executable.into(), sha256: sha256.into(), signature: Some((public_key.into(), signature.into())) };
+        host.checked()?;
+        Ok(host)
+    }
+
+    fn schema(&self) -> &'static str { if self.signature.is_some() { "agentq.app-server/1" } else { SCHEMA } }
+    fn permit_field(&self) -> &'static str { if self.signature.is_some() { "permit" } else { "slot" } }
+
     fn checked(&self) -> Res<()> {
         canonical(&self.executable)?;
         if file_hash(&self.executable)? != self.sha256 { return Err("protected adapter artifact changed; authority unknown".into()); }
+        if let Some((key, signature)) = &self.signature {
+            super::host::verify_signature(key, signature, "agentq.protected-adapter/1", self.sha256.as_bytes())?;
+        }
         Ok(())
     }
 
     fn command(&self, action: &str, request: &Value) -> Res<Command> {
         if action == "prepare" {
-            if !fields(request, &["schema", "slot"]) || request["schema"] != SCHEMA { return Err("protected preparation request invalid".into()); }
-            validate_slot(&request["slot"])?;
+            if !fields(request, &["schema", self.permit_field()]) || request["schema"] != self.schema() { return Err("protected preparation request invalid".into()); }
+            validate_slot(permit(request))?;
         } else { validate_request(request)?; }
+        if request["schema"] != self.schema() { return Err("protected protocol mismatch; no fallback".into()); }
         self.checked()?;
         let mut command = Command::new(&self.executable);
-        command.args(["service", "app-server", "--action", action, "--request", &request.to_string()]);
+        if self.signature.is_some() { command.args(["agent", "host"]); } else { command.args(["service", "app-server"]); }
+        command.args(["--action", action, "--request", &request.to_string()]);
         Ok(command)
     }
 
@@ -67,6 +82,31 @@ impl ProtectedHost {
     /// Recovery readback only. A copied receipt cannot be supplied to a transport to authorize input.
     pub fn observe(&self, request: &Value, until: Instant) -> Res<Value> { self.read("observe", request, until) }
 
+    /// Reconcile operator-authenticated retained bytes through the independent host, never the old runtime.
+    pub fn reconcile_retained(&self, checkpoint: &str, receipt: &str, until: Instant) -> Res<Value> {
+        self.retained("retained",checkpoint,receipt,until)
+    }
+
+    /// Exact native cancellation using the original authenticated retained identity; never completion or release.
+    pub fn cancel_retained(&self, checkpoint: &str, receipt: &str, until: Instant) -> Res<Value> {
+        self.retained("retained-cancel",checkpoint,receipt,until)
+    }
+
+    fn retained(&self, action:&str, checkpoint:&str, receipt:&str, until:Instant) -> Res<Value> {
+        if self.signature.is_none() || checkpoint.len()>1024*1024 || receipt.len()>1024*1024 {return Err("signed retained recovery required".into());}
+        self.checked()?;
+        let request=json!({"checkpoint":checkpoint,"receipt":receipt});
+        let mut command=Command::new(&self.executable);
+        command.args(["agent","host","--action",action,"--request",&request.to_string()]);
+        let budget=until.checked_duration_since(Instant::now()).filter(|d|!d.is_zero()).ok_or("retained recovery deadline")?.min(Duration::from_secs(5));
+        let output=coreq::process::output("agent.protected.retained",&mut command,budget).map_err(|_|"retained recovery unknown; occupancy retained")?;
+        let answer:Value=serde_json::from_slice(&output.stdout).map_err(|_|"retained recovery invalid")?;
+        if answer["schema"]!="agentq.retained-operation/1"||answer["checkpoint"]!=checkpoint||answer["receipt"]!=receipt
+            || !matches!(answer["state"].as_str(),Some("unknown"|"completed"))
+            || answer["state"]=="completed"&&answer["cleanup"]["cleanup_verified"]!=true {return Err("retained recovery binding changed; occupancy retained".into());}
+        Ok(answer)
+    }
+
     /// Exact host cancellation, never slot release or proof of whole-turn completion.
     pub fn cancel(&self, request: &Value, until: Instant) -> Res<Value> { self.read("cancel", request, until) }
 
@@ -74,8 +114,8 @@ impl ProtectedHost {
     pub fn prepare(&self, slot: &Value, until: Instant) -> Res<ProtectedPreparation> {
         validate_slot(slot)?;
         if native(&slot["binding"])? != identity(std::process::id())? { return Err("protected preparation belongs to another consumer incarnation".into()); }
-        let receipt = self.read("prepare", &json!({"schema":SCHEMA,"slot":slot}), until)?;
-        let preparation = self.recover_preparation(&json!({"slot":slot,"receipt":receipt}))?;
+        let receipt = self.read("prepare", &json!({"schema":self.schema(),self.permit_field():slot}), until)?;
+        let preparation = self.recover_preparation(&json!({self.permit_field():slot,"receipt":receipt}))?;
         validate_expected(&preparation.expected)?;
         Ok(preparation)
     }
@@ -84,13 +124,14 @@ impl ProtectedHost {
     pub fn recover_preparation(&self, checkpoint: &Value) -> Res<ProtectedPreparation> {
         self.checked()?;
         let receipt = &checkpoint["receipt"]; let prepared = &receipt["prepared"]; let a = &prepared["authority"];
-        if !fields(checkpoint, &["slot", "receipt"]) || receipt["schema"] != SCHEMA || receipt["state"] != "prepared"
+        if !fields(checkpoint, &[self.permit_field(), "receipt"]) || receipt["schema"] != self.schema() || receipt["state"] != "prepared"
             || !fields(prepared, &["schema", "binding", "authority", "host_instance"])
-            || prepared["schema"] != "taskq.app-server-preparation/1" || prepared["binding"] != checkpoint["slot"]["binding"]
-            || !nonempty(&prepared["host_instance"]) || !receipt["preparation"].as_str().is_some_and(hash) {
+            || prepared["schema"] != preparation_schema(self.schema()) || prepared["binding"] != permit(checkpoint)["binding"]
+            || !nonempty(&prepared["host_instance"]) || !receipt["preparation"].as_str().is_some_and(hash)
+            || receipt["preparation"] != super::host::digest(prepared.to_string().as_bytes()) {
             return Err("protected independent preparation missing or mismatched".into());
         }
-        let request = json!({"schema":SCHEMA,"slot":checkpoint["slot"],"policy_revision":receipt["policy_revision"],
+        let request = json!({"schema":self.schema(),self.permit_field():permit(checkpoint),"policy_revision":receipt["policy_revision"],
             "account":receipt["account"],"preparation":receipt["preparation"]});
         validate_request(&request)?;
         let path = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(PathBuf::from).ok_or("protected prepared path unknown");
@@ -126,7 +167,7 @@ impl ProtectedHost {
         validate_expected(&expected)?;
         let mut command = self.command("launch", &request)?;
         let owner = identity(std::process::id())?;
-        if native(&request["slot"]["binding"])? != owner { return Err("protected slot belongs to another consumer incarnation".into()); }
+        if native(&permit(&request)["binding"])? != owner { return Err("protected slot belongs to another consumer incarnation".into()); }
         // Inherited off wins, exactly as in ordinary runtime launches. No caller environment is forwarded.
         let intent = if std::env::var_os(optimization::ENV).is_some_and(|v| v == "off") { Intent::Off } else { intent };
         command.env(optimization::ENV, intent.code());
@@ -170,7 +211,7 @@ impl ProtectedAppServer {
             let launch = &receipt["launch"]; let scope = &launch["scope"];
             if launch["authority"] != prepared["authority"] || launch["host_instance"] != prepared["host_instance"]
                 || launch["frontend"].is_null() || launch["input_closed"] != false || scope["dispatch_ack"] != true
-                || !scope_binding(&scope["binding"], &self.request["slot"]["binding"]) {
+                || !scope_binding(&scope["binding"], &permit(&self.request)["binding"]) {
                 return Err("protected prepared launch binding changed; no native input".into());
             }
         }
@@ -196,6 +237,8 @@ impl ProtectedAppServer {
     pub fn open(self, session: Option<&str>, launch: &super::Launch) -> Res<super::Run> { super::adapter::open_protected(self, session, launch) }
 }
 
+pub(super) fn permit(r: &Value) -> &Value { r.get("permit").unwrap_or(&r["slot"]) }
+fn preparation_schema(schema: &str) -> &'static str { if schema == SCHEMA { "taskq.app-server-preparation/1" } else { "agentq.app-server-preparation/1" } }
 fn fields(value: &Value, names: &[&str]) -> bool {
     value.as_object().is_some_and(|o| o.len() == names.len() && names.iter().all(|n| o.contains_key(*n)))
 }
@@ -225,17 +268,19 @@ fn identity(pid: u32) -> Res<Identity> {
     coreq::process::identity(pid).map_err(|_| "protected process liveness unknown")?.ok_or_else(|| "protected process absent; retain operation".into())
 }
 fn validate_request(r: &Value) -> Res<()> {
-    if !(fields(r, &["schema", "slot", "policy_revision", "account"])
-        || fields(r, &["schema", "slot", "policy_revision", "account", "preparation"]) && r["preparation"].as_str().is_some_and(hash)) || r["schema"] != SCHEMA
+    let field = if r["schema"] == SCHEMA { "slot" } else { "permit" };
+    if !(fields(r, &["schema", field, "policy_revision", "account"])
+        || fields(r, &["schema", field, "policy_revision", "account", "preparation"]) && r["preparation"].as_str().is_some_and(hash)) || (r["schema"] != SCHEMA && r["schema"] != "agentq.app-server/1")
         || r["policy_revision"].as_u64().is_none_or(|n| n == 0) || !nonempty(&r["account"])
         || r.to_string().len() > 16384 { return Err("protected request invalid; no native launch".into()); }
-    validate_slot(&r["slot"])
+    validate_slot(permit(r))
 }
-fn validate_slot(slot: &Value) -> Res<()> {
+pub(super) fn validate_slot(slot: &Value) -> Res<()> {
     let b = &slot["binding"];
-    if !fields(slot, &["binding", "key"]) || !slot["key"].as_str().is_some_and(hash)
+    if !(fields(slot, &["binding", "key"]) && b["schema"] == "taskq.slots/1"
+        || fields(slot, &["binding", "key", "signature"]) && b["schema"] == "pipe.permits/1" && slot["signature"].as_str().is_some_and(|s| super::host::hex(s, 64).is_ok())) || !slot["key"].as_str().is_some_and(hash)
         || !fields(b, &["schema", "caller", "op_id", "root", "runtime", "pid", "started", "boot", "expires_at"])
-        || b["schema"] != "taskq.slots/1" || b["runtime"] != "codex" || !nonempty(&b["caller"]) || !nonempty(&b["op_id"])
+        || b["runtime"] != "codex" || !nonempty(&b["caller"]) || !nonempty(&b["op_id"])
         || b["boot"].as_i64().is_none_or(|n| n <= 0) || b["expires_at"].as_u64().is_none_or(|n| n == 0)
         || slot.to_string().len() > 16384 { return Err("protected slot invalid; no native launch".into()); }
     native(b)?;
@@ -250,7 +295,7 @@ fn validate_expected(e: &ProtectedIdentity) -> Res<()> {
     Ok(())
 }
 fn validate_authority(a: &Value, request: &Value, expected: &ProtectedIdentity, host: &ProtectedHost) -> Res<()> {
-    let b = &request["slot"]["binding"];
+    let b = &permit(&request)["binding"];
     if a["project"] != b["root"] || a["runtime"] != "codex" || a["account"] != request["account"]
         || a["account_home"] != json!(expected.account_home) || a["profile_sha256"] != expected.profile_sha256
         || a["executable"] != json!(expected.executable) || a["executable_sha256"] != expected.executable_sha256
@@ -265,11 +310,11 @@ fn validate_authority(a: &Value, request: &Value, expected: &ProtectedIdentity, 
 }
 fn validate_receipt(r: &Value, request: &Value, expected: &ProtectedIdentity, host: &ProtectedHost, frontend: u32) -> Res<Value> {
     validate_expected(expected)?;
-    let launch = &r["launch"]; let a = &launch["authority"]; let b = &request["slot"]["binding"];
+    let launch = &r["launch"]; let a = &launch["authority"]; let b = &permit(&request)["binding"];
     validate_authority(a, request, expected, host)?;
     let effective = &r["verified_effective"];
-    if r["schema"] != SCHEMA || r["state"] != "verified-effective" || r["caller"] != b["caller"] || r["operation"] != b["op_id"]
-        || launch["schema"] != SCHEMA || launch["state"] != "verified-effective" || launch["cancel_requested"] != false
+    if r["schema"] != request["schema"] || r["state"] != "verified-effective" || r["caller"] != b["caller"] || r["operation"] != b["op_id"]
+        || launch["schema"] != request["schema"] || launch["state"] != "verified-effective" || launch["cancel_requested"] != false
         || launch["policy_revision"] != request["policy_revision"] || launch["account"] != request["account"]
         || !nonempty(&launch["host_instance"]) || !launch["reason"].is_null()
         || effective["state"] != "verified-effective" || !nonempty(&effective["scope"])
@@ -291,17 +336,17 @@ fn scope_binding(scope: &Value, slot: &Value) -> bool {
         && scope["boot"].as_i64().zip(slot["boot"].as_i64()).is_some_and(|(a,b)| a > 0 && b > 0 && a.abs_diff(b) <= 2)
 }
 fn validate_completion(r: &Value, preparation: &ProtectedPreparation) -> Res<()> {
-    let request = &preparation.request; let b = &request["slot"]["binding"]; let launch = &r["launch"];
-    if r["schema"] != SCHEMA || r["caller"] != b["caller"] || r["operation"] != b["op_id"] {
+    let request = &preparation.request; let b = &permit(&request)["binding"]; let launch = &r["launch"];
+    if r["schema"] != request["schema"] || r["caller"] != b["caller"] || r["operation"] != b["op_id"] {
         return Err("protected completion operation unknown; retain original slot".into());
     }
     if r["state"] == "unknown" { return Ok(()); }
     let scope = &launch["scope"]; let cert = &scope["certificate"];
-    if r["state"] != "completed" || launch["schema"] != SCHEMA || launch["policy_revision"] != request["policy_revision"]
+    if r["state"] != "completed" || launch["schema"] != request["schema"] || launch["policy_revision"] != request["policy_revision"]
         || launch["account"] != request["account"] || launch["authority"] != preparation.prepared["authority"]
         || launch["host_instance"] != preparation.prepared["host_instance"] || launch["input_closed"] != true
         || scope["dispatch_ack"] != true || scope["cleanup_intent"] != true || scope["bootout_ack"] != true || scope["cleanup_verified"] != true
-        || cert["schema"] != "taskq.native-completion/1" || !scope_binding(&scope["binding"], b)
+        || cert["schema"] != if request["schema"] == SCHEMA { "taskq.native-completion/1" } else { "agentq.native-completion/1" } || !scope_binding(&scope["binding"], b)
         || cert["scope"] != scope["binding"] || cert["native"] != launch["native"] || cert["supervisor"] != launch["supervisor"]
         || cert["counts"].as_array().is_none_or(|a| a.len() != 2)
         || cert["counts"][0].as_u64().zip(cert["counts"][1].as_u64()).is_none_or(|(a,b)| a.checked_sub(b) != Some(1)) {
