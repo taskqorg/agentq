@@ -173,6 +173,28 @@ fn protected_retained_fences_bind_operation_and_incarnation_not_bytes() {
     let outcome=retained_cleanup(&f.root,"invented-interrupted","invented-incarnation",||panic!("verified"),||panic!("stopped"),||panic!("exited")).unwrap();
     assert_eq!(outcome["cleanup_verified"],true);
     assert!(retained_inherit(&f.root,"invented-interrupted","invented-other",true).is_err());
+    // M12.8: the other action cannot bind a second incarnation, including older action-only journals.
+    let mut effects=0;let mut unchanged=true;
+    let (_,_,original_incarnation)=parsed(&first.to_string());
+    for first_action in ["cleanup","cancel"] {
+        let operation=format!("{key}-{first_action}-first");
+        if first_action=="cleanup" {
+            retained_cleanup(&f.root,&operation,&original_incarnation,||Ok(()),||Err("invented lost acknowledgment".into()),||panic!("exit without acknowledgment")).unwrap();
+        }else{
+            retained_cancel(&f.root,&operation,&original_incarnation,||Ok(()),||Ok(()));
+        }
+        let before=fs::read(f.root.join("operations.json")).unwrap();
+        if first_action=="cleanup" {
+            let outcome=retained_cancel(&f.root,&operation,&incarnation,||Ok(()),||{effects+=1;Ok(())});
+            assert_eq!(outcome["state"],"unknown");
+        }else{
+            let outcome=retained_cleanup(&f.root,&operation,&incarnation,||Ok(()),||{effects+=1;Err("invented lost acknowledgment".into())},||panic!("exit without acknowledgment"));
+            assert!(outcome.is_err()||outcome.unwrap()["state"]=="unknown");
+        }
+        unchanged&=fs::read(f.root.join("operations.json")).unwrap()==before;
+    }
+    assert_eq!(effects,0,"cross-action incarnation drift must cause no stop");
+    assert!(unchanged,"cross-action drift must preserve the durable journal");
 }
 // Risk: a crash after exact-job bootout intent is mistaken for acknowledgment and repeats cleanup.
 #[cfg(target_os="macos")]

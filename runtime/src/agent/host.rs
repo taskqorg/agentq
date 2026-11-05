@@ -513,17 +513,21 @@ fn retained_incarnation(original:&Value)->Res<String> {
     Ok(digest(json!({"supervisor":[supervisor.pid,supervisor.started],"native":[child.pid,child.started],"boot":scope["binding"]["boot"],"coalition":scope["binding"]["coalition"],"label":scope["label"],"domain":scope["domain"]}).to_string().as_bytes()))
 }
 #[cfg(any(test,target_os="macos"))]
-fn retained_fence(s:&resources::State,key:&str,incarnation:&str)->Res<Value> {
-    match s.ops.get(key) {
-        Some(op) if op.bound["incarnation"]==incarnation=>Ok(op.receipt.clone()),
-        Some(_)=>Err("retained cleanup binding changed".into()),None=>Ok(Value::Null),
+fn retained_fence(s:&resources::State,operation:&str,incarnation:&str)->Res<Value> {
+    let key=format!("retained-{operation}");
+    // Both existing action records bind the operation; keep their receipts and consumed intents intact.
+    for key in [&key,&format!("retained-cancel-{operation}")] {
+        if s.ops.get(key).is_some_and(|op|op.bound["incarnation"]!=incarnation) {
+            return Err("retained cleanup binding changed".into());
+        }
     }
+    Ok(s.ops.get(&key).map_or(Value::Null,|op|op.receipt.clone()))
 }
 #[cfg(any(test,target_os="macos"))]
 fn retained_inherit(install:&Path,operation:&str,incarnation:&str,acknowledged:bool)->Res<()> {
     let key=format!("retained-{operation}");
     resources::within(install,resources::WAIT,|s| {
-        retained_fence(s,&key,incarnation)?;
+        retained_fence(s,operation,incarnation)?;
         let op=s.ops.entry(key.clone()).or_insert_with(||resources::Op{bound:json!({"incarnation":incarnation}),receipt:json!({"cleanup_intent":true})});
         if acknowledged {op.receipt["bootout_ack"]=json!(true);}Ok(())
     })
@@ -532,7 +536,7 @@ fn retained_inherit(install:&Path,operation:&str,incarnation:&str,acknowledged:b
 #[cfg(any(test,target_os="macos"))]
 fn retained_cleanup(install:&Path,operation:&str,incarnation:&str,verify:impl FnOnce()->Res<()>,bootout:impl FnOnce()->Res<()>,exited:impl FnOnce()->Res<()>)->Res<Value> {
     let key=format!("retained-{operation}");
-    let saved=resources::within(install,resources::WAIT,|s|retained_fence(s,&key,incarnation))?;
+    let saved=resources::within(install,resources::WAIT,|s|retained_fence(s,operation,incarnation))?;
     if saved["cleanup_verified"]==true {
         if saved["cleanup_intent"]!=true||saved["bootout_ack"]!=true {return Err("retained cleanup proof incomplete".into());}
         return Ok(saved);
@@ -541,17 +545,18 @@ fn retained_cleanup(install:&Path,operation:&str,incarnation:&str,verify:impl Fn
         if saved.is_null() {
             verify()?;
             resources::within(install,resources::WAIT,|s| {
+                retained_fence(s,operation,incarnation)?;
                 if s.ops.contains_key(&key) {return Err("retained cleanup intent consumed; never retry".into());}
                 s.ops.insert(key.clone(),resources::Op{bound:json!({"incarnation":incarnation}),receipt:json!({"cleanup_intent":true})});Ok(())
             })?;
             bootout()?;
             resources::within(install,resources::WAIT,|s| {s.ops.get_mut(&key).ok_or("cleanup record absent")?.receipt["bootout_ack"]=json!(true);Ok(())})?;
         }
-        let acknowledged=resources::within(install,resources::WAIT,|s|retained_fence(s,&key,incarnation))?;
+        let acknowledged=resources::within(install,resources::WAIT,|s|retained_fence(s,operation,incarnation))?;
         if acknowledged["bootout_ack"]!=true {return Err("retained cleanup unacknowledged; never repeat".into());}
         exited()?;
         resources::within(install,resources::WAIT,|s| {
-            retained_fence(s,&key,incarnation)?;
+            retained_fence(s,operation,incarnation)?;
             let op=s.ops.get_mut(&key).ok_or("cleanup record absent")?;
             op.receipt["cleanup_verified"]=json!(true);Ok(op.receipt.clone())
         })
@@ -563,8 +568,10 @@ fn retained_cleanup(install:&Path,operation:&str,incarnation:&str,verify:impl Fn
 fn retained_cancel(install:&Path,operation:&str,incarnation:&str,verify:impl FnOnce()->Res<()>,terminate:impl FnOnce()->Res<()>)->Value {
     let key=format!("retained-cancel-{operation}");
     let result=(||->Res<()> {
+        resources::within(install,resources::WAIT,|s|retained_fence(s,operation,incarnation))?;
         verify()?;
         resources::within(install,resources::WAIT,|s| {
+            retained_fence(s,operation,incarnation)?;
             if s.ops.contains_key(&key) {return Err("retained cancellation already requested; observe without retry".into());}
             s.ops.insert(key.clone(),resources::Op{bound:json!({"incarnation":incarnation}),receipt:json!({"cancel_intent":true})});Ok(())
         })?;

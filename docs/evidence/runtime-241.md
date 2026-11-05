@@ -56,6 +56,12 @@ The stop itself runs behind a closure in these checks, so they prove the fence a
 
 **Windows journal sync.** The journal synced through a read-only handle, which Windows refuses. [CI run 42086892150](https://github.com/taskqorg/agentq/actions/runs/42086892150) failed `protected_independent_signatures_permits_and_missing_state_refuse` with `protected journal sync unknown`. The handle now has write access and the assertion is unchanged. `rust (windows-latest)` passed in [CI run 42088896349](https://github.com/taskqorg/agentq/actions/runs/42088896349), together with `rust (macos-latest)` and `rust (ubuntu-latest)`. That is a pull-request result, not the merge result.
 
+**Cross-action incarnation drift (second review).** Candidate `5688cc8a2e9d83a40a3398ca7fe50fb7f11510f8` still let cleanup and cancellation bind separate incarnations of the same operation. Under R13 / §12 M12.8, the existing retained-fence regression now also exercises cleanup A followed by cancellation B and cancellation A followed by cleanup B, using authenticated snapshots with different native incarnations.
+
+`cargo test --locked -p agentq-runtime --lib protected_retained_fences` failed before the fix on Windows: `cross-action incarnation drift must cause no stop`, left `2`, right `0`. After the fix the same check passes, with zero second-action stops and byte-identical journal state after each refusal. Both action records are checked under the journal lock before persisting either intent, including a recheck after native readback. Existing action-only journals bind both actions without migration, receipt rewriting or intent reset. Inherited cleanup checks the same binding. The earlier formatting, snapshot, lost-acknowledgment, original-intent and no-replay guards remain unchanged.
+
+The two earlier requeues exposed the same missing relationship at different boundaries: byte-based fences first, then separately bound action fences. The smallest remedy is the shared operation/incarnation check in the existing journal, with both cross-action orders retained in the existing deterministic regression. This adds no new authority, storage or launch path.
+
 ## Immutable candidate
 
 - AgentQ runtime/API and adapter source: `97a9ba59d6f60bfefdab0c6c9e09827ee4a326df`.
