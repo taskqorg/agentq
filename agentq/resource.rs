@@ -613,10 +613,16 @@ pub(crate) mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn live_probe_overhead() {
-        let start = Instant::now();
-        let r = read();
-        let took = start.elapsed();
-        assert!(took < Duration::from_millis(50), "one sample took {took:?}");
+        // A busy runner can stall any one sample past the bound; a slow probe is slow on every attempt.
+        let (r, took) = (0..3)
+            .map(|_| {
+                let start = Instant::now();
+                let r = read();
+                (r, start.elapsed())
+            })
+            .min_by_key(|(_, took)| *took)
+            .unwrap();
+        assert!(took < Duration::from_millis(50), "the fastest of 3 samples took {took:?}");
         if std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|s| wsl1(&s)) {
             return assert_eq!(r.cpu, Err("wsl1 mirrors the Windows host".into()));
         }
