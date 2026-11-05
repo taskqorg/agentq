@@ -19,6 +19,7 @@ Each adapter implements every operation. The sections below remain the binding d
 | `poll(run)` | `running`, `finished`, `failed` or `unknown` from the existing end detection. |
 | `report(run)` | The `Report` of a finished run; a running one returns cause `running`. |
 | `progress(run)` | Complete native JSON records appended to the run's log since the previous call, as raw values, each read at most once. |
+| `launcher_output(run)` | The raw `background` launcher exchange of this run, once (Caller launch data). |
 | `session_id(run)` | The native session once named, else none. |
 | `session_url(run)` | The URL or cause of `observe` (Session observation), without polling. |
 | `observe(run)` | One runtime-neutral `Observation`: `poll` state (a failed poll reads `unknown` with its error), native session, and session URL or absence cause with its native detail (Session observation). |
@@ -46,8 +47,8 @@ Descriptor data, the only runtime metadata a caller reads. `models` are the mode
 
 | `name` | `label` | `brand` | `family` | `models` | `minimum` | `capabilities` |
 |---|---|---|---|---|---|---|
-| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas` |
-| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort`, `image-input`, `account` |
+| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas`, `settings-env` |
+| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort`, `image-input`, `account`, `host-args`, `settings-env` |
 | `antigravity` | Antigravity | Google | `gemini` | | | `turn`, `resume`, `title` |
 
 ### Session observation
@@ -100,6 +101,18 @@ Codex `builtin`, `isolated` and `subscription` flags follow the `exec` or `app-s
 - `Launch.deltas` (`turn-deltas`): partial text records in `progress` → Claude `--include-partial-messages`. App-server runs always stream deltas and ignore it.
 
 `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
+
+### Caller launch data
+
+M12.12 lets a caller launch through the trait when its host configuration holds native data. A launch that sets none of these keeps its native arguments unchanged.
+
+- `Launch.host_args` (`host-args`, Codex turns only): operator-configured arguments, passed verbatim after the mapped arguments and before the optimizer override. They refuse a non-default `Policy` with `host-args require the native policy on <name>`, because they could override any part of it. Another runtime or mode refuses with `host-args unsupported by <name>`.
+- `Launch.settings_env` (`settings-env`, CLI turn and background modes): environment of the session, as text.
+  - Claude: one `--settings` JSON `env`, joined with `Launch.compact_hook` and the child's `AGENTQ_OPTIMIZATION` and `AGENTQ_LAUNCHER`, which win over a caller value. A background session runs under the Claude daemon, whose environment is not the launcher child's; settings `env` reaches it and survives resume. These values do not join the child environment, so `Launch.env` stays the place for child variables.
+  - Codex: child environment after `Launch.env`, so a settings value wins.
+  - The values of a Claude launch enter argv, so a caller never puts secrets here. Secrets stay in `Launch.env`.
+  - Antigravity, queue and app-server launches refuse with `settings-env unsupported by <name>`.
+- `Runtime::launcher_output(run)` (`background`): the raw `Result<Output, Failure>` of the launcher exchange that `background_launch` returns, handed over once so the caller can record it and tell a refusal from an uncertain response with `launch_refusal`. A run without a launcher reads cause `no-launcher`. A second call and a recovered run read cause `launcher-output-unavailable`, because the output is not part of the checkpoint. A foreign run reads `foreign-run`. The run's own state does not change: an unobserved job stays `unknown` and never resubmits.
 
 ### Turn recovery and process setup
 
@@ -442,7 +455,7 @@ Consumers of the runtime and CoreQ on their default branches when this page chan
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
 | AssetQ | `coreq` v0.19.2, `agentq-runtime` tag `runtime-v0.2.0` (which resolves its own `coreq` v0.18.0) | Pinned; a newer revision follows its own contract and qualification |
 
-- Runtime crate version 0.4.1. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
+- Runtime crate version 0.5.0. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. Optionally, after a merged main commit passes the `Test` workflow on Linux, macOS and Windows, `scripts/tag_runtime.py` checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.
 - Forward: a consumer edits its contract, switches `coreq::agent` to `agentq_runtime::agent` at one immutable revision, passes its own fake-client gates and qualifies its real native paths. A revision with the runtime trait (M12.9) replaces direct `Client`/`Spec`/`Turn` calls with `Runtime` operations, `Policy` and `Launch`; native behavior is unchanged. A fake-client pass never substitutes for native qualification.
