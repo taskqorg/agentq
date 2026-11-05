@@ -39,36 +39,60 @@ pub(super) fn reported(client: Client, v: &Value, now: u64) -> Option<Vec<Window
         return Some(if windows.is_empty() { unknown("partial-snapshot") } else { windows });
     }
     if client != Client::Codex { return None; }
-    let r = [&v["rate_limits"], &v["payload"]["rate_limits"], &v["msg"]["rate_limits"], &v["params"]["rateLimits"], &v["result"]["rateLimits"], &v["rateLimits"]]
-        .into_iter().find(|r| r.is_object());
-    let groups = v["result"]["rateLimitsByLimitId"].as_object().or(v["rateLimitsByLimitId"].as_object());
-    let sources: Vec<&Value> = match groups { Some(g) => g.values().collect(), None => vec![r?] };
     let mut windows = vec![];
-    for r in sources {
-        if !r.is_object() { windows.extend(unknown("limit-group-unreadable")); continue; }
-        for key in ["primary", "secondary"] {
-            let Some(w) = r.get(key).filter(|w| !w.is_null()) else { continue; };
-            if !w.is_object() { windows.push(window(Some(key.into()),None,None,id.clone())); continue; }
-            let minutes = w["window_minutes"].as_u64().or(w["windowDurationMins"].as_u64());
-            let used = w["used_percent"].as_f64().or(w["usedPercent"].as_f64()).map(|u| u / 100.0);
-            let reset = w["resets_at"].as_u64().or(w["resetsAt"].as_u64()).or_else(|| w["resets_in_seconds"].as_u64().and_then(|s| now.checked_add(s)));
-            windows.push(window(minutes.map(|m| format!("{m}m")), used, reset, id.clone()));
-        }
+    for (_, r) in codex_groups(v)? {
+        windows.extend(codex_windows(r, id.clone(), now));
     }
     Some(if windows.is_empty() { unknown("partial-snapshot") } else { windows })
 }
 
+fn codex_groups(v: &Value) -> Option<Vec<(&str, &Value)>> {
+    if let Some(groups) = v["result"].get("rateLimitsByLimitId").or(v["params"].get("rateLimitsByLimitId")).or(v.get("rateLimitsByLimitId")) {
+        return Some(match groups.as_object() { Some(g) => g.iter().map(|(id, r)| (id.as_str(), r)).collect(), None => vec![("codex", groups)] });
+    }
+    let r = [v.get("rate_limits"), v["payload"].get("rate_limits"), v["msg"].get("rate_limits"), v["params"].get("rateLimits"), v["result"].get("rateLimits"), v.get("rateLimits")].into_iter().flatten().next()?;
+    Some(vec![(r["limit_id"].as_str().or(r["limitId"].as_str()).unwrap_or("codex"), r)])
+}
+
+fn codex_windows(r: &Value, id: Option<String>, now: u64) -> Vec<Window> {
+    if !r.is_object() { return unknown("limit-group-unreadable"); }
+    let mut windows = vec![];
+    for key in ["primary", "secondary"] {
+        let Some(w) = r.get(key).filter(|w| !w.is_null()) else { continue; };
+        if !w.is_object() { windows.push(window(Some(key.into()),None,None,id.clone())); continue; }
+        let minutes = w["window_minutes"].as_u64().or(w["windowDurationMins"].as_u64());
+        let used = w["used_percent"].as_f64().or(w["usedPercent"].as_f64()).map(|u| u / 100.0);
+        let reset = w["resets_at"].as_u64().or(w["resetsAt"].as_u64()).or_else(|| w["resets_in_seconds"].as_u64().and_then(|s| now.checked_add(s)));
+        windows.push(window(minutes.map(|m| format!("{m}m")), used, reset, id.clone()));
+    }
+    if windows.is_empty() { unknown("partial-snapshot") } else { windows }
+}
+
+/// Merge independent native snapshots, never key Codex groups by their shared window lengths.
+pub(super) fn update(client: Client, v: &Value, now: u64, all: &mut BTreeMap<String, Vec<Window>>) -> bool {
+    if client == Client::Codex {
+        let Some(groups) = codex_groups(v) else { return false; };
+        if groups.is_empty() { all.clear(); all.insert("codex".into(), unknown("partial-snapshot")); }
+        for (id, r) in groups {
+            let event_id = v["event_id"].as_str().or(v["uuid"].as_str()).or(v["id"].as_str()).map(String::from);
+            all.insert(id.into(), codex_windows(r, event_id, now));
+        }
+        return true;
+    }
+    let Some(windows) = reported(client, v, now) else { return false; };
+    for w in windows { all.insert(w.window.clone().unwrap_or_default(), vec![w]); }
+    true
+}
+
 pub(super) fn read(client: Client, events: &[Value], rollout: Option<&Path>) -> Vec<Window> {
     let now = (unix_ms() / 1000).max(0) as u64;
-    if client == Client::Claude {
-        let mut all=BTreeMap::new();
-        for v in events { if let Some(windows)=reported(client,v,now) {for w in windows {all.insert(w.window.clone(),w);}} }
-        if !all.is_empty() {return all.into_values().collect();}
-    }
-    if let Some(w) = events.iter().rev().find_map(|v| reported(client, v, now)) { return w; }
+    let mut all=BTreeMap::new();
+    for v in events { update(client, v, now, &mut all); }
+    if !all.is_empty() { return all.into_values().flatten().collect(); }
     if let Some(path) = rollout {
         let text = match std::fs::read_to_string(path) { Ok(t) => t, Err(_) => return unknown("evidence-unreadable") };
-        if let Some(w) = text.lines().rev().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|v| reported(client, &v, now)) { return w; }
+        for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) { update(client, &v, now, &mut all); }
+        if !all.is_empty() { return all.into_values().flatten().collect(); }
     }
     unknown("not-reported")
 }
@@ -277,6 +301,24 @@ fn code_assist(token: &str, mut read: impl FnMut(&str)->Res<Value>) -> Res<Vec<W
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #246 A4/P2: logs, reports and rollout fallback retain independent groups, even with equal lengths.
+    #[test]
+    fn codex_group_updates_keep_sibling_windows() {
+        let row=|group,used,id|json!({"event_id":id,"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":group,"primary":{"used_percent":used,"window_minutes":300,"resets_at":60},"secondary":{"used_percent":90,"window_minutes":10080,"resets_at":90}}}});
+        let mut rows=vec![row("codex",20,"a"),row("other",30,"b"),row("codex",40,"c")];
+        rows.push(json!({"event_id":"d","rate_limits":{"limit_id":"other","primary":{"window_minutes":300},"secondary":{"used_percent":80,"window_minutes":10080,"resets_at":100}}}));
+        let log=rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        let windows=adapter::runtime("codex").unwrap().log_limits(&log,None,None);
+        assert_eq!(windows.len(),4,"{windows:?}");
+        assert_eq!(windows.iter().map(|w|w.used).collect::<Vec<_>>(),vec![Some(0.4),Some(0.9),None,Some(0.8)]);
+        assert_eq!(windows[0].event_id.as_deref(),Some("c"));assert_eq!(windows[2].event_id.as_deref(),Some("d"));
+        assert_eq!(windows[2].unknown.as_deref(),Some("partial-snapshot"));
+        assert_eq!(Report::read(Client::Codex,&log,&rows,None).limits,windows);
+        let root=crate::scratch("quota-groups");let path=root.join("rollout.jsonl");std::fs::write(&path,&log).unwrap();
+        assert_eq!(read(Client::Codex,&[],Some(&path)),windows);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     // #246 A4: retain every window and event identity; partial data must never look unused.
     #[test]
     fn all_windows_keep_unknowns_and_ids() {

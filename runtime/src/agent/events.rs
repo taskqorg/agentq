@@ -125,7 +125,7 @@ impl Cursor {
         let id = string(&i["id"]);
         if matches!(native, "agentMessage" | "agent_message") {
             if end { if let Some(text) = string(&i["text"]) { out.push(Event::Message { item: id, text }); } }
-        } else if !matches!(native, "userMessage" | "reasoning" | "plan" | "todo_list") {
+        } else if matches!(native, "commandExecution" | "command_execution" | "mcpToolCall" | "mcp_tool_call" | "webSearch" | "web_search" | "fileChange" | "file_change" | "dynamicToolCall" | "dynamic_tool_call" | "collabAgentToolCall" | "collab_tool_call" | "imageView" | "image_view" | "imageGeneration" | "image_generation") {
             if start { out.push(Event::ToolStart { id: id.clone(), kind: tool_kind(native), name: string(&i["tool"]).or_else(|| string(&i["name"])) }); }
             if end { out.push(Event::ToolEnd { id, status: string(&i["status"]) }); }
         }
@@ -164,6 +164,22 @@ impl Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #246 A3: non-tool and future items must not manufacture tool calls on either Codex transport.
+    #[test]
+    fn codex_only_tool_items_emit_tool_events() {
+        for kind in ["contextCompaction", "context_compaction", "futureItem", "userMessage", "reasoning", "plan", "todo_list"] {
+            for phase in ["started", "completed"] {
+                for event in [json!({"method":format!("item/{phase}"),"params":{"item":{"type":kind}}}), json!({"type":format!("item.{phase}"),"item":{"type":kind}})] {
+                    assert_eq!(Cursor::default().read(Client::Codex, vec![event]), vec![Event::Activity], "{kind}: {phase}");
+                }
+            }
+        }
+        for kind in ["commandExecution", "command_execution", "mcpToolCall", "mcp_tool_call", "webSearch", "web_search", "fileChange", "file_change", "dynamicToolCall", "dynamic_tool_call", "collabAgentToolCall", "collab_tool_call", "imageView", "image_view", "imageGeneration", "image_generation"] {
+            let events=Cursor::default().read(Client::Codex, vec![json!({"method":"item/started","params":{"item":{"type":kind,"id":"tool"}}}),json!({"method":"item/completed","params":{"item":{"type":kind,"id":"tool","status":"completed"}}})]);
+            assert!(matches!(&events[..], [Event::ToolStart{..}, Event::ToolEnd{..}]), "{kind}: {events:?}");
+        }
+    }
+
     // #246 A3: equivalent native messages map at the boundary, deltas honor intent, unknown records keep activity.
     #[test]
     fn neutral_events_preserve_order_and_unknowns() {
