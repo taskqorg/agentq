@@ -68,7 +68,7 @@ Unknown source shapes retain their exact raw bytes rather than guessing parity.
 
 - #199 is the baseline protected lifecycle implementation. This work neither transfers its
   original operation nor changes its authority, sealed completion or recovery checkpoint.
-- #198's [existing native receipts](../../benchmarks/prerequisites/198.md) prove their stated
+- #198's existing native receipts (git history at `33cef656`) prove their stated
   macOS execution/resume/hook behavior only. They do not qualify this new history API.
 - A5 now includes the original sidecar transcript under the exact-source authorization
   in note 6576105503. Its bounded redacted fixture replaces the diagnostic projection.

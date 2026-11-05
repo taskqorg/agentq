@@ -8,7 +8,6 @@ fn cli(root: &Path, args: &[&str], input: Option<&str>) -> Output {
         .env("HOME", root).env("USERPROFILE", root).env("LOCALAPPDATA", root).env("APPDATA", root)
         .env("AGENTQ_INSTALL", root.join("install"))
         .env("CODEX_HOME", root.join("codex")).env("CLAUDE_CONFIG_DIR", root.join("claude")).env("HERMES_HOME", root.join("hermes"))
-        .env("AGENT_CONTEXT_HOME", root.join("legacy")).env("npm_config_prefix", root.join("npm"))
         .env("XDG_CONFIG_HOME", root.join("config")).env("AGENTQ_AGENT", "claude")
         .env("CALLS", root.join("calls")).env("EXIT", "7")
         .env("PATH", std::env::join_paths(std::iter::once(root.join("bin")).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap())

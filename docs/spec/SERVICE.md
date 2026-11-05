@@ -44,20 +44,20 @@ agentq runs these external tools on a host ([specq host requirements](https://gi
 | `tar` | bsdtar 3.3.2 or GNU tar 1.29 | RTK unpack; Windows bsdtar also reads the RTK zip | all |
 | Python | 3.11, below 3.14, with `venv` and `ensurepip` | headroom venv, `check compression` | all except macOS x64 (no headroom wheels) |
 | Windows PowerShell | 5.1 | process inventory, service registration check, user PATH | Windows |
-| OS components | supplied by the OS release | service unit, process inventory, connection count, host name, hidden key input | macOS `launchctl ps pgrep lsof id hostname stty`; Linux `systemctl ps pgrep id hostname stty`; Windows `schtasks taskkill netstat hostname whoami icacls` |
+| OS components | supplied by the OS release | service unit, process inventory, connection count, host name, hidden key input | macOS `launchctl ps lsof id hostname stty`; Linux `systemctl ps id hostname stty`; Windows `schtasks taskkill netstat hostname whoami icacls` |
 | `security`, `secret-tool` (optional) | none | Langfuse key storage; when absent, the `data/langfuse` file | macOS, Linux |
 
 ## Host requirement notes
 
 - Minimums: curl 7.55.1 and bsdtar 3.3.2 are the copies Windows 10 1803 ships; every flag agentq and coreq pass is older (newest: curl `--proto`, 7.20.2). GNU tar 1.29 detects gzip on extraction. The Python range is the headroom pin's; `check compression` alone accepts 3.9+.
 - Not host requirements: Codex, Claude Code and Hermes run agentq, not the reverse; their configuration compatibility is agentq.md § 4, and `check compression` records their exact versions. Commands passed to `agentq run` belong to the user.
-- `npm` runs only to remove the legacy package, which brought its own npm. `gh` is not called: incident delivery (agentq.md § 7) is not wired into this binary yet and adds its row when it is.
+- `gh` is not called: incident delivery (agentq.md § 7) is not wired into this binary yet and adds its row when it is.
 - Wrapper exceptions: the run adapter keeps native stderr unchanged, so its RTK failures stay stats outcome `failed`; the Python finder probes candidates and its error names every candidate tried; a read of the optional key store falls back to the file without a log line, while a failed write is logged. coreq's own calls (update, enrollment, service unit) follow coreq.
 
 ## Release observation fields
 
 - `selected`: CoreQ `Tool::current()` reads `<install>/current`; only a bounded release identifier crosses. Missing, unreadable or invalid selection is null with `selection_unknown`.
-- `running`: the producer binary's `Tool.version`; `coreq_version`: the Cargo.lock pin, 0.15.0. No dependency upgrade or capture integration is required.
+- `running`: the producer binary's `Tool.version`; `coreq_version`: the version in the built `Cargo.lock`, null when unreadable. No capture integration is required.
 - `health`: the running release's existing `releases/<version>/healthy` regular-file marker, consumed by CoreQ launcher rollback. A readable empty marker with a nonfuture modification time yields `state=verified`, `scope=status_written`, `version` and source `at`. Missing, unreadable, nonempty or future markers remain unknown.
 - `lifecycle`: `waiting_for_activation` when selected differs from running (the update drain rule still governs activation); `healthy` only for equal versions with this receipt; otherwise `starting` or `unknown`. Host disable intent yields `pending_disable`; unreadable lifecycle state yields `unknown`.
 - Snapshot and heartbeat reuse the status observation, allowlist fields and codes, and set current health/lifecycle unknown when the status time is missing, future or older than 90 s. Historical versions and receipt time remain explicitly last-known. Older producers report `not_reported`.

@@ -23,11 +23,11 @@ const POWERSHELL: Req = Req { name: "powershell", program: "powershell", args: &
 const PYTHON_FIX: &str = "install Python 3.11-3.13 with venv, or set AGENTQ_PYTHON to one";
 
 const OS: &[&str] = if cfg!(target_os = "macos") {
-    &["launchctl", "ps", "pgrep", "lsof", "id", "hostname", "stty"]
+    &["launchctl", "ps", "lsof", "id", "hostname", "stty"]
 } else if cfg!(windows) {
     &["schtasks", "taskkill", "netstat", "hostname", "whoami", "icacls"]
 } else {
-    &["systemctl", "ps", "pgrep", "id", "hostname", "stty"]
+    &["systemctl", "ps", "id", "hostname", "stty"]
 };
 
 /// Every requirement as `doctor` lines: (requirement met, line).

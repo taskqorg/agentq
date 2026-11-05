@@ -4,7 +4,7 @@ Accepted under agentq.md §3/§6 and PRODUCT R9/R10. [DashQ presentation](https:
 
 ## O1. Populations and provenance
 
-Reuse the existing stats record, bounded queue and export path. One distinct core event ID contributes once to exactly one outcome: compressed, passed or failed. Calls are core optimization calls, not all model requests, tool calls or MCP retrievals. Preserve canonical reason codes; a normal pass-through is not an error, and optimization failure is not task failure. Legacy run/compress overlap is deduplicated only with proven event identity; otherwise show separate cohorts and incomplete coverage.
+Reuse the existing stats record, bounded queue and export path. One distinct core event ID contributes once to exactly one outcome: compressed, passed or failed. Calls are core optimization calls, not all model requests, tool calls or MCP retrievals. Preserve canonical reason codes; a normal pass-through is not an error, and optimization failure is not task failure.
 
 Use source event time in a half-open [start,end) interval; preserve installation/runtime, opaque profile identity where available, adapter, recipe/engine/config version and safe evidence IDs. Unknown profile is a separate unknown cohort, never inferred from host name. Publish only metadata through existing authorized paths: no prompts, arguments, raw output, paths or credentials. Compatible additive fields stay versioned; unsupported schemas and future/uncertain timestamps cannot silently enter totals.
 

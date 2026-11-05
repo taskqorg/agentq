@@ -459,11 +459,9 @@ pub(crate) fn stats_date(name: &str) -> Option<&str> {
     .then_some(d)
 }
 
-/// The producer's coverage journal in `data/stats/` (ACCOUNTING O3).
-pub const COVERAGE: &str = "coverage.json";
 /// Prefix of markers left in `data/` when a save fails before or at its journal write: the journal no longer proves
 /// coverage until the next written journal resets it. Each failure writes its own file, so a reset removes only the
-/// markers it saw. They live outside `data/stats/`, so an unwritable stats folder still leaves evidence.
+/// markers it saw. They live outside the store, so an unwritable store still leaves evidence.
 pub const FAILED: &str = "coverage.failed";
 
 /// Failure markers held in `data`.
@@ -693,7 +691,6 @@ pub(crate) fn validate_record(v: &Value) -> Result<(), String> {
 
 pub fn records(data: &Path, cutoff: u64) -> Result<Vec<Value>, String> {
     let snapshot = crate::local::snapshot(data)?;
-    if let Some(reason) = snapshot["error"].as_str() { return Err(format!("stats unknown: {reason}")); }
     let mut out = vec![];
     for v in snapshot["records"].as_array().ok_or("stats unknown: invalid snapshot")? {
         validate_record(v)?;
@@ -796,17 +793,8 @@ mod tests {
             10,
             at - 7 * 86400 - 120,
         );
-        let boundary = d
-            .join("stats")
-            .join(format!("{}.jsonl", crate::date(at - 7 * 86400)));
-        let ancient = d
-            .join("stats")
-            .join(format!("{}.jsonl", crate::date(at - 8 * 86400)));
-        // Align expired data to the boundary partition even when UTC is within two minutes of midnight.
         expired["time"] = json!(at - 7 * 86400 - 120);
-        std::fs::create_dir_all(d.join("stats")).unwrap();
-        std::fs::write(&boundary, format!("{expired}\n")).unwrap();
-        std::fs::write(&ancient, "expired data\n").unwrap();
+        crate::local::seed(&d, "stats", &[expired], None);
         assert_eq!(stats(&d).unwrap()["groups"][0]["calls"], 3);
         let input = json!({"text":"result","adapter":"provider","tool":"shell","command":"cargo test --private-arg"});
         std::fs::write(
@@ -818,8 +806,6 @@ mod tests {
             compress(&d, "codex", &input.to_string()).unwrap()["text"],
             "result"
         );
-        assert!(ancient.exists(), "migration preserves legacy files");
-        assert_eq!(std::fs::read_to_string(&boundary).unwrap(),format!("{expired}\n"));
         assert!(crate::local::snapshot(&d).unwrap()["records"].as_array().unwrap().iter().all(|r|r["time"].as_u64().unwrap()>=at-7*86400));
         let q: Vec<_> = std::fs::read_dir(d.join("queue"))
             .unwrap()
@@ -834,11 +820,10 @@ mod tests {
                 && span.contains("disabled")
         );
         assert!(!span.contains("private-arg"));
-        let p = d
-            .join("stats")
-            .join(format!("{}.jsonl", crate::date(crate::now())));
-        std::fs::write(p, "bad\n").unwrap();
-        assert!(stats(&d).unwrap_err().contains("malformed"));
+        let db = rusqlite::Connection::open(d.join("telemetry.sqlite3")).unwrap();
+        db.execute("UPDATE events SET payload='bad' WHERE kind='stats'", []).unwrap();
+        drop(db);
+        assert!(stats(&d).unwrap_err().contains("telemetry event"));
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -846,23 +831,14 @@ mod tests {
     #[test]
     fn retention_keeps_loss_chain() {
         let d = std::env::temp_dir().join(format!("agentq-retention-{}", crate::mcp::new_id()));
-        let stats_dir = d.join("stats");
-        std::fs::create_dir_all(&stats_dir).unwrap();
+        std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("config.json"), r#"{"compression":{"min_bytes":0,"stats":"off"}}"#).unwrap();
         let at = crate::now();
         let day = crate::date(at - 7 * 86400);
-        let line = |t: u64| record("hermes", "hook", "terminal", &Value::Null, 10, t).to_string();
+        let line = |t: u64| record("hermes", "hook", "terminal", &Value::Null, 10, t);
         // Producer wrote 3 lines; one unexpired line is lost, one expired line remains to be trimmed.
-        std::fs::write(
-            stats_dir.join(format!("{day}.jsonl")),
-            format!("{}\n{}\n", line(at - 7 * 86400 - 120), line(at - 7 * 86400 + 3600)),
-        )
-        .unwrap();
-        std::fs::write(
-            stats_dir.join(COVERAGE),
-            json!({"schema":1,"since":at - 7 * 86400 - 200,"resets":[],"gaps":[],"counts":{&day:3}}).to_string(),
-        )
-        .unwrap();
+        let journal = json!({"schema":1,"since":at - 7 * 86400 - 200,"resets":[],"gaps":[],"counts":{&day:3}});
+        crate::local::seed(&d, "stats", &[line(at - 7 * 86400 - 120), line(at - 7 * 86400 + 3600)], Some(&journal));
         let input = json!({"text":"result","adapter":"hook","tool":"terminal"});
         compress(&d, "hermes", &input.to_string()).unwrap();
         let j = crate::local::snapshot(&d).unwrap()["journal"].clone();
@@ -876,8 +852,7 @@ mod tests {
     #[test]
     fn journal_write_failure_chain() {
         let d = std::env::temp_dir().join(format!("agentq-journal-fail-{}", crate::mcp::new_id()));
-        let stats_dir = d.join("stats");
-        std::fs::create_dir_all(&stats_dir).unwrap();
+        std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("config.json"), r#"{"compression":{"min_bytes":0,"stats":"off"}}"#).unwrap();
         let input = json!({"text":"result","adapter":"hook","tool":"terminal"}).to_string();
         compress(&d, "hermes", &input).unwrap();
@@ -903,8 +878,7 @@ mod tests {
     #[test]
     fn same_second_reset_chain() {
         let d = std::env::temp_dir().join(format!("agentq-same-second-{}", crate::mcp::new_id()));
-        let stats_dir = d.join("stats");
-        std::fs::create_dir_all(&stats_dir).unwrap();
+        std::fs::create_dir_all(&d).unwrap();
         let c = json!({"stats":"off"});
         let t = crate::now();
         let save_at = || save(&d, &c, &record("hermes", "hook", "terminal", &Value::Null, 10, t));

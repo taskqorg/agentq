@@ -1,7 +1,6 @@
 //! Installation-owned SQLite telemetry; public entrypoints serialize through the existing lifecycle lock.
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use std::io::Read;
 use std::path::Path;
 
 const APP: i64 = 0x4151544d;
@@ -57,12 +56,6 @@ fn raw_meta(db: &Connection, key: &str) -> Result<Option<String>, String> {
         .optional()
         .map_err(|e| e.to_string())
 }
-fn meta(db: &Connection, key: &str) -> Result<Option<Value>, String> {
-    raw_meta(db, key)?
-        .map(|s| serde_json::from_str(&s).map_err(|e| format!("telemetry metadata: {e}")))
-        .transpose()
-}
-
 fn set(db: &Connection, key: &str, value: &Value) -> Result<(), String> {
     if value.to_string().len() > RECORD_MAX {
         return Err("local telemetry metadata exceeds 64 KiB; originals kept".into());
@@ -133,10 +126,10 @@ fn counts(db: &Connection) -> Result<serde_json::Map<String, Value>, String> {
     Ok(out)
 }
 
-fn maintain(db: &mut Connection, now: u64, bytes: usize, through: u64) -> Result<(), String> {
+fn maintain(db: &mut Connection, now: u64, bytes: usize) -> Result<(), String> {
     let reserve = (bytes as i64).div_euclid(4096) * 2 + 34;
     if reserve >= PAGES {
-        return Err("local telemetry import batch exceeds capacity; history kept".into());
+        return Err("local telemetry batch exceeds capacity; history kept".into());
     }
     loop {
         checkpoint(db)?;
@@ -149,12 +142,11 @@ fn maintain(db: &mut Connection, now: u64, bytes: usize, through: u64) -> Result
         let pressure = pages - free + reserve >= PAGES;
         let tx = db.transaction().map_err(|e| e.to_string())?;
         let rows = {
-            let mut q=tx.prepare("SELECT seq,kind,day,time FROM events WHERE time < ?1 OR (?2 AND time<=?3) ORDER BY time,seq LIMIT 256").map_err(|e|e.to_string())?;
+            let mut q=tx.prepare("SELECT seq,kind,day,time FROM events WHERE time < ?1 OR ?2 ORDER BY time,seq LIMIT 256").map_err(|e|e.to_string())?;
             q.query_map(
                 params![
                     now.saturating_sub(WINDOW).min(i64::MAX as u64) as i64,
-                    pressure,
-                    through.min(i64::MAX as u64) as i64
+                    pressure
                 ],
                 |r| {
                     Ok((
@@ -199,291 +191,6 @@ fn maintain(db: &mut Connection, now: u64, bytes: usize, through: u64) -> Result
     }
 }
 
-// Historical import must not evict newer observations merely to replay an older file.
-fn skip_import(db: &mut Connection, at: u64) -> Result<(), String> {
-    checkpoint(db)?;
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    if let Some(mut j) = raw_meta(&tx, "journal")?
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .filter(crate::compression::journal_valid)
-    {
-        j["since"] = json!(j["since"].as_u64().unwrap_or(0).max(at.saturating_add(1)));
-        set(&tx, "journal", &j)?;
-    }
-    tx.commit().map_err(|e| e.to_string())?;
-    checkpoint(db)
-}
-
-fn manifest(dir: &Path, now: u64) -> Result<Value, String> {
-    let mut entries = vec![];
-    let mut bytes = 0u64;
-    for e in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
-        let e = e.map_err(|e| e.to_string())?;
-        let n = e.file_name().to_string_lossy().into_owned();
-        if n != crate::compression::COVERAGE
-            && !crate::compression::stats_date(&n)
-                .is_some_and(|d| d >= crate::date(now.saturating_sub(WINDOW)).as_str())
-        {
-            continue;
-        }
-        let m = e.metadata().map_err(|e| e.to_string())?;
-        bytes = bytes.saturating_add(m.len());
-        if bytes > 64 << 20 {
-            return Err("legacy telemetry exceeds 64 MiB import bound; files kept".into());
-        }
-        let at = m
-            .modified()
-            .map_err(|e| e.to_string())?
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos()
-            .to_string();
-        entries.push(json!([n, m.len(), at]));
-    }
-    entries.sort_by_key(Value::to_string);
-    let value = json!({"oldest_day":crate::date(now.saturating_sub(WINDOW)),"files":entries});
-    if value.to_string().len() > RECORD_MAX {
-        return Err("legacy manifest exceeds bound; files kept".into());
-    }
-    Ok(value)
-}
-// Keep old files and checkpoint each bounded transaction; no content-based event deduplication.
-fn migrate(db: &mut Connection, data: &Path, now: u64) -> Result<(), String> {
-    if !data.join("stats").exists() {
-        return Ok(());
-    }
-    let manifest = manifest(&data.join("stats"), now)?;
-    if meta(db, "legacy_manifest")?.as_ref() == Some(&manifest) {
-        return Ok(());
-    }
-    let legacy = crate::accounting::legacy(data, now);
-    if legacy["unknown"]
-        .as_str()
-        .is_some_and(|s| ["stats file unreadable", "stats unreadable"].contains(&s))
-    {
-        return Err(legacy["unknown"].as_str().unwrap().into());
-    }
-    let records = legacy["records"]
-        .as_array()
-        .ok_or("invalid legacy source")?;
-    let mut seen = std::collections::HashMap::new();
-    for r in records {
-        if !r.is_object() {
-            return Err("stats unknown: malformed record".into());
-        }
-        crate::compression::validate_record(r)?;
-        if r.to_string().len() > RECORD_MAX {
-            return Err("legacy record exceeds 64 KiB; file kept".into());
-        }
-        let id = r["event_id"].as_str().unwrap();
-        if seen.insert(id, r).is_some_and(|old| old != r) {
-            return Err("conflicting legacy event ID; file kept".into());
-        }
-        exists(db, "stats", id, r)?;
-    }
-    let old_journal = std::fs::read(data.join("stats").join(crate::compression::COVERAGE))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .filter(crate::compression::journal_valid);
-    if old_journal
-        .as_ref()
-        .is_some_and(|v| v.to_string().len() > RECORD_MAX)
-    {
-        return Err("legacy coverage exceeds bound; file kept".into());
-    }
-    let first = meta(db, "legacy_manifest")?.is_none() && meta(db, "importing_stats")?.is_none();
-    checkpoint(db)?;
-    {
-        let tx = db.transaction().map_err(|e| e.to_string())?;
-        if first && raw_meta(&tx, "journal")?.is_none() {
-            if let Some(old) = old_journal.as_ref() {
-                let mut j = json!({"schema":1,"since":old["since"],"resets":old["resets"],"gaps":old["gaps"],"counts":counts(&tx)?});
-                let mut held = serde_json::Map::new();
-                for r in records {
-                    let day = crate::date(r["time"].as_u64().unwrap());
-                    let n = held.get(&day).and_then(Value::as_u64).unwrap_or(0);
-                    held.insert(day, json!(n + 1));
-                }
-                for (day, n) in old["counts"].as_object().unwrap() {
-                    let missing = n
-                        .as_u64()
-                        .unwrap_or(0)
-                        .saturating_sub(held.get(day).and_then(Value::as_u64).unwrap_or(0));
-                    if missing > 0 {
-                        j["counts"][day] = json!(
-                            j["counts"][day]
-                                .as_u64()
-                                .unwrap_or(0)
-                                .checked_add(missing)
-                                .ok_or("coverage count overflow; history kept")?
-                        );
-                    }
-                }
-                set(&tx, "journal", &j)?;
-            }
-        }
-        set(&tx, "importing_stats", &manifest)?;
-        tx.commit().map_err(|e| e.to_string())?;
-    }
-    for file in manifest["files"].as_array().unwrap() {
-        let name = file[0].as_str().unwrap();
-        if crate::compression::stats_date(name).is_none() {
-            continue;
-        }
-        let mut text = String::new();
-        std::fs::File::open(data.join("stats").join(name))
-            .map_err(|e| e.to_string())?
-            .take((64 << 20) + 1)
-            .read_to_string(&mut text)
-            .map_err(|e| e.to_string())?;
-        if text.len() > 64 << 20 {
-            return Err("legacy telemetry exceeds import bound; file kept".into());
-        }
-        let key = format!("legacy_cursor:{name}");
-        let cursor = meta(db, &key)?;
-        let mut offset = 0;
-        if let Some(c) = cursor.as_ref() {
-            let n = c["bytes"].as_u64().ok_or("legacy cursor malformed")? as usize;
-            let hash = c["sha256"].as_str().ok_or("legacy cursor malformed")?;
-            if text.get(..n).is_some_and(|s| {
-                crate::resource::hex(
-                    ring::digest::digest(&ring::digest::SHA256, s.as_bytes()).as_ref(),
-                ) == hash
-            }) {
-                offset = n;
-            } else {
-                // The old age pruner may remove only the expired prefix; an ambiguous rewrite stays unknown.
-                let id = c["last_id"].as_str().ok_or("legacy cursor malformed")?;
-                let mut at = 0;
-                let mut found = vec![];
-                for line in text.split_inclusive('\n') {
-                    at += line.len();
-                    if serde_json::from_str::<Value>(line)
-                        .ok()
-                        .is_some_and(|r| r["event_id"] == id)
-                    {
-                        found.push(at);
-                    }
-                }
-                if found.len() != 1 {
-                    return Err(
-                        "legacy stats rewritten or lost; files kept; coverage unknown".into(),
-                    );
-                }
-                offset = found[0];
-            }
-        }
-        let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
-        hash.update(&text.as_bytes()[..offset]);
-        while offset < text.len() {
-            let mut end = offset;
-            let mut batch = vec![];
-            for line in text[offset..].split_inclusive('\n') {
-                if !batch.is_empty() && end + line.len() - offset > RECORD_MAX {
-                    break;
-                }
-                let r: Value =
-                    serde_json::from_str(line).map_err(|_| "stats unknown: malformed record")?;
-                crate::compression::validate_record(&r)?;
-                if line.len() > RECORD_MAX {
-                    return Err("legacy record exceeds 64 KiB; file kept".into());
-                }
-                end += line.len();
-                batch.push(r);
-            }
-            let latest = batch
-                .iter()
-                .filter_map(|r| r["time"].as_u64())
-                .max()
-                .unwrap_or(0);
-            let skip = match maintain(db, now, end - offset, latest) {
-                Ok(()) => false,
-                Err(e) if e == "local telemetry full; write refused" => {
-                    skip_import(db, latest)?;
-                    true
-                }
-                Err(e) => return Err(e),
-            };
-            hash.update(&text.as_bytes()[offset..end]);
-            let tx = db.transaction().map_err(|e| e.to_string())?;
-            let mut journal = raw_meta(&tx, "journal")?
-                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                .filter(crate::compression::journal_valid);
-            if !skip {
-                for r in &batch {
-                    if insert(&tx, "stats", r["event_id"].as_str().unwrap(), r)? {
-                        if let Some(j) = journal.as_mut() {
-                            let day = crate::date(r["time"].as_u64().unwrap());
-                            j["counts"][&day] = json!(
-                                j["counts"][&day]
-                                    .as_u64()
-                                    .unwrap_or(0)
-                                    .checked_add(1)
-                                    .ok_or("coverage count overflow; history kept")?
-                            );
-                        }
-                    }
-                }
-            }
-            if let Some(j) = journal {
-                set(&tx, "journal", &j)?;
-            }
-            set(
-                &tx,
-                &key,
-                &json!({"bytes":end,"sha256":crate::resource::hex(hash.clone().finish().as_ref()),"last_id":batch.last().unwrap()["event_id"]}),
-            )?;
-            tx.commit().map_err(|e| e.to_string())?;
-            offset = end;
-        }
-    }
-    maintain(db, now, 0, u64::MAX)?;
-    checkpoint(db)?;
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    if let (Some(mut j), Some(old)) = (
-        raw_meta(&tx, "journal")?
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .filter(crate::compression::journal_valid),
-        old_journal.as_ref(),
-    ) {
-        j["since"] = json!(
-            j["since"]
-                .as_u64()
-                .unwrap_or(now + 1)
-                .max(old["since"].as_u64().unwrap_or(now + 1))
-        );
-        for k in ["resets", "gaps"] {
-            for v in old[k].as_array().unwrap() {
-                if !j[k].as_array().unwrap().contains(v) {
-                    j[k].as_array_mut().unwrap().push(v.clone());
-                }
-            }
-        }
-        set(&tx, "journal", &j)?;
-    }
-    let unknown = legacy["unknown"]
-        .as_str()
-        .filter(|s| *s != crate::accounting::UNPROVEN && *s != "stats write failed")
-        .filter(|_| {
-            !records.is_empty()
-                || old_journal.as_ref().is_some_and(|j| {
-                    j["counts"].as_object().unwrap().iter().any(|(day, n)| {
-                        day.as_str() >= crate::date(now.saturating_sub(WINDOW)).as_str()
-                            && n.as_u64().unwrap_or(0) > 0
-                    })
-                })
-        })
-        .map(Value::from)
-        .unwrap_or(Value::Null);
-    set(&tx, "legacy_unknown", &unknown)?;
-    set(&tx, "legacy_manifest", &manifest)?;
-    set(&tx, "legacy_error", &Value::Null)?;
-    set(&tx, "importing_stats", &Value::Null)?;
-    tx.execute("DELETE FROM meta WHERE key GLOB 'legacy_cursor:????-??-??.jsonl' AND substr(key,15,10) < ?1",[crate::date(now.saturating_sub(WINDOW))]).map_err(|e|e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
-    checkpoint(db)
-}
-
 /// Called with the lifecycle lock held. A record and its coverage commit in one transaction.
 pub fn save_locked(data: &Path, r: &Value, failed: bool) -> Result<(), String> {
     crate::compression::validate_record(r)?;
@@ -491,11 +198,7 @@ pub fn save_locked(data: &Path, r: &Value, failed: bool) -> Result<(), String> {
         return Err("local telemetry record exceeds 64 KiB".into());
     }
     let mut db = open(data)?;
-    if let Err(e) = migrate(&mut db, data, crate::now()) {
-        checkpoint(&db)?;
-        set(&db, "legacy_error", &json!(e))?;
-    }
-    maintain(&mut db, crate::now(), r.to_string().len(), u64::MAX)?;
+    maintain(&mut db, crate::now(), r.to_string().len())?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let at = r["time"].as_u64().ok_or("missing time")?;
     let held = counts(&tx)?;
@@ -532,22 +235,16 @@ pub fn save_locked(data: &Path, r: &Value, failed: bool) -> Result<(), String> {
 }
 
 pub fn snapshot(data: &Path) -> Result<Value, String> {
-    if !data.join("telemetry.sqlite3").exists() && !data.join("stats").exists() {
+    if !data.join("telemetry.sqlite3").exists() {
         return Err("stats unknown: no stats file".into());
     }
     let _lock = crate::executor::lock(data)?;
     let mut db = open(data)?;
-    let migrated = migrate(&mut db, data, crate::now());
     let tx = db.transaction().map_err(|e| e.to_string())?;
-    let error = migrated
-        .err()
-        .map(Value::from)
-        .or(meta(&tx, "legacy_error")?)
-        .unwrap_or(Value::Null);
     let journal = raw_meta(&tx, "journal")?
         .map(|s| serde_json::from_str::<Value>(&s).unwrap_or(json!("unreadable")));
     Ok(
-        json!({"records":events(&tx,"stats")?,"journal":journal,"unknown":meta(&tx,"legacy_unknown")?,"error":error,"held":counts(&tx)?}),
+        json!({"records":events(&tx,"stats")?,"journal":journal,"held":counts(&tx)?}),
     )
 }
 
@@ -588,99 +285,11 @@ fn trace_value(v: &Value) -> Result<Value, String> {
     }
     Ok(json!({"time":at,"op":op,"step":step,"duration_ms":duration,"class":v["class"]}))
 }
-fn migrate_traces(db: &mut Connection, data: &Path, now: u64) -> Result<(), String> {
-    let dir = data.join("traces");
-    if !dir.exists() {
-        return Ok(());
-    }
-    let manifest = manifest(&dir, now).map_err(|e| format!("traces unknown: {e}"))?;
-    if meta(db, "trace_manifest")?.as_ref() == Some(&manifest) {
-        return Ok(());
-    }
-    for file in manifest["files"].as_array().unwrap() {
-        let name = file[0].as_str().unwrap();
-        if crate::compression::stats_date(name).is_none() {
-            continue;
-        }
-        let mut text = String::new();
-        std::fs::File::open(dir.join(name))
-            .map_err(|e| format!("traces unknown: {e}"))?
-            .take(crate::profile::TRACE_DAY_BYTES + RECORD_MAX as u64 + 1)
-            .read_to_string(&mut text)
-            .map_err(|e| format!("traces unknown: {e}"))?;
-        if text.len() > crate::profile::TRACE_DAY_BYTES as usize + RECORD_MAX {
-            return Err("traces unknown: legacy day exceeds bound; file kept".into());
-        }
-        let key = format!("trace_cursor:{name}");
-        let cursor = meta(db, &key)?;
-        let start = cursor
-            .as_ref()
-            .and_then(|c| c["bytes"].as_u64())
-            .unwrap_or(0) as usize;
-        if let Some(c) = cursor {
-            if !text.get(..start).is_some_and(|s| {
-                crate::resource::hex(
-                    ring::digest::digest(&ring::digest::SHA256, s.as_bytes()).as_ref(),
-                ) == c["sha256"]
-            }) {
-                return Err("traces unknown: legacy file rewritten; file kept".into());
-            }
-        }
-        let mut rows = vec![];
-        let mut offset = 0;
-        for (index, line) in text.split_inclusive('\n').enumerate() {
-            let v: Value =
-                serde_json::from_str(line).map_err(|_| "traces unknown: malformed line")?;
-            let v = trace_value(&v)?;
-            let id = format!("{name}:{index}");
-            exists(db, "trace", &id, &v)?;
-            if offset >= start {
-                rows.push((id, v));
-            }
-            offset += line.len();
-        }
-        let latest = rows
-            .iter()
-            .filter_map(|(_, v)| v["time"].as_u64())
-            .max()
-            .unwrap_or(0);
-        let skip = match maintain(
-            db,
-            now,
-            rows.iter().map(|(_, r)| r.to_string().len()).sum(),
-            latest,
-        ) {
-            Ok(()) => false,
-            Err(e) if e == "local telemetry full; write refused" => true,
-            Err(e) => return Err(e),
-        };
-        let tx = db.transaction().map_err(|e| e.to_string())?;
-        if !skip {
-            for (id, v) in rows {
-                insert(&tx, "trace", &id, &v)?;
-            }
-        }
-        set(
-            &tx,
-            &key,
-            &json!({"bytes":text.len(),"sha256":crate::resource::hex(ring::digest::digest(&ring::digest::SHA256,text.as_bytes()).as_ref())}),
-        )?;
-        tx.commit().map_err(|e| e.to_string())?;
-    }
-    checkpoint(db)?;
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    set(&tx, "trace_manifest", &manifest)?;
-    tx.execute("DELETE FROM meta WHERE key GLOB 'trace_cursor:????-??-??.jsonl' AND substr(key,14,10) < ?1",[crate::date(now.saturating_sub(WINDOW))]).map_err(|e|e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
-    checkpoint(db)
-}
-
 pub fn trace(data: &Path, v: Value) -> Result<(), String> {
     let v = trace_value(&v)?;
     let _lock = crate::executor::lock(data)?;
     let mut db = open(data)?;
-    let imported = migrate_traces(&mut db, data, crate::now());
-    maintain(&mut db, crate::now(), v.to_string().len(), u64::MAX)?;
+    maintain(&mut db, crate::now(), v.to_string().len())?;
     let day = crate::date(v["time"].as_u64().unwrap());
     let bytes: i64 = db
         .query_row(
@@ -693,82 +302,16 @@ pub fn trace(data: &Path, v: Value) -> Result<(), String> {
         return Err("trace day bound reached".into());
     }
     insert(&db, "trace", &crate::mcp::new_id(), &v)?;
-    checkpoint(&db)?;
-    imported
+    checkpoint(&db)
 }
 
-pub fn traces(data: &Path, now: u64) -> Result<Vec<Value>, String> {
-    if !data.join("telemetry.sqlite3").exists() && !data.join("traces").exists() {
+pub fn traces(data: &Path) -> Result<Vec<Value>, String> {
+    if !data.join("telemetry.sqlite3").exists() {
         return Ok(vec![]);
     }
     let _lock = crate::executor::lock(data)?;
-    let mut db = open(data)?;
-    migrate_traces(&mut db, data, now)?;
+    let db = open(data)?;
     events(&db, "trace")
-}
-
-fn legacy_exports(data: &Path) -> Result<Value, String> {
-    use std::io::Read;
-    let mut text = String::new();
-    match std::fs::File::open(data.join("queue/state.json")) {
-        Ok(f) => {
-            f.take((1 << 20) + 1)
-                .read_to_string(&mut text)
-                .map_err(|e| format!("export state unknown: {e}"))?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
-        Err(e) => return Err(format!("export state unknown: {e}")),
-    }
-    if text.len() > 1 << 20 {
-        return Err("export state unknown: legacy state exceeds 1 MiB; file kept".into());
-    }
-    let v: Value =
-        serde_json::from_str(&text).map_err(|_| "export state unknown: unreadable state.json")?;
-    let map = v
-        .as_object()
-        .ok_or("export state unknown: state.json is not a JSON object")?;
-    let profile = match map.get("profile") {
-        None => return Ok(json!({})),
-        Some(Value::Object(p)) => p,
-        _ => return Err("export state unknown: malformed profile".into()),
-    };
-    let mut out = json!({});
-    for op in ["export.langfuse", "export.dashq"] {
-        let Some(samples) = profile.get(op) else {
-            continue;
-        };
-        let valid = samples.as_array().is_some_and(|a| {
-            a.len() <= crate::profile::KEEP
-                && a.iter().all(|s| {
-                    s.as_array().is_some_and(|a| a.len() == 3)
-                        && s[0].is_u64()
-                        && s[1].is_u64()
-                        && (s[2].is_null()
-                            || s[2].as_str().is_some_and(|c| {
-                                [
-                                    "auth", "http", "timeout", "network", "queue", "no_reply",
-                                    "stopped", "rejected",
-                                ]
-                                .contains(&c)
-                            }))
-                })
-        });
-        out[op] = if valid {
-            samples.clone()
-        } else {
-            json!("malformed sample")
-        };
-    }
-    Ok(out)
-}
-fn sync_exports(db: &Connection, data: &Path) -> Result<Value, String> {
-    let legacy = legacy_exports(data)?;
-    if meta(db, "legacy_exports")?.as_ref() != Some(&legacy) {
-        checkpoint(db)?;
-        set(db, "legacy_exports", &legacy)?;
-        checkpoint(db)?;
-    }
-    Ok(legacy)
 }
 
 pub fn sample(
@@ -783,27 +326,22 @@ pub fn sample(
     }
     let _lock = crate::executor::lock(data)?;
     let mut db = open(data)?;
-    let imported = sync_exports(&db, data);
     let v = json!({"time":at,"op":op,"duration_ms":duration_ms,"class":class});
-    maintain(&mut db, crate::now(), v.to_string().len(), u64::MAX)?;
+    maintain(&mut db, crate::now(), v.to_string().len())?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
     insert(&tx, "export", &crate::mcp::new_id(), &v)?;
     tx.execute("DELETE FROM events WHERE kind='export' AND json_extract(payload,'$.op')=?1 AND seq NOT IN (SELECT seq FROM events WHERE kind='export' AND json_extract(payload,'$.op')=?1 ORDER BY time DESC,seq DESC LIMIT 256)",[op]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    checkpoint(&db)?;
-    imported.map(|_| ())
+    checkpoint(&db)
 }
 
 pub fn samples(data: &Path) -> Result<serde_json::Map<String, Value>, String> {
-    if !data.join("telemetry.sqlite3").exists() && !data.join("queue/state.json").exists() {
+    if !data.join("telemetry.sqlite3").exists() {
         return Ok(serde_json::Map::new());
     }
     let _lock = crate::executor::lock(data)?;
     let db = open(data)?;
-    let mut out = sync_exports(&db, data)?
-        .as_object()
-        .cloned()
-        .ok_or("export state unknown: malformed profile")?;
+    let mut out = serde_json::Map::new();
     for v in events(&db, "export")? {
         let op = v["op"]
             .as_str()
@@ -842,7 +380,7 @@ pub fn events_at(data: &Path, spans: &[(&Value, u64)]) -> Result<(), String> {
     if !rows.is_empty() {
         let _lock = crate::executor::lock(data)?;
         let mut db = open(data)?;
-        maintain(&mut db, crate::now(), rows.iter().map(|r| r.2.len()).sum(), u64::MAX)?;
+        maintain(&mut db, crate::now(), rows.iter().map(|r| r.2.len()).sum())?;
         let tx = db.transaction().map_err(|e| e.to_string())?;
         for (id, at, payload, compress) in &rows {
             if *compress {
@@ -881,34 +419,22 @@ pub fn export(data: &Path) -> Result<Value, String> {
     let _lock = crate::executor::lock(data)?;
     let mut db = open(data)?;
     let mut errors = serde_json::Map::new();
-    if let Err(e) = migrate(&mut db, data, crate::now()) {
-        errors.insert("stats".into(), json!(e));
-    }
-    if let Err(e) = migrate_traces(&mut db, data, crate::now()) {
-        errors.insert("trace".into(), json!(e));
-    }
-    if let Err(e) = sync_exports(&db, data) {
-        errors.insert("export".into(), json!(e));
-    }
-    maintain(&mut db, crate::now(), 0, u64::MAX)?;
+    maintain(&mut db, crate::now(), 0)?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let journal = raw_meta(&tx, "journal")?
         .map(|s| serde_json::from_str::<Value>(&s).unwrap_or(json!("unreadable")));
-    if let Some(e) = meta(&tx, "legacy_error")?.filter(Value::is_string) {
-        errors.insert("stats".into(), e);
-    }
     if !crate::compression::failed(data).is_empty() {
         errors.insert("stats".into(), json!("stats write failed"));
     }
     Ok(
         json!({"schema":1,"collection_completeness":"unknown: calls that leave no evidence are undetectable","stats":events(&tx,"stats")?,"traces":events(&tx,"trace")?,"export_samples":events(&tx,"export")?,
-        "legacy_export_samples":meta(&tx,"legacy_exports")?,"events":events(&tx,"event")?,"coverage":journal,"coverage_unknown":meta(&tx,"legacy_unknown")?,"errors":errors}),
+        "events":events(&tx,"event")?,"coverage":journal,"errors":errors}),
     )
 }
 
 pub fn export_jsonl(data: &Path) -> Result<String, String> {
     let v = export(data)?;
-    let mut lines=vec![json!({"schema":"agentq.telemetry/1","collection_completeness":v["collection_completeness"],"coverage":v["coverage"],"coverage_unknown":v["coverage_unknown"],"errors":v["errors"]}).to_string()];
+    let mut lines=vec![json!({"schema":"agentq.telemetry/1","collection_completeness":v["collection_completeness"],"coverage":v["coverage"],"errors":v["errors"]}).to_string()];
     for (key, kind) in [
         ("stats", "stats"),
         ("traces", "trace"),
@@ -918,9 +444,6 @@ pub fn export_jsonl(data: &Path) -> Result<String, String> {
         for record in v[key].as_array().into_iter().flatten() {
             lines.push(json!({"kind":kind,"record":record}).to_string());
         }
-    }
-    for (op, samples) in v["legacy_export_samples"].as_object().into_iter().flatten() {
-        lines.push(json!({"kind":"legacy_export","operation":op,"samples":samples}).to_string());
     }
     Ok(lines.join("\n"))
 }
@@ -948,9 +471,6 @@ pub fn check_store(data: &Path) -> Result<u64, String> {
         .map_err(|e| e.to_string())?;
     if integrity != "ok" {
         return Err("SQLite integrity check failed; file kept".into());
-    }
-    if meta(&db, "importing_stats")?.is_some_and(|v| !v.is_null()) {
-        return Err("legacy import incomplete; retained rows kept".into());
     }
     let count: i64 = db
         .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
@@ -983,6 +503,18 @@ pub fn selftest() -> bool {
     })();
     let _ = std::fs::remove_dir_all(&data);
     result.is_ok()
+}
+
+/// Test rows and coverage that no current producer can write as such: old times, lost rows, malformed payloads.
+#[cfg(test)]
+pub fn seed(data: &Path, kind: &str, rows: &[Value], journal: Option<&Value>) {
+    let db = open(data).unwrap();
+    for r in rows {
+        insert(&db, kind, &crate::mcp::new_id(), r).unwrap();
+    }
+    if let Some(j) = journal {
+        set(&db, "journal", j).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1130,104 +662,30 @@ mod tests {
             "invalid input must not prune existing history"
         );
         let mut db = open(&d).unwrap();
-        maintain(&mut db, now + WINDOW + 1, 0, u64::MAX).unwrap();
+        maintain(&mut db, now + WINDOW + 1, 0).unwrap();
         assert!(events(&db, "stats").unwrap().is_empty());
         drop(db);
         std::fs::remove_dir_all(d).unwrap();
     }
     #[test]
-    fn legacy_retry_equal_observations_and_mixed_writers() {
-        let d = dir();
-        std::fs::create_dir_all(d.join("stats")).unwrap();
-        let now = crate::now();
-        let day = crate::date(now);
-        let first = valid(now);
-        let path = d.join("stats").join(format!("{day}.jsonl"));
-        std::fs::write(&path, format!("{first}\n")).unwrap();
-        std::fs::write(
-            d.join("stats/coverage.json"),
-            json!({"schema":1,"since":now,"resets":[],"gaps":[],"counts":{&day:1}}).to_string(),
-        )
-        .unwrap();
-        assert_eq!(
-            snapshot(&d).unwrap()["records"].as_array().unwrap().len(),
-            1
-        );
-        assert_eq!(
-            snapshot(&d).unwrap()["records"].as_array().unwrap().len(),
-            1
-        );
-        save_locked(&d, &valid(now), false).unwrap();
-        let third = valid(now);
-        std::fs::write(&path, format!("{first}\n{third}\n")).unwrap();
-        assert_eq!(
-            snapshot(&d).unwrap()["records"].as_array().unwrap().len(),
-            3
-        );
-        let mut conflict = third.clone();
-        conflict["bytes_in"] = json!(11);
-        std::fs::write(&path, format!("{first}\n{conflict}\n")).unwrap();
-        let s = snapshot(&d).unwrap();
-        assert!(s["error"].as_str().unwrap().contains("conflicting"));
-        assert_eq!(s["records"].as_array().unwrap().len(), 3);
-        std::fs::remove_dir_all(d).unwrap();
-    }
-    #[test]
     fn profile_history_is_local_bounded_and_does_not_merge_equal_samples() {
         let d = dir();
-        std::fs::create_dir_all(d.join("queue")).unwrap();
-        std::fs::create_dir_all(d.join("traces")).unwrap();
         let now = crate::now();
         let v =
             json!({"time":now,"op":"compress.run","step":"native","duration_ms":1,"class":null});
-        let trace_path = d.join("traces").join(format!("{}.jsonl", crate::date(now)));
-        std::fs::write(&trace_path, format!("{v}\n{v}\n")).unwrap();
-        trace(&d, v.clone()).unwrap();
-        assert_eq!(traces(&d, now).unwrap().len(), 3);
-        assert_eq!(traces(&d, now).unwrap().len(), 3);
-        std::fs::write(&trace_path, format!("{v}\n{v}\n{v}\n")).unwrap();
-        assert_eq!(traces(&d, now).unwrap().len(), 4);
-        std::fs::write(
-            d.join("queue/state.json"),
-            json!({"profile":{"export.langfuse":[[now-1,1,null],[now-1,1,null]]}}).to_string(),
-        )
-        .unwrap();
-        sample(&d, "export.langfuse", now, 1, None).unwrap();
-        assert_eq!(
-            samples(&d).unwrap()["export.langfuse"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(
-            samples(&d).unwrap()["export.langfuse"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
+        for _ in 0..3 {
+            trace(&d, v.clone()).unwrap();
+        }
+        assert_eq!(traces(&d).unwrap().len(), 3);
+        let held = |d: &Path| samples(d).unwrap()["export.langfuse"].as_array().unwrap().len();
+        for _ in 0..3 {
+            sample(&d, "export.langfuse", now, 1, None).unwrap();
+        }
+        assert_eq!(held(&d), 3);
         for _ in 0..300 {
             sample(&d, "export.langfuse", now, 1, None).unwrap();
         }
-        assert_eq!(
-            samples(&d).unwrap()["export.langfuse"]
-                .as_array()
-                .unwrap()
-                .len(),
-            256
-        );
-        let state: Value =
-            serde_json::from_str(&std::fs::read_to_string(d.join("queue/state.json")).unwrap())
-                .unwrap();
-        assert_eq!(
-            state["profile"]["export.langfuse"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2,
-            "new producers never dual-write the legacy history"
-        );
+        assert_eq!(held(&d), 256);
         std::fs::remove_dir_all(d).unwrap();
     }
     #[test]
@@ -1258,51 +716,6 @@ mod tests {
                 .any(|a| a["key"] == "agentq.resource.test" && a["value"]["intValue"] == 2)
         );
         assert!(crate::telemetry::entries(&crate::telemetry::queue(&d)).is_empty());
-        std::fs::remove_dir_all(d).unwrap();
-    }
-
-    #[test]
-    fn large_same_second_import_resumes_by_position_not_payload_or_time() {
-        let d = dir();
-        std::fs::create_dir_all(d.join("stats")).unwrap();
-        let now = crate::now();
-        let day = crate::date(now);
-        let mut text = String::new();
-        let mut ids = vec![];
-        for _ in 0..600 {
-            let mut v = valid(now);
-            v["session"] = json!("x".repeat(60 << 10));
-            ids.push(v["event_id"].clone());
-            text.push_str(&format!("{v}\n"));
-        }
-        let p = d.join("stats").join(format!("{day}.jsonl"));
-        std::fs::write(&p, &text).unwrap();
-        std::fs::write(
-            d.join("stats/coverage.json"),
-            json!({"schema":1,"since":now,"resets":[],"gaps":[],"counts":{&day:600}}).to_string(),
-        )
-        .unwrap();
-        let s = snapshot(&d).unwrap();
-        let rows = s["records"].as_array().unwrap();
-        assert!(rows.len() < 600 && !rows.is_empty());
-        assert_eq!(
-            rows.last().unwrap()["event_id"],
-            ids[599],
-            "same-second later events must survive pressure pruning"
-        );
-        assert!(!rows.iter().any(|r| r["event_id"] == ids[0]));
-        assert_eq!(s["journal"]["counts"], s["held"]);
-        let late = valid(now);
-        text.push_str(&format!("{late}\n"));
-        std::fs::write(&p, &text).unwrap();
-        let again = snapshot(&d).unwrap();
-        let rows = again["records"].as_array().unwrap();
-        assert!(rows.iter().any(|r| r["event_id"] == late["event_id"]));
-        assert!(
-            !rows.iter().any(|r| r["event_id"] == ids[0]),
-            "a changed legacy file must not resurrect its already-consumed prefix"
-        );
-        assert_eq!(again["journal"]["counts"], again["held"]);
         std::fs::remove_dir_all(d).unwrap();
     }
 }

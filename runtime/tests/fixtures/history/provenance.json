@@ -62,7 +62,7 @@
     "rows": 8,
     "native_version": null,
     "os": "macos-arm64",
-    "version_evidence": "benchmarks/prerequisites/198.md",
+    "version_evidence": "taskqorg/agentq#198 native receipts, git history at 33cef656ba86536e4e7f970ed5fc637b81622b06",
     "redaction": "Protocol type/status enums and truncated field names retained; all other strings replaced, IDs mapped consistently, source timestamps replaced. All record fields and numeric values retained. No raw source content is copied.",
     "limitations": [
       "Native fixture parsing is not native turn qualification. GENERIC authorship and omitted/truncated fields are not inferred. TOOL_RESPONSE is covered only by synthetic schema cases."

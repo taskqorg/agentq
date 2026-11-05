@@ -20,7 +20,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 
 | Command | Does |
 |---|---|
-| `agentq onboard [agent..]` | Read-only discovery: ready Codex, Claude Code, Claude Desktop, Hermes and Antigravity profiles per runtime; missing input; legacy install (§ 10); other optimizers. No writes. |
+| `agentq onboard [agent..]` | Read-only discovery: ready Codex, Claude Code, Claude Desktop, Hermes and Antigravity profiles per runtime; missing input; other optimizers. No writes. |
 | `agentq onboard --yes [agent..]` | Install the release and engines, apply § 4 for the selected agents, then (re)start the service unit so its first pass starts the proxy on each fixed port. Wait up to 60 s for each routed proxy; a silent one gets one `agentq service restart` and another 60 s, else the line names it. Then run `doctor` and print what to verify by a real turn. Repeat is safe. |
 | `agentq enroll <https url> [--headless]` | DashQ provider-backed browser approval (headless: link and code only); protected observation grant and projected snapshot receipt (§ 6). Released before qualification #95. |
 | `agentq connection status [--json]`, `agentq disconnect`, `agentq langfuse` | Connection, projection, export and revocation state with the next action; disconnect stops sending at once and retries the revoke. Released before qualification #95. `langfuse`: standalone mode, reads Langfuse host and keys from hidden stdin into protected storage (§ 6). |
@@ -35,14 +35,13 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 | `agentq status [--json]` | Fresh local integration, compression and service state, including intentional disable, pending reload/drain, aliases, conflicts and observation time; works with the service stopped. |
 | `agentq configure [<profile> <field>=<value>.. [--yes]]` | Profile projection, typed plan, or guarded apply with host readback under the lifecycle lock (§ 4). Released before qualification #95. |
 | `agentq check compression [codex\|claude\|both] [--codex PATH] [--claude PATH] [--fixture cargo\|pytest] [--output DIR]` | Live native CLI qualification with the embedded checker, Python and the chosen installed runner, default cargo (§ 3). |
-| `agentq doctor`, `agentq telemetry status\|verify [agent]\|export`, `agentq incidents [list\|show]` | Health of install, host, service, engines, agents and legacy state (M1.3); queue status, synthetic read-back check and local JSONL export (§ 6); local incident reports and what would be sent (§ 7). |
-| `agentq update [--check]`, `agentq selftest`, `agentq service install\|run\|pause\|resume\|status\|restart\|stop\|uninstall\|list` | coreq update steps and service (§ 5); selftest checks the binary, built-in fixtures and engine pins, and on Windows retires a locked legacy fixture in the OS temp dir (§ 10). |
-| `agentq uninstall [--dry-run]`, `agentq uninstall --legacy [--dry-run]` | § 9; § 10 removes the legacy install; none left: `already removed`. |
+| `agentq doctor`, `agentq telemetry status\|verify [agent]\|export`, `agentq incidents [list\|show]` | Health of install, host, service, engines and agents (M1.3); queue status, synthetic read-back check and local JSONL export (§ 6); local incident reports and what would be sent (§ 7). |
+| `agentq update [--check]`, `agentq selftest`, `agentq service install\|run\|pause\|resume\|status\|restart\|stop\|uninstall\|list` | coreq update steps and service (§ 5); selftest checks the binary, built-in fixtures and engine pins. |
+| `agentq uninstall [--dry-run]` | § 9; none left: `already removed`. |
 
 - Each `hook` run stamps the event time as configuration evidence. A run that cannot read stdin or write stdout records `data/evidence/<agent>.<event>.failed` with its time and error. A successful run moves it to `<agent>.<event>.last_failure`, so `.failed` exists exactly while the latest run failed; the last failure stays for the heartbeat (§ 6).
-- `doctor` checks install, host tools (§ 5), service, engines, owned edits count, local SQLite integrity, telemetry queue and optional keys, legacy install, running legacy pids and files left in a retired legacy folder. Each recorded hook failure fails, an unreadable record included.
+- `doctor` checks install, host tools (§ 5), service, engines, owned edits count, local SQLite integrity, telemetry queue and optional keys. Each recorded hook failure fails, an unreadable record included.
 - `doctor` reports per agent its routing and whether that is intended (§ 5): an onboarded agent intended routed but not routed fails with `run agentq onboard --yes`; an unknown intent fails. Ports and routing drift join when the service owns them; `onboard --yes` reapplies owned edits.
-- The Node CLI's `install`, `rollback`, `set-key`, `provider`, `headroom`, `gateway`, `monitor`, `proxy`, `retrieval`, `probe`, `plugin-path`, `verify`, `connect`, `set-langfuse`, `lifecycle`, `native-hook`, `tools` and `incidents report|enable|disable` do not exist; their duties live above or are dropped in § 11.
 
 ## 2. MCP tools
 - **M2.1** Server name `agentq`; tools `index_document`, `search_document`, `get_original`. Tool names and input schemas stay stable (PRODUCT R2). Clients reload registrations normally.
@@ -98,7 +97,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 | Antigravity | `~/.gemini/config/hooks.json`: named group `agentq`, enabled, with `PreToolUse` matcher `run_command` running `agentq hook antigravity PreToolUse`. Onboarding, enable, disable, status and doctor use the same journaled hook; foreign groups and later edits stay. The config folder is a sibling of the selected native data home (§ 12). |
 | Instructions | Global `AGENTS.md`/`CLAUDE.md` block between `<!-- agentq:start -->` and `<!-- agentq:end -->`, naming `agentq run` and `agentq doctor`. |
 
-- Legacy entries `supercompress`, `headroom`, `context_mode` MCP servers and launcher-owned hooks are removed only when the journal or the legacy uninstall (§ 10) owns them. Desktop clients that override `ANTHROPIC_BASE_URL` bypass routing; the `SessionStart` hook tells the model so and `doctor` reports it.
+- Desktop clients that override `ANTHROPIC_BASE_URL` bypass routing; the `SessionStart` hook tells the model so and `doctor` reports it.
 - Config roots: the client's own env (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `HERMES_HOME`), else the default home folder; project-level overrides are reported, never edited. Native Windows and WSL are separate installs.
 - A JSON config that starts with a UTF-8 BOM is parsed without it; the edit writes it without the BOM and its `edited:` line says `UTF-8 BOM stripped`. Uninstall restores the original bytes, BOM included.
 - [CONFIGURATION A1–A5](docs/spec/CONFIGURATION.md) owns profile projection and separately authorized typed management with revision checks, journaled apply, host readback and real-client verification. Observation enrollment grants no configuration authority.
@@ -117,9 +116,8 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - New or restored Desktop Chat MCP registrations use `agentq mcp claude-desktop`, so its disable intent is independent of Claude Code. Existing shared `mcp claude` connections have no caller identity and stay pending reload; Claude Code is never disabled to guess their caller.
 - Native qualification is reported per client and platform; code checks alone do not qualify working profiles. Rollout to the existing Mac, Windows and FRA installations is authorized for release 0.8.0 only, with the Desktop and reboot gaps recorded in the integration-control plan; those paths stay unqualified and this is not a stable-platform claim.
 - Under disable, foreign entries and later edits remain and conflicts are explicit; shared roots and registrations switch together. Lifecycle state, transitions, locks, drain, service handling, status and revisions: [INTEGRATION-CONTROL.md](docs/spec/INTEGRATION-CONTROL.md).
-### Namespace cutover
-- **M4.10** The MCP server, Codex provider, managed instruction markers and Hermes plugin are named `agentq`. No old namespace alias is registered. Existing Codex chats are not migrated: histories stay intact, but chats bound to the retired provider must be replaced by new chats.
-- `agentq migrate-names [--dry-run]` renames only unchanged owned registrations under the lifecycle lock; onboarding and service startup run it. `agentq migrate-names --rollback` restores recorded names only while ownership/control metadata still matches the cutover. Procedure: [LEGACY.md](docs/spec/LEGACY.md#namespace-cutover).
+### Namespace
+- **M4.10** The MCP server, Codex provider, managed instruction markers and Hermes plugin are named `agentq`. No old namespace alias is registered and no command renames old registrations. Existing Codex chats are not migrated: histories stay intact, but chats bound to the retired provider must be replaced by new chats.
 
 ## 5. Install layout and service
 - **M5.1** coreq owns layout, update, launcher, rollback, service units and `status.json`; agentq passes tool name `agentq`, install folder and release repository `taskqorg/agentq`.
@@ -177,9 +175,10 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 
 ## 8. State
 - **M8.1** State other than local telemetry stays plain files with atomic rename and one lifecycle lock. Interrupted transactions resume or roll back from the journal on next start.
-- `<install>/data/`: `owned.json` (journal), `config.json` (incident opt-out, mode, ports, `direct`, `compression`, `profile`), `installation`, `resource-key`, `langfuse` (fallback), `originals/`, `runs/`, `provider/`, `model/`, `sessions/` (M6.9), `stats/` and `traces/` (legacy history), `queue/` (with `state.json`: last delivery/error/dropped; old export samples kept), `incidents/`.
-- Local telemetry uses `telemetry.sqlite3` (SQLite/WAL, FULL, 2 s busy timeout, 64 MiB including sidecars); stats/traces retain 7 days, exports 256 samples per operation. Preserve event IDs, atomic coverage, legacy history and optional export. OTLP events persist locally before optional delivery; compression uses its canonical stats row.
-- `stats --records` exports retained metadata for local qualification. `telemetry export` emits versioned metadata-only JSONL with errors and unknown completeness; JSONL remains the legacy format.
+- `<install>/data/`: `owned.json` (journal), `config.json` (incident opt-out, mode, ports, `direct`, `compression`, `profile`), `installation`, `resource-key`, `langfuse` (fallback), `originals/`, `runs/`, `provider/`, `model/`, `sessions/` (M6.9), `queue/` (with `state.json`: last delivery/error/dropped), `incidents/`.
+- Older `stats/`, `traces/` and `name-migration.json` files stay unread until `uninstall` removes `data/`.
+- Local telemetry uses `telemetry.sqlite3` (SQLite/WAL, FULL, 2 s busy timeout, 64 MiB including sidecars); stats/traces retain 7 days, exports 256 samples per operation. Preserve event IDs, atomic coverage and optional export. OTLP events persist locally before optional delivery; compression uses its canonical stats row.
+- `stats --records` exports retained metadata for local qualification. `telemetry export` emits versioned metadata-only JSONL with errors and unknown completeness.
 - Dashboard duties (fleet view, versions, last seen, health, usage, incidents, access control) belong to dashq, which reads optional Langfuse events and authenticated snapshots under the connection contract. agentq ships no panel and no dashboard JSON.
 
 ## 9. Ownership and uninstall
@@ -187,15 +186,11 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M9.2** `uninstall` restores owned values whose current value still equals the recorded after value, keeps later foreign edits and reports conflicts. `uninstall --dry-run` prints every restore and removal.
 - `uninstall` stops and removes the service unit, engines, data and install folder. Logins, shared keys, reused components, exported history and the Codex direct definition (§ 4) stay. A second run says `already removed`.
 
-## 10. Legacy Node install
-- **M10.1** `uninstall --legacy` strips only legacy entries, after copying each listed file to `<legacy>/config-backup/`; a user edit made after the Node journal never blocks. Running legacy proxy pids are listed and left for the user.
-- **M10.2** `onboard --yes` with a legacy install runs `uninstall --legacy` without a prompt (`--yes` is the consent), then applies § 4. A failure stops onboarding with its message.
-- The Node package `@alexkirs/agent-context` is gone from this repository; installed copies keep working until this section removes them. `onboard` detects `~/.agent-context` and the global npm package; `onboard`, `doctor` and `uninstall --legacy` name running legacy pids.
-- `uninstall --legacy` works without Node, unloads the `contextq-monitor` unit, removes the global npm package and retires `<legacy>`; when files are locked the removal still succeeds and `doctor` lists what is left. `npm-final/` holds the final package 0.5.0, which only prints the migration instruction and exits 1.
-- Retired names remain recognized only for removal and the one-time namespace cutover (§ 4). Detection, removal procedure and retired repository parts: [LEGACY.md](docs/spec/LEGACY.md).
+## 10. Retired Node install
+- **M10.1** agentq does not detect, name or remove the retired Node package `@alexkirs/agent-context`, its `~/.agent-context` folder or the retired namespace. Files left there stay untouched.
 
 ## 11. PRODUCT.md map
-- Kept: R3 (§ 3; one compression core for every agent, only built-in qualified lists per adapter, others pass as `not_qualified`), R4 (§ 1 `direct`, § 3), R5 (§ 1 `onboard`, `enroll`, § 4; device enrollment served by dashq), R7 (§ 9, § 10), R9 (§ 6), R11 (Principles, § 5), R12 (Principles; this file is the approved spec revision).
+- Kept: R3 (§ 3; one compression core for every agent, only built-in qualified lists per adapter, others pass as `not_qualified`), R4 (§ 1 `direct`, § 3), R5 (§ 1 `onboard`, `enroll`, § 4; device enrollment served by dashq), R7 (§ 9), R9 (§ 6), R11 (Principles, § 5), R12 (Principles; this file is the approved spec revision).
 - Mapped: R1 (§ 1, § 4, § 5; Desktop Chat: MCP only), R8 (§ 8, § 6; SQLite/WAL for local telemetry, other state stays files), R10 (§ 6, § 8; accounting kept, dashboard dropped from agentq, owned by dashq).
 - Changed: R2 (§ 2, § 3; built-in search replaces context-mode, tool names unchanged); R6 (§ 5; coreq release trust, HTTPS and tags, replaces signatures; no staged rollout; worker swap kept for headroom).
 - Added: R13 (§ 12; runtime library and `agentq agent turn`, optional optimization per launch).
@@ -223,8 +218,8 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - Claude reads only its own native records (transcript `bridge_status`, background job state, debug log); it never launches or rewrites anything for it, and an unreadable record reads `evidence-unreadable`. Causes and sources: [RUNTIME.md](docs/spec/RUNTIME.md#session-observation).
 - Read-only worker capability and bounded transcript/event observation uses `agent::history`; source identity, raw content, ordering, limits and per-transport support are defined in [RUNTIME.md](docs/spec/RUNTIME.md#worker-capabilities-and-bounded-history). It grants no submission, replay, stop or cleanup authority.
 - Native `agy` lookup appends `~/.local/bin` through `user_bin_path` when PATH lacks it, before falling back to `agentapi`. Explicit `ANTIGRAVITY_HOME` / `ANTIGRAVITY_APP_DATA_DIR` wins; otherwise use `~/.gemini/antigravity-cli` when present, then the legacy `~/.gemini/antigravity`.
-- Live benchmark fixtures use repository-local `benchmarks/.tmp` scratch workspaces and pass `--dangerously-skip-permissions` to headless agy turns only.
-- Effective `on` means configured at launch, not verified (P2); the session's `agentq.compress` records prove actual compression. Resolution order, reasons, JSON contract, worker benchmark methodology (`scripts/benchmark-workers.py`, `benchmarks/runs/`, `benchmarks/viewer/`) and fake-client traces: [RUNTIME.md](docs/spec/RUNTIME.md) and [COMPRESSION-BENCHMARK.md](docs/spec/COMPRESSION-BENCHMARK.md).
+- Worker benchmark runs, viewer data and live scratch workspaces stay outside the repository (`--output`, default `<OS temp>/agentq-benchmarks`); live fixtures pass `--dangerously-skip-permissions` to headless agy turns only.
+- Effective `on` means configured at launch, not verified (P2); the session's `agentq.compress` records prove actual compression. Resolution order, reasons, JSON contract, worker benchmark methodology (`scripts/benchmark-workers.py`, `scripts/benchmark-viewer.html`) and fake-client traces: [RUNTIME.md](docs/spec/RUNTIME.md) and [COMPRESSION-BENCHMARK.md](docs/spec/COMPRESSION-BENCHMARK.md).
 - During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime revision through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](docs/spec/RUNTIME.md#adoption-and-rollback)).
 
 ## Linked detail
@@ -238,5 +233,4 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - [docs/spec/INTEGRATION-CONTROL.md](docs/spec/INTEGRATION-CONTROL.md): temporary control lifecycle, transitions, drain, status and revisions.
 - [docs/spec/SERVICE.md](docs/spec/SERVICE.md): command registration, Windows service processes, update, status fields, host tools and release observation fields.
 - [docs/spec/TELEMETRY.md](docs/spec/TELEMETRY.md): heartbeat attributes, model call mapping, resource probes and profiling.
-- [docs/spec/LEGACY.md](docs/spec/LEGACY.md): namespace cutover procedure and legacy Node removal.
 - [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md): agent runtime arguments, end detection, usage, limits, accounts, compatibility modes, the `agentq agent` JSON contract, optimization intent, consumer inventory and adoption boundaries.

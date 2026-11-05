@@ -6,4 +6,4 @@ Read [agentq.md](agentq.md) first; a decision change edits it or its linked deta
 
 Install, onboarding or removal at a user's request: [INSTALL.md](INSTALL.md).
 
-Checks: `cargo test --locked`, `cargo run --locked -- selftest`, and the contract lint `python3 <specq>/engineering/scripts/contract_lint.py agentq.md` at the specq commit pinned in `.github/workflows/test.yml`. Test legacy removal (agentq.md § 10) only in an isolated `AGENT_CONTEXT_HOME` and `npm_config_prefix`, else it removes the real global npm package. Qualifying a candidate does not authorize deploying it to working profiles or calling it stable.
+Checks: `cargo test --locked`, `cargo run --locked -- selftest`, and the contract lint `python3 <specq>/engineering/scripts/contract_lint.py agentq.md` at the specq commit pinned in `.github/workflows/test.yml`. Qualifying a candidate does not authorize deploying it to working profiles or calling it stable.

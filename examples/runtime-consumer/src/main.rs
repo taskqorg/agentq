@@ -1,7 +1,6 @@
-//! Runs one deterministic Claude and Codex worker without an AgentQ installation or real client credentials.
-use agentq_runtime::agent::{self, Client, Spec, Turn};
-use agentq_runtime::optimization::{self, Intent};
-use std::process::Command;
+//! Runs one deterministic Claude and Codex worker through `agent::Runtime`, without an AgentQ installation or real client credentials.
+use agentq_runtime::agent::{self, Launch, State};
+use agentq_runtime::optimization::Intent;
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -12,6 +11,8 @@ fn main() {
         assert_eq!(input, "fixture input");
         assert_eq!(std::env::var("AGENTQ_OPTIMIZATION").unwrap(), "off");
         assert!(["TASKQ_TASK", "AGENTQ_LAUNCHER"].iter().any(|k| std::env::var(k).is_ok_and(|v| !v.is_empty())));
+        let argv: Vec<String> = std::env::args().skip(1).collect();
+        std::fs::write(std::env::var("AGENTQ_RUNTIME_EXAMPLE_ARGV").unwrap(), argv.join(" ")).unwrap();
         if client == "claude" {
             println!(r#"{{"type":"assistant","message":{{"id":"fixture","model":"fixture","usage":{{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}}}}"#);
             println!(r#"{{"type":"result","is_error":false,"result":"fixture answer"}}"#);
@@ -24,20 +25,26 @@ fn main() {
     }
     let root = std::env::temp_dir().join(format!("agentq-external-consumer-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
-    for client in [Client::Claude, Client::Codex] {
-        let mut spec = Spec { client, root: root.clone(), session: agent::new_session(client), resume: false, args: vec![],
-            home: Some(root.join("no-home")), env: vec![("AGENTQ_RUNTIME_EXAMPLE_CLIENT".into(), client.code().into())] };
-        let o = optimization::prepare(Intent::Off, "runtime-consumer", &mut spec, Some(&root.join("no-agentq")));
-        let argv: Vec<_> = agent::args(&spec).iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!((o.effective, o.reason), ("off", "launch_off"));
-        let mut turn = Turn::start(Command::new(std::env::current_exe().unwrap()), &spec, &root.join(format!("{}.log", client.code())), "fixture input").unwrap();
-        turn.wait(Some(Instant::now() + Duration::from_secs(10))).unwrap();
-        let report = turn.report();
+    for name in ["claude", "codex"] {
+        let runtime = agent::runtime(name).unwrap();
+        let argv = root.join(format!("{name}.argv"));
+        let mut launch = Launch::new(&root, root.join(format!("{name}.log")), "fixture input", "runtime-consumer");
+        launch.command = vec![std::env::current_exe().unwrap().into()];
+        launch.optimization = Intent::Off;
+        launch.home = Some(root.join("no-home"));
+        launch.env = vec![("AGENTQ_RUNTIME_EXAMPLE_CLIENT".into(), name.into()), ("AGENTQ_RUNTIME_EXAMPLE_ARGV".into(), argv.clone().into())];
+        let mut run = runtime.launch(&launch).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while runtime.poll(&mut run).unwrap() == State::Running {
+            assert!(Instant::now() < until, "fixture turn ended");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (optimization, report) = (run.optimization().clone(), runtime.report(&run).unwrap());
+        assert_eq!((optimization.effective, optimization.reason), ("off", "launch_off"));
         assert_eq!(report.outcome, "ok");
         assert_eq!(report.text.as_deref(), Some("fixture answer"));
         assert_eq!((report.usage.input, report.usage.output), (Some(1), Some(1)));
-        assert!(!root.join("no-agentq").exists());
-        println!("{}: {} | optimization {} | turn {}", client.code(), argv.join(" "), o.json(), report.outcome);
+        println!("{name}: {} | optimization {} | turn {}", std::fs::read_to_string(&argv).unwrap(), optimization.json(), report.outcome);
     }
     std::fs::remove_dir_all(root).unwrap();
 }
