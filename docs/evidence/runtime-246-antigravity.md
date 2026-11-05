@@ -11,7 +11,7 @@ Task: [AgentQ #247](https://github.com/taskqorg/agentq/issues/247), evidence for
 | Candidate | `9b0e29de31c688d1c90132c9ff5be0090719fcfe`, from `taskq-246`; `git rev-parse HEAD` read back the same SHA |
 | Checkout | Detached worktree inside this task's worktree; removed after the runs |
 | Native client | `agy --version`: `1.5.1` |
-| Platform | macOS, existing host authority, no TaskQ Seatbelt or TCC denial observed |
+| Platform | macOS, existing host authority; no TCC or sandbox denial observed |
 
 The candidate was not changed. Nothing was installed. The probe added two native conversations to the existing Antigravity store; those conversations remain there. No profile, credential, grant or hook file was edited.
 
