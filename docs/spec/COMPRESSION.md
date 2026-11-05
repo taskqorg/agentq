@@ -19,14 +19,14 @@ One section `compression` in `data/config.json`: `{"enabled": true, "min_bytes":
 - `reason` is one of `compressed`, `disabled`, `short`, `code`, `json`, `not_qualified`, `not_smaller`, `no_engine`, `timeout`, `error`.
 - `est_tokens_in` and `est_tokens_out` are labeled `estimate` (agentq.md § 6). Byte/token fields are null for unmeasured native passthrough, never zero.
 - Readers treat a record without `version` and `engine_version` as version unknown.
-- Local copy: SQLite `data/telemetry.sqlite3`, kind `stats`, event ID unique, 7 days; legacy JSONL imports without deletion. `agentq stats [--json]` prints per agent and engine the call count, outcomes and bytes in and out.
+- Local copy: SQLite `data/telemetry.sqlite3`, kind `stats`, event ID unique, 7 days. `agentq stats [--json]` prints per agent and engine the call count, outcomes and bytes in and out.
 - Sink `queue`: one `agentq.compress` span with each key as `agentq.<key>`; it replaces the `agentq.run` span.
 
 ## Accounting coverage
 
 - `agentq/accounting.rs` is one pure aggregate over these records or their exported spans, shared by `agentq stats --accounting` and the consumer fixtures `docs/spec/accounting-fixtures.json` (ACCOUNTING "Published schema").
-- Coverage is only what the producer proves: record and `meta.journal` (`since`, `resets`, legacy `gaps`, per-day `counts`) commit atomically.
+- Coverage is only what the producer proves: record and `meta.journal` (`since`, `resets`, recorded `gaps`, per-day `counts`) commit atomically.
 - Missing/unreadable coverage over held records resets from the next second, rebuilding counts; its own second stays unproven.
 - Failed transactions roll back both and leave `data/coverage.failed.*` outside SQLite until a later committed reset clears the markers it saw.
 - Retention subtracts removed rows; pressure also advances `since`. Local totals always remain lower bounds: calls losing both record and marker are undetectable.
-- Missing/corrupt stores, failed writes and fewer rows than journal counts read unknown, never zero. Legacy coverage gaps remain visible; exported events carry no completeness proof.
+- Missing/corrupt stores, failed writes and fewer rows than journal counts read unknown, never zero. Recorded coverage gaps remain visible; exported events carry no completeness proof.

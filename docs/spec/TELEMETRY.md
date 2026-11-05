@@ -96,9 +96,9 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 | `proxy.request` | none: the headroom proxy serves model requests, agentq records none | unknown | unknown |
 
 - Counters: always on. A stats record is the compression sample: outcome `failed` is a failure and its `reason` the error class.
-- An export sample is `time`, operation, `duration_ms`, `class` in SQLite kind `export`, last 256 per operation; legacy state snapshots import without deduplicating equal observations. Class is null on success, else `auth`, `http`, `timeout`, `network`, `queue` (Langfuse) or `no_reply`, `stopped`, `rejected` (DashQ).
+- An export sample is `time`, operation, `duration_ms`, `class` in SQLite kind `export`, last 256 per operation. Class is null on success, else `auth`, `http`, `timeout`, `network`, `queue` (Langfuse) or `no_reply`, `stopped`, `rejected` (DashQ).
 - Traces: `agentq profile trace on [<minutes>]` sets `profile.trace_until` in `config.json`, default 15, at most 60 minutes; `off` removes it. While on, `compress.run` writes its `native` and `filter` steps and each export its posted batches to SQLite kind `trace`: `time`, `op`, `step`, `duration_ms`, `class`.
-- Traces are kept 7 days; a day stops at 1 MiB of canonical payload; legacy JSONL stays readable through import. `agentq profile` reports the switch state.
+- Traces are kept 7 days; a day stops at 1 MiB of canonical payload. `agentq profile` reports the switch state.
 - Report: `agentq profile [--json]` over the 7 days up to the report time, later timestamps excluded: per operation its calls, failure rate and classes, p50/p95/max ms (nearest rank), mean, standard deviation and its coefficient of variation `cv`.
 - Over budget: p95 above its budget (`time`), failure rate above its budget (`failures`), `cv` above 1 (`unstable`). Rank: the largest of p95/budget, failure rate/budget and `cv`, worst first, computed by CoreQ (`profile::summarize`, `profile::rank`); unknown operations last. Trace lines add per-step calls and p95.
 - Unknown: no samples in the window, an unreadable stats record (all `compress.*` operations), an unreadable or non-object export state or `profile` value (all `export.*` operations) or a malformed sample list or sample (that operation only) reads unknown with the reason, never zero or ok; the other operations still report.

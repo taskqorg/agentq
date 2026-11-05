@@ -19,7 +19,7 @@ Binding detail of [agentq.md § 4 Temporary controls](../../agentq.md#temporary-
 - Detach evaluates journal history against the simulated file after each receipt. Repeated legacy receipts for one owned registration are idempotent; later foreign values still block the whole affected file before writes.
 - Detach reuses scoped journal restore and forgets successfully restored active entries.
 - Enable reuses current canonical wants filtered to the saved fields, retaining a prior Direct state, absent optional components and independent optimization preferences.
-- Enable does not call onboarding, uninstall or legacy removal, replay obsolete registration bytes, or overwrite later foreign values. It prepares the existing proxy before restoring routed configuration.
+- Enable does not call onboarding or uninstall, replay obsolete registration bytes, or overwrite later foreign values. It prepares the existing proxy before restoring routed configuration.
 - Partial writes reconcile by recorded stages and actual readback, preserving conflicts; ambiguous operations are not blindly reapplied.
 
 ## Locks, dry run and roots

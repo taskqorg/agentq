@@ -19,13 +19,13 @@
   "producer": {
     "journal": "data/telemetry.sqlite3 meta.journal {schema:1,since,resets,gaps,counts}; event and coverage commit atomically. A failed write leaves data/coverage.failed.* outside SQLite until a later committed reset clears only markers it saw. Legacy coverage.json is imported and preserved.",
     "since": "time of the first record the store holds without loss; a missing journal over held records or an unreadable journal restarts it at the next second (the reset second stays unproven) and appends a reset",
-    "gaps": "Imported legacy failed-append intervals [time,time+1). SQLite failures roll back both event and journal and use external failure markers.",
+    "gaps": "Recorded failed-append intervals [time,time+1). SQLite failures roll back both event and journal and use external failure markers.",
     "counts": "Per-day canonical SQLite stats rows: +1 per new unique event ID, less intentional retention/pressure removals. Identical retries add nothing; conflicting IDs stay unknown. Counts rebuild from retained rows on reset. Unexpected row loss remains unknown.",
     "local source": "observed = [max(since, now - 7 days), now + 1) less gaps, always with unknown \"calls that wrote no evidence are undetectable\" (a call whose record and marker writes both fail leaves nothing), so local totals are lower bounds; no stats store, no journal, an unreadable journal or store, a coverage.failed.* marker (\"stats write failed\") or a retained rows fewer than their count (\"stats records lost\"): observed [] and unknown with that reason",
     "exported source": "observed [] and unknown \"exported events carry no coverage\"; a queue folder adds its dropped count"
   },
   "output": {
-    "state": "complete: every source covers the window, nothing excluded, no legacy cohort, not capped; unknown: no coverage and no events; else partial",
+    "state": "complete: every source covers the window, nothing excluded, not capped; unknown: no coverage and no events; else partial",
     "lower_bound": "true when partial: totals are observed counts, never a complete-period rate",
     "calls, outcomes, reasons": "distinct event IDs in the window; null when unknown",
     "volume": "per adapter and engine, compressed calls only: compressed, paired, bytes_in, bytes_out (unit byte; MiB = 2^20 bytes), reduction = 1 - sum(out)/sum(in), excluded {unmeasured, invalid}, estimated_tokens {kind: estimate}",
@@ -235,7 +235,7 @@
         "observed_tokens": {"state": "unknown"}, "task_effect": {"state": "unknown", "reason": "no paired experiment cohort"}}
     },
     {
-      "name": "exported_spans_and_legacy_run",
+      "name": "exported_spans",
       "input": {"window": {"start": 1000, "end": 2000}, "now": 3000, "sources": [{"installation": null, "runtime": null, "observed": [[1000, 2000]], "records": [
         {"traceId": "000000000000000000000000000000a1", "name": "agentq.compress", "startTimeUnixNano": "1500000000000", "attributes": [
           {"key": "agentq.schema", "value": {"intValue": 1}}, {"key": "agentq.event_id", "value": {"stringValue": "000000000000000000000000000000a1"}},
@@ -251,12 +251,9 @@
           {"key": "agentq.session", "value": {"stringValue": "null"}}, {"key": "agentq.profile", "value": {"stringValue": "null"}}
         ]},
         {"event_id": "000000000000000000000000000000a1", "version": "$absent", "engine_version": "$absent"},
-        {"traceId": "000000000000000000000000000000b9", "name": "agentq.run", "startTimeUnixNano": "1600000000000", "attributes": [
-          {"key": "agentq.event_id", "value": {"stringValue": "000000000000000000000000000000b9"}}, {"key": "agentq.exit_code", "value": {"intValue": 0}}
-        ]},
         {"traceId": "000000000000000000000000000000c9", "name": "agentq.resource", "startTimeUnixNano": "1600000000000", "attributes": []}
       ]}]},
-      "expect": {"state": "partial", "calls": 1, "coverage": {"read": 4, "duplicates": 1, "legacy_run": 1, "profile_unknown": 1},
+      "expect": {"state": "complete", "calls": 1, "coverage": {"read": 3, "duplicates": 1, "profile_unknown": 1},
         "cohorts": [{"installation": "inst-export", "runtime": "windows", "version": "0.6.0", "engine_version": "0.51.0", "profile": null, "calls": 1}]}
     },
     {

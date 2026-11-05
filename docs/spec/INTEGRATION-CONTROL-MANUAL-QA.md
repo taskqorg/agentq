@@ -70,7 +70,7 @@ For Claude auto mode, successful results use PostToolUse; older PreToolUse-only 
 
 This profile is MCP-only. Compression must remain unsupported.
 
-1. In an isolated Chat session, index the public fixture and recover it through `agent_context`; record the registration's candidate identity.
+1. In an isolated Chat session, index the public fixture and recover it through `agentq`; record the registration's candidate identity.
 2. Disable `claude-desktop`, reload Chat normally and start a fresh conversation. Its selected MCP tools must be absent. Claude Code's independent registration remains intact.
 3. Enable `claude-desktop`, reload normally and recover the retained original. The restored registration uses `agentq mcp claude-desktop`.
 
