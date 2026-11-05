@@ -114,7 +114,7 @@ Live check for agentq.md § 6 `agentq.installation` (`agentq.routing`, `agentq.h
 - Not checked: dashq Attention rendering (dashq#116) and a forced failure on mac or hermes-fra1 (no host access).
 - Found: `agentq service restart` on this host ended the `AgentQ-host` task and then failed `schtasks /Create` with Access denied, leaving no service. `schtasks /Run /TN AgentQ-host` restored it.
 
-Hermes onboarding ships the §4 `agent-context` transform plugin through the existing ownership journal. `hermes_keeps_foreign_enabled_and_disabled_plugins_on_install_and_restore` proves repeat install/removal preserves other plugins; foreign source conflicts prevent activation before writes. `python tests/hermes_adapter.py` checks native transform metadata, envelope preservation and fail-open behavior. Installed gateway dispatch and model visibility require separate native qualification.
+Hermes onboarding ships the §4 `agentq` transform plugin through the existing ownership journal. `hermes_keeps_foreign_enabled_and_disabled_plugins_on_install_and_restore` proves repeat install/removal preserves other plugins; foreign source conflicts prevent activation before writes. `python tests/hermes_adapter.py` checks native transform metadata, envelope preservation and fail-open behavior. Installed gateway dispatch and model visibility require separate native qualification.
 
 ## Shared worker runtime
 
