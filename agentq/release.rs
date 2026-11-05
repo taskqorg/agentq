@@ -3,7 +3,12 @@ use coreq::Tool;
 use serde_json::{Value, json};
 use std::time::UNIX_EPOCH;
 
-const COREQ_VERSION: &str = "0.15.0";
+/// The CoreQ version this binary was built with, read from its lockfile; None reads unknown (P2).
+fn coreq_version() -> Option<&'static str> {
+    let mut lines = include_str!("../Cargo.lock").lines();
+    lines.find(|l| *l == "name = \"coreq\"")?;
+    lines.next()?.strip_prefix("version = \"")?.strip_suffix('"')
+}
 
 fn version(v: Option<&str>) -> Option<&str> {
     v.filter(|s| !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)) && *s != "." && *s != "..")
@@ -30,7 +35,7 @@ pub fn observe(t: &Tool, now: u64) -> Value {
             _ => ("starting", "no_receipt"),
         },
     };
-    json!({"at": now, "selected": selected, "running": t.version, "coreq_version": COREQ_VERSION,
+    json!({"at": now, "selected": selected, "running": t.version, "coreq_version": coreq_version(),
         "health": health, "lifecycle": lifecycle, "reason": reason})
 }
 
@@ -57,10 +62,13 @@ pub fn project(v: &Value, now: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// #141 A1/A3: real CoreQ selection and marker, never binary presence alone; pin must match the lockfile.
+    /// #141 A1/A3: real CoreQ selection and marker, never binary presence alone; #235 A3: one CoreQ, the one the lockfile holds.
     #[test]
     fn installation_sources() {
-        assert!(include_str!("../Cargo.lock").contains(&format!("name = \"coreq\"\nversion = \"{COREQ_VERSION}\"")));
+        let lock = include_str!("../Cargo.lock");
+        assert_eq!(lock.lines().filter(|l| *l == "name = \"coreq\"").count(), 1, "one CoreQ in Cargo.lock");
+        let pin = coreq_version().unwrap();
+        assert!(include_str!("../runtime/Cargo.toml").contains(&format!("tag = \"v{pin}\"")), "the runtime names the locked CoreQ");
         let d = std::env::temp_dir().join(format!("agentq-141-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", "1.0.0");

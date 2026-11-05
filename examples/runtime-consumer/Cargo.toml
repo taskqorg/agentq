@@ -6,6 +6,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-agentq-runtime = { git = "https://github.com/taskqorg/agentq", rev = "513193c8a96f3de1c71a86291a679230817ce0b2" }
+agentq-runtime = { git = "https://github.com/taskqorg/agentq", rev = "33cef656ba86536e4e7f970ed5fc637b81622b06" }
 
 [workspace]

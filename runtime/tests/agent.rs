@@ -492,7 +492,7 @@ fn live_claude_background_link() {
     let claude = agent::runtime("claude").unwrap();
     println!("claude version: {:?}", claude.ready(None, None).version);
     // A trusted project folder: Claude refuses `--bg` in an untrusted workspace, and accepting trust edits client configuration.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("benchmarks").join(".tmp").join(format!("live-bg-{}", std::process::id()));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("target").join(format!("live-bg-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let mut l = agent::Launch::new(&root, root.join("caller.log"), "Reply with the single word OK and stop.", "agentq-live");
     l.mode = agent::Mode::Background;

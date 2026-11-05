@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,8 +21,9 @@ import time
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNS = ROOT / "benchmarks/runs"
-VIEWER = ROOT / "benchmarks/viewer"
+VIEWER_PAGE = Path(__file__).with_name("benchmark-viewer.html")
+DEFAULT_OUTPUT = Path(tempfile.gettempdir()) / "agentq-benchmarks"
+output = DEFAULT_OUTPUT
 CLIENTS = ("claude", "codex", "antigravity")
 COUNTERS = ("input", "cache_read", "cache_write", "output")
 SPECQ_REVISION = "7e9adf57287553176d8b3be61c2b22565543dc51"
@@ -258,7 +260,7 @@ def correlate_compression(payload, client, sessions):
 
 
 def run_cell(binary, client, opt, task, mode, args, contract_lint=None):
-    scratch = ROOT / "benchmarks/.tmp" if mode == "live" else None
+    scratch = output / "scratch" if mode == "live" else None
     if scratch is not None:
         scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="agentq-worker-bench-", dir=scratch) as tmp:
@@ -326,10 +328,12 @@ def save_run(run, directory):
     return path
 
 
-def rebuild(directory=RUNS, viewer=VIEWER):
-    runs = [json.loads(p.read_text()) for p in directory.glob("*.json")]
+def rebuild():
+    runs = [json.loads(p.read_text()) for p in (output / "runs").glob("*.json")]
     runs.sort(key=lambda r: r["created_at"], reverse=True)
+    viewer = output / "viewer"
     viewer.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(VIEWER_PAGE, viewer / "index.html")
     data = json.dumps(runs, ensure_ascii=True).replace("<", "\\u003c")
     (viewer / "data.js").write_text("window.AGENTQ_RUNS = " + data + ";\n", encoding="utf-8")
 
@@ -414,7 +418,7 @@ def selftest():
     assert correlate_compression({"errors": [], "records": [receipt]}, "antigravity", {"own"})[0][0]["bytes_in"] == 100
     assert not correlate_compression({"errors": [], "records": [receipt]}, "antigravity", {"foreign"})[0]
     assert not correlate_compression({"errors": ["corrupt"], "records": [receipt]}, "antigravity", {"own"})[0]
-    scratch = ROOT / "benchmarks/.tmp"
+    scratch = output / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=scratch) as tmp:
         root = Path(tmp)
@@ -451,7 +455,7 @@ def selftest():
     with mock_patch.object(sys.modules[__name__], "run_turn", wraps=run_turn) as turn:
         unavailable = run_cell(Path("/nonexistent-agentq-worker-benchmark"), "antigravity", "on", "T1-context-navigation", "live", [])
         workspace = turn.call_args.args[4]
-        assert workspace.is_relative_to(ROOT / "benchmarks/.tmp")
+        assert workspace.is_relative_to(output / "scratch") and not workspace.is_relative_to(ROOT)
         assert not workspace.exists(), "scratch must be removed after the cell"
     assert unavailable["source"] == "live" and unavailable["reports"][0]["outcome"] == "unknown"
     assert unavailable["usage"]["total"] is None and unavailable["rubric"]["quality"] == 0
@@ -507,16 +511,21 @@ def main():
     parser.add_argument("--scenario", choices=("engineering", "sdd"), default="engineering")
     parser.add_argument("--contract-lint", type=Path, help="unchanged workflow-pinned specq contract_lint.py; required for SDD")
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="runs, viewer and live scratch; never inside the repository")
     parser.add_argument("--rebuild-viewer", action="store_true")
     parser.add_argument("--serve", type=int, metavar="PORT")
     args = parser.parse_args()
+    global output
+    output = args.output.resolve()
+    if output.is_relative_to(ROOT):
+        parser.error("--output must be outside the repository")
     if args.selftest:
         return selftest()
     if args.rebuild_viewer:
         return rebuild()
     if args.serve is not None:
         from functools import partial
-        with http.server.ThreadingHTTPServer(("127.0.0.1", args.serve), partial(http.server.SimpleHTTPRequestHandler, directory=str(VIEWER))) as server:
+        with http.server.ThreadingHTTPServer(("127.0.0.1", args.serve), partial(http.server.SimpleHTTPRequestHandler, directory=str(output / "viewer"))) as server:
             print(f"http://127.0.0.1:{server.server_port}", flush=True)
             server.serve_forever()
         return
@@ -550,7 +559,7 @@ def main():
            "mode": args.mode, "label": args.label, "scenario": args.scenario, "client_args": client_args, "cells": cells,
            "contract_lint_sha256": hashlib.sha256(args.contract_lint.read_bytes()).hexdigest() if args.contract_lint else None,
            "deltas": [{"client": c, "task": t, **paired_delta(next(x for x in cells if (x["client"],x["task"],x["optimization"]) == (c,t,"off")), next(x for x in cells if (x["client"],x["task"],x["optimization"]) == (c,t,"on")))} for c in CLIENTS for t in tasks]}
-    print(save_run(run, RUNS).relative_to(ROOT))
+    print(save_run(run, output / "runs"))
     rebuild()
 
 

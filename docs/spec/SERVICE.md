@@ -57,7 +57,7 @@ agentq runs these external tools on a host ([specq host requirements](https://gi
 ## Release observation fields
 
 - `selected`: CoreQ `Tool::current()` reads `<install>/current`; only a bounded release identifier crosses. Missing, unreadable or invalid selection is null with `selection_unknown`.
-- `running`: the producer binary's `Tool.version`; `coreq_version`: the Cargo.lock pin, 0.15.0. No dependency upgrade or capture integration is required.
+- `running`: the producer binary's `Tool.version`; `coreq_version`: the version in the built `Cargo.lock`, null when unreadable. No capture integration is required.
 - `health`: the running release's existing `releases/<version>/healthy` regular-file marker, consumed by CoreQ launcher rollback. A readable empty marker with a nonfuture modification time yields `state=verified`, `scope=status_written`, `version` and source `at`. Missing, unreadable, nonempty or future markers remain unknown.
 - `lifecycle`: `waiting_for_activation` when selected differs from running (the update drain rule still governs activation); `healthy` only for equal versions with this receipt; otherwise `starting` or `unknown`. Host disable intent yields `pending_disable`; unreadable lifecycle state yields `unknown`.
 - Snapshot and heartbeat reuse the status observation, allowlist fields and codes, and set current health/lifecycle unknown when the status time is missing, future or older than 90 s. Historical versions and receipt time remain explicitly last-known. Older producers report `not_reported`.

@@ -28,7 +28,7 @@ Source: [task 216](https://github.com/taskqorg/agentq/issues/216), for A3 of thi
 
 Procedure: `AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent` runs `live_claude_background_link` (not in the CI list). It launches one real Claude background job through `Runtime::launch` (`Mode::Background`, `title` set, so `--remote-control`, model `haiku`), polls `Runtime::observe`, takes `Runtime::checkpoint`, drops the run, rebuilds it with `Runtime::recover`, observes again, and stops the job with `Runtime::cancel`. The consumer parses no log.
 
-The workspace is the repository-local `benchmarks/.tmp/live-bg-<pid>`. Claude refuses `--bg` in an OS temp folder ("Workspace not trusted"), and accepting trust would edit `~/.claude.json`, so no trust was granted. No working profile or client configuration changed.
+The workspace was a repository-local scratch folder, now `target/live-bg-<pid>`. Claude refuses `--bg` in an OS temp folder ("Workspace not trusted"), and accepting trust would edit `~/.claude.json`, so no trust was granted. No working profile or client configuration changed.
 
 ### Before: two Windows layout defects
 
@@ -51,7 +51,7 @@ The first live run (job `42b99951`) registered Remote Control natively (`state.j
 
 Source: [task 220](https://github.com/taskqorg/agentq/issues/220), for A3 of this task. Host: native macOS (arm64), Claude Code 2.1.316 (`Runtime::ready` version `2.1.316 (Claude Code)`), candidate main at `0cb1acef1c480b89255e5a604278b1a27db43da0`. This is a live client run, separate from the fake-client checks above.
 
-Procedure: the same `AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent` as task 216, with no code change. The workspace was `benchmarks/.tmp/live-bg-54706`; no trust was granted and no working profile or client configuration changed.
+Procedure: the same `AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent` as task 216, with no code change. The workspace was a repository-local scratch folder; no trust was granted and no working profile or client configuration changed.
 
 ### Live run (job `912d254d`)
 
@@ -66,7 +66,7 @@ Source: [task 222](https://github.com/taskqorg/agentq/issues/222), A2. Host: nat
 
 Defect before the fix: `claude agents --json --all --cwd <root>` lists `[]` for a root under `.claude/worktrees`, so discovery found no job. The fix retries the unfiltered `claude agents --json --all` listing; `BackgroundJob::read` still binds the exact root, job ID and session.
 
-Procedure: `AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent` from that checkout. The workspace was `benchmarks/.tmp/live-bg-2289`. No trust was granted and no working profile or client configuration changed.
+Procedure: `AGENTQ_LIVE_CLAUDE_BACKGROUND=1 cargo test --locked -p agentq-runtime --test agent` from that checkout. The workspace was a repository-local scratch folder. No trust was granted and no working profile or client configuration changed.
 
 ### Live run (job `1b6b8db9`)
 
