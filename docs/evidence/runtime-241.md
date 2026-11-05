@@ -64,25 +64,30 @@ The two earlier requeues exposed the same missing relationship at different boun
 
 ## Immutable candidate
 
-- AgentQ runtime/API and adapter source: `97a9ba59d6f60bfefdab0c6c9e09827ee4a326df`.
+- AgentQ runtime/API and locally built Windows adapter source: `12507a213df2e6244e6163589bc92b5516ddcd8d`.
+- macOS adapter source: PR build merge `385dd54967d9c9456b80a11fefc2a5b45ad57e7c` (parents `1e364e505e797f36e61682100ced6b51f83f230e` and `12507a213df2e6244e6163589bc92b5516ddcd8d`). This includes newer main changes; the protected host, journal/permit/scope code, `ProtectedHost`, signing utility and command dispatch are identical to the locally tested source. Their diff was checked explicitly. The CI checkout log binds the binary to this exact merge, not the Windows source tree.
 - CoreQ: `v0.19.2`, lockfile revision `b78ca64cac615500b57b4a04983e79333035dd65`.
 - Native containment source provenance above is retained only as history; the built binary links no TaskQ crate and dispatches no TaskQ command on the signed route.
-- The signed macOS arm64 artifact and public manifest accompany the task result. The dedicated private key stays in private host configuration with mode 0600; it is not in this repository, artifact or board. No policy, trust manifest, initial journal, permit or grant was provisioned into the working host.
+- The signed artifacts and public manifests accompany the task result. This attempt generated a dedicated signing key in private Windows host configuration, outside the repository and the host authority store. Its directory has inheritance disabled and grants access only to the current user and SYSTEM, verified by ACL readback. The key is not in this repository, artifact or board. No policy, trust manifest, initial journal, permit or grant was provisioned into a working host. Same-user uncontained processes remain outside the private-file boundary.
 
 The publication reviewer must require green `merge_group` CI for this PR's merge result (private fallback: exact-SHA CI); PR/head success alone is insufficient.
 
 ## Final artifact and checks
 
-The final macOS arm64 adapter is the 7,181,184-byte AgentQ release binary built with `cargo build --locked --release --bin agentq` from the source pin above. SHA-256: `3485e70404fa96f1e7d23ec63c686311bdeb9a57b82dad6ba2d7bd3b825059a3`. Ed25519 public key, unchanged: `084098ab761a440bd88a7fa36600c8018ef44fa66ae67c2da622f23a84f0e141`. The [public detached manifest](runtime-241/adapter-macos-aarch64.json) contains its signature; the signature does not modify the binary. The task attachment contains those bytes and the manifest; it is not an installed or native-qualified release.
+The final Windows x86_64 adapter is the 11,123,352-byte AgentQ release binary built with `cargo build --locked --release --bin agentq` from the source pin above. SHA-256: `9ee905960a57dbe4649c42626a2a5c6b1ed871b440ecfbfa5aebe8cff71fb7ba`. Its [public detached manifest](runtime-241/adapter-windows-x86_64.json) contains the Ed25519 public key `7f739abab8625718e2e5dbedf0deb5a98373260d3c22ecd20a1148f42bf6d584` and signature. This is a new publication key, not a change to any working host's trust. A consumer independently pins the key and artifact digest. Signatures do not modify the binaries. The task attachment is not an installed or native-qualified release.
 
-`ProtectedHost::signed` accepted the staged copy and refused a zeroed signature (`protected signature invalid; authority unknown`). The release artifact's offline selftest passed.
+The final macOS arm64 adapter is 7,146,016 bytes, SHA-256 `425c5924046338bf13167e5bf76eb827533435ed09e5f3cf336b6744d9bf2118`. The [macOS manifest](runtime-241/adapter-macos-aarch64.json) uses the same new public key and signs those exact bytes. The existing [release workflow run 42095863846](https://github.com/taskqorg/agentq/actions/runs/42095863846), macOS job `127485600771`, built it from the merge above with `cargo build --release --target aarch64-apple-darwin`, passed the platform's tests and offline artifact selftest, and uploaded artifact `13447726902` (`macos-aarch64`). This is PR build evidence, not `merge_group` acceptance. It was downloaded and signed on Windows without transferring a private key or executing the macOS binary there.
 
-At the source pin, on macOS arm64:
+`ProtectedHost::signed` accepted both staged binaries and refused a zeroed signature for each (`protected signature invalid; authority unknown`). The Windows release artifact's offline selftest also passed locally. The package records sources separately and contains only binaries, public manifests and this evidence; no private key, policy, permit or original receipt is included.
 
-- `cargo test --locked` passed every target, including 116 AgentQ unit cases and 31 runtime unit cases with 1 ignored. The authority-snapshot fixture that an earlier sandbox blocked also ran and passed.
+At the source pin, on Windows x86_64:
+
+- `cargo test --locked` passed every target, including 113 AgentQ unit cases and 30 runtime unit cases with 1 ignored. The authority-snapshot case, five protected process scenarios and checked-launcher regression also passed in this full run.
 - `cargo run --locked -- selftest` passed offline.
-- The contract lint at the workflow-pinned specq `7e9adf57287553176d8b3be61c2b22565543dc51` passed with its existing headroom warnings.
-- The four workflow Python suites passed, with one case skipped.
-- `cargo test --locked -p agentq-runtime --test agent -- signed_retained independent_signed_host protected_` passed 5 scenarios, and `cargo test --locked --test release protected_host_uses_checked_launcher_bytes` passed.
+- The contract lint at workflow-pinned specq `7e9adf57287553176d8b3be61c2b22565543dc51` passed with its existing headroom warnings. The local rule cache lacked the script; the pinned GitHub blob was fetched and checked against `29609754df6067ed504621ed4fc11f5a4a6dd995` before execution.
+- The four workflow Python suites passed: 9, 11, 2 and 4 cases, with none skipped on this host.
+- `cargo test --locked -p agentq-runtime --lib protected_retained_fences` failed before and passed after the cross-action binding fix, as recorded above. Existing assertions and lost-acknowledgment protection remain.
+
+The previous macOS artifact at source `97a9ba59d6f60bfefdab0c6c9e09827ee4a326df`, digest `3485e70404fa96f1e7d23ec63c686311bdeb9a57b82dad6ba2d7bd3b825059a3`, is superseded by the cross-action correction; its earlier test observations do not qualify the corrected source.
 
 No native protected launch or receipt import was performed on a working profile. Native Mac enforcement and lifecycle qualification remain unknown, and Windows native containment is not qualified. Pipe owns its consumer integration and live image qualification in assetq#47.
