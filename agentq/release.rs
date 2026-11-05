@@ -6,11 +6,178 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
+fn active_files(t: &Tool) -> Vec<String> {
+    let files = vec!["current".into(), "previous".into(), t.exe_name()];
+    #[cfg(windows)]
+    let files = { let mut files = files; files.push(t.gui_exe_name()); files };
+    files
+}
+
+fn recovery_dir(t: &Tool) -> std::path::PathBuf { t.install.join("data/install-recovery") }
+
+fn copy_synced(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::copy(from, to).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let file = {
+        // FlushFileBuffers needs a write handle, even when retaining a read-only original.
+        let permissions = std::fs::metadata(from).map_err(|e| e.to_string())?.permissions();
+        let mut writable = permissions.clone();
+        writable.set_readonly(false);
+        std::fs::set_permissions(to, writable).map_err(|e| e.to_string())?;
+        let file = std::fs::File::options().write(true).open(to).map_err(|e| e.to_string())?;
+        std::fs::set_permissions(to, permissions).map_err(|e| e.to_string())?;
+        file
+    };
+    #[cfg(unix)]
+    let file = std::fs::File::open(to).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
+}
+
+/// Flush the rename, including parent directories on Unix; Windows uses the same write-through move as CoreQ.
+fn move_durable(from: &Path, to: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name="kernel32")]
+        unsafe extern "system" { fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32; }
+        let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Both terminated buffers stay live for this synchronous call (replace existing, write through).
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 { return Err(std::io::Error::last_os_error().to_string()); }
+    }
+    #[cfg(unix)]
+    {
+        std::fs::rename(from, to).map_err(|e| e.to_string())?;
+        for parent in [from.parent().unwrap(), to.parent().unwrap()] {
+            std::fs::File::open(parent).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn originals(t: &Tool) -> Result<Value, String> {
+    let dir = recovery_dir(t);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut saved = json!({});
+    for name in active_files(t) {
+        let path = t.install.join(&name);
+        let present = match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_file() => true,
+            Ok(_) => return Err(format!("{name}: active file is not regular; kept")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(format!("{name}: active file unknown: {e}")),
+        };
+        if present {
+            let backup = dir.join(&name);
+            copy_synced(&path, &backup)?;
+        }
+        saved[&name] = json!(present);
+    }
+    coreq::write_durable(&dir.join("ready"), saved.to_string())?;
+    Ok(saved)
+}
+
+fn restore(t: &Tool, saved: &Value) -> Result<(), String> {
+    let dir = recovery_dir(t);
+    if saved.as_object().is_none_or(|m| m.len() != active_files(t).len()) { return Err("invalid install recovery record".into()); }
+    for name in active_files(t) {
+        let present = saved[&name].as_bool().ok_or("invalid install recovery record")?;
+        let path = t.install.join(&name);
+        let exists = match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_file() => true,
+            Ok(_) => return Err(format!("{name}: recovery target is not regular; kept")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(format!("{name}: recovery target unknown: {e}")),
+        };
+        // A crashed CoreQ write may leave its reserved temporary; serialization proves this operation owns it.
+        match std::fs::remove_file(path.with_file_name(format!("{name}.pending"))) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => return Err(format!("{name}: pending recovery: {e}")),
+        }
+        let backup = dir.join(&name);
+        if present {
+            if !std::fs::symlink_metadata(&backup).map_err(|e| e.to_string())?.is_file() { return Err("invalid install backup".into()); }
+            let staged = dir.join(format!("{name}.restore"));
+            copy_synced(&backup, &staged)?;
+            let result = move_durable(&staged, &path);
+            #[cfg(windows)]
+            let result = if result.is_err() && exists {
+                // A running Windows launcher can be renamed, never overwritten. Keep it beside CoreQ's old copies.
+                let old = (0..).map(|n| t.install.join(format!("{name}.old.{n}"))).find(|p| !p.exists()).unwrap();
+                move_durable(&path, &old).and_then(|_| move_durable(&staged, &path))
+            } else { result };
+            result?;
+            if std::fs::read(&path).map_err(|e| e.to_string())? != std::fs::read(&backup).map_err(|e| e.to_string())? { return Err(format!("{name}: recovery readback differs")); }
+        } else if exists {
+            let removed = dir.join(format!("{name}.removed"));
+            move_durable(&path, &removed)?;
+            if path.exists() { return Err(format!("{name}: recovery removal readback differs")); }
+        }
+    }
+    Ok(())
+}
+
+fn finish(t: &Tool) -> Result<(), String> {
+    let dir = recovery_dir(t);
+    move_durable(&dir.join("ready"), &dir.join("committed"))?;
+    // A committed record never rolls back, even if cleanup is interrupted.
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+fn recover_locked(t: &Tool) -> Result<(), String> {
+    let dir = recovery_dir(t);
+    match std::fs::read(dir.join("ready")) {
+        Ok(bytes) => {
+            let saved = serde_json::from_slice(&bytes).map_err(|e| format!("install recovery unknown: {e}"))?;
+            restore(t, &saved).map_err(|e| format!("install recovery uncertain: {e}"))?;
+            finish(t)?;
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(format!("install recovery unknown: {e}")),
+    }
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("install recovery cleanup: {e}")),
+    }
+}
+
+/// Lifecycle startup recovers before the launcher can select a partially activated release; read-only commands stay read-only.
+pub fn recover(t: &Tool) -> Result<(), String> {
+    match std::fs::symlink_metadata(recovery_dir(t)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("install recovery unknown: {e}")),
+        Ok(_) => {},
+    }
+    let _lock = crate::executor::lock(&t.install.join("data"))?;
+    recover_locked(t)
+}
+
+fn install_locked(t: &Tool, verified: &[u8], activate: impl FnOnce(&Tool) -> Result<(), String>) -> Result<(), String> {
+    update::prepare_install(t, verified)?;
+    let saved = originals(t)?;
+    if let Err(e) = activate(t).and_then(|_| finish(t)) {
+        // Keep the ready record on restoration failure so another start can retry safely.
+        coreq::write_durable(&recovery_dir(t).join("ready"), saved.to_string())
+            .and_then(|_| restore(t, &saved)).and_then(|_| finish(t))
+            .map_err(|recovery| format!("{e}; install recovery uncertain: {recovery}"))?;
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Prepare, then activate (coreq.md R15). The launcher only reads `current`, so the prior release stays active until it moves.
 fn install(t: &Tool, verified: &[u8]) -> Result<(), String> {
+    install_with(t, verified, update::activate_install)
+}
+
+// Keep the activation boundary injectable: even an error after `current` moves must restore the originals.
+fn install_with(t: &Tool, verified: &[u8], activate: impl FnOnce(&Tool) -> Result<(), String>) -> Result<(), String> {
     let _lock = crate::executor::lock(&t.install.join("data"))?;
-    update::prepare_install(t, verified)?;
-    update::activate_install(t)
+    recover_locked(t)?;
+    install_locked(t, verified, activate)
 }
 
 pub fn install_self(t: &Tool) -> Result<(), String> {
@@ -38,7 +205,15 @@ fn verified_candidate(t: &Tool, name: &str, dir: &Path) -> Result<Vec<u8>, Strin
 }
 
 /// Ok(Some(version)) when a new release became current. CoreQ's check selects the version and prunes old releases.
+pub fn check(t: &Tool) -> Result<Option<String>, String> {
+    let _lock = crate::executor::lock(&t.install.join("data"))?;
+    recover_locked(t)?;
+    update::update(t, true)
+}
+
 pub fn update(t: &Tool) -> Result<Option<String>, String> {
+    let _lock = crate::executor::lock(&t.install.join("data"))?;
+    recover_locked(t)?;
     let Some(ver) = update::update(t, true)? else { return Ok(None) };
     let name = format!("{}-{ver}-{}{}", t.name, update::target(), std::env::consts::EXE_SUFFIX);
     let base = format!("https://github.com/{}/releases/latest/download", t.repo);
@@ -49,7 +224,7 @@ pub fn update(t: &Tool) -> Result<Option<String>, String> {
     let _ = std::fs::remove_dir_all(&tmp);
     // ponytail: leaks one version string per new release; Tool::version is 'static in CoreQ
     let candidate = Tool { version: Box::leak(ver.clone().into_boxed_str()), ..t.clone() };
-    install(&candidate, &bytes?)?;
+    install_locked(&candidate, &bytes?, update::activate_install)?;
     // the check prunes before its download, so offline only skips its answer (agentq.md § 5: keep current and previous)
     let _ = update::update(t, true);
     Ok(Some(ver))
@@ -221,6 +396,98 @@ mod tests {
         }
         prior_active(&d, &t);
         assert!(!t.release_exe("2.0.0").exists());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// #238 A2, CoreQ R15: a late activation error must restore selection, rollback and launcher bytes.
+    #[test]
+    fn late_activation_failure_restores_originals() {
+        let (d, t, bytes) = installed("late-error");
+        let error = install_with(&t, &bytes, |t| {
+            update::activate_install(t)?;
+            assert_eq!(t.current().as_deref(), Some("2.0.0"));
+            Err("injected failure after current rename".into())
+        }).unwrap_err();
+        assert!(error.contains("injected failure"));
+        prior_active(&d, &t);
+        assert_eq!(fs::read_to_string(d.join("previous")).unwrap(), "0.9.0");
+        assert_eq!(fs::read_to_string(d.join(t.exe_name())).unwrap(), "prior launcher");
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// #238 A2, M8.1: no in-memory state is needed to restore a crash after selection; failed recovery keeps its evidence.
+    #[test]
+    fn interrupted_activation_recovers_on_next_start() {
+        let (d, t, bytes) = installed("recover");
+        #[cfg(windows)]
+        fs::write(d.join(t.gui_exe_name()), "prior GUI launcher").unwrap();
+        {
+            let _lock = crate::executor::lock(&d.join("data")).unwrap();
+            update::prepare_install(&t, &bytes).unwrap();
+            originals(&t).unwrap();
+            update::activate_install(&t).unwrap();
+        }
+        assert_eq!(t.current().as_deref(), Some("2.0.0"));
+        // Leave a CoreQ temporary as a crash could, and temporarily lose access to a backup.
+        fs::write(d.join("current.pending"), "partial").unwrap();
+        fs::rename(recovery_dir(&t).join("previous"), recovery_dir(&t).join("hidden-previous")).unwrap();
+        assert!(recover(&t).unwrap_err().contains("uncertain"));
+        assert!(recovery_dir(&t).join("ready").is_file());
+        fs::rename(recovery_dir(&t).join("hidden-previous"), recovery_dir(&t).join("previous")).unwrap();
+        recover(&t.clone()).unwrap();
+        prior_active(&d, &t);
+        assert_eq!(fs::read_to_string(d.join("previous")).unwrap(), "0.9.0");
+        assert_eq!(fs::read_to_string(d.join(t.exe_name())).unwrap(), "prior launcher");
+        #[cfg(windows)]
+        assert_eq!(fs::read_to_string(d.join(t.gui_exe_name())).unwrap(), "prior GUI launcher");
+        assert!(!d.join("current.pending").exists());
+        assert!(!recovery_dir(&t).exists());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// #238 A2: competing --check and service update cannot prune a prepared candidate or its staging directory.
+    #[test]
+    fn concurrent_checks_cannot_prune_install() {
+        let (d, t, bytes) = installed("concurrent");
+        install_with(&t, &bytes, |t| {
+            let staging = d.join("releases/2.0.0.tmp");
+            fs::create_dir_all(&staging).unwrap();
+            fs::write(staging.join("capture"), "keep").unwrap();
+            std::thread::scope(|scope| {
+                let check = scope.spawn(|| super::check(t));
+                let update = scope.spawn(|| super::update(t));
+                assert!(check.join().unwrap().unwrap_err().contains("lifecycle lock"));
+                assert!(update.join().unwrap().unwrap_err().contains("lifecycle lock"));
+            });
+            assert!(t.release_exe("2.0.0").is_file());
+            assert_eq!(fs::read_to_string(staging.join("capture")).unwrap(), "keep");
+            update::activate_install(t)
+        }).unwrap();
+        assert_eq!(t.current().as_deref(), Some("2.0.0"));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// #238 A2: a failed first install restores absence, and Unix executable permissions survive recovery.
+    #[test]
+    fn failed_first_install_restores_absence() {
+        let (d, t, bytes) = installed("absent");
+        for name in active_files(&t) { let _ = fs::remove_file(d.join(name)); }
+        assert!(install_with(&t, &bytes, |t| {
+            update::activate_install(t)?;
+            Err("injected late failure".into())
+        }).is_err());
+        for name in active_files(&t) { assert!(!d.join(name).exists()); }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(d.join(t.exe_name()), "original executable").unwrap();
+            fs::set_permissions(d.join(t.exe_name()), fs::Permissions::from_mode(0o751)).unwrap();
+            assert!(install_with(&t, &bytes, |t| {
+                update::activate_install(t)?;
+                Err("injected late failure".into())
+            }).is_err());
+            assert_eq!(fs::metadata(d.join(t.exe_name())).unwrap().permissions().mode() & 0o777, 0o751);
+        }
         fs::remove_dir_all(d).unwrap();
     }
 

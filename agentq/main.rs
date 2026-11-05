@@ -65,18 +65,22 @@ fn main() {
     if let Some(code) = compression::replay() { std::process::exit(code); }
     let t = tool();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    if matches!(a.as_slice(), ["update"] | ["update", "--check"] | ["service", "install" | "run" | "restart"])
+        || (a.first() == Some(&"onboard") && a.contains(&"--yes")) {
+        if let Err(e) = release::recover(&t) { fail(&e, "retry after the installation becomes writable; active state is unknown"); }
+    }
     // the launcher copy only picks a release (coreq.md § Launcher); hooks run in place, so a release mid-update or a
     // failed start never fails the client's hook (#132)
     if std::env::current_exe().ok() == Some(t.install.join(t.exe_name())) && t.current().is_some() && args.first().map(String::as_str) != Some("hook") {
         coreq::launcher::launch(&t, &args);
     }
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match a.as_slice() {
         ["--version"] => {
             println!("agentq {VERSION}");
             0
         }
-        ["update"] | ["update", "--check"] => match if a.len() == 2 { update::update(&t, true) } else { release::update(&t) } {
+        ["update"] | ["update", "--check"] => match if a.len() == 2 { release::check(&t) } else { release::update(&t) } {
             Ok(Some(v)) if a.len() == 2 => println_code(&format!("update: {v} available")),
             Ok(Some(v)) => println_code(&format!("update: {v} installed")),
             Ok(None) => println_code(&format!("update: {} is the latest", t.current().unwrap_or(VERSION.into()))),
