@@ -23,7 +23,7 @@ A user request to remove agentq allows this step.
 
 ## Temporarily disable and restore
 
-Use the commands from [README](README.md#temporarily-disable-optimization-or-integrations) with 0.9.0 or later for the current namespace. The current direct OpenAI provider definition supports resume after detach without an active AgentQ integration. Existing chats bound to the retired provider are intentionally not migrated: start new Codex chats after the owner-approved name cutover. Onboarding/service startup migrates owned registrations; `agentq migrate-names [--dry-run]` applies it after an explicit update. See [upgrade instructions](README.md#upgrade-to-the-current-names). Keep AgentQ enabled when the user requested that state. Claude auto mode uses successful-result PostToolUse replacement; older PreToolUse-only profiles need explicit hook configuration. Enable preserves the saved baseline.
+Use the commands from [README](README.md#temporarily-disable-optimization-or-integrations) with 0.9.0 or later for the current namespace. The current direct OpenAI provider definition supports resume after detach without an active AgentQ integration. Existing chats bound to the retired provider are intentionally not migrated: start new Codex chats.
 
 1. Read `agentq status --json`. Distinguish a compression preference, configured integration, runtime evidence and service health; none implies the others.
 2. For compression only, run `agentq optimization off [codex|claude|hermes]`; omit the agent for the host. Resume with `on`. The host switch preserves individually disabled preferences. No native config edits or client restart.

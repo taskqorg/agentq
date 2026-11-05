@@ -40,21 +40,6 @@ pub fn class(e: &str) -> &'static str {
     }
 }
 
-/// Legacy state fixture: identical observations remain separate samples.
-#[cfg(test)]
-fn legacy_sample(st: &mut Value, op: &str, at: u64, took: Duration, class: Option<&str>) {
-    if !st["profile"].is_object() {
-        st["profile"] = json!({});
-    }
-    if !st["profile"][op].is_array() {
-        st["profile"][op] = json!([]);
-    }
-    let v = st["profile"][op].as_array_mut().expect("array");
-    v.push(json!([at, ms(took), class]));
-    let over = v.len().saturating_sub(KEEP);
-    v.drain(..over);
-}
-
 /// Always-local export sample; storage failures never change delivery behavior.
 pub fn sample(data:&Path,op:&str,at:u64,took:Duration,class:Option<&str>) {
     if let Err(e)=crate::local::sample(data,op,at,ms(took),class) { eprintln!("agentq: export sample unknown: {e}"); }
@@ -148,7 +133,7 @@ fn unknown(op: &str, reason: &str) -> Value {
     json!({"op": op, "state": "unknown", "reason": reason})
 }
 
-/// Export samples per operation from `queue/state.json`; an unreadable file or sample is the reason it is unknown.
+/// Export samples per operation from the local store; an unreadable store or sample is the reason it is unknown.
 fn export_state(data: &Path) -> Result<Map<String, Value>, String> {
     crate::local::samples(data)
 }
@@ -172,7 +157,7 @@ fn export_samples(samples: &Value, cutoff: u64, now: u64) -> Result<Vec<(u64, Op
 /// Trace lines in the window grouped per operation and step; a malformed line makes the traces unknown.
 fn steps(data: &Path, cutoff: u64, now: u64) -> Result<Map<String, Value>, String> {
     let mut g = std::collections::BTreeMap::<(String, String), Vec<(u64, Option<String>)>>::new();
-    for v in crate::local::traces(data,now)? {
+    for v in crate::local::traces(data)? {
         let (Some(at), Some(op), Some(step), Some(d)) = (v["time"].as_u64(), v["op"].as_str(), v["step"].as_str(), v["duration_ms"].as_u64()) else {
             return Err("traces unknown: malformed line".into());
         };
@@ -305,28 +290,22 @@ mod tests {
     fn ranked_report_and_corrupt_records() {
         let d = dir();
         let now = crate::now();
-        let mut st = json!({"last_delivery": 1});
-        for (i, ms_) in [100u64, 120, 110, 90].iter().enumerate() {
-            legacy_sample(&mut st, "export.dashq", now - 10, Duration::from_millis(*ms_), (i == 0).then_some("no_reply"));
-        }
-        for _ in 0..KEEP + 5 {
-            legacy_sample(&mut st, "export.langfuse", now - 5, Duration::from_millis(50), None);
-        }
-        legacy_sample(&mut st, "export.langfuse", now - WINDOW - 1, Duration::from_millis(1), Some("auth"));
-        assert_eq!(st["profile"]["export.langfuse"].as_array().unwrap().len(), KEEP);
-        std::fs::write(d.join("queue/state.json"), st.to_string()).unwrap();
-        std::fs::create_dir_all(d.join("stats")).unwrap();
+        let sample = |op: &str, at: u64, ms_: u64, class: Option<&str>| json!({"time": at, "op": op, "duration_ms": ms_, "class": class});
+        let mut exports: Vec<Value> = [100u64, 120, 110, 90].iter().enumerate()
+            .map(|(i, ms_)| sample("export.dashq", now - 10, *ms_, (i == 0).then_some("no_reply"))).collect();
+        exports.extend((0..KEEP - 1).map(|_| sample("export.langfuse", now - 5, 50, None)));
+        exports.push(sample("export.langfuse", now - WINDOW - 1, 1, Some("auth")));
+        crate::local::seed(&d, "export", &exports, None);
         let rec = |adapter: &str, ms_: u64, outcome: &str, reason: &str| {
             let mut r = json!({"schema":1,"event_id":crate::mcp::new_id().replace('-',""),"time":now - 1,"agent":"claude","adapter":adapter,"tool":"shell","runner":null,"engine":"none",
                 "outcome":outcome,"reason":reason,"bytes_in":10,"bytes_out":10,"est_tokens_in":3,"est_tokens_out":3,"duration_ms":ms_,"ref":null,"session":null,"turn":null,"tool_call":null});
             if adapter == "run" {
                 r["exit_code"] = json!(0);
             }
-            r.to_string()
+            r
         };
-        let lines_ = [rec("hook", 2500, "passed", "short"), rec("hook", 2400, "passed", "json"), rec("run", 10, "passed", "not_qualified"), rec("run", 5000, "failed", "timeout")];
-        let stats = d.join("stats").join(format!("{}.jsonl", crate::date(now)));
-        std::fs::write(&stats, lines_.join("\n") + "\n").unwrap();
+        let records = [rec("hook", 2500, "passed", "short"), rec("hook", 2400, "passed", "json"), rec("run", 10, "passed", "not_qualified"), rec("run", 5000, "failed", "timeout")];
+        crate::local::seed(&d, "stats", &records, None);
         let r = report(&d, now);
         let names: Vec<&str> = r["operations"].as_array().unwrap().iter().map(|o| o["op"].as_str().unwrap()).collect();
         // run: 50 % failed of a 1 % budget; dashq: 25 % of 5 %; hook: p95 2500 of 1000 ms; langfuse within budget
@@ -347,32 +326,35 @@ mod tests {
         assert!(!text.contains("claude") && !text.contains("shell"));
 
         // a corrupt stats record: all compress.* unknown, exports still measured
-        std::fs::write(&stats, lines_.join("\n") + "\n{bad\n").unwrap();
+        crate::local::seed(&d, "stats", &[json!({"time": now - 1})], None);
         let r = report(&d, now);
         for o in ["compress.run", "compress.hook", "compress.provider"] {
             assert_eq!(op(&r, o)["state"], "unknown");
-            assert!(op(&r, o)["reason"].as_str().unwrap().contains("malformed"));
+            assert!(op(&r, o)["reason"].as_str().unwrap().contains("stats unknown"));
         }
         assert_eq!(op(&r, "export.langfuse")["state"], "measured");
+        let db = rusqlite::Connection::open(d.join("telemetry.sqlite3")).unwrap();
+        db.execute("DELETE FROM events WHERE kind='stats' AND json_extract(payload,'$.agent') IS NULL", []).unwrap();
+        drop(db);
         // a corrupt export sample: only that operation unknown, the other export and compression measured
-        std::fs::write(&stats, lines_.join("\n") + "\n").unwrap();
-        let bad = format!(r#"{{"profile":{{"export.langfuse":[[1,"x",null]],"export.dashq":[[{},20,null]]}}}}"#, now - 1);
-        std::fs::write(d.join("queue/state.json"), bad).unwrap();
+        crate::local::seed(&d, "export", &[json!({"time": now - 1, "op": "export.langfuse", "duration_ms": "x", "class": null})], None);
         let r = report(&d, now);
         assert!(op(&r, "export.langfuse")["reason"].as_str().unwrap().contains("malformed sample"));
         assert_eq!(op(&r, "export.dashq")["state"], "measured");
         assert_eq!(op(&r, "compress.hook")["state"], "measured");
-        // unreadable state: every export unknown
-        std::fs::write(d.join("queue/state.json"), "{").unwrap();
+        // unreadable rows: every export unknown
+        let db = rusqlite::Connection::open(d.join("telemetry.sqlite3")).unwrap();
+        db.execute("UPDATE events SET payload='{' WHERE kind='export'", []).unwrap();
+        drop(db);
         let r = report(&d, now);
         for o in ["export.langfuse", "export.dashq"] {
-            assert!(op(&r, o)["reason"].as_str().unwrap().contains("unreadable"), "{o}");
+            assert!(op(&r, o)["reason"].as_str().unwrap().contains("telemetry event"), "{o}");
         }
 
         // trace switch: bounded, keeps other config, steps join the report; off stops writing
         std::fs::write(d.join("config.json"), r#"{"ports":{"codex":1}}"#).unwrap();
         trace(&d, "compress.run", "native", Duration::from_millis(7), None);
-        assert!(!d.join("traces").exists());
+        assert!(crate::local::traces(&d).unwrap().is_empty());
         assert!(trace_minutes(Some("61")).is_err() && trace_minutes(Some("0")).is_err());
         let t = set_trace(&d, Some(trace_minutes(None).unwrap()), now).unwrap();
         assert_eq!(t, json!({"state": "on", "until": now + TRACE_DEFAULT * 60}));
@@ -383,8 +365,7 @@ mod tests {
         assert_eq!(set_trace(&d, None, now).unwrap()["state"], "off");
         let c: Value = serde_json::from_str(&std::fs::read_to_string(d.join("config.json")).unwrap()).unwrap();
         assert_eq!(c, json!({"ports": {"codex": 1}}));
-        std::fs::create_dir_all(d.join("traces")).unwrap();
-        std::fs::write(d.join("traces").join(format!("{}.jsonl", crate::date(now))), "bad\n").unwrap();
+        crate::local::seed(&d, "trace", &[json!({"time": now, "op": "compress.run", "step": "native", "duration_ms": "x"})], None);
         assert!(report(&d, now)["trace"]["unknown"].as_str().unwrap().contains("malformed"));
         std::fs::remove_dir_all(d).unwrap();
     }
@@ -408,25 +389,17 @@ mod tests {
             assert!(t["reason"].as_str().unwrap().contains(reason), "{config}: {t}");
             assert!(lines(&report(&d, now))[0].contains("trace unknown"));
             trace(&d, "compress.run", "native", Duration::from_millis(1), None);
-            assert!(!d.join("traces").exists());
+            assert!(crate::local::traces(&d).unwrap().is_empty());
         }
-        for (state, reason) in [
-            ("[]", "not a JSON object"),
-            ("1", "not a JSON object"),
-            (r#"{"profile":null}"#, "malformed profile"),
-            (r#"{"profile":{"export.dashq":{}}}"#, "malformed samples"),
-        ] {
-            std::fs::write(d.join("queue/state.json"), state).unwrap();
-            let r = report(&d, now);
-            assert!(op(&r, "export.dashq")["reason"].as_str().unwrap().contains(reason), "{state}");
-        }
-        std::fs::write(d.join("traces"), "not a directory").unwrap();
-        assert!(report(&d, now)["trace"]["unknown"].as_str().unwrap().starts_with("traces unknown: "));
-        std::fs::remove_file(d.join("traces")).unwrap();
-        std::fs::create_dir(d.join("traces")).unwrap();
-        let line = json!({"time": now, "op": "compress.run", "step": "native", "duration_ms": 1, "class": 5});
-        std::fs::write(d.join("traces").join(format!("{}.jsonl", crate::date(now))), format!("{line}\n")).unwrap();
-        assert!(report(&d, now)["trace"]["unknown"].as_str().unwrap().contains("malformed line"));
+        // a malformed row and an unreadable store both read unknown, never no samples
+        crate::local::seed(&d, "export", &[json!({"time": now, "op": "export.dashq", "duration_ms": "x", "class": null})], None);
+        assert!(op(&report(&d, now), "export.dashq")["reason"].as_str().unwrap().contains("malformed sample"));
+        crate::local::seed(&d, "trace", &[json!({"time": now, "op": "compress.run", "step": "native", "duration_ms": 1, "class": 5})], None);
+        assert!(report(&d, now)["trace"]["unknown"].as_str().unwrap().starts_with("traces unknown: malformed line"));
+        let db = rusqlite::Connection::open(d.join("telemetry.sqlite3")).unwrap();
+        db.execute("UPDATE events SET payload='bad' WHERE kind='trace'", []).unwrap();
+        drop(db);
+        assert!(report(&d, now)["trace"]["unknown"].as_str().unwrap().contains("telemetry event"));
         std::fs::remove_dir_all(d).unwrap();
     }
 

@@ -350,7 +350,7 @@ fn execution_recovery_stats_chain() {
     std::fs::remove_dir_all(root).unwrap();
 }
 fn records_or_empty(root: &Path) -> Vec<Value> {
-    if install(root).join("data/telemetry.sqlite3").exists() || install(root).join("data/stats").exists() {
+    if install(root).join("data/telemetry.sqlite3").exists() {
         records(root)
     } else {
         vec![]

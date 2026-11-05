@@ -1,4 +1,4 @@
-//! agentq: update, service, status, MCP, engines, onboarding, hooks, telemetry and uninstall on coreq (agentq.md § 1-§ 6, § 9, § 10).
+//! agentq: update, service, status, MCP, engines, onboarding, hooks, telemetry and uninstall on coreq (agentq.md § 1-§ 6, § 9).
 
 mod accounting;
 mod check;
@@ -11,11 +11,9 @@ mod engines;
 mod hooks;
 mod host;
 mod executor;
-mod legacy;
 mod local;
 mod mcp;
 mod model;
-mod names;
 mod onboard;
 mod profile;
 mod profiles;
@@ -40,7 +38,7 @@ const UPDATE_EVERY: u64 = 3600;
 const DRAIN: u64 = 900;
 /// `onboard --yes` waits this long for a started proxy to answer, before and after one restart (#137).
 const PROXY_START: Duration = Duration::from_secs(60);
-const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | agent turn | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes|antigravity..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | migrate-names [--dry-run|--rollback] | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--legacy] [--dry-run] | --version";
+const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | agent turn | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes|antigravity..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -89,10 +87,6 @@ fn main() {
             Err(e)=>fail(&e,"install Python or use the managed Headroom runtime; run agentq check compression --help"),
         },
         ["selftest"] => selftest(&t),
-        ["migrate-names"] | ["migrate-names", "--rollback"] | ["migrate-names", "--dry-run"] => match names::migrate(&integration_host(&t), a.contains(&"--rollback"), a.contains(&"--dry-run")) {
-            Ok(v) => println_code(&v.to_string()),
-            Err(e) => fail(&e, "keep native settings and resolve the name migration conflict"),
-        },
         ["setup-path"] => match command_path::register(&t.install) {
             Ok(()) => 0,
             Err(e) => fail(&e, "resolve the command registration error and run `agentq setup-path` again"),
@@ -113,8 +107,7 @@ fn main() {
         ["stats", "--records"] => match local::snapshot(&t.install.join("data")) {
             Ok(v) => {
                 let mut errors = vec![];
-                if let Some(e) = v["error"].as_str() { errors.push(e.to_string()); }
-                if !compression::failed(&t.install.join("data")).is_empty() { errors.push("stats write failed".into()); }
+                if !compression::failed(&t.install.join("data")).is_empty() { errors.push("stats write failed"); }
                 println_code(&serde_json::json!({"schema":1,"records":v["records"],"errors":errors}).to_string())
             }
             Err(e) if e=="stats unknown: no stats file" => println_code(&serde_json::json!({"schema":1,"records":[],"errors":[],"state":"unknown","reason":"no retained observations"}).to_string()),
@@ -134,7 +127,7 @@ fn main() {
                 0
             },
             Err(e) if a.len()==2=>{println!("{}",serde_json::json!({"schema":1,"state":"unknown","reason":e,"groups":null}));1},
-            Err(e)=>fail(&e,"run a tool through agentq; inspect data/telemetry.sqlite3 and retained legacy files if records are unreadable"),
+            Err(e)=>fail(&e,"run a tool through agentq; inspect data/telemetry.sqlite3 if records are unreadable"),
         },
         ["profile"] => {
             for l in profile::lines(&profile::report(&t.install.join("data"), now())) {
@@ -225,8 +218,6 @@ fn main() {
         ["doctor"] => doctor(&t),
         ["uninstall"] => uninstall(&t, false),
         ["uninstall", "--dry-run"] => uninstall(&t, true),
-        ["uninstall", "--legacy"] => legacy(&legacy_dir(), false),
-        ["uninstall", "--legacy", "--dry-run"] | ["uninstall", "--dry-run", "--legacy"] => legacy(&legacy_dir(), true),
         _ => fail(&format!("unknown command `{}`", args.join(" ")), &format!("usage: {USAGE}")),
     };
     std::process::exit(code);
@@ -259,7 +250,7 @@ fn connection_line(s: &Value) -> String {
     }
 }
 
-/// agentq.md § 1: read-only install, service, engines, owned edits, telemetry and legacy state; exit 1 on a problem.
+/// agentq.md § 1: read-only install, service, engines, owned edits and telemetry state; exit 1 on a problem.
 fn doctor(t: &Tool) -> i32 {
     let mut ok = true;
     let mut line = |good: bool, l: String| {
@@ -310,14 +301,6 @@ fn doctor(t: &Tool) -> i32 {
         Ok(n)=>line(true,format!("local telemetry: readable SQLite, {n} retained records; compression unqualified")),
         Err(e)=>line(false,format!("local telemetry: unknown ({e})")),
     }
-    let old = legacy_dir();
-    let pids = legacy_pids(&old);
-    let installed = legacy::installed(&old);
-    let locked = legacy::locked(&old);
-    line(!installed && pids.as_ref().is_ok_and(Vec::is_empty) && locked.is_empty(), format!("legacy: {}{}", if installed { "installed; run `agentq uninstall --legacy`" } else { "removed" }, running(&pids)));
-    for f in &locked {
-        println!("legacy: locked {}; stop the legacy processes, then delete {}", f.display(), old.display());
-    }
     if ok { 0 } else { 1 }
 }
 
@@ -359,7 +342,6 @@ fn integration_cmd(t: &Tool, args: &[&str], enabled: bool) -> i32 {
     let agents: Vec<_> = args.iter().copied().filter(|a| *a != "--dry-run").collect();
     if agents.len() > 1 { fail("select one agent or the host", "agentq disable|enable [agent] [--dry-run]"); }
     if !args.contains(&"--dry-run") {
-        if let Err(e) = names::migrate(&integration_host(t), false, false) { fail(&e, "resolve the name migration conflict"); }
         if let Err(e) = recover_service(t) { fail(&e, "run `agentq status`; service state remains unknown"); }
     }
     let h = integration_host(t);
@@ -649,7 +631,7 @@ fn service_cmd(t: &Tool, cmd: &str) -> i32 {
 
 /// `service install` before the unit: the release, each failing host requirement with its fix, then the engines.
 fn install_release(t: &Tool) -> Result<(), String> {
-    names::migrate(&integration_host(t), false, false).and_then(|_| install_self(t)).and_then(|_| command_path::register(&t.install))
+    install_self(t).and_then(|_| command_path::register(&t.install))
         .map(|_| host::problems().iter().chain(&engines::ensure(&t.install)).for_each(|l| println!("{l}")))
 }
 
@@ -815,7 +797,6 @@ fn single_instance_selftest() -> bool {
 
 /// One status pass every 30 s, update check hourly; a new release exits 75 so the unit restarts into it.
 fn serve(t: &Tool) -> ! {
-    names::migrate(&integration_host(t), false, false).unwrap_or_else(|e| fail(&e, "resolve the name migration conflict before restarting the service"));
     // a release with a new engine pin installs it here; status keeps its 30 s pace meanwhile
     let install = t.install.clone();
     let maintain = control::host_disabled(&install.join("data")) == Ok(false);
@@ -912,8 +893,6 @@ fn selftest(t: &Tool) -> i32 {
         ("status", status::common(t, "h", PROJECT, 1, None, None)["version"] == VERSION),
         ("mcp tools", mcp::tools().as_array().is_some_and(|a| a.len() == 3)),
         ("telemetry event", telemetry::span("agentq.verify", "selftest", Value::Null, 1, "i", "h")["attributes"].as_array().is_some_and(|a| a.len() == 7)),
-        ("legacy strip", legacy::selftest()),
-        ("legacy locked", legacy::selftest_locked()),
         // the running binary is locked on Windows: the installed copy that equals it is read, never overwritten
         ("self copy skip", std::env::current_exe().is_ok_and(|me| copy_unless_same(&me, &me) == Ok(false))),
         ("json bom", onboard::selftest()),
@@ -935,7 +914,7 @@ fn journal(t: &Tool) -> PathBuf {
     t.install.join("data").join("owned.json")
 }
 
-/// agentq.md § 1: discovery without `--yes`; with it, legacy removal (§ 10), § 4 edits, service install.
+/// agentq.md § 1: discovery without `--yes`; with it, § 4 edits and service install.
 fn onboard(t: &Tool, args: &[&str]) -> i32 {
     let yes = args.contains(&"--yes");
     let picked: Vec<&str> = args.iter().copied().filter(|a| *a != "--yes").collect();
@@ -945,15 +924,6 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
     let ready: Vec<&str> = onboard::AGENTS.into_iter().filter(|a| onboard::root(a).exists()).collect();
     for a in onboard::AGENTS {
         println!("{a}: {} {}", if ready.contains(&a) { "ready" } else { "not found" }, onboard::root(a).display());
-    }
-    let old = legacy_dir();
-    // a still-running legacy process recreates the folder with incidents/ and machine-id.json only: not an install
-    let installed = legacy::installed(&old);
-    let pids = running(&legacy_pids(&old));
-    if installed {
-        println!("legacy: {} found{pids}", old.display());
-    } else if !pids.is_empty() {
-        println!("legacy: removed{pids}");
     }
     if !yes {
         // `--yes` reports them during the release install below
@@ -969,10 +939,6 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
     let unit = unit_snapshot(t);
     if unit["foreign"] == true || unit["registered"].is_null() {
         fail("service registration belongs to another installation or is unreadable", "keep it and select the intended installation explicitly");
-    }
-    // `--yes` is the consent (§ 10)
-    if installed {
-        legacy(&old, false);
     }
     let agents: Vec<&str> = if picked.is_empty() { ready } else { picked.into_iter().filter(|a| ready.contains(a)).collect() };
     // engines first: routing points an agent at the loopback port only when headroom can serve it
@@ -1010,7 +976,6 @@ fn direct(t: &Tool, args: &[&str]) -> i32 {
     if let Some(a) = args.iter().find(|a| !onboard::AGENTS.contains(a)) {
         fail(&format!("unknown agent `{a}`"), &format!("usage: {USAGE}"));
     }
-    names::migrate(&integration_host(t), false, false).unwrap_or_else(|e| fail(&e, "resolve the name migration conflict"));
     let agents = if args.is_empty() { &onboard::AGENTS[..] } else { args };
     let _lock = executor::lock(&t.install.join("data")).unwrap_or_else(|e| fail(&format!("direct: {e}"), "wait for it to finish, then run `agentq direct` again"));
     if let Err(e) = routing::set_direct(&t.install.join("data"), agents, true) {
@@ -1055,9 +1020,6 @@ fn accounting_cmd(t: &Tool, args: &[&str]) -> i32 {
 
 /// CONFIGURATION "Host executor": no change prints the profiles; changes print the plan; `--yes` applies that plan.
 fn configure_cmd(t: &Tool, args: &[&str]) -> i32 {
-    if args.contains(&"--yes") {
-        names::migrate(&integration_host(t), false, false).unwrap_or_else(|e| fail(&e, "resolve the name migration conflict"));
-    }
     let exe = t.install.join(t.exe_name());
     let at = now();
     let host = executor::Host::local(&t.install, exe, at);
@@ -1093,7 +1055,6 @@ fn uninstall(t: &Tool, dry: bool) -> i32 {
     if !t.install.exists() {
         return println_code("uninstall: already removed");
     }
-    if !dry { names::migrate(&integration_host(t), false, false).unwrap_or_else(|e| fail(&e, "resolve the name migration conflict")); }
     onboard::restore(&journal(t), dry, None).unwrap_or_else(|e| fail(&format!("uninstall: {e}"), "fix the file, then run `agentq uninstall` again")).iter().for_each(|l| println!("{l}"));
     if dry {
         return println_code(&format!("would remove: command registration, service unit, {}", t.install.display()));
@@ -1108,30 +1069,6 @@ fn uninstall(t: &Tool, dry: bool) -> i32 {
     }
 }
 
-/// `AGENT_CONTEXT_HOME` (or home)/.agent-context, as the Node package resolves it.
-fn legacy_dir() -> PathBuf {
-    let home = std::env::var_os("AGENT_CONTEXT_HOME").or_else(|| std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })).unwrap_or_default();
-    PathBuf::from(home).join(".agent-context")
-}
-
-/// agentq.md § 10: back up and strip legacy config entries, unload the monitor, remove the npm package, move the
-/// folder aside.
-fn legacy(dir: &Path, dry: bool) -> i32 {
-    if !legacy::installed(dir) {
-        println!("legacy: already removed{}", running(&legacy_pids(dir)));
-        return 0;
-    }
-    // a nonzero exit is an answer here (no such task, process gone); a failed start is logged
-    let run = |cmd: &str, args: &[&str]| host::output(Command::new(cmd).args(args)).is_ok_and(|o| o.status.success());
-    match legacy::remove(dir, dry, &date(now()), &run) {
-        Ok(lines) => {
-            lines.iter().for_each(|l| println!("{l}"));
-            0
-        }
-        Err(e) => fail(&format!("legacy uninstall: {e}"), "close programs using the legacy folder, then run `agentq uninstall --legacy` again"),
-    }
-}
-
 /// `YYYY-MM-DD` in UTC (days-to-civil, H. Hinnant).
 fn date(secs: u64) -> String {
     let z = (secs / 86400) as i64 + 719468;
@@ -1141,29 +1078,6 @@ fn date(secs: u64) -> String {
     let mp = (5 * doy + 2) / 153;
     let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
     format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
-}
-
-/// Pids of processes whose command line holds `<legacy>/`, as the legacy launcher, proxies and MCP servers do.
-/// Windows: PowerShell `Win32_Process`, case-insensitive. ponytail: pids per folder, not per file; Restart Manager
-/// (`RmGetList`) names the holder of each file if a host needs it.
-fn legacy_pids(dir: &Path) -> Result<Vec<String>, String> {
-    let needle = format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR);
-    let o = if cfg!(windows) {
-        let ps = format!("Get-CimInstance Win32_Process | ? {{ $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.ToLower().Contains('{}') }} | % ProcessId", needle.to_lowercase().replace('\'', "''"));
-        host::run(Command::new("powershell").args(["-NoProfile", "-Command", &ps]))
-    } else {
-        // pgrep exits 1 when nothing matches
-        host::run_allow(Command::new("pgrep").arg("-f").arg(needle), &[0, 1])
-    };
-    o.map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().map(String::from).collect())
-}
-
-fn running(pids: &Result<Vec<String>, String>) -> String {
-    match pids {
-        Ok(p) if p.is_empty() => String::new(),
-        Ok(p) => format!("; legacy processes still running: pids {}", p.join(" ")),
-        Err(e) => format!("; legacy processes unknown ({e})"),
-    }
 }
 
 #[cfg(test)]
@@ -1288,21 +1202,5 @@ mod tests {
             assert!(!unit_owned_in(platform, owned, "/other-install/agentq"), "a matching OS label is not ownership");
             assert!(!unit_owned_in(platform, &owned.replace("service run", "service stop").replace("service\nrun", "service\nstop"), "/install/agentq"));
         }
-    }
-
-    /// #64 A3: a running legacy process recreated the folder with leftovers only: removed, and its pid is named.
-    #[cfg(unix)]
-    #[test]
-    fn legacy_leftovers_name_running_pids() {
-        let d = std::env::temp_dir().join(format!("agentq-leftover-{}", std::process::id()));
-        std::fs::create_dir_all(d.join("incidents")).unwrap();
-        std::fs::write(d.join("machine-id.json"), "{}").unwrap();
-        let mut p = Command::new("sh").args(["-c", "sleep 30; true"]).arg(d.join("launcher.mjs")).spawn().unwrap();
-        assert_eq!(legacy_pids(&d).unwrap(), vec![p.id().to_string()]);
-        assert_eq!(legacy(&d, false), 0, "no launcher: nothing to uninstall");
-        let _ = p.kill();
-        let _ = p.wait();
-        assert!(legacy_pids(&d).unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(&d);
     }
 }
