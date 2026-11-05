@@ -73,8 +73,9 @@ fn main() {
         if let Err(e) = release::recover(&t) { fail(&e, "retry after the installation becomes writable; active state is unknown"); }
     }
     // the launcher copy only picks a release (coreq.md § Launcher); hooks run in place, so a release mid-update or a
-    // failed start never fails the client's hook (#132)
-    if is_launcher && t.current().is_some() && args.first().map(String::as_str) != Some("hook") {
+    // failed start never fails the client's hook (#132). Protected host dispatch keeps the checked artifact (M12.8).
+    if is_launcher && t.current().is_some() && args.first().map(String::as_str) != Some("hook")
+        && !matches!(a.as_slice(), ["agent", "host", ..]) {
         coreq::launcher::launch(&t, &args);
     }
     let code = match a.as_slice() {

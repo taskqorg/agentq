@@ -37,3 +37,20 @@ fn recovered_running_launcher_dispatches_prior_release() {
     assert!(stderr.contains("Unrecognized option: 'check'"), "must reach the prior libtest release: {out:?}");
     fs::remove_dir_all(root).unwrap();
 }
+
+// M12.8 / #241 A1: a signed launcher cannot redirect protected authority to an unchecked current release.
+#[test]
+fn protected_host_uses_checked_launcher_bytes() {
+    let root=std::env::temp_dir().join(format!("agentq-241-launcher-{}",std::process::id()));
+    fs::create_dir_all(&root).unwrap();let root=root.canonicalize().unwrap();
+    let t=Tool{install:root.clone(),..Tool::new("agentq","AgentQ","taskqorg/agentq","2.0.0")};
+    fs::create_dir_all(t.release_exe("1.0.0").parent().unwrap()).unwrap();
+    fs::copy(std::env::current_exe().unwrap(),t.release_exe("1.0.0")).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_agentq"),root.join(t.exe_name())).unwrap();
+    fs::write(root.join("current"),"1.0.0").unwrap();
+    let out=Command::new(root.join(t.exe_name())).args(["agent","host","--action","invalid-action","--request","{}"])
+        .env("AGENTQ_INSTALL",&root).output().unwrap();
+    let error=String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("Next: retain the original permit and reconcile; never replay uncertain work"),"must reach checked host dispatcher without another release: {out:?}");
+    fs::remove_dir_all(root).unwrap();
+}
