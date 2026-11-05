@@ -46,6 +46,9 @@ fn main() {
         ("ready_reads_native_login_and_minimum_version", ready_reads_native_login_and_minimum_version),
         ("host_args_reach_codex_turns_only", host_args_reach_codex_turns_only),
         ("settings_env_reaches_the_session", settings_env_reaches_the_session),
+        ("settings_env_preserves_subscription_policy", settings_env_preserves_subscription_policy),
+        ("settings_env_off_precedes_state_read", settings_env_off_precedes_state_read),
+        ("settings_env_keeps_inherited_launch_markers", settings_env_keeps_inherited_launch_markers),
         ("launcher_output_is_handed_over_once", launcher_output_is_handed_over_once),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
@@ -495,19 +498,23 @@ fn host_args_reach_codex_turns_only() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+fn settings_of(args: &Value) -> Value {
+    let args = args.as_array().unwrap();
+    let at: Vec<_> = args.iter().enumerate().filter(|(_, a)| *a == "--settings").map(|(i, _)| i).collect();
+    assert_eq!(at.len(), 1, "one --settings");
+    serde_json::from_str(args[at[0] + 1].as_str().unwrap()).unwrap()
+}
+
 // #240 A1: caller settings reach the session: Claude through one `--settings` that survives the daemon, Codex through its child.
 // Risk: a `--bg` session misses TaskQ's variables or `off`, a second `--settings` drops the compact hook, or settings values leak into child env.
 fn settings_env_reaches_the_session() {
     use agentq_runtime::optimization::Intent;
+    // This fixture supplies its own launcher identity; inherited TaskQ identity has a separate regression below.
+    let task = std::env::var_os("TASKQ_TASK");
+    unsafe { std::env::remove_var("TASKQ_TASK"); }
     let root = scratch("settings-env");
     let account = root.join("account");
     let claude = agent::runtime("claude").unwrap();
-    let settings_of = |args: &Value| -> Value {
-        let args = args.as_array().unwrap();
-        let at: Vec<_> = args.iter().enumerate().filter(|(_, a)| *a == "--settings").map(|(i, _)| i).collect();
-        assert_eq!(at.len(), 1, "one --settings");
-        serde_json::from_str(args[at[0] + 1].as_str().unwrap()).unwrap()
-    };
     // An explicit child marker: `prepare` also reads the test process's own environment, which a worker sets.
     let mut l = fake_launch("claude", &root, "x", &[("CLAUDE_CONFIG_DIR", account.as_os_str()), ("AGENTQ_LAUNCHER", "child".as_ref())]);
     l.settings_env = vec![("FAKE_EXTRA".into(), "settings".into()), ("AGENTQ_LAUNCHER".into(), "caller".into())];
@@ -549,6 +556,80 @@ fn settings_env_reaches_the_session() {
     assert_eq!(agent::runtime("antigravity").unwrap().launch(&c).err().as_deref(), Some("settings-env unsupported by antigravity"));
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(codex_root).unwrap();
+    if let Some(task) = task { unsafe { std::env::set_var("TASKQ_TASK", task); } }
+}
+
+// #240 A1 / M12.10: settings must not restore API auth after subscription policy cleared the child.
+fn settings_env_preserves_subscription_policy() {
+    let root = scratch("settings-subscription");
+    let claude = agent::runtime("claude").unwrap();
+    for mode in [agent::Mode::Turn, agent::Mode::Background] {
+        let mut l = fake_launch("claude", &root, "x", &[]);
+        l.mode = mode.clone();
+        if mode == agent::Mode::Background { l.env.push(("COREQ_FAKE_BACKGROUND".into(), "1".into())); }
+        l.policy.subscription = true;
+        l.settings_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].map(|k| (k.into(), "invented-fixture".into())).to_vec();
+        let mut run = claude.launch(&l).unwrap();
+        let turn = if mode == agent::Mode::Turn {
+            finish(claude, &mut run);
+            record(&root, 1)
+        } else { serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap() };
+        let settings = settings_of(&turn["args"]);
+        for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+            assert_eq!(settings["env"][key], "", "subscription policy wins over settings: {mode:?} {key}");
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// #240 A1 / M12.5-M12.7: settings off must be observed before installed state and reach both native sessions.
+fn settings_env_off_precedes_state_read() {
+    for name in ["claude", "codex"] {
+        let root = scratch(&format!("settings-off-{name}"));
+        let home = root.join("home");
+        let install = root.join("install");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(install.join("data")).unwrap();
+        std::fs::write(home.join("config.toml"), "model_provider = \"agentq\"\n").unwrap();
+        std::fs::write(home.join("settings.json"), r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"/i/agentq hook claude PreToolUse"}]}]}}"#).unwrap();
+        let runtime = agent::runtime(name).unwrap();
+        let mut l = fake_launch(name, &root, "x", &[("AGENTQ_OPTIMIZATION", "on".as_ref())]);
+        l.home = Some(home);
+        l.install = Some(install.clone());
+        l.settings_env = vec![("AGENTQ_OPTIMIZATION".into(), "off".into())];
+        for invalid in [false, true] {
+            if invalid { std::fs::write(install.join("data/config.json"), "not JSON").unwrap(); }
+            let mut run = runtime.launch(&l).unwrap();
+            finish(runtime, &mut run);
+            assert_eq!((run.optimization().effective, run.optimization().reason), ("off", "launch_off"), "{name} invalid={invalid}");
+            let turn = record(&root, 1);
+            assert_eq!(turn["optimization"], "off");
+            if name == "claude" { assert_eq!(settings_of(&turn["args"])["env"]["AGENTQ_OPTIMIZATION"], "off"); }
+            else { assert!(turn["args"].as_array().unwrap().iter().any(|a| a == "model_providers.agentq.http_headers.x-agentq-optimization=\"off\"")); }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// #240 A1 / M12.4, M6.9: a daemon session must retain inherited launcher identity to prevent double counting.
+fn settings_env_keeps_inherited_launch_markers() {
+    let keys = ["TASKQ_TASK", "AGENTQ_LAUNCHER", "AGENTQ_OPTIMIZATION"];
+    let saved = keys.map(|k| (k, std::env::var_os(k)));
+    for key in keys { unsafe { std::env::remove_var(key); } }
+    let root = scratch("settings-markers");
+    let claude = agent::runtime("claude").unwrap();
+    for key in ["TASKQ_TASK", "AGENTQ_LAUNCHER"] {
+        unsafe { std::env::set_var(key, "inherited-fixture"); }
+        let mut l = fake_launch("claude", &root, "x", &[("COREQ_FAKE_BACKGROUND", "1".as_ref())]);
+        l.mode = agent::Mode::Background;
+        l.settings_env = vec![(key.into(), "caller-fixture".into())];
+        claude.launch(&l).unwrap();
+        let turn: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
+        assert_eq!(settings_of(&turn["args"])["env"][key], "inherited-fixture");
+        unsafe { std::env::remove_var(key); }
+    }
+    for (key, value) in saved { unsafe { match value { Some(v) => std::env::set_var(key, v), None => std::env::remove_var(key) } } }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 // #240 A1, TaskQ #1555/#1557: the caller reads the launcher's own stdout, stderr and status from a launched run, once.
