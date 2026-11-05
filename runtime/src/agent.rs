@@ -14,6 +14,8 @@ mod native;
 mod app;
 mod protected;
 mod adapter;
+mod capture;
+pub use capture::{APPEND_CHUNK, Call, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
@@ -512,6 +514,8 @@ pub struct Turn {
     resumed: Option<String>,
     ag: AntigravityTranscript,
     receipt: Option<std::sync::mpsc::Receiver<Res<String>>>,
+    /// Samples the owned process tree; None for a recovered child or a sidecar submission.
+    sampler: Option<capture::Sampler>,
 }
 
 fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64) }
@@ -549,6 +553,7 @@ impl Turn {
         let started_ms = unix_ms();
         base.stdin(Stdio::piped()).stdout(if native_agentapi {Stdio::piped()} else {Stdio::from(out)}).stderr(err);
         let mut child = process.spawn(base, spec.client.code())?;
+        let sampler = (!native_agentapi).then(|| capture::Sampler::start(child.id()));
         let receipt = if native_agentapi {
             let mut stdout = child.stdout.take().ok_or("agentapi stdout unavailable")?;
             let (send, receive) = std::sync::mpsc::channel();
@@ -568,7 +573,7 @@ impl Turn {
             drop(stdin);
         }
         Ok(Turn { client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
-            ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt })
+            ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt, sampler })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }
@@ -600,7 +605,7 @@ impl Turn {
         let age = Duration::from_millis(unix_ms().saturating_sub(started_ms).max(0) as u64);
         Ok(Turn { client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(),
             start, pos: start, ended: false, stopping: false, timed_out: flag("timed_out")?, started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
-            started_ms, exit: None, home: spec_home(spec), resumed, ag: AntigravityTranscript::default(), receipt: None })
+            started_ms, exit: None, home: spec_home(spec), resumed, ag: AntigravityTranscript::default(), receipt: None, sampler: None })
     }
 
     fn sync_antigravity_transcript(&mut self) -> Res<()> {
@@ -698,6 +703,12 @@ impl Turn {
         }
     }
 
+    /// Immutable identity of this turn's `agent.call` records: recovery rebuilds the same one.
+    pub(crate) fn key(&self) -> String {
+        let session = session_of(self.client, &read_from(&self.log, self.start).unwrap_or_default()).or_else(|| self.ag.session.clone()).or_else(|| self.resumed.clone());
+        crate::sha256_hex(format!("{}\0{}\0{}\0{}\0{}", self.client.code(), session.as_deref().unwrap_or(""), self.log.display(), self.start, self.started_ms).as_bytes())
+    }
+
     /// The turn's report from its log bytes; call after `poll` returned an exit.
     pub fn report(&self) -> Report {
         let text = read_from(&self.log, self.start).unwrap_or_default();
@@ -712,6 +723,21 @@ impl Turn {
         r.duration_us = self.started.elapsed().as_micros() as u64;
         r.started_ms = self.started_ms;
         r.exit = if self.exit_unknown { None } else { self.exit };
+        r.process = match &self.sampler {
+            Some(s) => s.usage(),
+            None if self.ag.native_agentapi => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("sidecar-server") },
+            None => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("recovered") },
+        };
+        // A Codex `exec` turn names each request only in its rollout; `turn.completed` holds the totals.
+        if let Some(text) = rollout.as_deref().and_then(|p| std::fs::read_to_string(p).ok()) {
+            let calls = capture::rollout_calls(&text, true);
+            if !calls.is_empty() {
+                let per_request = sum_usage(&calls, None, true);
+                r.usage.reasoning = per_request.reasoning;
+                r.usage.model = r.usage.model.take().or(per_request.model);
+                r.calls = calls;
+            }
+        }
         if self.timed_out { (r.outcome, r.error) = ("cancelled", "timeout"); }
         else if self.cancelled { (r.outcome, r.error) = ("cancelled", "interrupted"); }
         else if r.outcome == "unknown" && r.exit.is_some_and(|c| c != 0) && r.error == "no-end" { (r.outcome, r.error) = ("failed", "exit"); }
@@ -761,7 +787,8 @@ pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: 
     let mut turn = Turn::start(base, spec, log, text, &Process::default())?;
     turn.wait(deadline)?;
     let mut r = turn.report();
-    r.recorded = crate::telemetry::Event::new(r.observation(spec.client, ctx)).and_then(|e| store.append(&[e])).map(|_| ());
+    let key = turn.key();
+    r.recorded = crate::telemetry::Event::observation(r.observation(spec.client, ctx)).and_then(|e| capture::record(store, e, &r, spec.client, ctx, &key));
     Ok(r)
 }
 
@@ -776,6 +803,8 @@ pub struct Usage {
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
     pub output: Option<u64>,
+    /// Reasoning output the client reports apart; part of `output`.
+    pub reasoning: Option<u64>,
     pub model: Option<String>,
     /// Why no usage was read; None when some was.
     pub unknown: Option<&'static str>,
@@ -785,30 +814,50 @@ pub struct Usage {
 /// output, the model of most calls), Codex `turn.completed` (`input_tokens` includes `cached_input_tokens`, no cache
 /// writes), Antigravity `PLANNER_RESPONSE` steps (each `step_index` once: `input_tokens`, `cache_read_tokens`,
 /// `output_tokens`). A counted call without a value makes that sum unknown, never smaller.
+#[cfg(test)]
 pub(crate) fn usage(events: &[Value]) -> Usage {
-    let (mut ids, mut turns, mut models) = (std::collections::HashSet::new(), false, BTreeMap::<String, u64>::new());
-    let mut sums = [Some(0u64); 4];
+    let (calls, count, known) = read_calls(events);
+    sum_usage(&calls, count, known)
+}
+
+/// The turn's token sums of its calls; a call without a value makes that sum unknown, never smaller.
+pub(crate) fn sum_usage(calls: &[Call], count: Option<u64>, known: bool) -> Usage {
+    if !known { return Usage { unknown: Some("no-usage"), ..Usage::default() }; }
+    let sum = |f: fn(&Call) -> Option<u64>| calls.iter().try_fold(0u64, |a, c| a.checked_add(f(c)?));
+    let mut models = BTreeMap::<&str, u64>::new();
+    for m in calls.iter().filter_map(|c| c.model.as_deref()) { *models.entry(m).or_default() += 1; }
+    let model = models.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|m| m.0.to_string());
+    Usage { calls: count, input: sum(|c| c.input), cache_read: sum(|c| c.cache_read), cache_write: sum(|c| c.cache_write), output: sum(|c| c.output),
+        reasoning: if calls.is_empty() { None } else { sum(|c| c.reasoning) }, model, unknown: None }
+}
+
+/// The model requests of the turn's events, the Claude message count, and whether any usage was read.
+pub(crate) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
+    let (mut ids, mut turns, mut calls) = (std::collections::HashSet::new(), false, vec![]);
     let mut cli_usage = false;
     for (idx, v) in events.iter().enumerate() {
         let kind = if v["event"] == "step_update" {"agy-step"} else {v["type"].as_str().unwrap_or_default()};
         let cli = kind == "agy-step";
         let codex = kind == "turn.completed";
         let ag = kind == "PLANNER_RESPONSE";
+        let mut id = None;
         let counted = match kind {
-            "assistant" => v["message"]["id"].as_str().is_some_and(|id| ids.insert(id.to_string())),
-            "turn.completed" => { turns = true; true }
+            "assistant" => { id = v["message"]["id"].as_str().map(String::from); v["message"]["id"].as_str().is_some_and(|id| ids.insert(id.to_string())) }
+            "turn.completed" => { turns = true; id = v.get("total_usage").map(Value::to_string); true }
             "agy-step" => {
                 let step = &v["step_update"];
                 if step["state"] != "DONE" || (step["step_type"] != "agent_response" && !step["usage"].is_object()) { continue; }
-                let Some(id) = step["step_index"].as_u64() else {continue;};
-                if events[idx+1..].iter().any(|later| later["event"] == "step_update" && later["step_update"]["step_index"].as_u64() == Some(id) && later["step_update"]["state"] == "DONE" && (later["step_update"]["step_type"] == "agent_response" || later["step_update"]["usage"].is_object())) {continue;}
+                let Some(n) = step["step_index"].as_u64() else {continue;};
+                if events[idx+1..].iter().any(|later| later["event"] == "step_update" && later["step_update"]["step_index"].as_u64() == Some(n) && later["step_update"]["state"] == "DONE" && (later["step_update"]["step_type"] == "agent_response" || later["step_update"]["usage"].is_object())) {continue;}
                 cli_usage = true; turns = true;
-                ids.insert(format!("agy-step-{id}"))
+                id = Some(format!("agy-step-{n}"));
+                ids.insert(format!("agy-step-{n}"))
             }
             "PLANNER_RESPONSE" => {
                 if !matches!(v["status"].as_str(), Some("DONE" | "ERROR" | "CANCELLED")) { continue; }
                 if v["step_index"].as_u64().is_some_and(|step| events[idx+1..].iter().any(|later| later["type"] == "PLANNER_RESPONSE" && later["step_index"].as_u64() == Some(step))) { continue; }
                 let Some(step) = v["step_index"].as_u64() else { continue; };
+                id = Some(format!("ag-step-{step}"));
                 ids.insert(format!("ag-step-{step}"))
             }
             _ => false,
@@ -823,21 +872,24 @@ pub(crate) fn usage(events: &[Value]) -> Usage {
         } else {
             u["cache_read_input_tokens"].as_u64()
         };
-        let call = [
-            if codex { input.zip(read).and_then(|(i, r)| i.checked_sub(r)) } else { input },
-            read,
-            if codex { Some(0) } else if ag || cli { u["cache_write_tokens"].as_u64().or(u["cache_creation_input_tokens"].as_u64()) } else { u["cache_creation_input_tokens"].as_u64() },
-            u["output_tokens"].as_u64(),
-        ];
-        for (s, c) in sums.iter_mut().zip(call) { *s = s.zip(c).and_then(|(a, b)| a.checked_add(b)) }
-        let m = v["message"]["model"].as_str().or_else(|| v["model"].as_str());
-        if let Some(m) = m.filter(|m| model_code(m)) { *models.entry(m.into()).or_default() += 1; }
+        let (outcome, error) = if v["isApiErrorMessage"] == true || v["error"].is_string() { ("failed", "client-error") }
+            else if ag && v["status"] == "ERROR" { ("failed", "turn-failed") }
+            else if ag && v["status"] == "CANCELLED" { ("cancelled", "turn-cancelled") }
+            else { ("ok", "none") };
+        calls.push(Call {
+            id, at_ms: v["timestamp"].as_str().or(v["created_at"].as_str()).and_then(capture::time_ms),
+            input: if codex { input.zip(read).and_then(|(i, r)| i.checked_sub(r)) } else { input },
+            cache_read: read,
+            cache_write: if codex { Some(0) } else if ag || cli { u["cache_write_tokens"].as_u64().or(u["cache_creation_input_tokens"].as_u64()) } else { u["cache_creation_input_tokens"].as_u64() },
+            output: u["output_tokens"].as_u64(),
+            reasoning: if codex { u["reasoning_output_tokens"].as_u64() } else { None },
+            model: v["message"]["model"].as_str().or_else(|| v["model"].as_str()).filter(|m| model_code(m)).map(String::from),
+            outcome, error, aggregate: codex && v["call"] != true,
+        });
     }
-    let [input, cache_read, cache_write, output] = sums;
-    let model = models.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|m| m.0);
-    let calls = (!cli_usage && !ids.is_empty()).then_some(ids.len() as u64);
-    if calls.is_some() || turns { Usage { calls, input, cache_read, cache_write, output, model, unknown: None } }
-    else { Usage { unknown: Some("no-usage"), ..Usage::default() } }
+    let count = (!cli_usage && !ids.is_empty()).then_some(ids.len() as u64);
+    let known = count.is_some() || turns;
+    (calls, count, known)
 }
 
 /// A model id is a short code; anything else stays unreported.
@@ -1026,6 +1078,9 @@ pub struct Report {
     pub duration_us: u64,
     /// The observation append; Ok(()) before `run` appends.
     pub recorded: Res<()>,
+    /// The turn's model requests; their tokens are the same tokens as `usage`.
+    pub calls: Vec<Call>,
+    pub process: ProcessUse,
 }
 
 impl Report {
@@ -1050,12 +1105,16 @@ impl Report {
                     None => ("unknown", "no-end"),
                 }
             };
-        Report { session: session_of(client, text), usage: usage(events), limit: snapshot(client, events, rollout), reached, outcome, error, detail,
+        let (calls, count, known) = read_calls(events);
+        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), reached, outcome, error, detail,
             text: final_text(events), exit: None, started_ms: unix_ms(), duration_us: 0, recorded: Ok(()) }
     }
 
     /// The `agent.turn` observation: codes and numbers only; every null names its reason.
-    pub(crate) fn observation(&self, client: Client, ctx: &Context) -> Value {
+    pub(crate) fn observation(&self, client: Client, ctx: &Context) -> Value { self.observation_as(client.code(), ctx) }
+
+    /// The record under a runtime name; a hook session may name a client outside `Client` (agentq.md M6.11).
+    pub(crate) fn observation_as(&self, runtime: &str, ctx: &Context) -> Value {
         let mut unknown = serde_json::Map::new();
         let mut num = |name: &str, v: Option<u64>, why: &str| -> Value {
             if v.is_none() { unknown.insert(name.into(), json!(why)); }
@@ -1064,13 +1123,22 @@ impl Report {
         let why = self.usage.unknown.unwrap_or("not-reported");
         let (task, attempt) = ctx.task.map_or((None, None), |(t, a)| (Some(t), Some(a)));
         let limit_why = self.limit.unknown.unwrap_or("not-reported");
+        // A signalled child has no code; a Windows code reads as its unsigned DWORD.
+        let exit = self.exit.and_then(|c| if cfg!(windows) { Some(u64::from(c as u32)) } else { u64::try_from(c).ok() });
+        let exit_why = if self.exit.is_some() { "signalled" } else { self.process.exit_unknown };
+        let process_why = self.process.unknown.unwrap_or("not-sampled");
         let mut v = json!({
             "product": ctx.product, "version": ctx.version, "operation": "agent.turn", "kind": "agent.turn",
             "trace": null, "span": null, "started_ms": self.started_ms.max(0), "duration_us": self.duration_us,
-            "outcome": self.outcome, "error": self.error, "project": ctx.project, "runtime": client.code(), "account": ctx.account,
+            "outcome": self.outcome, "error": self.error, "project": ctx.project, "runtime": runtime, "account": ctx.account,
             "task": num("task", task, "no-task"), "attempt": num("attempt", attempt, "no-task"),
             "input_tokens": num("input_tokens", self.usage.input, why), "cache_read_tokens": num("cache_read_tokens", self.usage.cache_read, why),
             "cache_write_tokens": num("cache_write_tokens", self.usage.cache_write, why), "output_tokens": num("output_tokens", self.usage.output, why),
+            "reasoning_tokens": num("reasoning_tokens", self.usage.reasoning, why),
+            "exit_code": num("exit_code", exit, exit_why),
+            "user_cpu_us": num("user_cpu_us", self.process.user_cpu_us, process_why),
+            "system_cpu_us": num("system_cpu_us", self.process.system_cpu_us, process_why),
+            "peak_rss_bytes": num("peak_rss_bytes", self.process.peak_rss_bytes, process_why),
             "limit_used_percent": num("limit_used_percent", self.limit.used_percent, limit_why),
             "limit_resets_at": num("limit_resets_at", self.limit.resets_at, limit_why),
         });
@@ -1083,6 +1151,8 @@ impl Report {
         text(&mut v, &mut unknown, "model", self.usage.model.as_deref(), if self.usage.unknown.is_some() { why } else { "not-reported" });
         text(&mut v, &mut unknown, "route", ctx.route, "task-turn");
         text(&mut v, &mut unknown, "limit_window", self.limit.window.as_deref(), limit_why);
+        text(&mut v, &mut unknown, "session_id", capture::session_code(self.session.as_deref()), "session-unknown");
+        text(&mut v, &mut unknown, "host", capture::host().as_deref(), "not-reported");
         v["unknown"] = Value::Object(unknown);
         v
     }

@@ -109,6 +109,10 @@ pub(crate) struct AppSession {
     limits: Option<Value>,
     latest_limits: Option<Value>,
     started_ms: i64,
+    /// Samples the plain server process; None for a protected or recovered session.
+    sampler: Option<super::capture::Sampler>,
+    /// The sampler's reading frozen at the terminal event, so a repeated report reads the same record.
+    process: Option<super::capture::ProcessUse>,
     early: Vec<Value>,
     fault: Option<String>,
     scope: String,
@@ -122,7 +126,7 @@ impl AppSession {
             return Err("app-server session invalid".into());
         }
         Ok(Self { spec: spec.clone(), next: 1, pending: None, initialized: false, ready: false,
-            thread: None, turn: None, active: false, terminal: None, model: None, text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0,
+            thread: None, turn: None, active: false, terminal: None, model: None, text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0, sampler: None, process: None,
             early:vec![],fault:None,scope:native::scope(spec),worked:false,failure:None })
     }
 
@@ -168,6 +172,8 @@ impl AppSession {
         let changed_model = params.get("model").is_some_and(|m| m.as_str() != self.model.as_deref());
         let request = self.request("turn/start", params)?;
         self.active = true; self.turn = None; self.terminal = None; self.text = None; self.usage.clear(); self.limits = self.latest_limits.clone(); self.started_ms = unix_ms();
+        self.process = None;
+        if let Some(sampler) = &self.sampler { sampler.mark(); }
         self.worked=false;self.failure=None;
         if changed_model {self.model=None;}
         Ok(request)
@@ -250,6 +256,7 @@ impl AppSession {
             let status = p["turn"]["status"].as_str().filter(|s| matches!(*s,"completed"|"failed"|"interrupted")).ok_or("app-server terminal status unknown")?;
             if self.terminal.as_deref().is_some_and(|old| old != status) { return Err("app-server terminal outcomes conflict".into()); }
             if self.terminal.is_none() && p["turn"]["error"].is_object() {self.failure=Some(p["turn"]["error"].clone());}
+            if self.terminal.is_none() { self.process = self.sampler.as_ref().map(super::capture::Sampler::usage); }
             self.terminal = Some(status.into());
         } else if self.terminal.is_none() {
             match method {
@@ -267,6 +274,9 @@ impl AppSession {
         Ok(())
     }
 
+    /// Sample the plain server process this session owns.
+    pub(crate) fn sample(&mut self, pid: u32) { self.sampler = Some(super::capture::Sampler::start(pid)); }
+
     /// Native terminal report only. Transport EOF or process exit cannot manufacture a report.
     pub fn report(&self) -> Option<Report> {
         if self.fault.is_some() || self.turn.is_none() || self.pending.is_some_and(|(_,method)|method=="turn/start") {return None;}
@@ -283,6 +293,8 @@ impl AppSession {
         }
         let mut r = Report::read(Client::Codex, "", &events, None);
         r.session = self.thread.clone(); r.usage.model = self.model.clone(); r.text = self.text.clone(); r.started_ms = self.started_ms;
+        r.process = super::capture::ProcessUse { exit_unknown: "session-process", ..self.process.clone().unwrap_or_default() };
+        for call in &mut r.calls { if call.model.is_none() { call.model = self.model.clone(); } }
         (r.outcome, r.error) = match status { "completed" => ("ok","none"), "interrupted" => ("cancelled","interrupted"), _ => ("failed","turn-failed") };
         if status=="failed" {
             if let Some(error)=&self.failure {
@@ -303,7 +315,7 @@ impl AppSession {
         let mut value = r.observation(Client::Codex, ctx);
         value["duration_us"] = Value::Null; value["unknown"]["duration_us"] = json!("not-reported");
         let key = crate::sha256_hex(format!("{}\0{}\0{}\0{}", self.spec.root.display(),self.scope, self.thread.as_deref().unwrap_or(""), self.turn.as_deref().unwrap_or("")).as_bytes());
-        r.recorded = crate::telemetry::Event::identified("agent.app", &key, value).and_then(|e| store.append(&[e])).map(|_| ());
+        r.recorded = crate::telemetry::Event::identified("agent.app", &key, crate::telemetry::shared(&value)).and_then(|e| super::capture::record(store, e, &r, Client::Codex, ctx, &key));
         Ok(Some(r))
     }
 
@@ -362,7 +374,7 @@ mod tests {
     use super::*;
 
     fn observations(store: &crate::telemetry::Store) -> Vec<Value> {
-        store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
+        store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).filter(|o| o["kind"] == "agent.turn").collect()
     }
 
     // R47-R50: app-server protocol shares session/turn ownership while caller policy and server requests stay intact.

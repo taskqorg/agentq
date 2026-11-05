@@ -41,6 +41,7 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 - The plugin's `post_api_request` hook runs `agentq hook hermes post_api_request` once per provider call with only `api_request_id`, `session_id`, `turn_id`, `model`, `response_model`, `ended_at` and Hermes's normalized `usage` buckets; request, response and message content never leave the plugin.
 - One `agentq.model` span per call, same event ID rule with call ID `api_request_id` (a call without it keys on session, turn and end time), start = end = `ended_at`.
 - Attributes as for Claude with `agentq.agent` `hermes`, `agentq.model.source` `hermes_hook`, `agentq.turn`, name `response_model` else `model`, `cache_creation_tokens` from `cache_write_tokens`; a missing value reads `<field>_unknown` `not reported`. Hermes reports no cost in this hook: `agentq.model.cost_unknown` is `not reported`.
+- The same hook writes the `agent.call` record ([Session records](#session-records)); its allowlist also carries `reasoning_tokens` for that record.
 - An existing installation gains the hook through `onboard --yes`, which upgrades an owned plugin file whose bytes still equal its journal record (journal first) and keeps any other content a conflict.
 
 ### Codex responses
@@ -49,6 +50,35 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 - Call ID = the response `id`; `agentq.agent` `codex`, `agentq.model.source` `codex_provider`. A response without `id` keys on a hash of its entry. Start = end = `created_at` (entry time when absent).
 - Tokens keep the Claude meaning: `input_tokens` is uncached input (`usage.input_tokens` − `input_tokens_details.cached_tokens`), `cache_read_tokens` is `cached_tokens`, `output_tokens` is `usage.output_tokens` (reasoning included).
 - The Responses API reports no cache creation and no cost: `cache_creation_tokens_unknown` and `cost_unknown` are `not reported`; any other missing field reads `not in response`.
+
+## Session records
+
+M6.11 applies the runtime records of [RUNTIME.md](RUNTIME.md#observation) to sessions no launcher records. `agentq-runtime` `agent::session_records` and `agent::session_call_records` build them; the hook only finds the bytes and writes the records.
+
+| Runtime | Entry | Source of `agent.call` | One `agent.turn` per |
+|---|---|---|---|
+| Claude | `Stop` | transcript with its `<session>/subagents/*.jsonl`, each message id once | `Stop` that found new bytes |
+| Codex | `Stop` | rollout at `transcript_path` | `Stop` that found new bytes, or a `Stop` without a transcript |
+| Antigravity | `Stop` | `transcriptPath`, each completed step index once | `Stop` with `fullyIdle` not false that found new bytes, or without a transcript |
+| Hermes | `post_api_request` | the hook's allowlisted record, written at once | `on_session_end`, which fires when one `run_conversation` ends |
+
+- A launched session and a disabled integration read and write nothing.
+- Store: `data/observations.sqlite3`, the installation's CoreQ local store. Sending it is the CoreQ shipper's job, in a later task after parity; this page adds no sender.
+- Transcript reads: a per-file offset in `data/observe/` advances only after the append. One `Stop` reads at most 8 MiB in total, always through the whole line it started, and stops reading 3.5 s after the hook started. Unread bytes wait for the next `Stop`, so the hook stays inside its 5 s budget (M1.2). The turn key is the first read file and its start offset, so a retry after a failed append keeps one turn. A shorter file was rewritten and reads from the start; immutable call ids keep a reread from counting twice.
+- Records go to the store in chunks of 1024 with the turn first, and the hook starts no chunk after that deadline. An append that stopped early keeps the offset, and the retry keeps the first payload of each stored id.
+- A record has `route` `hook`, and `agent.turn` sums the tokens of its calls. `exit_code`, CPU and `peak_rss_bytes` read null `hook-session`, because the client process is not ours; `duration_us` reads null `not-reported`.
+- A `Stop` without a session writes `session_id` null `session-unknown` with a turn key unique to that `Stop`. A `Stop` without a transcript writes null tokens with reason `no-transcript`. A Claude `Stop` without a transcript writes nothing, because the `agentq.model` path already records that failure.
+- Outcome: Claude and Codex read `ok`. Antigravity reads `failed` for an `error` value or a `terminationReason` naming an error or the step limit, else `ok`. Hermes reads `ok` for `completed`, `cancelled` for `interrupted`, `failed` when both are false and `unknown` when neither is reported.
+- Antigravity reports no tokens in its hooks. A transcript step without token fields is one `agent.call` with null tokens `not-reported`, and `modelName` fills a model the transcript does not name. The Antigravity `Stop` answers `{"decision":"allow"}`, on failure too, so the hook never re-enters the loop.
+- Hermes keeps each call's allowlisted record in `data/observe/hermes/<session hash>.jsonl` until `on_session_end` sums it into the turn and removes it. A file left by a session that never ended expires after 7 days. A call stays recorded when no turn follows. A model name that is not a code, such as `vendor/model`, reads null `not-reported`, because the store accepts only codes.
+- `project` is the M6.10 code of `cwd`, else of the first `workspacePaths` entry, else of the working directory, else `other`.
+- A failed read or append is a recorded hook failure (§ 1) and still returns the normal hook response (M1.2). It never stops the `agentq.model` path.
+
+### Open gaps
+
+- Claude Desktop Chat has no hook and writes no records (PRODUCT R1).
+- No native Hermes or Antigravity client ran these hooks yet. Their hook fields come from the [Hermes observer hooks](https://hermes-agent.nousresearch.com/docs/developer-guide/observer-hooks) and the [Antigravity hook schema](https://antigravity.google/docs/hooks).
+- An existing Antigravity `agentapi` server does not inherit the launch marker (§ 12). If that server runs the global `Stop` hook, a launched sidecar turn writes a second turn under another key.
 
 ## Resource samples
 
