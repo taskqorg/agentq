@@ -280,7 +280,7 @@ fn observe_until(data: &Path, input: &Value, deadline: Instant) -> Result<(), St
 }
 
 /// Files in `dir` untouched for 7 days go: transcript marks (a backlog of a deleted transcript included) and session records.
-fn expire(dir: &Path) {
+pub fn expire(dir: &Path) {
     let week = std::time::SystemTime::now() - Duration::from_secs(7 * 86400);
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < week) { let _ = std::fs::remove_file(e.path()); }

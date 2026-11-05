@@ -1,5 +1,5 @@
 //! `agent.turn` and `agent.call` capture (agentq.md M12.12, M12.13; docs/spec/RUNTIME.md § Observation).
-use super::{Client, Context, Report, Res, read_calls, sum_usage};
+use super::{Client, Context, Report, Res, model_code, read_calls, sum_usage};
 use crate::telemetry::{Event, Store, shared};
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, Mutex, mpsc};
@@ -247,7 +247,7 @@ pub(crate) fn rollout_calls(text: &str, last_turn: bool) -> Vec<Call> {
     read_calls(&events).0
 }
 
-fn call_event(c: &Call, index: usize, r: &Report, runtime: &str, ctx: &Context, turn_key: &str) -> Res<Event> {
+fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str) -> Res<Event> {
     let mut unknown = Map::new();
     let mut num = |name: &str, v: Option<u64>, why: &str| -> Value {
         if v.is_none() { unknown.insert(name.into(), json!(why)); }
@@ -271,7 +271,7 @@ fn call_event(c: &Call, index: usize, r: &Report, runtime: &str, ctx: &Context, 
     };
     text("model", c.model.as_deref(), "not-reported");
     text("route", ctx.route, "task-turn");
-    text("session_id", session_code(r.session.as_deref()), "session-unknown");
+    text("session_id", session_code(session), "session-unknown");
     text("host", host().as_deref(), "not-reported");
     if c.aggregate { v["source"] = json!("turn-aggregate"); }
     v["unknown"] = Value::Object(unknown);
@@ -281,7 +281,7 @@ fn call_event(c: &Call, index: usize, r: &Report, runtime: &str, ctx: &Context, 
 
 /// The `agent.call` records of a finished turn, with immutable IDs under `turn_key`.
 pub(crate) fn call_events(r: &Report, client: Client, ctx: &Context, turn_key: &str) -> Res<Vec<Event>> {
-    r.calls.iter().enumerate().map(|(i, c)| call_event(c, i, r, client.code(), ctx, turn_key)).collect()
+    r.calls.iter().enumerate().map(|(i, c)| call_event(c, i, r.session.as_deref(), client.code(), ctx, turn_key)).collect()
 }
 
 /// Append `turn` with its calls. An immutable ID already stored keeps its first payload, so a repeated record never
@@ -292,42 +292,91 @@ pub(crate) fn record(store: &Store, turn: Event, r: &Report, client: Client, ctx
     append_records(store, &events)
 }
 
-/// Append records atomically; on an immutable ID conflict append them one by one and keep each stored payload.
+/// The most events CoreQ takes in one append.
+pub const APPEND_CHUNK: usize = 1024;
+
+/// Append records in order, each chunk atomically; on an immutable ID conflict append that chunk one by one and keep each
+/// stored payload. A failed later chunk leaves the earlier ones, so a retry of the same records stays idempotent.
 pub fn append_records(store: &Store, events: &[Event]) -> Res<()> {
     let conflict = |e: &str| matches!(e, "telemetry immutable id payload mismatch" | "telemetry immutable retention time mismatch");
-    match store.append(events) {
-        Err(e) if conflict(&e) => {
-            for event in events {
-                match store.append(std::slice::from_ref(event)) { Err(e) if !conflict(&e) => return Err(e), _ => {} }
+    for chunk in events.chunks(APPEND_CHUNK) {
+        match store.append(chunk) {
+            Err(e) if conflict(&e) => {
+                for event in chunk {
+                    match store.append(std::slice::from_ref(event)) { Err(e) if !conflict(&e) => return Err(e), _ => {} }
+                }
             }
-            Ok(())
+            other => { other?; }
         }
-        other => other.map(|_| ()),
     }
+    Ok(())
 }
 
-/// The records of one turn of a session no launcher records (agentq.md M6.11): `text` holds its new native transcript
-/// bytes, `key` identifies the turn and calls keep their IDs under `session`. `now_ms` is the start when no call names one.
-pub fn session_records(runtime: &str, ctx: &Context, session: &str, text: &str, key: &str, now_ms: u64) -> Res<Vec<Event>> {
-    let client = Client::parse(runtime).ok_or("session records need a known runtime")?;
+/// One turn of a session no launcher records (agentq.md M6.11).
+#[derive(Clone, Copy, Debug)]
+pub struct SessionTurn<'a> {
+    /// The client's name; a hook session may name one outside the runtime's clients.
+    pub runtime: &'a str,
+    /// A missing or invalid session reads null `session-unknown`.
+    pub session: Option<&'a str>,
+    /// Calls keep their IDs under this scope, so a reread never counts twice.
+    pub scope: &'a str,
+    /// The turn's immutable ID.
+    pub key: &'a str,
+    /// The start when no call names one.
+    pub now_ms: u64,
+    pub outcome: &'static str,
+    pub error: &'static str,
+    /// The hook's model, for a turn or call whose transcript names none.
+    pub model: Option<&'a str>,
+}
+
+fn call_scope(turn: &SessionTurn) -> String { crate::sha256_hex(format!("hook\0{}\0{}", turn.runtime, turn.scope).as_bytes()) }
+
+fn session_events(turn: &SessionTurn, ctx: &Context, mut r: Report) -> Res<Vec<Event>> {
+    (r.outcome, r.error) = (turn.outcome, turn.error);
+    r.session = turn.session.map(String::from);
+    let model = turn.model.filter(|m| model_code(m)).map(String::from);
+    if r.usage.model.is_none() { r.usage.model.clone_from(&model); }
+    for c in r.calls.iter_mut().filter(|c| c.model.is_none()) { c.model.clone_from(&model); }
+    r.started_ms = r.calls.iter().find_map(|c| c.at_ms).unwrap_or(turn.now_ms) as i64;
+    r.process = ProcessUse::none("hook-session");
+    let mut record = r.observation_as(turn.runtime, ctx);
+    record["duration_us"] = Value::Null;
+    record["unknown"]["duration_us"] = json!("not-reported");
+    let mut out = vec![Event::identified("agent.turn", turn.key, shared(&record))?];
+    let scope = call_scope(turn);
+    for (i, c) in r.calls.iter().enumerate() { out.push(call_event(c, i, r.session.as_deref(), turn.runtime, ctx, &scope)?); }
+    Ok(out)
+}
+
+/// The records of one turn from its new native transcript bytes in `text`, turn first.
+pub fn session_records(turn: &SessionTurn, ctx: &Context, text: &str) -> Res<Vec<Event>> {
+    let client = Client::parse(turn.runtime).ok_or("session records need a known runtime")?;
     let events: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["message"]["model"] != "<synthetic>").collect();
     let mut r = Report::read(client, text, &events, None);
     if client == Client::Codex {
         r.calls = rollout_calls(text, false);
         let known = !r.calls.is_empty();
         r.usage = sum_usage(&r.calls, None, known);
-        if text.is_empty() { r.usage.unknown = Some("no-transcript"); }
     }
-    (r.outcome, r.error) = ("ok", "none");
-    r.session = Some(session.into());
-    r.started_ms = r.calls.iter().find_map(|c| c.at_ms).unwrap_or(now_ms) as i64;
-    r.process = ProcessUse::none("hook-session");
-    let mut turn = r.observation(client, ctx);
-    turn["duration_us"] = Value::Null;
-    turn["unknown"]["duration_us"] = json!("not-reported");
-    let mut out = vec![Event::identified("agent.turn", key, shared(&turn))?];
-    out.extend(call_events(&r, client, ctx, &crate::sha256_hex(format!("hook\0{runtime}\0{session}").as_bytes()))?);
-    Ok(out)
+    if text.is_empty() { r.usage.unknown = Some("no-transcript"); }
+    session_events(turn, ctx, r)
+}
+
+/// The records of one turn whose calls the hook already holds, turn first.
+pub fn session_call_records(turn: &SessionTurn, ctx: &Context, calls: Vec<Call>) -> Res<Vec<Event>> {
+    let mut r = Report::read(Client::Claude, "", &[], None);
+    r.usage = sum_usage(&calls, None, !calls.is_empty());
+    r.calls = calls;
+    session_events(turn, ctx, r)
+}
+
+/// The `agent.call` record of one model request a hook saw; `turn` names its session and scope.
+pub fn session_call(turn: &SessionTurn, ctx: &Context, call: &Call) -> Res<Event> {
+    let mut call = call.clone();
+    call.model = call.model.filter(|m| model_code(m));
+    call_event(&call, 0, turn.session, turn.runtime, ctx, &call_scope(turn))
 }
 
 #[cfg(test)]
@@ -428,6 +477,34 @@ mod tests {
         assert!(none.calls.is_empty());
         let turn = none.observation(Client::Codex, &ctx);
         assert!(turn["input_tokens"].is_null() && turn["unknown"]["input_tokens"] == "no-usage", "{turn}");
+        drop(store); // Windows keeps an open database undeletable.
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    // Chain: M12.12, specq Telemetry contract § Capture (A2). Risk: CoreQ refuses more than 1024 events in one append, so a
+    // long turn loses its calls and its `agent.turn`.
+    #[test]
+    fn a_turn_over_the_store_batch_keeps_the_turn_and_every_call_once() {
+        let d = crate::scratch("capture-chunks");
+        std::fs::create_dir_all(&d).unwrap();
+        let store = Store::open(&d.join("telemetry.db")).unwrap();
+        let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: None, route: Some("manager"), account: "default" };
+        let lines: Vec<Value> = (0..1100).map(|i| json!({"type": "assistant", "message": {"id": format!("m{i}"), "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": 1}}})).collect();
+        let r = read(Client::Claude, &lines);
+        let turn = Event::observation(r.observation(Client::Claude, &ctx)).unwrap();
+        record(&store, turn.clone(), &r, Client::Claude, &ctx, "long").unwrap();
+        record(&store, turn, &r, Client::Claude, &ctx, "long").unwrap();
+        let (mut rows, mut after) = (vec![], 0);
+        loop {
+            let page = store.export(0, after, 1024).unwrap();
+            rows.extend(page["events"].as_array().unwrap().iter().map(|e| e["observation"]["kind"].as_str().unwrap().to_string()));
+            after = page["next"].as_i64().unwrap();
+            if page["more"] != true { break; }
+        }
+        assert_eq!(rows.len(), 1101, "a retry stays idempotent");
+        assert_eq!(rows[0], "agent.turn", "the turn goes first, so a failed later chunk never loses it");
+        assert_eq!(rows.iter().filter(|k| *k == "agent.call").count(), 1100);
+        drop(store);
         std::fs::remove_dir_all(d).unwrap();
     }
 

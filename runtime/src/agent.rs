@@ -15,7 +15,7 @@ mod app;
 mod protected;
 mod adapter;
 mod capture;
-pub use capture::{Call, ProcessUse, append_records, session_records};
+pub use capture::{APPEND_CHUNK, Call, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
@@ -877,7 +877,7 @@ pub(crate) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
             else if ag && v["status"] == "CANCELLED" { ("cancelled", "turn-cancelled") }
             else { ("ok", "none") };
         calls.push(Call {
-            id, at_ms: v["timestamp"].as_str().and_then(capture::time_ms),
+            id, at_ms: v["timestamp"].as_str().or(v["created_at"].as_str()).and_then(capture::time_ms),
             input: if codex { input.zip(read).and_then(|(i, r)| i.checked_sub(r)) } else { input },
             cache_read: read,
             cache_write: if codex { Some(0) } else if ag || cli { u["cache_write_tokens"].as_u64().or(u["cache_creation_input_tokens"].as_u64()) } else { u["cache_creation_input_tokens"].as_u64() },
@@ -1111,7 +1111,10 @@ impl Report {
     }
 
     /// The `agent.turn` observation: codes and numbers only; every null names its reason.
-    pub(crate) fn observation(&self, client: Client, ctx: &Context) -> Value {
+    pub(crate) fn observation(&self, client: Client, ctx: &Context) -> Value { self.observation_as(client.code(), ctx) }
+
+    /// The record under a runtime name; a hook session may name a client outside `Client` (agentq.md M6.11).
+    pub(crate) fn observation_as(&self, runtime: &str, ctx: &Context) -> Value {
         let mut unknown = serde_json::Map::new();
         let mut num = |name: &str, v: Option<u64>, why: &str| -> Value {
             if v.is_none() { unknown.insert(name.into(), json!(why)); }
@@ -1127,7 +1130,7 @@ impl Report {
         let mut v = json!({
             "product": ctx.product, "version": ctx.version, "operation": "agent.turn", "kind": "agent.turn",
             "trace": null, "span": null, "started_ms": self.started_ms.max(0), "duration_us": self.duration_us,
-            "outcome": self.outcome, "error": self.error, "project": ctx.project, "runtime": client.code(), "account": ctx.account,
+            "outcome": self.outcome, "error": self.error, "project": ctx.project, "runtime": runtime, "account": ctx.account,
             "task": num("task", task, "no-task"), "attempt": num("attempt", attempt, "no-task"),
             "input_tokens": num("input_tokens", self.usage.input, why), "cache_read_tokens": num("cache_read_tokens", self.usage.cache_read, why),
             "cache_write_tokens": num("cache_write_tokens", self.usage.cache_write, why), "output_tokens": num("output_tokens", self.usage.output, why),
