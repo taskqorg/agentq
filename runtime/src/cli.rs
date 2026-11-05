@@ -75,6 +75,6 @@ pub fn report_json(r: &Report) -> Value {
         "started_ms": r.started_ms, "duration_us": r.duration_us,
         "usage": {"calls": u.calls, "input": u.input, "cache_read": u.cache_read, "cache_write": u.cache_write, "output": u.output, "reasoning": u.reasoning, "model": u.model, "unknown": u.unknown},
         "process": {"user_cpu_us": r.process.user_cpu_us, "system_cpu_us": r.process.system_cpu_us, "peak_rss_bytes": r.process.peak_rss_bytes, "unknown": r.process.unknown},
-        "limit": {"used_percent": r.limit.used_percent, "resets_at": r.limit.resets_at, "window": r.limit.window, "unknown": r.limit.unknown},
+        "limit": {"used_percent": r.limit.used_percent, "resets_at": r.limit.resets_at, "window": r.limit.window, "unknown": r.limit.unknown}, "limits": r.limits,
         "reached": r.reached.map(|reset| json!({"reset": reset}))})
 }

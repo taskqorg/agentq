@@ -7,7 +7,7 @@ type WriteRequest=(Vec<u8>,mpsc::Sender<Res<()>>);
 /// Shared native stdio transport. Dropping the handle does not kill an active session; callers own its lifecycle.
 pub(crate) struct AppServer {
     child:Child,
-    input:SyncSender<WriteRequest>,
+    input:Option<SyncSender<WriteRequest>>,
     events:Receiver<Res<Value>>,
 }
 
@@ -51,7 +51,7 @@ impl AppServer {
                 if output.send(event).is_err() || failed {break;}
             }
         });
-        Ok(Self {child,input,events})
+        Ok(Self {child,input:Some(input),events})
     }
 
     pub fn id(&self)->u32 {self.child.id()}
@@ -63,7 +63,7 @@ impl AppServer {
         bytes.push(b'\n');
         let left=until.checked_duration_since(Instant::now()).ok_or("app-server send deadline; not submitted")?;
         let (receipt,done)=mpsc::channel();
-        self.input.try_send((bytes,receipt)).map_err(|_|"app-server writer unavailable; not submitted")?;
+        self.input.as_ref().ok_or("app-server writer closed")?.try_send((bytes,receipt)).map_err(|_|"app-server writer unavailable; not submitted")?;
         done.recv_timeout(left).map_err(|_|"app-server write acknowledgment unavailable; submission unknown")?
     }
 
@@ -80,7 +80,17 @@ impl AppServer {
     /// Stop only this directly owned child. Consumer process-group/native-turn authority remains with the caller.
     pub fn kill(&mut self)->Res<()> {
         if self.poll()?.is_some() {return Ok(());}
-        self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))
+        self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))?;
+        self.child.wait().map_err(|e|format!("app-server reap unconfirmed: {e}"))?;
+        Ok(())
+    }
+
+    /// EOF lets the native server close its MCP children; the owned server is reaped before return.
+    pub(super) fn close(&mut self)->Res<()> {
+        self.input.take();
+        let until=Instant::now()+Duration::from_secs(2);
+        while self.poll()?.is_none() && Instant::now()<until {std::thread::sleep(Duration::from_millis(10));}
+        self.kill()
     }
 }
 
@@ -108,6 +118,9 @@ pub(crate) struct AppSession {
     usage: Vec<Value>,
     limits: Option<Value>,
     latest_limits: Option<Value>,
+    windows: Vec<Window>,
+    latest_windows: Vec<Window>,
+    window_groups: BTreeMap<String, Vec<Window>>,
     started_ms: i64,
     /// Samples the plain server process; None for a protected or recovered session.
     sampler: Option<super::capture::Sampler>,
@@ -127,7 +140,7 @@ impl AppSession {
         }
         Ok(Self { spec: spec.clone(), next: 1, pending: None, initialized: false, ready: false,
             thread: None, turn: None, active: false, terminal: None, model: None, text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0, sampler: None, process: None,
-            early:vec![],fault:None,scope:native::scope(spec),worked:false,failure:None })
+            early:vec![],fault:None,scope:native::scope(spec),worked:false,failure:None, windows:limits::unknown("not-reported"), latest_windows:limits::unknown("not-reported"), window_groups:BTreeMap::new() })
     }
 
     /// Native catalogue/account methods share the same transport; caller handlers consume their raw responses.
@@ -172,6 +185,7 @@ impl AppSession {
         let changed_model = params.get("model").is_some_and(|m| m.as_str() != self.model.as_deref());
         let request = self.request("turn/start", params)?;
         self.active = true; self.turn = None; self.terminal = None; self.text = None; self.usage.clear(); self.limits = self.latest_limits.clone(); self.started_ms = unix_ms();
+        self.windows = self.latest_windows.clone();
         self.process = None;
         if let Some(sampler) = &self.sampler { sampler.mark(); }
         self.worked=false;self.failure=None;
@@ -196,11 +210,18 @@ impl AppSession {
     fn observe_inner(&mut self, message: &Value) -> Res<()> {
         // Server requests belong to the caller, even when their id happens to equal a client request id.
         if message["method"].is_string() && message.get("id").is_some() { return Ok(()); }
+        if limits::update(Client::Codex, message, (unix_ms()/1000).max(0) as u64, &mut self.window_groups) {
+            self.latest_windows = self.window_groups.values().flatten().cloned().collect();
+            if self.active && self.terminal.is_none() { self.windows = self.latest_windows.clone(); }
+        }
         if let Some((id, method)) = self.pending {
             if message["id"].as_u64() == Some(id) {
                 if !message["error"].is_null() {
                     if matches!(method,"model/list"|"account/read"|"account/rateLimits/read") {
-                        if method=="account/rateLimits/read" {self.latest_limits=None;if self.active && self.terminal.is_none() {self.limits=None;}}
+                        if method=="account/rateLimits/read" {
+                            self.latest_limits=None;self.window_groups.clear();self.latest_windows=limits::unknown("native-read-refused");
+                            if self.active && self.terminal.is_none() {self.limits=None;self.windows=self.latest_windows.clone();}
+                        }
                         self.pending=None;return Ok(());
                     }
                     return Err(format!("app-server {method} refused; original session retained"));
@@ -292,6 +313,7 @@ impl AppSession {
             events.push(json!({"rate_limits":limits}));
         }
         let mut r = Report::read(Client::Codex, "", &events, None);
+        r.limits = self.windows.clone();
         r.session = self.thread.clone(); r.usage.model = self.model.clone(); r.text = self.text.clone(); r.started_ms = self.started_ms;
         r.process = super::capture::ProcessUse { exit_unknown: "session-process", ..self.process.clone().unwrap_or_default() };
         for call in &mut r.calls { if call.model.is_none() { call.model = self.model.clone(); } }
@@ -331,7 +353,7 @@ impl AppSession {
         json!({"schema":"coreq-app-session/1", "root":self.spec.root, "home":self.spec.home, "session":self.spec.session,
             "next":self.next, "pending":self.pending.map(|(id, method)| json!([id,method])), "initialized":self.initialized, "ready":self.ready,
             "thread":self.thread,"turn":self.turn,"active":self.active,"terminal":self.terminal,"model":self.model,"text":self.text,
-            "usage":self.usage,"limits":self.limits,"latest_limits":self.latest_limits,"started_ms":self.started_ms,"early":self.early,"fault":self.fault,"scope":self.scope,"worked":self.worked,"failure":self.failure})
+            "usage":self.usage,"limits":self.limits,"latest_limits":self.latest_limits,"windows":self.windows,"latest_windows":self.latest_windows,"window_groups":self.window_groups,"started_ms":self.started_ms,"early":self.early,"fault":self.fault,"scope":self.scope,"worked":self.worked,"failure":self.failure})
     }
 
     pub fn recover(spec: &Spec, v: &Value) -> Res<Self> {
@@ -352,6 +374,9 @@ impl AppSession {
         }
         s.usage = v["usage"].as_array().ok_or("app-server recovery usage invalid")?.clone(); s.limits = (!v["limits"].is_null()).then(|| v["limits"].clone());
         s.latest_limits=(!v["latest_limits"].is_null()).then(||v["latest_limits"].clone());
+        if let Some(w) = v.get("windows") { s.windows = serde_json::from_value(w.clone()).map_err(|_| "app-server recovery windows invalid")?; }
+        if let Some(w) = v.get("latest_windows") { s.latest_windows = serde_json::from_value(w.clone()).map_err(|_| "app-server recovery windows invalid")?; }
+        if let Some(groups) = v.get("window_groups") { s.window_groups = serde_json::from_value(groups.clone()).map_err(|_| "app-server recovery window groups invalid")?; }
         s.started_ms = v["started_ms"].as_i64().filter(|n| *n >= 0).ok_or("app-server recovery time invalid")?;
         s.early=v["early"].as_array().ok_or("app-server recovery early events missing")?.clone();
         s.fault=if v["fault"].is_null() {None} else {Some(v["fault"].as_str().ok_or("app-server recovery fault invalid")?.into())};
@@ -372,6 +397,41 @@ impl AppSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #246 A4/P2: app-server groups survive updates/recovery; terminal reports stay frozen.
+    #[test]
+    fn app_server_keeps_independent_quota_groups() {
+        let spec=Spec {client:Client::Codex,root:std::env::temp_dir(),session:"-".into(),resume:false,args:vec![],env:vec![],home:None};
+        let mut app=AppSession::new(&spec).unwrap();
+        let init=app.initialize(json!({})).unwrap();app.observe(&json!({"id":init["id"],"result":{}})).unwrap();
+        let open=app.open(json!({})).unwrap();app.observe(&json!({"id":open["id"],"result":{"thread":{"id":"thread"}}})).unwrap();
+        let start=app.start_turn(json!({"input":[]})).unwrap();app.observe(&json!({"id":start["id"],"result":{"turn":{"id":"turn"}}})).unwrap();
+        let row=|group,used|json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":group,"primary":{"usedPercent":used,"windowDurationMins":300,"resetsAt":60},"secondary":{"usedPercent":90,"windowDurationMins":10080,"resetsAt":90}}}});
+        app.observe(&row("codex",20)).unwrap();app.observe(&row("other",30)).unwrap();
+        let read=app.request("account/rateLimits/read",json!({})).unwrap();
+        app.observe(&json!({"id":read["id"],"result":{"rateLimitsByLimitId":{"codex":row("codex",20)["params"]["rateLimits"],"other":row("other",30)["params"]["rateLimits"]}}})).unwrap();
+        let mut cold=AppSession::recover(&spec,&app.checkpoint()).unwrap();
+        for current in [&mut app,&mut cold] {
+            current.observe(&row("codex",40)).unwrap();
+            current.observe(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}})).unwrap();
+            let windows=current.report().unwrap().limits;
+            assert_eq!(windows.len(),4,"{windows:?}");
+            assert_eq!(windows.iter().map(|w|w.used).collect::<Vec<_>>(),vec![Some(0.4),Some(0.9),Some(0.3),Some(0.9)]);
+            current.observe(&row("other",99)).unwrap();assert_eq!(current.report().unwrap().limits,windows);
+            current.finish_turn().unwrap();let start=current.start_turn(json!({"input":[]})).unwrap();
+            current.observe(&json!({"id":start["id"],"result":{"turn":{"id":"next"}}})).unwrap();
+            current.observe(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"windowDurationMins":300},"secondary":null}}})).unwrap();
+            current.observe(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"next","status":"completed"}}})).unwrap();
+            let windows=current.report().unwrap().limits;assert_eq!(windows.len(),3);
+            assert_eq!(windows[0].used,None);assert!(windows[0].unknown.is_some());assert_eq!(windows[1].used,Some(0.99));
+            current.finish_turn().unwrap();let start=current.start_turn(json!({"input":[]})).unwrap();
+            current.observe(&json!({"id":start["id"],"result":{"turn":{"id":"unread"}}})).unwrap();
+            let read=current.request("account/rateLimits/read",json!({})).unwrap();
+            current.observe(&json!({"id":read["id"],"error":{"code":-32601,"message":"invented refusal"}})).unwrap();
+            current.observe(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"unread","status":"completed"}}})).unwrap();
+            assert_eq!(current.report().unwrap().limits,limits::unknown("native-read-refused"));
+        }
+    }
+
 
     fn observations(store: &crate::telemetry::Store) -> Vec<Value> {
         store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).filter(|o| o["kind"] == "agent.turn").collect()

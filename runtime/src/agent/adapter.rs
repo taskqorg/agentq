@@ -156,7 +156,7 @@ pub enum Mode {
     Background,
     /// Queue `Launch.input` (a reference) into a running desktop thread and observe its native `transcript` (capability `app-queue`).
     Queue { transcript: PathBuf },
-    /// A native app-server session (capability `app-server`): caller `initialize` and `thread` parameters pass through
+    /// A protected app-server session (capability `app-server`), opened only by `ProtectedAppServer::open`: caller `initialize` and `thread` parameters pass through
     /// unchanged, plus the mapped policy and model; `Launch.log` is the private stderr log.
     AppServer { initialize: Value, thread: Value },
 }
@@ -243,7 +243,7 @@ fn version_parts(s: &str) -> Option<Vec<u64>> {
     })
 }
 
-fn b64(bytes: &[u8]) -> String {
+pub(super) fn b64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for c in bytes.chunks(3) {
@@ -288,6 +288,8 @@ pub struct Run {
     body: Body,
     optimization: Optimization,
     progress: u64,
+    events: super::events::Cursor,
+    rollout_progress: Option<(PathBuf, u64)>,
     live: Option<Live>,
     recorded: bool,
     deadline: Option<Instant>,
@@ -316,6 +318,19 @@ struct Native {
 }
 
 impl Run {
+    fn restored(mut self, saved: &Value) -> Res<Self> {
+        if let Some(progress)=saved.get("progress") { self.progress=progress.as_u64().ok_or("run progress checkpoint invalid")?; }
+        if let Some(events)=saved.get("events") { self.events=serde_json::from_value(events.clone()).map_err(|_|"run event checkpoint invalid")?; }
+        if let Some(value)=saved.get("rollout_progress").filter(|v|!v.is_null()) {
+            let (path,offset):(PathBuf,u64)=serde_json::from_value(value.clone()).map_err(|_|"rollout checkpoint invalid")?;
+            let Body::Turn(t)=&self.body else {return Err("rollout checkpoint scope differs".into());};
+            let session=t.resumed.clone().or_else(||session_of(Client::Codex,&read_from(&t.log,t.start).unwrap_or_default()));
+            let expected=session.and_then(|s|rollout(&s,t.home.as_deref()));
+            if expected.as_ref()!=Some(&path) {return Err("rollout checkpoint scope differs".into());}
+            self.rollout_progress=Some((path,offset));
+        }
+        Ok(self)
+    }
     /// The descriptor name of the runtime that owns this run.
     pub fn runtime(&self) -> &'static str { self.runtime }
     /// The optimization state configured at launch, never proof of compression.
@@ -340,7 +355,7 @@ impl Run {
                 n.turn.record(ctx, store)?.ok_or("running")?
             }
             // Each app-server turn records once under its native thread and turn identity.
-            Body::App(a) => return a.session.record(ctx, store)?.ok_or_else(|| "running".into()),
+            Body::App(a) => a.session.record(ctx, store)?.ok_or_else(|| "running".to_string())?,
         };
         self.recorded = true;
         Ok(r)
@@ -405,6 +420,45 @@ struct App {
     model: Option<String>,
     /// Why the transport ended; the turn outcome stays native evidence only.
     closed: Option<String>,
+    owned: bool,
+    requests: Vec<Value>,
+    effort: Option<String>,
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if self.owned { if let Some(Transport::Plain(s)) = &mut self.transport { let _ = s.close(); } }
+    }
+}
+
+fn automatic(l: &Launch) -> bool { l.mode == Mode::Turn && (l.mcp.is_some() || l.instructions.is_some() || !l.parts.is_empty() || l.deltas) }
+
+/// Ordinary turns accept only declared needs; native protocol parameters remain protected-host data.
+fn turn_thread(l: &Launch) -> Res<Value> {
+    if l.parts.is_empty() && l.input.is_empty() { return Err("input-empty".into()); }
+    let mut policy = l.clone(); policy.effort = None;
+    let mut t = thread_params(&policy, &json!({}))?;
+    if let Some(e) = &l.effort {
+        if e.is_empty() || !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err("effort requires a plain word".into()); }
+    }
+    t["cwd"] = json!(l.root);
+    t["excludeTurns"] = json!(true);
+    if let Some(path) = &l.instructions { t["developerInstructions"] = json!(std::fs::read_to_string(path).map_err(|_| "instructions unreadable")?); }
+    if let Some(path) = &l.mcp {
+        mcp_servers(path)?;
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(path).map_err(|_| "mcp config unreadable")?).map_err(|_| "mcp config invalid")?;
+        let mut servers = serde_json::Map::new();
+        for (name, v) in v["mcpServers"].as_object().ok_or("mcp config names no servers")? {
+            let object = v.as_object().ok_or("mcp server must be an object")?;
+            if object.keys().any(|k| !matches!(k.as_str(), "command" | "args" | "env")) { return Err("mcp server field unsupported; expected command, args, env".into()); }
+            if v["command"].as_str().is_none_or(|s| s.is_empty()) || v.get("args").is_some_and(|a| a.as_array().is_none_or(|a| a.iter().any(|v| !v.is_string())))
+                || v.get("env").is_some_and(|e| e.as_object().is_none_or(|e| e.values().any(|v| !v.is_string()))) { return Err("mcp server command, args or env invalid".into()); }
+            let mut server = v.clone(); server["default_tools_approval_mode"] = json!("approve");
+            servers.insert(name.clone(), server);
+        }
+        t["config"]["mcp_servers"] = servers.into();
+    }
+    Ok(t)
 }
 
 fn reply_deadline(l: &Launch) -> Instant { l.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30)) }
@@ -432,15 +486,23 @@ fn thread_params(l: &Launch, thread: &Value) -> Res<Value> {
 }
 
 impl App {
+    fn observe(&mut self, m: Value, until: Instant) -> Res<()> {
+        self.session.observe(&m)?;
+        if m.get("id").is_some() && m["method"].is_string() {
+            if self.owned {
+                let reply = json!({"id":m["id"],"error":{"code":-32601,"message":"No approval or native tool handler for this turn"}});
+                self.transport.as_mut().ok_or("app-server transport ended")?.send(&reply, until)?;
+            } else { self.requests.push(m); }
+        } else { self.pending.push(m); }
+        Ok(())
+    }
     /// Exchange one client request and read until its reply; every message read stays pending for `progress`.
     fn exchange(&mut self, request: Value, until: Instant) -> Res<()> {
-        let transport = self.transport.as_mut().ok_or("app-server transport ended")?;
-        transport.send(&request, until)?;
+        self.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)?;
         loop {
-            let m = transport.receive(until)?.ok_or("app-server reply deadline; session state unknown")?;
-            self.session.observe(&m)?;
+            let m = self.transport.as_mut().ok_or("app-server transport ended")?.receive(until)?.ok_or("app-server reply deadline; session state unknown")?;
             let reply = m["id"] == request["id"] && m.get("method").is_none();
-            self.pending.push(m);
+            self.observe(m, until)?;
             if reply { return Ok(()); }
         }
     }
@@ -453,14 +515,15 @@ impl App {
             Err(e) => { if let Transport::Plain(s) = &mut transport { let _ = s.kill(); } return Err(e); }
         };
         if let Transport::Plain(server) = &transport { session.sample(server.id()); }
-        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None };
+        let owned = matches!(transport, Transport::Plain(_));
+        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone() };
         let opened = app.handshake(initialize, thread, l);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
     }
 
     fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch) -> Res<()> {
-        let params = thread_params(l, thread)?;
+        let params = if self.owned { turn_thread(l)? } else { thread_params(l, thread)? };
         let until = reply_deadline(l);
         let request = self.session.initialize(initialize.clone())?;
         self.exchange(request, until)?;
@@ -469,7 +532,8 @@ impl App {
         let request = self.session.open(params)?;
         self.exchange(request, until)?;
         if !self.session.ready() { return Err("app-server thread not ready".into()); }
-        if !l.input.is_empty() { self.input(&l.input, until)?; }
+        if !l.parts.is_empty() { self.start(input_items(&table(Client::Codex).descriptor, &l.parts).map_err(|e|e.to_string())?, until)?; }
+        else if !l.input.is_empty() { self.input(&l.input, until)?; }
         Ok(())
     }
 
@@ -480,6 +544,7 @@ impl App {
         if self.session.report().is_some() { self.session.finish_turn()?; }
         let mut params = json!({"input": items});
         if let Some(m) = &self.model { params["model"] = json!(m); }
+        if let Some(e) = &self.effort { params["effort"] = json!(e); }
         let request = self.session.start_turn(params)?;
         self.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)
     }
@@ -495,10 +560,16 @@ impl App {
 
     /// Read every message available now.
     fn pump(&mut self) -> Res<()> {
-        let Some(transport) = self.transport.as_mut() else { return Ok(()) };
+        if self.transport.is_none() { return Ok(()); }
         loop {
-            match transport.receive(Instant::now()) {
-                Ok(Some(m)) => { self.session.observe(&m)?; self.pending.push(m); }
+            match self.transport.as_mut().expect("transport").receive(Instant::now()) {
+                Ok(Some(m)) => {
+                    self.observe(m, Instant::now() + Duration::from_secs(5))?;
+                    if self.owned && self.session.report().is_some() {
+                        if let Some(Transport::Plain(s)) = &mut self.transport { s.close()?; }
+                        return Ok(());
+                    }
+                }
                 Ok(None) => return Ok(()),
                 Err(e) => { self.closed = Some(e); return Ok(()); }
             }
@@ -554,7 +625,7 @@ fn input_items(descriptor: &Descriptor, parts: &[Part]) -> Result<Value, Failure
         items.push(match p {
             Part::Text(t) => json!({"type": "text", "text": t}),
             Part::Image(_) if !descriptor.has("image-input") => return Err(Failure::Refused(Cause("image-unsupported"))),
-            Part::Image(path) if !path.is_absolute() || !path.is_file() => return Err(Failure::Refused(Cause("image-invalid"))),
+            Part::Image(path) if !path.is_absolute() || !path.is_file() || File::open(path).is_err() => return Err(Failure::Refused(Cause("image-invalid"))),
             Part::Image(path) => json!({"type": "localImage", "path": path}),
         });
     }
@@ -570,15 +641,16 @@ pub trait Runtime: Send + Sync {
     fn input(&self, run: &mut Run, parts: &[Part]) -> Result<(), Failure>;
     /// Read-only login identity of a session run (capability `account`); never refreshes or writes a credential.
     fn account(&self, run: &mut Run) -> Result<Account, Failure>;
-    /// Send one native protocol message of a session run: a reply to a server request from `progress`, or a
-    /// catalogue/limit read (`model/list`, `account/rateLimits/read`). Every other method returns cause `send-unsupported`.
-    fn send(&self, run: &mut Run, message: &Value) -> Res<()>;
+    /// Read the login's model catalogue; no turn or product protocol handler is needed.
+    fn catalogue(&self, home: Option<&Path>) -> Res<Vec<Model>>;
+    fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window>;
+    fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window>;
     /// Request the stop; true when the exit is already confirmed.
     fn cancel(&self, run: &mut Run) -> Res<bool>;
     fn poll(&self, run: &mut Run) -> Res<State>;
     fn report(&self, run: &Run) -> Res<Report>;
-    /// Complete native JSON records appended since the previous call.
-    fn progress(&self, run: &mut Run) -> Res<Vec<Value>>;
+    /// Ordered neutral events, each returned at most once.
+    fn progress(&self, run: &mut Run) -> Res<Vec<Event>>;
     /// Capability `background`: the raw launcher exchange of this run, handed over once.
     fn launcher_output(&self, run: &mut Run) -> Result<Result<Output, crate::process::Failure>, Cause>;
     fn session_id(&self, run: &Run) -> Option<String>;
@@ -652,12 +724,12 @@ struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize }
 static ADAPTERS: [Adapter; 3] = [
     Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
-        capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "background", "title", "mcp-config",
+        capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
             "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } },
     Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt", models: &[], minimum: "0.162.0",
-        capabilities: &["turn", "resume", "quota-snapshot", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env"] } },
+        capabilities: &["turn", "resume", "quota-snapshot", "account-limits", "catalogue", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env", "mcp-config", "instructions-file", "turn-parts", "turn-deltas"] } },
     Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "",
-        capabilities: &["turn", "resume", "title"] } },
+        capabilities: &["turn", "resume", "title", "account-limits"] } },
 ];
 
 /// Every runtime adapter.
@@ -844,12 +916,13 @@ impl Adapter {
     /// The child spec for `l`: mapped policy, then the launch's optimization intent.
     fn spec(&self, l: &Launch, session: String, resume: bool) -> Res<(Spec, Optimization)> {
         let name = self.descriptor.name;
-        let app = matches!(l.mode, Mode::AppServer { .. });
+        let app = matches!(l.mode, Mode::AppServer { .. }) || self.client == Client::Codex && automatic(l);
         for (capability, set) in [("mcp-config", l.mcp.is_some()), ("instructions-file", l.instructions.is_some()), ("turn-parts", !l.parts.is_empty()),
             ("turn-deltas", l.deltas && !app), ("host-args", !l.host_args.is_empty())] {
             if set && (l.mode != Mode::Turn || !self.descriptor.has(capability)) { return Err(format!("{capability} unsupported by {name}")); }
         }
         if !l.host_args.is_empty() && l.policy != Policy::default() { return Err(format!("host-args require the native policy on {name}")); }
+        if app && !l.host_args.is_empty() { return Err("host-args unsupported with relay input".into()); }
         if !l.settings_env.is_empty() && (!matches!(l.mode, Mode::Turn | Mode::Background) || !self.descriptor.has("settings-env")) {
             return Err(format!("settings-env unsupported by {name}"));
         }
@@ -879,13 +952,14 @@ impl Adapter {
 
     fn run(&'static self, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
         self.live.fetch_add(1, Ordering::SeqCst);
-        Run { runtime: self.descriptor.name, body, progress, optimization, live: Some(Live(&self.live)), recorded: false, deadline: l.deadline,
+        Run { runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, deadline: l.deadline,
             remote: l.title.is_some() }
     }
 
     fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {
         let name = self.descriptor.name;
         if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability())); }
+        if matches!(l.mode, Mode::AppServer { .. }) { return Err("app-server requires explicit protected host; state needs in Launch".into()); }
         if let Some(accounts) = &l.accounts {
             let now = (unix_ms() / 1000).max(0);
             let q = self.quota(accounts, now);
@@ -899,10 +973,20 @@ impl Adapter {
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
         match &l.mode {
             Mode::Turn => {
+                if self.client == Client::Codex && automatic(l) {
+                    turn_thread(l)?;
+                    if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
+                    let server = AppServer::spawn(app_server_command(command, &spec)?, &l.log, &l.process)?;
+                    let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l)?;
+                    return Ok(self.run(Body::App(Box::new(app)), 0, optimization, l));
+                }
                 let input = if l.parts.is_empty() { l.input.clone() } else { stream_message(&l.parts)? };
+                let baseline = if self.client == Client::Codex && spec.resume {
+                    rollout(&spec.session, spec_home(&spec).as_deref()).map(|p|std::fs::metadata(&p).map(|m|(p,m.len())).map_err(|_|"rollout baseline unreadable")) .transpose()?
+                } else {None};
                 let turn = Turn::start(command, &spec, &l.log, &input, &l.process)?;
                 let start = turn.start;
-                Ok(self.run(Body::Turn(turn), start, optimization, l))
+                let mut run = self.run(Body::Turn(turn), start, optimization, l); run.rollout_progress = baseline; Ok(run)
             }
             Mode::Background => {
                 // A new job's transcript is unknown until discovery; the alias path does not exist.
@@ -945,7 +1029,7 @@ impl Runtime for Adapter {
         let items = input_items(&self.descriptor, parts)?;
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
-            Body::App(a) => { a.pump()?; a.start(items, until)?; run.live.get_or_insert(Live(&table(self.client).live)).0.fetch_add(1, Ordering::SeqCst); Ok(()) }
+            Body::App(a) if !a.owned => { a.pump()?; a.start(items, until)?; run.recorded = false; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
             // A CLI run reads one input; the next turn is a resume.
             _ => Err(Failure::Refused(Cause("input-unsupported"))),
         }
@@ -960,21 +1044,15 @@ impl Runtime for Adapter {
         }
     }
 
-    fn send(&self, run: &mut Run, message: &Value) -> Res<()> {
-        let run = self.own_mut(run)?;
-        let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
-        let Body::App(a) = &mut run.body else { return Err("send-unsupported: only session runs take native messages".into()) };
-        let request = match message["method"].as_str() {
-            Some(m @ ("model/list" | "account/rateLimits/read")) => {
-                let method = if m == "model/list" { "model/list" } else { "account/rateLimits/read" };
-                a.session.request(method, message.get("params").cloned().unwrap_or_else(|| json!({})))?
-            }
-            Some(m) => return Err(format!("send-unsupported: method {m}")),
-            None if message.get("id").is_some() && (message.get("result").is_some() || message.get("error").is_some()) => message.clone(),
-            None => return Err("send requires a server-request reply or a catalogue/account read".into()),
-        };
-        a.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)
+    fn catalogue(&self, home: Option<&Path>) -> Res<Vec<Model>> { self.needs("catalogue")?; super::limits::catalogue(home) }
+
+    fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window> {
+        let events = log.lines().filter_map(|l| serde_json::from_str(l).ok()).collect::<Vec<_>>();
+        let path = session.and_then(|s| self.session_transcript(s, home));
+        super::limits::read(self.client, &events, path.as_deref())
     }
+
+    fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window> { super::limits::account(self.client, home, now) }
 
     fn cancel(&self, run: &mut Run) -> Res<bool> {
         match &mut self.own_mut(run)?.body {
@@ -1019,7 +1097,13 @@ impl Runtime for Adapter {
                 state(&t.report())
             }
             Body::Native(n) => n.poll()?,
-            Body::App(a) => a.poll()?,
+            Body::App(a) => {
+                if a.owned && run.deadline.is_some_and(|d|Instant::now()>=d) && a.session.report().is_none() {
+                    if let Some(Transport::Plain(s))=&mut a.transport {s.close()?;}
+                    a.closed=Some("deadline elapsed; native turn outcome unknown".into());
+                }
+                a.poll()?
+            },
         };
         if s != State::Running && s != State::Unknown { run.live = None; }
         Ok(s)
@@ -1034,17 +1118,26 @@ impl Runtime for Adapter {
         }
     }
 
-    fn progress(&self, run: &mut Run) -> Res<Vec<Value>> {
+    fn progress(&self, run: &mut Run) -> Res<Vec<Event>> {
         let run = self.own_mut(run)?;
         let path = match &mut run.body {
             Body::Turn(t) => { t.sync_antigravity_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
-            Body::App(a) => { a.pump()?; return Ok(std::mem::take(&mut a.pending)); }
+            Body::App(a) => { a.pump()?; return Ok(run.events.read(self.client, std::mem::take(&mut a.pending))); }
         };
-        let (values, next) = lines_from(&path, run.progress)?;
+        let (mut values, next) = lines_from(&path, run.progress)?;
+        if let Body::Turn(t) = &run.body {
+            if self.client == Client::Codex {
+                if run.rollout_progress.is_none() && t.resumed.is_none() { run.rollout_progress = session_of(self.client, &read_from(&t.log,t.start).unwrap_or_default()).and_then(|s| rollout(&s, t.home.as_deref())).map(|p|(p,0)); }
+                if let Some((path, from)) = &mut run.rollout_progress {
+                    let (rows, next) = lines_from(path, *from)?; *from = next;
+                    values.extend(rows.into_iter().filter(|v| v["payload"]["type"] == "token_count"));
+                }
+            }
+        }
         run.progress = next;
-        Ok(values)
+        Ok(run.events.read(self.client, values))
     }
 
     fn launcher_output(&self, run: &mut Run) -> Result<Result<Output, crate::process::Failure>, Cause> {
@@ -1165,18 +1258,20 @@ impl Runtime for Adapter {
     }
 
     fn checkpoint(&self, run: &Run) -> Result<Value, Cause> {
-        match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
+        let mut saved = match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
             Body::Turn(t) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "turn", "turn": t.checkpoint()?})),
             Body::App(a) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "app", "app": a.session.checkpoint(), "model": a.model})),
             Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
                 "session": n.turn.session(), "resume": n.spec.resume, "job": n.job_id, "attached": n.attached, "fault": n.fault})),
-        }
+        }?;
+        saved["progress"]=json!(run.progress); saved["events"]=json!(run.events); saved["rollout_progress"]=json!(run.rollout_progress);
+        Ok(saved)
     }
 
     fn recover(&self, saved: &Value, l: &Launch) -> Res<Run> {
         let me = table(self.client);
         let queue = matches!(l.mode, Mode::Queue { .. });
-        let kind = match l.mode { Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
+        let kind = match l.mode { Mode::Turn if self.client == Client::Codex && automatic(l) => "app", Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
         if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["kind"] != kind {
             return Err("run recovery scope differs".into());
         }
@@ -1186,15 +1281,15 @@ impl Runtime for Adapter {
             let (spec, optimization) = me.spec(l, resumed.map_or_else(|| new_session(self.client), String::from), resumed.is_some())?;
             let turn = Turn::recover(&spec, &l.log, &saved["turn"])?;
             let start = turn.start;
-            return Ok(me.run(Body::Turn(turn), start, optimization, l));
+            return me.run(Body::Turn(turn), start, optimization, l).restored(saved);
         }
         if kind == "app" {
             // Observation only: the transport ended with its process, so the run reports and records but takes no input.
             let app = &saved["app"];
             let (spec, optimization) = me.spec(l, app["session"].as_str().ok_or("run recovery session invalid")?.into(), app["session"] != "-")?;
             let session = AppSession::recover(&spec, app)?;
-            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()) };
-            return Ok(me.run(Body::App(Box::new(a)), 0, optimization, l));
+            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone() };
+            return me.run(Body::App(Box::new(a)), 0, optimization, l).restored(saved);
         }
         let session = saved["session"].as_str().filter(|s| native::plain_id(s)).ok_or("run recovery session invalid")?;
         let (spec, optimization) = me.spec(l, session.into(), saved["resume"].as_bool().ok_or("run recovery state invalid")?)?;
@@ -1204,7 +1299,7 @@ impl Runtime for Adapter {
         let start = turn.start();
         let body = Body::Native(Box::new(Native { queue, turn, spec, command: l.command.clone(), job_id: text("job"), job: None,
             attached: saved["attached"].as_bool().ok_or("run recovery state invalid")?, fault: text("fault"), report: None, launcher: None }));
-        Ok(me.run(body, start, optimization, l))
+        me.run(body, start, optimization, l).restored(saved)
     }
 
     fn classify(&self, log: &str) -> Report {
@@ -1301,6 +1396,19 @@ pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, 
 }
 
 fn table(client: Client) -> &'static Adapter { ADAPTERS.iter().find(|a| a.client == client).expect("adapter in table") }
+
+pub(super) fn protected_requests(run: &mut Run) -> Res<Vec<Value>> {
+    let Body::App(a) = &mut run.body else { return Err("protected-host-required".into()); };
+    if a.owned { return Err("protected-host-required".into()); }
+    a.pump()?; Ok(std::mem::take(&mut a.requests))
+}
+
+pub(super) fn protected_reply(run: &mut Run, reply: &Value, until: Instant) -> Res<()> {
+    let Body::App(a) = &mut run.body else { return Err("protected-host-required".into()); };
+    if reply.get("method").is_some() || reply.get("id").is_none() || (reply.get("result").is_some() == reply.get("error").is_some()) { return Err("protected server-request reply required".into()); }
+    let Some(Transport::Protected(s)) = &mut a.transport else { return Err("protected-host-required".into()); };
+    s.send(reply, until)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1474,7 +1582,7 @@ mod tests {
         assert_eq!(runtime("agy").unwrap().descriptor().name, "antigravity");
         assert!(runtime("other").is_none());
         assert!(runtime("claude").unwrap().descriptor().has("compact-hook") && !runtime("codex").unwrap().descriptor().has("compact-hook"));
-        assert!(runtime("claude").unwrap().descriptor().has("turn-parts") && !runtime("codex").unwrap().descriptor().has("turn-parts"));
+        assert!(runtime("claude").unwrap().descriptor().has("turn-parts") && runtime("codex").unwrap().descriptor().has("turn-parts") && !runtime("antigravity").unwrap().descriptor().has("turn-parts"));
         assert_eq!(runtime("claude").unwrap().descriptor().models, ["opus", "sonnet", "haiku"]);
         assert!(runtimes().iter().all(|r| r.descriptor().minimum.is_empty() || version_parts(r.descriptor().minimum).is_some()));
         for r in runtimes() {
