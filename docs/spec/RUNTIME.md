@@ -131,6 +131,8 @@ Antigravity maps `step_update` and `result` to the events it can name and everyt
 
 Antigravity sidecar tool calls and responses map to `ToolStart` and `ToolEnd`. Neither Antigravity source reports context capacity or quota events; these stay absent. Requesting live text through `Launch.deltas` is unsupported on Antigravity. Native `agy` text deltas without that request remain activity. No synthetic context or quota is emitted.
 
+Antigravity event qualification requires a native tool completion with status `DONE`; a successful final model response does not prove tool execution. A denied, cancelled or unknown tool result fails the qualification probe, which reports every `ToolEnd` status and retains the native log. Native macOS event evidence includes a pre-tool-hook denial: message and error events were observed, but successful tool execution remains unqualified ([native evidence](../evidence/runtime-246-antigravity.md)). Hooks and native authority are never bypassed to qualify this path.
+
 `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
 
 ### Caller launch data

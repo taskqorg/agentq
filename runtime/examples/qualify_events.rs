@@ -18,6 +18,16 @@ fn finish(runtime: &dyn agent::Runtime, launch: &Launch, resume: Option<&str>) -
     }
 }
 
+fn antigravity_tools_completed(events: &[Event]) -> Result<(), String> {
+    let statuses: Vec<_> = events.iter().filter_map(|event| match event {
+        Event::ToolEnd { status, .. } => Some(status.as_deref()), _ => None,
+    }).collect();
+    if statuses.is_empty() || statuses.iter().any(|status| *status != Some("DONE")) {
+        return Err("native Antigravity tool completion not proven; inspect retained log".into());
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let name = std::env::args().nth(1).unwrap_or_else(|| "codex".into());
     let runtime = agent::runtime(&name).ok_or("unknown runtime")?;
@@ -37,7 +47,10 @@ fn main() -> Result<(), String> {
     if name != "codex" {
         let mut counts=std::collections::BTreeMap::<&str,usize>::new();
         for event in &observed {let kind=match event {Event::Text{..}=>"Text",Event::Message{..}=>"Message",Event::ToolStart{..}=>"ToolStart",Event::ToolEnd{..}=>"ToolEnd",Event::Quota(_)=>"Quota",Event::Context{..}=>"Context",Event::Activity=>"Activity"};*counts.entry(kind).or_default()+=1;}
-        println!("{}",json!({"runtime":name,"outcome":plain.outcome,"session":plain.session,"limits":plain.limits,"events":counts,"delta_capability":runtime.descriptor().has("turn-deltas")})); return Ok(());
+        let statuses: Vec<_> = observed.iter().filter_map(|event| match event { Event::ToolEnd { status, .. } => Some(status), _ => None }).collect();
+        println!("{}",json!({"runtime":name,"outcome":plain.outcome,"session":plain.session,"limits":plain.limits,"events":counts,"tool_end_statuses":statuses,"log":l.log,"delta_capability":runtime.descriptor().has("turn-deltas")}));
+        if name == "antigravity" { antigravity_tools_completed(&observed)?; }
+        return Ok(());
     }
     let server = root.join("relay.py");
     std::fs::write(&server, r#"import json,os,sys
@@ -68,4 +81,22 @@ for line in sys.stdin:
     if deltas == 0 || tools == 0 { return Err("native delta/tool events missing".into()); }
     println!("{}",json!({"runtime":name,"plain":"ok","advanced":report.outcome,"env_ok":true,"deltas":deltas,"tools":tools,"limits":report.limits,"catalogue_models":runtime.catalogue(None)?.len(),"account_limits":runtime.account_limits(None, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)}));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #246 A5/P2: a final model success must not hide denied or unobserved tool execution.
+    #[test]
+    fn antigravity_probe_requires_successful_tool_completion() {
+        assert!(antigravity_tools_completed(&[]).is_err());
+        for status in [None, Some("ERROR"), Some("CANCELLED")] {
+            let denied = Event::ToolEnd { id: None, status: status.map(String::from) };
+            assert!(antigravity_tools_completed(&[denied]).is_err());
+        }
+        let done = Event::ToolEnd { id: None, status: Some("DONE".into()) };
+        assert!(antigravity_tools_completed(&[done.clone()]).is_ok());
+        assert!(antigravity_tools_completed(&[done, Event::ToolEnd { id: None, status: Some("ERROR".into()) }]).is_err());
+    }
 }

@@ -23,3 +23,7 @@ name = "agent"
 path = "tests/agent.rs"
 # The binary is also the fake Claude and Codex client (COREQ_FAKE_AGENT), so it owns main.
 harness = false
+
+[[example]]
+name = "qualify_events"
+test = true
