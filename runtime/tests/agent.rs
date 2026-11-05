@@ -15,7 +15,7 @@ fn main() {
         std::process::exit(Command::new(&wrapper[1]).args(&wrapper[2..]).status().unwrap().code().unwrap_or(1));
     }
     if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
-    if std::env::args().nth(1).as_deref()==Some("service") { return protected::fake_host(); }
+    if matches!(std::env::args().nth(1).as_deref(), Some("service"|"agent")) { return protected::fake_host(); }
     if let Some(file) = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].iter().find_map(|k| std::env::var_os(k)).map(|h| PathBuf::from(h).join("fake-ready.json")).filter(|f| f.is_file()) {
         return fake_ready(&file);
     }
@@ -34,6 +34,8 @@ fn main() {
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
         ("protected_launch_refuses_tampering_and_preserves_native_transport", protected::protected_launch_refuses_tampering_and_preserves_native_transport),
+        ("signed_retained_recovery_preserves_original_bytes", protected::signed_retained_recovery_preserves_original_bytes),
+        ("independent_signed_host_recovers_without_taskq", protected::independent_signed_host_recovers_without_taskq),
         ("protected_frontend_is_not_scope_supervisor", protected::protected_frontend_is_not_scope_supervisor),
         ("protected_preparation_and_completion_recover_original_operation", protected::protected_preparation_and_completion_recover_original_operation),
         ("json_turns_run_plain_without_the_optimizer", json_turns_run_plain_without_the_optimizer),

@@ -23,21 +23,32 @@ fn authority(root:&Path,revision:&Value,account:&Value)->Value {
 
 pub fn fake_host() {
     let args:Vec<_>=std::env::args().collect();
-    assert_eq!(&args[1..4],["service","app-server","--action"]);
+    assert!(args[1..4]==["service","app-server","--action"] || args[1..4]==["agent","host","--action"]);
     assert_eq!(args[5],"--request"); assert_eq!(args.len(),7,"no native flags or caller environment");
-    let r:Value=serde_json::from_str(&args[6]).unwrap();let root=PathBuf::from(r["slot"]["binding"]["root"].as_str().unwrap());
+    let wire:Value=serde_json::from_str(&args[6]).unwrap();
+    if matches!(args[4].as_str(),"retained"|"retained-cancel") {
+        assert_eq!(&args[1..3],["agent","host"],"retained recovery never invokes a TaskQ runtime");
+        let checkpoint:Value=serde_json::from_str(wire["checkpoint"].as_str().unwrap()).unwrap();
+        let root=PathBuf::from(checkpoint["slot"]["binding"]["root"].as_str().unwrap());
+        assert_eq!(std::fs::read_to_string(root.join("retained-checkpoint")).unwrap(),wire["checkpoint"]);
+        assert_eq!(std::fs::read_to_string(root.join("retained-receipt")).unwrap(),wire["receipt"]);
+        println!("{}",json!({"schema":"agentq.retained-operation/1","checkpoint":wire["checkpoint"],"receipt":wire["receipt"],"state":"unknown","cleanup":{"requested":args[4]}}));return;
+    }
+    let modern=wire["schema"]=="agentq.app-server/1";
+    let mut r=wire.clone();if modern {r["slot"]=r["permit"].take();r.as_object_mut().unwrap().remove("permit");}
+    let root=PathBuf::from(r["slot"]["binding"]["root"].as_str().unwrap());
     let original=root.join("request.json"); let receipt=root.join("receipt.json");
     match args[4].as_str() {
         "prepare"=>{
             assert!(!original.exists(),"never derive preparation from launch");
             assert_eq!(r.as_object().unwrap().len(),2);
-            let prepared=json!({"schema":"taskq.app-server-preparation/1","binding":r["slot"]["binding"],
+            let prepared=json!({"schema":if modern {"agentq.app-server-preparation/1"}else{"taskq.app-server-preparation/1"},"binding":r["slot"]["binding"],
                 "authority":authority(&root,&json!(29),&json!("default")),"host_instance":"invented-host-1"});
             let hash=ring::digest::digest(&ring::digest::SHA256,prepared.to_string().as_bytes()).as_ref().iter().map(|b|format!("{b:02x}")).collect::<String>();
             let answer=json!({"schema":"taskq.app-server/1","state":"prepared","preparation":hash,"policy_revision":29,"account":"default","prepared":prepared});
             let path=root.join("prepared.json");
             if path.exists() {assert_eq!(read(&path),answer,"preparation drift cannot replace original authority");}else{save(&path,&answer);}
-            println!("{answer}");
+            println!("{}", wire_receipt(answer,modern));
         },
         "launch"=>{
             if root.join("prepared.json").exists() {
@@ -47,13 +58,13 @@ pub fn fake_host() {
                 assert_eq!(authority(&root,&r["policy_revision"],&r["account"]),prepared["prepared"]["authority"],"launch revalidates host authority");
             }
             if root.join("owner-route").exists() {
-                assert_eq!(read(&root.join("owner-route/launch-intent.json")),r,"durable exact intent precedes dispatch");
+                assert_eq!(read(&root.join("owner-route/launch-intent.json")),wire,"durable exact intent precedes dispatch");
             }
             assert!(!original.exists(),"uncertain launch must never replay"); save(&original,&r);
             if root.join("scope-mode").exists() {
                 let frontend=coreq::process::identity(std::process::id()).unwrap().unwrap();
                 save(&root.join("frontend.json"),&json!({"pid":frontend.pid,"started":frontend.started}));
-                let status=Command::new(std::env::current_exe().unwrap()).args(["service","app-server","--action","fake-scope","--request",&r.to_string()]).status().unwrap();
+                let status=Command::new(std::env::current_exe().unwrap()).args([if modern {"agent"}else{"service"},if modern {"host"}else{"app-server"},"--action","fake-scope","--request",&wire.to_string()]).status().unwrap();
                 std::process::exit(status.code().unwrap_or(1));
             }
             native_scope(&r,&root,&receipt);
@@ -62,21 +73,21 @@ pub fn fake_host() {
         "observe"=>{
             assert_eq!(read(&original),r,"host independently rejects changed operation/key");
             if root.join("lost-reply").exists() {print!("incomplete");return;}
-            println!("{}",read(&receipt));
+            println!("{}",wire_receipt(read(&receipt),modern));
         },
         "reconcile"=>{
             if original.exists() {assert_eq!(read(&original),r,"recovery preserves original slot/key/operation");}
             if root.join("lost-reply").exists() {print!("incomplete");return;}
             let seen=if receipt.exists() {read(&receipt)}else{json!({"schema":"taskq.app-server/1","caller":r["slot"]["binding"]["caller"],
                 "operation":r["slot"]["binding"]["op_id"],"state":"unknown","launch":null})};
-            println!("{seen}");
+            println!("{}",wire_receipt(seen,modern));
         },
         "cancel"=>{
             assert_eq!(read(&original),r);
             let id=read(&root.join("child.json"));
             coreq::process::terminate(&coreq::process::Identity{pid:id["pid"].as_u64().unwrap() as u32,started:id["started"].as_str().unwrap().into()}).unwrap();
             let mut seen=read(&receipt);seen["state"]=json!("unknown");seen["launch"]["cancel_requested"]=json!(true);save(&receipt,&seen);
-            println!("{seen}");
+            println!("{}",wire_receipt(seen,modern));
         },_=>panic!("unexpected adapter action"),
     }
 }
@@ -128,35 +139,45 @@ pub fn protected_frontend_is_not_scope_supervisor() {
 
 // M12.8 / #199 A1-A5: independent preparation, fresh input gate and original-operation recovery.
 // Risk: stale preparation dispatches, absent roots/descendants or a partial cleanup release capacity, or recovery replays input.
-pub fn protected_preparation_and_completion_recover_original_operation() {
+pub fn protected_preparation_and_completion_recover_original_operation() { prepared_operation(false); }
+pub fn independent_signed_host_recovers_without_taskq() { prepared_operation(true); }
+fn prepared_operation(modern:bool) {
     let root=scratch("protected-prepared").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
     let home=root.join("account");std::fs::create_dir(&home).unwrap();
     let expected=json!({"profile_sha256":"b".repeat(64),"account_home":home,"approver":"invented-operator"});
     save(&root.join("expected.json"),&expected);std::fs::write(root.join("scope-mode"),b"invented scope").unwrap();
-    let host=ProtectedHost::new(&exe,&digest(&exe)).unwrap();let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
-    let slot=json!({"binding":{"schema":"taskq.slots/1","caller":"invented-consumer","op_id":"job-prepared",
+    let host=if modern {signed_host(&exe)}else{ProtectedHost::new(&exe,&digest(&exe)).unwrap()};let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
+    let mut slot=json!({"binding":{"schema":"taskq.slots/1","caller":"invented-consumer","op_id":"job-prepared",
         "root":root,"runtime":"codex","pid":owner.pid,"started":owner.started,"boot":10,"expires_at":9999999999u64},"key":"a".repeat(64)});
+    if modern {slot["binding"]["schema"]=json!("pipe.permits/1");slot["signature"]=json!("a".repeat(128));}
+    let field=if modern {"permit"}else{"slot"};
     let mut wrong=slot.clone();wrong["binding"]["started"]=json!("reused-consumer-pid");
     assert!(host.prepare(&wrong,until()).is_err());assert!(!root.join("prepared.json").exists());
     assert!(host.prepare(&slot,Instant::now()).is_err());assert!(!root.join("prepared.json").exists(),"expired readback never invokes host");
     let handoff=root.join("owner-route");std::fs::create_dir(&handoff).unwrap();
-    let preparation=owner_route::prepare(&host,&slot,&handoff).unwrap();let checkpoint=preparation.checkpoint();
+    let preparation=if modern {
+        let preparation=host.prepare(&slot,until()).unwrap();
+        save(&handoff.join("preparation.json"),&preparation.checkpoint());
+        save(&handoff.join("launch-request.json"),preparation.request());
+        preparation
+    }else{owner_route::prepare(&host,&slot,&handoff).unwrap()};let checkpoint=preparation.checkpoint();
     assert_eq!(read(&handoff.join("preparation.json")),checkpoint);
     assert_eq!(read(&handoff.join("launch-request.json")),*preparation.request());
-    assert!(owner_route::prepare(&host,&slot,&handoff).is_err(),"one-shot checkpoint cannot repeat preparation");
-    assert_eq!(preparation.request()["slot"],slot);assert!(!root.join("request.json").exists(),"prepare cannot launch");
+    if !modern {assert!(owner_route::prepare(&host,&slot,&handoff).is_err(),"one-shot checkpoint cannot repeat preparation");}
+    assert_eq!(preparation.request()[field],slot);assert!(!root.join("request.json").exists(),"prepare cannot launch");
     assert_eq!(host.prepare(&slot,until()).unwrap().checkpoint(),checkpoint,"duplicate prepare keeps original authority");
     // Durable reload before intent never dispatches. Missing preparation cannot come from an operation receipt.
     let recovered=host.recover_preparation(&serde_json::from_str::<Value>(&checkpoint.to_string()).unwrap()).unwrap();
-    assert_eq!(owner_route::recover(&host,&handoff).unwrap().request(),recovered.request());
-    let mut foreign=recovered.request().clone();foreign["slot"]["key"]=json!("c".repeat(64));
+    if !modern {assert_eq!(owner_route::recover(&host,&handoff).unwrap().request(),recovered.request());}
+    let mut foreign=recovered.request().clone();foreign[field]["key"]=json!("c".repeat(64));
     save(&handoff.join("launch-request.json"),&foreign);
-    assert!(owner_route::recover(&host,&handoff).is_err(),"request cannot replace original slot/key");
+    if !modern {assert!(owner_route::recover(&host,&handoff).is_err(),"request cannot replace original slot/key");}
     save(&handoff.join("launch-request.json"),recovered.request());
     assert_eq!(host.reconcile(&recovered,until()).unwrap()["state"],"unknown");
     assert!(!root.join("request.json").exists());
     for (pointer,value) in [
         ("/receipt/state",json!("verified-effective")),("/receipt/preparation",Value::Null),
+        ("/receipt/preparation",json!("e".repeat(64))),
         ("/receipt/prepared/binding/started",json!("foreign-incarnation")),("/receipt/prepared/host_instance",Value::Null),
         ("/receipt/prepared/authority/saved/grant/mode",json!("full")),
         ("/receipt/prepared/authority/adapter/sha256",json!("c".repeat(64))),
@@ -172,8 +193,11 @@ pub fn protected_preparation_and_completion_recover_original_operation() {
     let deadline=until();while refused.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     assert!(!root.join("request.json").exists(),"drift refusal precedes intent/native launch");drop(refused);
     save(&root.join("expected.json"),&expected);
-    let mut server=owner_route::launch(&host,&handoff,&root.join("private.log")).unwrap();
-    assert!(owner_route::launch(&host,&handoff,&root.join("duplicate.log")).is_err(),"intent consumes dispatch before any retry");
+    let mut server=if modern {
+        save(&handoff.join("launch-intent.json"),recovered.request());
+        host.launch_prepared(&recovered,Intent::Off,&root.join("private.log")).unwrap()
+    }else{owner_route::launch(&host,&handoff,&root.join("private.log")).unwrap()};
+    if !modern {assert!(owner_route::launch(&host,&handoff,&root.join("duplicate.log")).is_err(),"intent consumes dispatch before any retry");}
     let deadline=until();while !root.join("intent.json").exists() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     let path=root.join("receipt.json");let good=read(&path);let message=json!({"id":1,"method":"initialize","params":{}});
     for (pointer,value) in [
@@ -203,7 +227,7 @@ pub fn protected_preparation_and_completion_recover_original_operation() {
     assert_eq!(host.reconcile(&recovered,until()).unwrap()["state"],"unknown","supervisor/root exit is not descendant completion");
     std::fs::write(root.join("lost-reply"),b"interrupted readback after durable intent").unwrap();
     assert!(host.reconcile(&recovered,until()).is_err());std::fs::remove_file(root.join("lost-reply")).unwrap();
-    assert_eq!(read(&root.join("request.json")),*recovered.request(),"lost reply never changes slot/key/effect");
+    assert_eq!(wire_request(read(&root.join("request.json")),modern),*recovered.request(),"lost reply never changes slot/key/effect");
     // Invented host-state model, not a native certificate: each partial state retains unknown occupancy.
     let mut completed=read(&path);completed["state"]=json!("completed");completed["launch"]["input_closed"]=json!(true);
     let launch=&mut completed["launch"];
@@ -224,12 +248,12 @@ pub fn protected_preparation_and_completion_recover_original_operation() {
         let mut changed=completed.clone();*changed.pointer_mut(pointer).unwrap()=value;save(&path,&changed);
         assert!(host.reconcile(&recovered,until()).is_err(),"{pointer}: retain occupancy");
     }
-    save(&path,&completed);assert_eq!(host.reconcile(&recovered,until()).unwrap(),completed);
-    assert_eq!(host.reconcile(&host.recover_preparation(&checkpoint).unwrap(),until()).unwrap(),completed,"duplicate/recovered completion observes same operation");
+    save(&path,&completed);assert_eq!(host.reconcile(&recovered,until()).unwrap(),wire_receipt(completed.clone(),modern));
+    assert_eq!(host.reconcile(&host.recover_preparation(&checkpoint).unwrap(),until()).unwrap(),wire_receipt(completed.clone(),modern),"duplicate/recovered completion observes same operation");
     let mut old=completed.clone();old["state"]=json!("unknown");save(&path,&old);
     assert_eq!(host.reconcile(&recovered,until()).unwrap()["state"],"unknown","reordered unknown cannot authorize release");
     assert_eq!(std::fs::read_to_string(root.join("app-input.jsonl")).unwrap(),native_input,"recovery never replays even the non-generating handshake");
-    assert_eq!(read(&root.join("request.json")),*recovered.request());std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(wire_request(read(&root.join("request.json")),modern),*recovered.request());std::fs::remove_dir_all(root).unwrap();
 }
 
 // Requirement: no input before fresh exact authority, no widening/replay from untrusted task/env/receipt text.
@@ -322,4 +346,41 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     while matches!(coreq::process::identity(frontend),Ok(Some(_))) {codex.poll(&mut run).unwrap();assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     assert_eq!(codex.poll(&mut run).unwrap(),agent::State::Unknown,"a fenced input and EOF never prove a turn or release a slot");
     drop(run);std::fs::remove_dir_all(root).unwrap();
+}
+
+fn wire_receipt(mut value:Value,modern:bool)->Value {
+    if modern {
+        if value["schema"]=="taskq.app-server/1" {value["schema"]=json!("agentq.app-server/1");}
+        if value["prepared"]["schema"]=="taskq.app-server-preparation/1" {value["prepared"]["schema"]=json!("agentq.app-server-preparation/1");}
+        if value["launch"]["schema"]=="taskq.app-server/1" {value["launch"]["schema"]=json!("agentq.app-server/1");}
+        if value["launch"]["scope"]["certificate"]["schema"]=="taskq.native-completion/1" {value["launch"]["scope"]["certificate"]["schema"]=json!("agentq.native-completion/1");}
+    }
+    value
+}
+fn wire_request(mut value:Value,modern:bool)->Value {
+    if modern {value["permit"]=value["slot"].take();value.as_object_mut().unwrap().remove("slot");}value
+}
+fn signed_host(exe:&Path)->ProtectedHost {
+    use ring::signature::{Ed25519KeyPair,KeyPair};
+    // Invented deterministic fixture key; never used for a published adapter or authority.
+    let pair=Ed25519KeyPair::from_seed_unchecked(&[41;32]).unwrap();
+    let hex=|bytes:&[u8]|bytes.iter().map(|v|format!("{v:02x}")).collect::<String>();
+    let hash=digest(exe);let signature=hex(pair.sign(format!("agentq.protected-adapter/1\0{hash}").as_bytes()).as_ref());
+    let public=hex(pair.public_key().as_ref());
+    assert!(ProtectedHost::signed(exe,&hash,&public,&"00".repeat(64)).is_err(),"invalid signature refuses before dispatch");
+    assert!(ProtectedHost::signed(exe,&"00".repeat(32),&public,&signature).is_err(),"signature cannot replace the digest pin");
+    ProtectedHost::signed(exe,&hash,&public,&signature).unwrap()
+}
+
+// M12.8 / #241 A2/A3: immutable recovery/cancellation crosses only the signed independent command boundary.
+pub fn signed_retained_recovery_preserves_original_bytes() {
+    let root=scratch("signed-retained").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
+    let host=signed_host(&exe);
+    let checkpoint=json!({"slot":{"binding":{"root":root}}}).to_string();let receipt=r#"{ "invented": "retained receipt" }"#;
+    std::fs::write(root.join("retained-checkpoint"),&checkpoint).unwrap();std::fs::write(root.join("retained-receipt"),receipt).unwrap();
+    assert_eq!(host.reconcile_retained(&checkpoint,receipt,until()).unwrap()["state"],"unknown");
+    assert_eq!(host.cancel_retained(&checkpoint,receipt,until()).unwrap()["state"],"unknown");
+    assert!(!root.join("app-input.jsonl").exists());assert!(!root.join("request.json").exists());
+    assert_eq!(std::fs::read_to_string(root.join("retained-receipt")).unwrap(),receipt);
+    std::fs::remove_dir_all(root).unwrap();
 }
