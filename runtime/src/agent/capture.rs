@@ -1,4 +1,4 @@
-//! `agent.turn` and `agent.call` capture (agentq.md M12.12, M12.13; docs/spec/RUNTIME.md § Observation).
+//! `agent.turn` and `agent.call` capture (agentq.md M12.13, M12.14; docs/spec/RUNTIME.md § Observation).
 use super::{Client, Context, Report, Res, model_code, read_calls, sum_usage};
 use crate::telemetry::{Event, Store, shared};
 use serde_json::{Map, Value, json};
@@ -427,7 +427,7 @@ mod tests {
         Report::read(client, &text, lines, None)
     }
 
-    // Chain: agentq.md M12.12, specq Telemetry contract § Capture (A2). Risk: a runtime writes no `agent.call`, a turn and
+    // Chain: agentq.md M12.13, specq Telemetry contract § Capture (A2). Risk: a runtime writes no `agent.call`, a turn and
     // its calls disagree, a repeated record counts twice, or an unreported bucket reads as zero.
     #[test]
     fn every_runtime_writes_one_call_per_model_request_and_null_for_unreported_tokens() {
@@ -483,7 +483,7 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
 
-    // Chain: M12.12, specq Telemetry contract § Capture (A2). Risk: CoreQ refuses more than 1024 events in one append, so a
+    // Chain: M12.13, specq Telemetry contract § Capture (A2). Risk: CoreQ refuses more than 1024 events in one append, so a
     // long turn loses its calls and its `agent.turn`.
     #[test]
     fn a_turn_over_the_store_batch_keeps_the_turn_and_every_call_once() {
@@ -510,7 +510,7 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
 
-    // Chain: M12.13 (A3). Risk: the exit code, session or tree numbers are lost, a signal reads as a code, or a process the
+    // Chain: M12.14 (A3). Risk: the exit code, session or tree numbers are lost, a signal reads as a code, or a process the
     // run does not own reads as measured.
     #[test]
     fn turn_carries_exit_code_session_cpu_and_peak_rss_or_a_reason() {
