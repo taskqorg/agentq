@@ -156,3 +156,18 @@ Applied rules: PRODUCT R13, agentq.md P1/P2/P3, M1.2 and M12.3–M12.7.
 
 - Before: `codex sandbox -P :workspace` inside TaskQ Seatbelt failed with `sandbox-exec: sandbox_apply: Operation not permitted` (exit 71); `agentq hook antigravity PreToolUse` returned `{}` on pass-through, `AGENTQ_OPTIMIZATION=off`, disabled and error fallback paths, which `agy 1.4.12` rejected with `tool call denied by pre-tool hook:` in session `5e3e75cf-ca1b-4abf-8fee-2efa2e5b67f0`.
 - After: Codex Workspace passes `['-s', 'danger-full-access']` inside outer TaskQ Seatbelt (`sandbox_check == 1`, fixture read/write/Cargo exit 101 pass). `agentq hook antigravity PreToolUse` returns `{"decision": "allow"}` across pass-through, `off`, disabled and error fallback paths (`RUNTIME.md`, `agentq/hooks.rs`, `agentq/main.rs`, `tests/hook.rs`). Live Antigravity Workspace `optimization: "on"` (`015808c6-0d10-44e0-aca6-cd2c14f775d5`) and `optimization: "off"` (`3ed8a575-f186-4a32-94ac-e15f76387520`) turns pass native storage persistence, `--conversation` resume, `probe.py` read/write/sandbox check, Cargo 181-test execution, attributable `on` compression (`4207 -> 397` bytes, `rtk:000018e4-185d-8af9-5428-000024eb0000`, exact MCP `get_original` recovery) and zero `off` compression records (receipts: `198.md`).
+
+### Contract headroom: task #248
+
+Requirement: [#248 A1–A3](https://github.com/taskqorg/agentq/issues/248), “Restore agentq.md below the specq 70% contract targets without changing behavior or losing a rule, condition or linked detail.” Applied: TaskQ R13 and § 7 rule 4; agentq.md P3 and §§ 3/5/12. No decision, behavior, runtime code or guarding assertion changes.
+
+The defect was exhausted contract headroom. The baseline is `b5ef97c257a97664bcd087bfd5d3ec0797c931c7`. Both lint observations use `engineering/scripts/contract_lint.py` from workflow-pinned specq `7e9adf57287553176d8b3be61c2b22565543dc51` (not the attempt's shared-rule revision). Run `python3 <specq>/engineering/scripts/contract_lint.py agentq.md`, where `<specq>` is a checkout of that pinned revision.
+
+| Observation | UTF-8 bytes | Lines | Longest visible line | Lint errors | Headroom |
+|---|---:|---:|---:|---:|---|
+| Before | 48554 | 246 | 396 | 0 | FAIL: byte and line warnings |
+| After | 37995 | 207 | 396 | 0 | PASS: no warnings; within 43008 bytes / 210 lines |
+
+One-time Python assertions compared the complete P/M blocks, including continuation lines, with that baseline: all 59 remain verbatim and in order in the root. All 41 removed detail bullets remain verbatim in [COMPRESSION](COMPRESSION.md#engines-and-pins), [SERVICE](SERVICE.md#installation-and-service-layout) or [RUNTIME](RUNTIME.md#runtime-operation-and-adoption), except rebased relative Markdown link targets. The root names each binding destination; its binding-detail declaration remains unchanged. New context lines keep moved section references attached to the root. Existing linked files and their original detail remain; only their scope descriptions expand.
+
+The same readback checked every local Markdown file/anchor link across the four changed contract pages: 67 resolve. `git diff --check` passed. Changes are restricted to `agentq.md` and `docs/spec`; no runtime, test, fixture, configuration or export changed. This is documentation evidence, not native-platform qualification or deployment; merge-result CI remains the publication gate (TaskQ R12/§ 7).

@@ -1,6 +1,20 @@
 # Service, status and host detail
 
-Binding detail of [agentq.md § 5](../../agentq.md#5-install-layout-and-service). The contract holds the mandatory rules; this file holds field lists, platform procedures and rationale. A change here is a decision change ([spec first](../../agentq.md#principles)).
+Binding detail of [agentq.md § 5](../../agentq.md#5-install-layout-and-service). The contract holds the mandatory rules; this file holds layout, release artifacts, field lists, platform procedures and rationale. A change here is a decision change ([spec first](../../agentq.md#principles)).
+
+Section references and P/M rule IDs below refer to [agentq.md](../../agentq.md).
+
+## Installation and service layout
+
+- Install: `~/.local/share/agentq`, Windows `%LOCALAPPDATA%\agentq`: `releases/<ver>/agentq`, `current`, `previous`, launcher `<install>/agentq`, `engines/`, `data/` (§ 8), `status.json`.
+- Onboarding and `service install` make the stable launcher available as `agentq` for the installing OS user; `agentq setup-path` repairs it without changing integrations or restarting services. Uninstall removes only this launcher's registration ([procedure](SERVICE.md#command-registration)).
+- Release CI on a `v*` tag from `main` builds `agentq-<ver>-<os>-<arch>` for macOS arm64/x64, Windows x64, Linux x64/arm64 (static musl), plus `SHA256SUMS` and `latest.json`. Each binary and `SHA256SUMS` carry a GitHub build provenance attestation (`gh attestation verify <file> --repo taskqorg/agentq`).
+- A checked Headroom venv is immutable; a failed version probe reports unavailable and never deletes it. Headroom checks, installation and proxy workers use one OpenBLAS/OMP thread.
+- The unit (coreq project `host`: `com.agentq.host`, `AgentQ-host`, `agentq-host.service`) runs `<install>/agentq service run` in `<install>`. It owns the loopback ports, headroom workers, OTLP intake, the queue sender, update checks and `status.json`.
+- A `service run` process is one whose command line runs a binary under `<install>/releases/`; the Windows launcher is not counted. [Windows processes](SERVICE.md#windows-service-processes).
+- Install and update use CoreQ `prepare_install` then `activate_install`; update first checks the sha256 and candidate selftest. The lifecycle lock covers checks, pruning, staging and activation. Durable originals restore a failed or interrupted activation before another install, update or service start ([detail](SERVICE.md#update-and-worker-swap)).
+- Update: hourly; each update keeps only `current` and `previous`; a dashq release notice may trigger an early check. A pin change runs at most two headroom workers. A service run restarts into a new `current` only with no open proxied connection, at most 15 min after the change ([detail](SERVICE.md#update-and-worker-swap)).
+- `status.json` lives at `<install>/status.json`, written every 30 s; `service status` treats it as unknown after 90 s. It adds per-agent routing and intent, MCP, hooks, engines, queue, `model_backlog`, newest incident and per-profile `configuration`, without paths or file text ([fields](SERVICE.md#status-file-fields)).
 
 ## Command registration
 
