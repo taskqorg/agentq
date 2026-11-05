@@ -15,10 +15,13 @@ Binding detail of [agentq.md § 5](../../agentq.md#5-install-layout-and-service)
 - On Windows `schtasks /End` ends only the launcher, so `stop`, `uninstall` and `restart` end every `service run` process tree, orphans included.
 - `restart` ends the task first, starts the service only through the `AgentQ-host` task and succeeds only when exactly one `service run` remains and `status.json` names its pid within 90 s.
 - `selftest` checks the count on a built-in Windows process list.
-- `service install` copies the running binary to `releases/<ver>/` and to the launcher only where the bytes differ: Windows refuses to overwrite a running exe (os error 32). A running launcher of an older version that cannot be replaced stays and says so; it only reads `current`. `selftest` checks the skip against its own running binary and the BOM strip on a built-in fixture.
+- `service install` never overwrites a running exe (Windows os error 32): identical release bytes are reused and the launcher is renamed aside, as in [update](#update-and-worker-swap). `selftest` checks this with its own running binary and the BOM strip on a built-in fixture.
 
 ## Update and worker swap
 
+- `service install`, `onboard --yes` and update install through CoreQ `prepare_install`, then `activate_install`, under the lifecycle lock. Preparation writes only `releases/<ver>/`. Activation replaces the launcher, then durably writes `previous` and `current`. The launcher only reads `current`, so the prior release stays active until `current` moves.
+- Update takes the version from CoreQ's check, downloads into `releases/<ver>.tmp/`, checks the sha256 and runs the candidate's `selftest` before preparation. Each failure leaves the active files unchanged and returns the error.
+- A later check prunes a prepared release that was never activated, so an interrupted install retries from the download. A second install of the same version with different bytes, or an older binary over a newer `current`, refuses and keeps the active files.
 - An engine pin change starts a new headroom worker on a new port, routes new connections to it, keeps open ones on the old worker, retires the old one after 15 min plus 30 s grace, then kills its process tree with an incident; at most two workers.
 - A service run whose `current` names another release (its own hourly check or a CLI `agentq update`) restarts into it: it exits 75 on the first pass with no open proxied connection, at most 15 min after it saw the change, and the unit starts the new `current`.
 - While connections stay open it logs the deferral and its count to the service log, once per change of reason; an unknown count defers like an open one.
