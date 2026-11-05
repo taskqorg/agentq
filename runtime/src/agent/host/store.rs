@@ -10,7 +10,8 @@ pub(super) struct State {pub ops:BTreeMap<String,Op>}
 pub(super) struct Op {pub bound:Value,pub receipt:Value}
 pub(super) fn write_synced(path:&Path,text:&str)->Res<()> {
     coreq::write_atomic(path,text).map_err(|_|"protected journal write unknown; retain occupancy")?;
-    fs::File::open(path).and_then(|f|f.sync_all()).map_err(|_|"protected journal sync unknown")?;
+    // Windows FlushFileBuffers needs write access; a read-only handle fails every journal commit.
+    OpenOptions::new().write(true).open(path).and_then(|f|f.sync_all()).map_err(|_|"protected journal sync unknown")?;
     #[cfg(unix)] fs::File::open(path.parent().ok_or("journal parent absent")?).and_then(|f|f.sync_all()).map_err(|_|"protected journal directory sync unknown")?;
     if fs::read(path).map_err(|_|"protected journal readback unknown")?!=text.as_bytes() {return Err("protected journal readback changed".into());}Ok(())
 }

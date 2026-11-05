@@ -259,7 +259,7 @@ pub(super) fn reconcile(install:&Path,r:&Request,key:&str)->Res<Value> {
 
 
 // Existing receipt bytes stay immutable; cleanup is a separately journaled observation of the original job.
-pub(super) fn cleanup_retained(install:&Path,original:&Value,archive:&str)->Res<Value> {
+pub(super) fn cleanup_retained(install:&Path,original:&Value,operation:&str)->Res<Value> {
     let scope=&original["scope"];let cert=&scope["certificate"];
     if original["input_closed"]!=true||scope["dispatch_ack"]!=true||cert["schema"]!="taskq.native-completion/1"
         ||cert["scope"]!=scope["binding"]||cert["native"]!=original["native"]||cert["supervisor"]!=original["supervisor"]
@@ -269,6 +269,9 @@ pub(super) fn cleanup_retained(install:&Path,original:&Value,archive:&str)->Res<
     }
     let supervisor=native(&original["supervisor"])?;native(&original["native"])?;
     if original["native"]==original["supervisor"] {return Err("retained incarnations overlap".into());}
+    let incarnation=retained_incarnation(original)?;
+    // Original intent consumes the fence, so an older signed snapshot cannot issue another bootout.
+    if scope["cleanup_intent"]==true {retained_inherit(install,operation,&incarnation,scope["bootout_ack"]==true)?;}
     if scope["cleanup_intent"]==true&&scope["bootout_ack"]==true&&scope["cleanup_verified"]==true {
         return Ok(json!({"cleanup_verified":true,"source":"operator-authenticated retained completion"}));
     }
@@ -280,50 +283,28 @@ pub(super) fn cleanup_retained(install:&Path,original:&Value,archive:&str)->Res<
             _=>json!({"state":"unknown","reason":"original acknowledged cleanup exit unproved"}),
         });
     }
-    let key=format!("retained-{archive}");
-    let saved=resources::within(install,resources::WAIT,|s| {
-        match s.ops.get(&key) {
-            Some(op) if op.bound["original_sha256"]==digest(original.to_string().as_bytes())=>Ok(op.receipt.clone()),
-            Some(_)=>Err("retained cleanup binding changed".into()),None=>Ok(Value::Null),
-        }
-    })?;
-    if saved["cleanup_verified"]==true {
-        if saved["cleanup_intent"]!=true||saved["bootout_ack"]!=true {return Err("retained cleanup proof incomplete".into());}
-        return Ok(saved);
-    }
-    let result=(||->Res<Value> {
+    let target=||->Res<String> {
         let label=scope["label"].as_str().ok_or("retained job label unknown")?;
         let domain=scope["domain"].as_str().ok_or("retained job domain unknown")?;
         if domain!=format!("gui/{}",unsafe{libc::geteuid()})||!label.starts_with("org.taskq.protected.") {return Err("retained job generation unknown".into());}
-        let target=format!("{domain}/{label}");
-        if saved.is_null() {
-            membership(&supervisor,&scope["binding"])?;
-            let c=counts(scope["binding"]["coalition"].as_u64().ok_or("retained coalition unknown")?)?;
-            if json!(c)!=cert["counts"] {return Err("retained coalition changed; no cleanup".into());}
-            let program=original["authority"]["adapter"]["executable"].as_str().ok_or("retained image unknown")?;
-            super::mac::image(&supervisor,Path::new(program))?;
-            let printed=launchctl(&["print",&target])?;
-            if !printed.lines().any(|l|l.trim()==format!("program = {program}"))||!printed.lines().any(|l|l.trim()==format!("pid = {}",supervisor.pid)) {return Err("retained job image/PID mismatched".into());}
-            resources::within(install,resources::WAIT,|s| {
-                if s.ops.contains_key(&key) {return Err("retained cleanup intent consumed; never retry".into());}
-                s.ops.insert(key.clone(),resources::Op{bound:json!({"original_sha256":digest(original.to_string().as_bytes())}),receipt:json!({"cleanup_intent":true})});Ok(())
-            })?;
-            launchctl(&["bootout",&target])?;
-            resources::within(install,resources::WAIT,|s| {s.ops.get_mut(&key).ok_or("cleanup record absent")?.receipt["bootout_ack"]=json!(true);Ok(())})?;
-        }
-        let acknowledged=resources::within(install,resources::WAIT,|s|Ok(s.ops.get(&key).ok_or("cleanup record absent")?.receipt.clone()))?;
-        if acknowledged["bootout_ack"]!=true {return Err("retained cleanup unacknowledged; never repeat".into());}
+        Ok(format!("{domain}/{label}"))
+    };
+    retained_cleanup(install,operation,&incarnation,||{
+        let target=target()?;
+        membership(&supervisor,&scope["binding"])?;
+        let c=counts(scope["binding"]["coalition"].as_u64().ok_or("retained coalition unknown")?)?;
+        if json!(c)!=cert["counts"] {return Err("retained coalition changed; no cleanup".into());}
+        let program=original["authority"]["adapter"]["executable"].as_str().ok_or("retained image unknown")?;
+        super::mac::image(&supervisor,Path::new(program))?;
+        let printed=launchctl(&["print",&target])?;
+        if !printed.lines().any(|l|l.trim()==format!("program = {program}"))||!printed.lines().any(|l|l.trim()==format!("pid = {}",supervisor.pid)) {return Err("retained job image/PID mismatched".into());}
+        Ok(())
+    },||launchctl(&["bootout",&target()?]).map(|_|()),||{
         let until=Instant::now()+WAIT;
         loop {match coreq::process::identity(supervisor.pid) {
-            Ok(None)=>break,Ok(Some(id)) if id!=supervisor=>break,
+            Ok(None)=>return Ok(()),Ok(Some(id)) if id!=supervisor=>return Ok(()),
             Ok(_) if Instant::now()<until=>std::thread::sleep(Duration::from_millis(10)),
             _=>return Err("retained supervisor exit unknown".into()),
         }}
-        resources::within(install,resources::WAIT,|s| {
-            let op=s.ops.get_mut(&key).ok_or("cleanup record absent")?;
-            if op.bound["original_sha256"]!=digest(original.to_string().as_bytes()) {return Err("retained cleanup binding changed".into());}
-            op.receipt["cleanup_verified"]=json!(true);Ok(op.receipt.clone())
-        })
-    })();
-    Ok(result.unwrap_or_else(|reason|json!({"state":"unknown","reason":reason})))
+    })
 }

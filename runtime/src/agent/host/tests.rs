@@ -98,7 +98,7 @@ fn protected_retained_import_authenticates_exact_original_bytes() {
     let key=operation_id(&Request{schema:SCHEMA.into(),permit:slot,policy_revision:29,account:"default".into(),preparation:String::new()}).unwrap();
     let directory=f.root.join("retained").join(&key);fs::create_dir(&directory).unwrap();
     let path=directory.join(format!("{}.json",digest(receipt.as_bytes())));f.signed(&path,"agentq.retained-operation/1",&input);
-    let before=fs::read(&path).unwrap();let recovered=retained_original(&f.root,&input).unwrap();
+    let before=fs::read(&path).unwrap();let (_,recovered)=retained_original(&f.root,&input).unwrap();
     assert_eq!(recovered["authority"]["adapter"],"invented-original-adapter");assert_eq!(fs::read(&path).unwrap(),before);
     let mut changed=input.clone();changed["receipt"]=json!(format!("{} ",receipt));
     assert!(retained_original(&f.root,&changed).is_err(),"even equivalent JSON cannot rewrite retained bytes");
@@ -123,18 +123,69 @@ fn protected_existing_authority_snapshot_refuses_drift_before_launch() {
     for os in ["windows","linux"] {assert!(resolve(&install,&home,&r,os,&native).is_err());}
     fs::remove_file(home.join(".codex/config.toml")).unwrap();assert!(resolve(&install,&home,&r,"macos",&native).is_err());
 }
+// Risk: a reformatted request or another snapshot of one incarnation mints a new fence and repeats a stop.
+#[test]
+fn protected_retained_fences_bind_operation_and_incarnation_not_bytes() {
+    let f=Fixture::new();let slot=json!({"binding":{"schema":"taskq.slots/1","caller":"pipe","op_id":"invented-fenced-job","root":f.root,"runtime":"codex","pid":17,"started":"invented-start","boot":10,"expires_at":9999999999u64},"key":"a".repeat(64)});
+    let independent=json!({"schema":"taskq.app-server-preparation/1","binding":slot["binding"],"authority":{"adapter":"invented-original-adapter","project":f.root,"runtime":"codex","saved":{"grant":{"mode":"workspace"}}},"host_instance":"invented-original-host"});
+    let prepared=json!({"schema":"taskq.app-server/1","state":"prepared","policy_revision":29,"account":"default","preparation":digest(independent.to_string().as_bytes()),"prepared":independent});
+    let checkpoint=json!({"slot":slot,"receipt":prepared}).to_string();
+    let key=operation_id(&Request{schema:SCHEMA.into(),permit:slot,policy_revision:29,account:"default".into(),preparation:String::new()}).unwrap();
+    let directory=f.root.join("retained").join(&key);fs::create_dir(&directory).unwrap();
+    // One signed archive per observation; `seen` differs between snapshots of one incarnation.
+    let archive=|seen:&str,pid:u32|->(Value,String) {
+        let launch=json!({"authority":prepared["prepared"]["authority"],"host_instance":"invented-original-host","policy_revision":29,"account":"default","seen":seen,"supervisor":{"pid":40,"started":"invented-supervisor"},"native":{"pid":pid,"started":"invented-native"},"scope":{"binding":{"boot":10,"coalition":101},"label":"org.taskq.protected.invented","domain":"gui/501"}});
+        let receipt=json!({"schema":"taskq.app-server/1","caller":"pipe","operation":"invented-fenced-job","launch":launch}).to_string();
+        let input=json!({"checkpoint":checkpoint,"receipt":receipt});
+        f.signed(&directory.join(format!("{}.json",digest(receipt.as_bytes()))),"agentq.retained-operation/1",&input);
+        let reordered=format!("{{ \"receipt\" : {} ,\n \"checkpoint\" : {} }}",json!(receipt),json!(checkpoint));
+        (input,reordered)
+    };
+    let (first,reordered)=archive("first",41);let (later,_)=archive("later",41);
+    let requests=[first.to_string(),reordered,serde_json::to_string_pretty(&first).unwrap(),later.to_string()];
+    let parsed=|text:&str|->(String,Value,String) {
+        let (operation,original)=retained_original(&f.root,&serde_json::from_str(text).unwrap()).unwrap();
+        let incarnation=retained_incarnation(&original).unwrap();(operation,original,incarnation)
+    };
+    let (bootouts,stops)=(std::cell::Cell::new(0),std::cell::Cell::new(0));
+    for text in &requests {
+        let (operation,_,incarnation)=parsed(text);assert_eq!(operation,key);
+        // The first bootout has no acknowledgment; every later shape must stay unknown without a second one.
+        let outcome=retained_cleanup(&f.root,&operation,&incarnation,||Ok(()),||{bootouts.set(bootouts.get()+1);Err("invented lost acknowledgment".into())},||panic!("no exit proof without acknowledgment")).unwrap();
+        assert_eq!(outcome["state"],"unknown");assert_ne!(outcome["cleanup_verified"],true);
+        let outcome=retained_cancel(&f.root,&operation,&incarnation,||Ok(()),||{stops.set(stops.get()+1);Ok(())});
+        assert_eq!(outcome["state"],"unknown");
+    }
+    assert_eq!((bootouts.get(),stops.get()),(1,1),"one incarnation gets one stop of each kind");
+    // A signed snapshot with another native incarnation of the same operation refuses and changes nothing.
+    let before=fs::read(f.root.join("operations.json")).unwrap();
+    let (changed,_)=archive("changed",42);let (operation,_,incarnation)=parsed(&changed.to_string());
+    assert!(retained_cleanup(&f.root,&operation,&incarnation,||panic!("changed incarnation verified"),||panic!("changed incarnation stopped"),||panic!("changed incarnation exited")).is_err());
+    assert_eq!(fs::read(f.root.join("operations.json")).unwrap(),before);
+    // Original intent in a newer snapshot fences an older one that lacks it, also without acknowledgment.
+    retained_inherit(&f.root,"invented-interrupted","invented-incarnation",false).unwrap();
+    let outcome=retained_cleanup(&f.root,"invented-interrupted","invented-incarnation",||panic!("verified"),||panic!("stopped"),||panic!("exited")).unwrap();
+    assert_eq!(outcome["reason"],"retained cleanup unacknowledged; never repeat");
+    // An inherited acknowledgment only observes exit, then stays verified without another effect.
+    retained_inherit(&f.root,"invented-interrupted","invented-incarnation",true).unwrap();
+    let outcome=retained_cleanup(&f.root,"invented-interrupted","invented-incarnation",||panic!("verified"),||panic!("stopped"),||Ok(())).unwrap();
+    assert_eq!(outcome["cleanup_verified"],true);
+    let outcome=retained_cleanup(&f.root,"invented-interrupted","invented-incarnation",||panic!("verified"),||panic!("stopped"),||panic!("exited")).unwrap();
+    assert_eq!(outcome["cleanup_verified"],true);
+    assert!(retained_inherit(&f.root,"invented-interrupted","invented-other",true).is_err());
+}
 // Risk: a crash after exact-job bootout intent is mistaken for acknowledgment and repeats cleanup.
 #[cfg(target_os="macos")]
 #[test]
 fn protected_retained_lost_cleanup_ack_never_retries() {
     let f=Fixture::new();let binding=json!({"boot":10,"coalition":101});let supervisor=json!({"pid":17,"started":"invented-supervisor"});let native=json!({"pid":18,"started":"invented-native"});
     let original=json!({"supervisor":supervisor,"native":native,"input_closed":true,"scope":{"binding":binding,"dispatch_ack":true,"label":"org.taskq.protected.invented","domain":format!("gui/{}",unsafe{libc::geteuid()}),"certificate":{"schema":"taskq.native-completion/1","scope":binding,"supervisor":supervisor,"native":native,"counts":[9,8]}}});
-    resources::within(&f.root,resources::WAIT,|s| {s.ops.insert("retained-invented-archive".into(),resources::Op{bound:json!({"original_sha256":digest(original.to_string().as_bytes())}),receipt:json!({"cleanup_intent":true})});Ok(())}).unwrap();
+    resources::within(&f.root,resources::WAIT,|s| {s.ops.insert("retained-invented-operation".into(),resources::Op{bound:json!({"incarnation":retained_incarnation(&original)?}),receipt:json!({"cleanup_intent":true})});Ok(())}).unwrap();
     let mut interrupted=original.clone();interrupted["scope"]["cleanup_intent"]=json!(true);
-    let outcome=scope::cleanup_retained(&f.root,&interrupted,"invented-archive").unwrap();
+    let outcome=scope::cleanup_retained(&f.root,&interrupted,"invented-operation").unwrap();
     assert_eq!(outcome["reason"],"original cleanup unacknowledged; never repeat");
     let before=fs::read(f.root.join("operations.json")).unwrap();
-    let outcome=scope::cleanup_retained(&f.root,&original,"invented-archive").unwrap();
+    let outcome=scope::cleanup_retained(&f.root,&original,"invented-operation").unwrap();
     assert_eq!(outcome["state"],"unknown");assert_eq!(outcome["reason"],"retained cleanup unacknowledged; never repeat");
     assert_eq!(fs::read(f.root.join("operations.json")).unwrap(),before,"lost acknowledgment never rewrites receipt or consumes cleanup twice");
 }

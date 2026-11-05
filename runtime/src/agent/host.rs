@@ -303,24 +303,20 @@ mod mac {
     pub(super) fn retained(action:&str,text:&str)->Res<()> {
         let (install,_home)=host_paths()?;
         let input:Value=serde_json::from_str(text).map_err(|_|"retained request invalid")?;
-        let original=retained_original(&install,&input)?;
-        let archive=digest(text.as_bytes());
+        let (operation,original)=retained_original(&install,&input)?;
         let cleanup=if action=="retained-cancel" {
-            let key=format!("retained-cancel-{archive}");
-            let result=(||->Res<()> {
-                let child=native(&original["native"])?;let supervisor=native(&original["supervisor"])?;
-                child_of(&child,&supervisor)?;scope::membership(&child,&original["scope"]["binding"])?;
-                let program=Path::new(original["authority"]["executable"].as_str().ok_or("retained native image unknown")?);
-                image(&child,program)?;
-                if file_digest(program)?!=original["authority"]["executable_sha256"] {return Err("retained native image changed".into());}
-                resources::within(&install,resources::WAIT,|s| {
-                    if s.ops.contains_key(&key) {return Err("retained cancellation already requested; observe without retry".into());}
-                    s.ops.insert(key.clone(),resources::Op{bound:json!({"original_sha256":digest(original.to_string().as_bytes())}),receipt:json!({"cancel_intent":true})});Ok(())
-                })?;
-                coreq::process::terminate(&child).map_err(|_|"retained native stop unknown".into())
-            })();
-            json!({"state":"unknown","reason":result.err().unwrap_or_else(||"exact native cancellation requested; completion unproved".into())})
-        }else{scope::cleanup_retained(&install,&original,&archive)?};
+            match retained_incarnation(&original) {
+                Ok(incarnation)=>retained_cancel(&install,&operation,&incarnation,||{
+                    let child=native(&original["native"])?;let supervisor=native(&original["supervisor"])?;
+                    child_of(&child,&supervisor)?;scope::membership(&child,&original["scope"]["binding"])?;
+                    let program=Path::new(original["authority"]["executable"].as_str().ok_or("retained native image unknown")?);
+                    image(&child,program)?;
+                    if file_digest(program)?!=original["authority"]["executable_sha256"] {return Err("retained native image changed".into());}
+                    Ok(())
+                },||coreq::process::terminate(&native(&original["native"])?).map_err(|_|"retained native stop unknown".into())),
+                Err(reason)=>json!({"state":"unknown","reason":reason}),
+            }
+        }else{scope::cleanup_retained(&install,&original,&operation)?};
         println!("{}",json!({"schema":"agentq.retained-operation/1","checkpoint":input["checkpoint"],"receipt":input["receipt"],
             "state":if cleanup["cleanup_verified"]==true {"completed"}else{"unknown"},"cleanup":cleanup}));Ok(())
     }
@@ -509,7 +505,75 @@ mod mac {
     }
 }
 
-fn retained_original(install:&Path,input:&Value)->Res<Value> {
+// A retained stop is fenced by operation and native incarnation, never by request or receipt bytes.
+#[cfg(any(test,target_os="macos"))]
+fn retained_incarnation(original:&Value)->Res<String> {
+    let (supervisor,child)=(native(&original["supervisor"])?,native(&original["native"])?);
+    let scope=&original["scope"];
+    Ok(digest(json!({"supervisor":[supervisor.pid,supervisor.started],"native":[child.pid,child.started],"boot":scope["binding"]["boot"],"coalition":scope["binding"]["coalition"],"label":scope["label"],"domain":scope["domain"]}).to_string().as_bytes()))
+}
+#[cfg(any(test,target_os="macos"))]
+fn retained_fence(s:&resources::State,key:&str,incarnation:&str)->Res<Value> {
+    match s.ops.get(key) {
+        Some(op) if op.bound["incarnation"]==incarnation=>Ok(op.receipt.clone()),
+        Some(_)=>Err("retained cleanup binding changed".into()),None=>Ok(Value::Null),
+    }
+}
+#[cfg(any(test,target_os="macos"))]
+fn retained_inherit(install:&Path,operation:&str,incarnation:&str,acknowledged:bool)->Res<()> {
+    let key=format!("retained-{operation}");
+    resources::within(install,resources::WAIT,|s| {
+        retained_fence(s,&key,incarnation)?;
+        let op=s.ops.entry(key.clone()).or_insert_with(||resources::Op{bound:json!({"incarnation":incarnation}),receipt:json!({"cleanup_intent":true})});
+        if acknowledged {op.receipt["bootout_ack"]=json!(true);}Ok(())
+    })
+}
+/// Durable intent precedes the single bootout; a lost acknowledgment stays unknown and is never retried.
+#[cfg(any(test,target_os="macos"))]
+fn retained_cleanup(install:&Path,operation:&str,incarnation:&str,verify:impl FnOnce()->Res<()>,bootout:impl FnOnce()->Res<()>,exited:impl FnOnce()->Res<()>)->Res<Value> {
+    let key=format!("retained-{operation}");
+    let saved=resources::within(install,resources::WAIT,|s|retained_fence(s,&key,incarnation))?;
+    if saved["cleanup_verified"]==true {
+        if saved["cleanup_intent"]!=true||saved["bootout_ack"]!=true {return Err("retained cleanup proof incomplete".into());}
+        return Ok(saved);
+    }
+    let result=(||->Res<Value> {
+        if saved.is_null() {
+            verify()?;
+            resources::within(install,resources::WAIT,|s| {
+                if s.ops.contains_key(&key) {return Err("retained cleanup intent consumed; never retry".into());}
+                s.ops.insert(key.clone(),resources::Op{bound:json!({"incarnation":incarnation}),receipt:json!({"cleanup_intent":true})});Ok(())
+            })?;
+            bootout()?;
+            resources::within(install,resources::WAIT,|s| {s.ops.get_mut(&key).ok_or("cleanup record absent")?.receipt["bootout_ack"]=json!(true);Ok(())})?;
+        }
+        let acknowledged=resources::within(install,resources::WAIT,|s|retained_fence(s,&key,incarnation))?;
+        if acknowledged["bootout_ack"]!=true {return Err("retained cleanup unacknowledged; never repeat".into());}
+        exited()?;
+        resources::within(install,resources::WAIT,|s| {
+            retained_fence(s,&key,incarnation)?;
+            let op=s.ops.get_mut(&key).ok_or("cleanup record absent")?;
+            op.receipt["cleanup_verified"]=json!(true);Ok(op.receipt.clone())
+        })
+    })();
+    Ok(result.unwrap_or_else(|reason|json!({"state":"unknown","reason":reason})))
+}
+/// Exact native stop at most once per operation; a request never proves completion.
+#[cfg(any(test,target_os="macos"))]
+fn retained_cancel(install:&Path,operation:&str,incarnation:&str,verify:impl FnOnce()->Res<()>,terminate:impl FnOnce()->Res<()>)->Value {
+    let key=format!("retained-cancel-{operation}");
+    let result=(||->Res<()> {
+        verify()?;
+        resources::within(install,resources::WAIT,|s| {
+            if s.ops.contains_key(&key) {return Err("retained cancellation already requested; observe without retry".into());}
+            s.ops.insert(key.clone(),resources::Op{bound:json!({"incarnation":incarnation}),receipt:json!({"cancel_intent":true})});Ok(())
+        })?;
+        terminate()
+    })();
+    json!({"state":"unknown","reason":result.err().unwrap_or_else(||"exact native cancellation requested; completion unproved".into())})
+}
+
+fn retained_original(install:&Path,input:&Value)->Res<(String,Value)> {
     let checkpoint=input["checkpoint"].as_str().filter(|s|s.len()<=1024*1024).ok_or("retained checkpoint absent or oversized")?;
     let receipt=input["receipt"].as_str().filter(|s|s.len()<=1024*1024).ok_or("retained receipt absent or oversized")?;
     let checkpoint:Value=serde_json::from_str(checkpoint).map_err(|_|"retained checkpoint corrupt")?;
@@ -530,7 +594,7 @@ fn retained_original(install:&Path,input:&Value)->Res<Value> {
         ||seen["launch"]["policy_revision"]!=checkpoint["receipt"]["policy_revision"]||seen["launch"]["account"]!=checkpoint["receipt"]["account"] {
         return Err("retained authority/operation proof changed; retain occupancy".into());
     }
-    Ok(seen["launch"].clone())
+    Ok((key,seen["launch"].clone()))
 }
 
 #[cfg(test)]
