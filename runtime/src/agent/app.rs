@@ -7,7 +7,7 @@ type WriteRequest=(Vec<u8>,mpsc::Sender<Res<()>>);
 /// Shared native stdio transport. Dropping the handle does not kill an active session; callers own its lifecycle.
 pub(crate) struct AppServer {
     child:Child,
-    input:SyncSender<WriteRequest>,
+    input:Option<SyncSender<WriteRequest>>,
     events:Receiver<Res<Value>>,
 }
 
@@ -51,7 +51,7 @@ impl AppServer {
                 if output.send(event).is_err() || failed {break;}
             }
         });
-        Ok(Self {child,input,events})
+        Ok(Self {child,input:Some(input),events})
     }
 
     pub fn id(&self)->u32 {self.child.id()}
@@ -63,7 +63,7 @@ impl AppServer {
         bytes.push(b'\n');
         let left=until.checked_duration_since(Instant::now()).ok_or("app-server send deadline; not submitted")?;
         let (receipt,done)=mpsc::channel();
-        self.input.try_send((bytes,receipt)).map_err(|_|"app-server writer unavailable; not submitted")?;
+        self.input.as_ref().ok_or("app-server writer closed")?.try_send((bytes,receipt)).map_err(|_|"app-server writer unavailable; not submitted")?;
         done.recv_timeout(left).map_err(|_|"app-server write acknowledgment unavailable; submission unknown")?
     }
 
@@ -80,7 +80,17 @@ impl AppServer {
     /// Stop only this directly owned child. Consumer process-group/native-turn authority remains with the caller.
     pub fn kill(&mut self)->Res<()> {
         if self.poll()?.is_some() {return Ok(());}
-        self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))
+        self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))?;
+        self.child.wait().map_err(|e|format!("app-server reap unconfirmed: {e}"))?;
+        Ok(())
+    }
+
+    /// EOF lets the native server close its MCP children; the owned server is reaped before return.
+    pub(super) fn close(&mut self)->Res<()> {
+        self.input.take();
+        let until=Instant::now()+Duration::from_secs(2);
+        while self.poll()?.is_none() && Instant::now()<until {std::thread::sleep(Duration::from_millis(10));}
+        self.kill()
     }
 }
 
@@ -108,6 +118,8 @@ pub(crate) struct AppSession {
     usage: Vec<Value>,
     limits: Option<Value>,
     latest_limits: Option<Value>,
+    windows: Vec<Window>,
+    latest_windows: Vec<Window>,
     started_ms: i64,
     /// Samples the plain server process; None for a protected or recovered session.
     sampler: Option<super::capture::Sampler>,
@@ -127,7 +139,7 @@ impl AppSession {
         }
         Ok(Self { spec: spec.clone(), next: 1, pending: None, initialized: false, ready: false,
             thread: None, turn: None, active: false, terminal: None, model: None, text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0, sampler: None, process: None,
-            early:vec![],fault:None,scope:native::scope(spec),worked:false,failure:None })
+            early:vec![],fault:None,scope:native::scope(spec),worked:false,failure:None, windows:limits::unknown("not-reported"), latest_windows:limits::unknown("not-reported") })
     }
 
     /// Native catalogue/account methods share the same transport; caller handlers consume their raw responses.
@@ -172,6 +184,7 @@ impl AppSession {
         let changed_model = params.get("model").is_some_and(|m| m.as_str() != self.model.as_deref());
         let request = self.request("turn/start", params)?;
         self.active = true; self.turn = None; self.terminal = None; self.text = None; self.usage.clear(); self.limits = self.latest_limits.clone(); self.started_ms = unix_ms();
+        self.windows = self.latest_windows.clone();
         self.process = None;
         if let Some(sampler) = &self.sampler { sampler.mark(); }
         self.worked=false;self.failure=None;
@@ -196,6 +209,10 @@ impl AppSession {
     fn observe_inner(&mut self, message: &Value) -> Res<()> {
         // Server requests belong to the caller, even when their id happens to equal a client request id.
         if message["method"].is_string() && message.get("id").is_some() { return Ok(()); }
+        if let Some(w) = limits::reported(Client::Codex, message, (unix_ms()/1000).max(0) as u64) {
+            self.latest_windows = w;
+            if self.active && self.terminal.is_none() { self.windows = self.latest_windows.clone(); }
+        }
         if let Some((id, method)) = self.pending {
             if message["id"].as_u64() == Some(id) {
                 if !message["error"].is_null() {
@@ -292,6 +309,7 @@ impl AppSession {
             events.push(json!({"rate_limits":limits}));
         }
         let mut r = Report::read(Client::Codex, "", &events, None);
+        r.limits = self.windows.clone();
         r.session = self.thread.clone(); r.usage.model = self.model.clone(); r.text = self.text.clone(); r.started_ms = self.started_ms;
         r.process = super::capture::ProcessUse { exit_unknown: "session-process", ..self.process.clone().unwrap_or_default() };
         for call in &mut r.calls { if call.model.is_none() { call.model = self.model.clone(); } }
@@ -331,7 +349,7 @@ impl AppSession {
         json!({"schema":"coreq-app-session/1", "root":self.spec.root, "home":self.spec.home, "session":self.spec.session,
             "next":self.next, "pending":self.pending.map(|(id, method)| json!([id,method])), "initialized":self.initialized, "ready":self.ready,
             "thread":self.thread,"turn":self.turn,"active":self.active,"terminal":self.terminal,"model":self.model,"text":self.text,
-            "usage":self.usage,"limits":self.limits,"latest_limits":self.latest_limits,"started_ms":self.started_ms,"early":self.early,"fault":self.fault,"scope":self.scope,"worked":self.worked,"failure":self.failure})
+            "usage":self.usage,"limits":self.limits,"latest_limits":self.latest_limits,"windows":self.windows,"latest_windows":self.latest_windows,"started_ms":self.started_ms,"early":self.early,"fault":self.fault,"scope":self.scope,"worked":self.worked,"failure":self.failure})
     }
 
     pub fn recover(spec: &Spec, v: &Value) -> Res<Self> {
@@ -352,6 +370,8 @@ impl AppSession {
         }
         s.usage = v["usage"].as_array().ok_or("app-server recovery usage invalid")?.clone(); s.limits = (!v["limits"].is_null()).then(|| v["limits"].clone());
         s.latest_limits=(!v["latest_limits"].is_null()).then(||v["latest_limits"].clone());
+        if let Some(w) = v.get("windows") { s.windows = serde_json::from_value(w.clone()).map_err(|_| "app-server recovery windows invalid")?; }
+        if let Some(w) = v.get("latest_windows") { s.latest_windows = serde_json::from_value(w.clone()).map_err(|_| "app-server recovery windows invalid")?; }
         s.started_ms = v["started_ms"].as_i64().filter(|n| *n >= 0).ok_or("app-server recovery time invalid")?;
         s.early=v["early"].as_array().ok_or("app-server recovery early events missing")?.clone();
         s.fault=if v["fault"].is_null() {None} else {Some(v["fault"].as_str().ok_or("app-server recovery fault invalid")?.into())};

@@ -235,6 +235,12 @@ impl ProtectedAppServer {
     /// Open this verified frontend as a Codex app-server `Run` (`Launch.mode` `AppServer`); `session` resumes a thread.
     /// Every later write repeats the authority check; a failed handshake leaves the frontend with its host.
     pub fn open(self, session: Option<&str>, launch: &super::Launch) -> Res<super::Run> { super::adapter::open_protected(self, session, launch) }
+
+    /// Protected-host protocol only: take pending server requests, preserving their original native IDs.
+    pub fn requests(run: &mut super::Run) -> Res<Vec<Value>> { super::adapter::protected_requests(run) }
+
+    /// Reply only to a protected host request; every write retains the host's authority verification.
+    pub fn reply(run: &mut super::Run, reply: &Value, until: Instant) -> Res<()> { super::adapter::protected_reply(run, reply, until) }
 }
 
 pub(super) fn permit(r: &Value) -> &Value { r.get("permit").unwrap_or(&r["slot"]) }

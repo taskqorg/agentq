@@ -323,8 +323,8 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     codex.input(&mut run,&[agent::Part::Text("protected request".into())]).unwrap();
     let deadline=until();
     while codex.poll(&mut run).unwrap()==agent::State::Running {
-        for event in codex.progress(&mut run).unwrap() {
-            if event["method"]=="item/tool/call" {codex.send(&mut run,&json!({"id":event["id"],"result":{"success":true}})).unwrap();}
+        for event in agent::ProtectedAppServer::requests(&mut run).unwrap() {
+            if event["method"]=="item/tool/call" {agent::ProtectedAppServer::reply(&mut run,&json!({"id":event["id"],"result":{"success":true}}),until()).unwrap();}
         }
         assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));
     }
