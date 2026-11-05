@@ -22,7 +22,7 @@ A policy payload has `schema: "agentq.protected-policy/1"`, `authority`, `profil
 
 `ProtectedHost::reconcile_retained(checkpoint_bytes, receipt_bytes, deadline)` invokes only the independent `retained` action. Operator authentication wraps the two exact original JSON strings in a signed envelope under `retained/op-<sha256(caller + NUL + op_id)>/<sha256 of exact receipt bytes>.json`. No TaskQ runtime or CA is used. Later retained observations append signed snapshots to the same operation directory; they never overwrite an earlier receipt. Original receipts and the old adapter identity remain unchanged. `cancel_retained` requests exact native stop only after live parent, image/hash and scope readback; its durable one-shot intent never proves completion. Import does not manufacture a certificate, grant or dispatch authority. A matching new permit cannot launch an archived operation.
 
-A missing or changed archive, private key/binding mismatch, missing descendant certificate or uncertain original-generation cleanup remains unknown and occupied. A valid original certificate can be checked against the same-boot kernel coalition and exact launchd job; independent bootout intent, acknowledgment and exit proof live separately in the host journal, keyed to the archive digest. Lost bootout acknowledgment, including an interrupted original-host cleanup, is never retried. The caller's original retained bytes are returned unchanged; replay is never part of recovery.
+A missing or changed archive, private key/binding mismatch, missing descendant certificate or uncertain original-generation cleanup remains unknown and occupied. A valid original certificate can be checked against the same-boot kernel coalition and exact launchd job; independent bootout intent, acknowledgment and exit proof live separately in the host journal, in one fence per operation bound to its native incarnation. Request and receipt bytes do not name a fence, so a reformatted request or another signed snapshot of that incarnation cannot repeat a stop. A snapshot that carries original cleanup intent consumes the fence, and a changed incarnation refuses. Lost bootout acknowledgment, including an interrupted original-host cleanup, is never retried. The caller's original retained bytes are returned unchanged; replay is never part of recovery.
 
 ## Operator provisioning
 
@@ -38,29 +38,45 @@ The existing preparation process scenario now runs against both explicit legacy 
 
 Before the digest fix, `cargo test --locked -p agentq-runtime --test agent -- protected_preparation` failed at `/receipt/preparation`: a different well-formed digest recovered successfully. Recovery now recomputes and checks the independent preparation digest; the same assertion is retained. Initial independent-double runs also exposed incomplete fixture schema conversion; only the invented wire serialization was corrected, with the original no-replay assertions retained.
 
-Local native authority is unqualified. The new authority-snapshot fixture was sandbox-blocked writing its temporary `.codex/config.toml` (`PermissionDenied`, `Operation not permitted`); it was not weakened or labeled PASS. Neither portable checks nor artifact signing prove native Mac boundaries, TCC grants, Windows containment or consumer Pipe integration. No model turn, image generation, accepted-crate replay, new grant or account/capacity change occurred. Merge-result CI remains mandatory for publication; the worker does not wait for it (TaskQ §7).
+Native authority stays unqualified locally: neither portable checks nor artifact signing prove native Mac boundaries, TCC grants, Windows containment or consumer Pipe integration. No model turn, image generation, accepted-crate replay, new grant or account/capacity change occurred. Merge-result CI remains mandatory for publication; the worker does not wait for it (TaskQ §7).
 
 The candidate review also found that importing an interrupted original-host cleanup must preserve its consumed intent. The independent reader now refuses another bootout when the original acknowledgment is missing; an existing acknowledgment allows only exit observation. Retained snapshots append under their receipt digests, so later evidence does not rewrite an original receipt. A separate exact-incarnation retained cancellation path persists one-shot intent and never reports completion from a stop request.
 
+## Review corrections
+
+The publication review requeued the candidate at `8a3f58e9e01832873372a0b05f9106fbf52cd9d1` with two defects. Both are fixed at the source pin below, and the digest published with that candidate is superseded.
+
+**Retained stop fence.** Cleanup and cancellation were fenced by a hash of the raw request, so request formatting or another snapshot created a new fence and repeated a bootout or native stop after a lost acknowledgment. `protected_retained_fences_bind_operation_and_incarnation_not_bytes` checks a compact request, a reordered and reformatted request, a pretty-printed request and a later signed snapshot of one incarnation, each with a lost acknowledgment.
+
+- With the fence keyed by request bytes again, it fails: `one incarnation gets one stop of each kind`, left `(3, 3)`, right `(1, 1)`.
+- With the incarnation keyed by snapshot bytes again, it fails: `retained cleanup binding changed`.
+- With the fix, it passes with one bootout and one stop. A changed incarnation refuses and leaves the journal bytes unchanged; an older snapshot after inherited intent issues no effect.
+
+The stop itself runs behind a closure in these checks, so they prove the fence and not a live launchd or process stop.
+
+**Windows journal sync.** The journal synced through a read-only handle, which Windows refuses. [CI run 42086892150](https://github.com/taskqorg/agentq/actions/runs/42086892150) failed `protected_independent_signatures_permits_and_missing_state_refuse` with `protected journal sync unknown`. The handle now has write access and the assertion is unchanged. `rust (windows-latest)` passed in [CI run 42088896349](https://github.com/taskqorg/agentq/actions/runs/42088896349), together with `rust (macos-latest)` and `rust (ubuntu-latest)`. That is a pull-request result, not the merge result.
+
 ## Immutable candidate
 
-- AgentQ runtime/API and adapter source: `3f084763d79b421e3b71f6b7ee8255371ffc2ce6`.
+- AgentQ runtime/API and adapter source: `97a9ba59d6f60bfefdab0c6c9e09827ee4a326df`.
 - CoreQ: `v0.19.2`, lockfile revision `b78ca64cac615500b57b4a04983e79333035dd65`.
 - Native containment source provenance above is retained only as history; the built binary links no TaskQ crate and dispatches no TaskQ command on the signed route.
-- The signed macOS arm64 artifact and public manifest accompany the task result. Its final manifest records the digest, public key and detached signature. The dedicated private key was generated in private host configuration with exclusive creation and mode 0600; it is not in this repository, artifact or board. No policy, trust manifest, initial journal, permit or grant was provisioned into the working host.
+- The signed macOS arm64 artifact and public manifest accompany the task result. The dedicated private key stays in private host configuration with mode 0600; it is not in this repository, artifact or board. No policy, trust manifest, initial journal, permit or grant was provisioned into the working host.
 
-The candidate was rebased on `origin/main` once before its first push. Initial canonical checks at `877c1a5eab0c3a6561080efc6838e67793683a49` were invalidated for the affected runtime by the subsequent recovery correction; the final canonical gate identifies the source above. Native qualification, Pipe's caller-owned permit integration and live image work remain separate and were not claimed here. The publication reviewer must require green `merge_group` CI for this PR's merge result (private fallback: exact-SHA CI); PR/head success alone is insufficient.
+The publication reviewer must require green `merge_group` CI for this PR's merge result (private fallback: exact-SHA CI); PR/head success alone is insufficient.
 
 ## Final artifact and checks
 
-The final macOS arm64 adapter is the 7,178,640-byte AgentQ release binary built with `cargo build --locked --release --bin agentq` from the API/source pin above. SHA-256: `77deba159f9fe654c07abc64c83e9f77288e1d325b357d89b1276d30593109df`. Ed25519 public key: `084098ab761a440bd88a7fa36600c8018ef44fa66ae67c2da622f23a84f0e141`. The [public detached manifest](runtime-241/adapter-macos-aarch64.json) contains its signature. These are the final binary bytes; the detached signature does not modify them. The task attachment contains those bytes and manifest; it is not an installed or native-qualified release.
+The final macOS arm64 adapter is the 7,181,184-byte AgentQ release binary built with `cargo build --locked --release --bin agentq` from the source pin above. SHA-256: `3485e70404fa96f1e7d23ec63c686311bdeb9a57b82dad6ba2d7bd3b825059a3`. Ed25519 public key, unchanged: `084098ab761a440bd88a7fa36600c8018ef44fa66ae67c2da622f23a84f0e141`. The [public detached manifest](runtime-241/adapter-macos-aarch64.json) contains its signature; the signature does not modify the binary. The task attachment contains those bytes and the manifest; it is not an installed or native-qualified release.
 
-Runtime `ProtectedHost::signed` verification accepted the exact staged copy and rejected a zeroed signature. Both the canonical debug selftest and the final release artifact's offline selftest passed. Runtime sources, tests, CLI and dependencies match the immutable pin exactly after the evidence update (`git diff --exit-code 3f084763d79b421e3b71f6b7ee8255371ffc2ce6 -- runtime agentq Cargo.toml Cargo.lock`).
+`ProtectedHost::signed` accepted the staged copy and refused a zeroed signature (`protected signature invalid; authority unknown`). The release artifact's offline selftest passed.
 
-The final `cargo test --locked` ran 116 AgentQ unit cases plus its integration cases successfully, then ran 29 successful runtime unit cases with one ignored case and the authority-snapshot fixture sandbox-blocked at its `.codex/config.toml` write. This is not a full-suite PASS: Cargo stopped before later runtime integration/doc targets. The affected process check `cargo test --locked -p agentq-runtime --test agent -- signed_retained independent_signed_host protected_` passed all five scenarios on unchanged final source. The four independent host model/signature/archive cases passed; the blocked snapshot assertion remains enabled for CI.
+At the source pin, on macOS arm64:
 
-Final canonical elapsed times: Cargo test 43.14 s (sandbox-blocked), offline selftest 0.48 s (PASS), contract lint 0.04 s (PASS, zero errors), the four workflow Python suites 0.35 s total (8 passed/1 skipped; 11, 2 and 4 passed), release build 10.91 s (PASS). The workflow-pinned linter is specq `7e9adf57287553176d8b3be61c2b22565543dc51`; contract headroom warnings remain. File links and `git diff --check` passed.
+- `cargo test --locked` passed every target, including 116 AgentQ unit cases and 31 runtime unit cases with 1 ignored. The authority-snapshot fixture that an earlier sandbox blocked also ran and passed.
+- `cargo run --locked -- selftest` passed offline.
+- The contract lint at the workflow-pinned specq `7e9adf57287553176d8b3be61c2b22565543dc51` passed with its existing headroom warnings.
+- The four workflow Python suites passed, with one case skipped.
+- `cargo test --locked -p agentq-runtime --test agent -- signed_retained independent_signed_host protected_` passed 5 scenarios, and `cargo test --locked --test release protected_host_uses_checked_launcher_bytes` passed.
 
-No native protected launch or receipt import was performed on a working profile. Native Mac enforcement/lifecycle qualification remains unknown; Windows artifact/native containment is not qualified. Pipe owns its consumer integration and live image qualification in assetq#47. The merge-result CI requirement remains open for the publication reviewer, without a worker CI wait.
-
-A final launcher-boundary regression found another relevant failure: `cargo test --locked --test release protected_host_uses_checked_launcher_bytes` failed with `Unrecognized option: 'action'` from a substituted `current` release. The checked stable launcher now runs `agent host` in place, and that exact process test passes. Hooks and ordinary release dispatch retain their existing paths. This invalidates the earlier artifact digest; the final manifest below supersedes it, and the exact source pin above includes this correction. No additional rebase was performed.
+No native protected launch or receipt import was performed on a working profile. Native Mac enforcement and lifecycle qualification remain unknown, and Windows native containment is not qualified. Pipe owns its consumer integration and live image qualification in assetq#47.
