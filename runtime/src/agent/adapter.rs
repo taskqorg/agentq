@@ -325,7 +325,8 @@ impl Run {
             Body::Turn(t) => {
                 if t.exit.is_none() { return Err("running".into()); }
                 let mut r = t.report();
-                r.recorded = crate::telemetry::Event::new(r.observation(t.client, ctx)).and_then(|e| store.append(&[e])).map(|_| ());
+                let key = t.key();
+                r.recorded = crate::telemetry::Event::observation(r.observation(t.client, ctx)).and_then(|e| super::capture::record(store, e, &r, t.client, ctx, &key));
                 r
             }
             Body::Native(n) => {
@@ -441,10 +442,11 @@ impl App {
     /// Initialize, open the thread and, with input, start the first turn.
     /// A failed handshake stops a plain child; a protected frontend stays with its host.
     fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch) -> Res<App> {
-        let session = match AppSession::new(spec) {
+        let mut session = match AppSession::new(spec) {
             Ok(s) => s,
             Err(e) => { if let Transport::Plain(s) = &mut transport { let _ = s.kill(); } return Err(e); }
         };
+        if let Transport::Plain(server) = &transport { session.sample(server.id()); }
         let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None };
         let opened = app.handshake(initialize, thread, l);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }

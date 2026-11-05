@@ -326,6 +326,10 @@ fn scratch(tag: &str) -> PathBuf {
 fn record(root: &Path, turn: u64) -> Value { serde_json::from_str(&std::fs::read_to_string(root.join(format!("fake-turn-{turn}.json"))).unwrap()).unwrap() }
 
 fn observations(store: &coreq::telemetry::Store) -> Vec<Value> {
+    records(store).into_iter().filter(|o| o["kind"] == "agent.turn").collect()
+}
+
+fn records(store: &coreq::telemetry::Store) -> Vec<Value> {
     store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).collect()
 }
 
@@ -558,6 +562,14 @@ fn claude_starts_and_resumes_one_session() {
     assert_eq!((o["input_tokens"].as_u64(), o["cache_read_tokens"].as_u64(), o["cache_write_tokens"].as_u64(), o["output_tokens"].as_u64()), (Some(3), Some(100), Some(20), Some(7)));
     assert_eq!((o["limit_used_percent"].as_u64(), o["limit_resets_at"].as_u64(), o["limit_window"].as_str()), (Some(25), Some(1792386000), Some("five_hour")));
     assert!(o["duration_us"].as_u64().is_some());
+    // A2, A3: a real child turn through `Run::record`. Risk: the fields exist in unit tests but never reach the store.
+    assert_eq!((o["schema"].as_u64(), o["exit_code"].as_u64(), o["session_id"].as_str().is_some()), (Some(1), Some(0), true));
+    let measured = o["peak_rss_bytes"].as_u64().is_some() && o["user_cpu_us"].as_u64().is_some() && o["system_cpu_us"].as_u64().is_some();
+    assert!(measured || o["unknown"]["peak_rss_bytes"] == "not-sampled", "{o}");
+    let calls: Vec<_> = records(&store).into_iter().filter(|r| r["kind"] == "agent.call").collect();
+    assert!(calls.len() >= 2, "each turn's model requests are recorded: {calls:?}");
+    let last = calls.last().unwrap();
+    assert_eq!((last["runtime"].as_str(), last["model"].as_str(), last["session_id"].clone(), last["task"].as_u64()), (Some("claude"), Some("claude-opus-5-5"), o["session_id"].clone(), Some(1)));
     drop(store);
     let _ = std::fs::remove_dir_all(root);
 }

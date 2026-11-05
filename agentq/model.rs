@@ -14,7 +14,7 @@ const BATCH_BYTES: usize = 4 << 20;
 const HOOK_PASS: Duration = Duration::from_secs(3);
 
 /// Same installation and call ID, same event: a duplicate counts once and a later reading replaces it.
-fn event_id(installation: &str, call: &str) -> String {
+pub fn event_id(installation: &str, call: &str) -> String {
     crate::resource::hex(digest::digest(&digest::SHA256, format!("{installation}:model:{call}").as_bytes()).as_ref())[..32].to_string()
 }
 

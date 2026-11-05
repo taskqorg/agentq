@@ -50,6 +50,18 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 - Tokens keep the Claude meaning: `input_tokens` is uncached input (`usage.input_tokens` − `input_tokens_details.cached_tokens`), `cache_read_tokens` is `cached_tokens`, `output_tokens` is `usage.output_tokens` (reasoning included).
 - The Responses API reports no cache creation and no cost: `cache_creation_tokens_unknown` and `cost_unknown` are `not reported`; any other missing field reads `not in response`.
 
+## Session records
+
+M6.11 applies the runtime records of [RUNTIME.md](RUNTIME.md#observation) to sessions no launcher records. `agentq-runtime` `agent::session_records` builds them; the hook only finds the bytes and writes the records.
+
+- Entry: the Claude and Codex `Stop` hooks. The hook input names `session_id`, `transcript_path` and `cwd`. A launched session and a disabled integration read and write nothing.
+- Store: `data/observations.sqlite3`, the installation's CoreQ local store. Sending it is the CoreQ shipper's job, in a later task after parity; this page adds no sender.
+- Source: the Claude transcript with its `<session>/subagents/*.jsonl`, or the Codex rollout. A per-file offset in `data/observe/` advances only after the append. One pass reads at most 8 MiB per file up to its last complete line, and the next `Stop` continues. A shorter file was rewritten and reads from the start; immutable call ids keep a reread from counting twice.
+- One `agent.turn` per `Stop` that found new bytes, with `route` `hook`, `outcome` `ok` and the token sum of the calls read. `exit_code`, CPU and `peak_rss_bytes` read null `hook-session`, because the client process is not ours; `duration_us` reads null `not-reported`. A Codex `Stop` without `transcript_path` writes the turn with null tokens and reason `no-transcript`.
+- `project` is the M6.10 code, else `other`.
+- A failed read or append is a recorded hook failure (§ 1) and still returns the normal hook response (M1.2). It never stops the `agentq.model` path.
+- Hermes and Antigravity write no session records: neither hook set has a turn end and a transcript. Antigravity worker turns record through the runtime.
+
 ## Resource samples
 
 ### Scope

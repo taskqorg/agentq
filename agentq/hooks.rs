@@ -15,12 +15,20 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
     let data = || exe.parent().map(|p| p.join("data")).ok_or("hook launcher has no install root");
     if agent == "claude" && event == "Stop" {
         let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
-        crate::model::observe(&data()?, &v, launched())?;
+        let spans = crate::model::observe(&data()?, &v, launched());
+        // The old path and the new records fail independently (M6.11).
+        let records = crate::observe::stop(&data()?, "claude", &v, launched());
+        spans.and(records)?;
         return Ok(empty());
     }
     if agent == "hermes" && event == "post_api_request" {
         let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
         crate::model::observe_hermes(&data()?, &v, launched(), std::env::current_dir().ok().as_deref())?;
+        return Ok(empty());
+    }
+    if agent == "codex" && event == "Stop" {
+        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
+        crate::observe::stop(&data()?, "codex", &v, launched())?;
         return Ok(empty());
     }
     if agent == "codex" && event == "SessionStart" {
