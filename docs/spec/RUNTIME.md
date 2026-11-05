@@ -4,7 +4,7 @@ This page holds the binding detail of [agentq.md § 12](../../agentq.md#12-agent
 
 ## Runtime trait
 
-M12.9/M12.10 apply the [specq agent-runtime rule](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md). The public surface is `agent::Runtime`, `agent::Descriptor`, `agent::Policy`, `agent::Launch`, `agent::Run` and the runtime-neutral `Report`, `Usage`, `Snapshot`, `Accounts`, `Context` and `history` types. `agent::runtimes()` lists every adapter; `agent::runtime(name)` finds one by descriptor name (alias `agy` selects `antigravity`). Callers treat names and session IDs as opaque data.
+M12.9/M12.10 apply the [specq agent-runtime rule](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md). The public surface is `agent::Runtime`, `agent::Descriptor`, `agent::Policy`, `agent::Launch`, `agent::Run` and the runtime-neutral `Event`, `Window`, `Report`, `Usage`, `Snapshot`, `Accounts`, `Context` and `history` types. `agent::runtimes()` lists every adapter; `agent::runtime(name)` finds one by descriptor name (alias `agy` selects `antigravity`). Callers treat names and session IDs as opaque data.
 
 Each adapter implements every operation. The sections below remain the binding detail of what each adapter does natively.
 
@@ -12,13 +12,13 @@ Each adapter implements every operation. The sections below remain the binding d
 |---|---|
 | `launch(&Launch)` | Check `quota` when `Launch.accounts` is set (none free: error `quota-exhausted`), map `Policy` (refusal names the part), apply optimization intent, start one turn and return a `Run`. |
 | `resume(session, &Launch)` | The same for an existing opaque session ID. |
-| `input(run, parts)` | Send more user input to a running session as ordered `Part`s: `Text` or `Image` (an absolute path to a local file the caller already verified). An app-server run starts its next turn with exactly these parts, once; a later turn never repeats earlier parts. Refusals are typed `Failure::Refused(cause)` before any native write: `input-empty`; `image-unsupported` without capability `image-input`; `image-invalid` for a relative path or a missing file; `input-unsupported` for a one-process CLI, background or queue run, whose next turn is a `resume`. A native or transport error is `Failure::Failed` and is never retried. |
+| `input(run, parts)` | Send more user input to a running session as ordered `Part`s: `Text` or `Image` (an absolute path to a local file the caller already verified). A protected app-server run starts its next turn with exactly these parts, once; a later turn never repeats earlier parts. Refusals are typed `Failure::Refused(cause)` before any native write: `input-empty`; `image-unsupported` without capability `image-input`; `image-invalid` for a relative path or a missing file; `input-unsupported` for a one-process CLI, background or queue run, whose next turn is a `resume`. A native or transport error is `Failure::Failed` and is never retried. |
 | `account(run)` | Read-only login identity of a session run (capability `account`): `Login` `subscription`, `api-key` or `none`, and the native plan name when reported. It never refreshes, writes or exports a credential, token or email. Other runs return `Failure::Refused` cause `account-unsupported`; an unrecognized login reads as `Failure::Failed`, never as a guess. |
-| `send(run, message)` | One native protocol message of an app-server run: a server-request reply or a catalogue/limit read (`model/list`, `account/rateLimits/read`). Account identity uses `account`; every other method, `account/read` and account login or logout included, returns cause `send-unsupported`. Other runs return cause `send-unsupported`. |
+| `catalogue(home)` | Models the login in `home` can use (capability `catalogue`): Codex one bounded `model/list` over its own short app-server session, with no run. Other runtimes refuse with `catalogue unsupported by <name>`; a caller then offers descriptor `models`. |
 | `cancel(run)` | Request the stop; returns whether exit is already confirmed. `poll` confirms it later. It never proves server-side stop (see Arguments). |
 | `poll(run)` | `running`, `finished`, `failed` or `unknown` from the existing end detection. |
 | `report(run)` | The `Report` of a finished run; a running one returns cause `running`. |
-| `progress(run)` | Complete native JSON records appended to the run's log since the previous call, as raw values, each read at most once. |
+| `progress(run)` | Typed `Event`s since the previous call, in native order, each returned at most once ([progress events](#progress-events)). |
 | `launcher_output(run)` | The raw `background` launcher exchange of this run, once (Caller launch data). |
 | `session_id(run)` | The native session once named, else none. |
 | `session_url(run)` | The URL or cause of `observe` (Session observation), without polling. |
@@ -30,6 +30,8 @@ Each adapter implements every operation. The sections below remain the binding d
 | `protected_paths(home)` | Native home folders and files a run must not overwrite: Claude home and `.claude.json`, Codex home, Antigravity home and its sibling `config`. |
 | `home_env(tool, label)` | The home variable pointing at `<base home>/<tool>-accounts/<label>`; none for `default`, which keeps the caller's own home. |
 | `checkpoint(run)`, `recover(saved, &Launch)` | Private recovery value of a CLI turn, background or queue run, and the run rebuilt from it without a native call (Turn recovery and process setup, Compatibility sessions). An `agentapi` submission returns cause `no-checkpoint`. |
+| `log_limits(log, session, home)` | Every quota `Window` in caller-held log text, else in the session's native transcript in `home`, each with its native event ID when reported. No run, no write ([limit snapshot](#limit-snapshot)). |
+| `account_limits(home, now)` | Every quota `Window` of the login in `home`, from its native read-only source (capability `account-limits`): Codex `account/rateLimits/read`, Claude OAuth usage, Antigravity code-assist. A credential file changed during the read makes the result unknown. Never refreshes or exports a credential. |
 | `classify(log)` | The `Report` of caller-held log text without a run: the same `Report::read` as a finished turn, with no exit code, deadline or rollout. `detail` holds the native reason of `auth-rejected` or `model-capacity`. One event classifies as its own one-line log. |
 | `executable(path)` | The client executable resolved on `path` (none: the process `PATH`), as in Arguments; Codex resolves its native executor. Unresolved names come back bare; nothing is spawned. |
 | `home()` | The client's own home (Arguments, `protected_paths`). |
@@ -48,7 +50,7 @@ Descriptor data, the only runtime metadata a caller reads. `models` are the mode
 | `name` | `label` | `brand` | `family` | `models` | `minimum` | `capabilities` |
 |---|---|---|---|---|---|---|
 | `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas`, `settings-env` |
-| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `app-queue`, `app-server`, `effort`, `image-input`, `account`, `host-args`, `settings-env` |
+| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `account-limits`, `catalogue`, `app-queue`, `app-server`, `effort`, `image-input`, `account`, `host-args`, `settings-env`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas` |
 | `antigravity` | Antigravity | Google | `gemini` | | | `turn`, `resume`, `title` |
 
 ### Session observation
@@ -93,12 +95,37 @@ The runtime never enables Claude debug logging; turning it on for workers is a s
 
 Codex `builtin`, `isolated` and `subscription` flags follow the `exec` or `app-server` subcommand, so they hold in app-server mode too.
 
-`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.effort` (capability `effort`, a plain word) maps to Codex `-c model_reasoning_effort=<e>`; other runtimes refuse it. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.home` is the login home of the run (the client's home variable; none keeps the caller's own). A CLI turn also takes caller relay data, each behind its capability; another runtime and app-server mode refuse it with `<capability> unsupported by <name>`:
+`Launch.model` maps to Claude `--model <m>`, Codex `--model <m>` and Antigravity `--model=<m>`. `Launch.effort` (capability `effort`, a plain word) maps to Codex `-c model_reasoning_effort=<e>`; other runtimes refuse it. `Launch.compact_hook` maps to Claude `--settings` with a `SessionStart` `compact` hook; other runtimes lack capability `compact-hook` and refuse it. `Launch.home` is the login home of the run (the client's home variable; none keeps the caller's own). A turn also takes caller relay data, each behind its capability; another runtime refuses it with `<capability> unsupported by <name>`:
 
-- `Launch.mcp` (`mcp-config`): an MCP config file → Claude `--mcp-config <file>`, and every server named in its `mcpServers` joins the `tools` allowlist as `mcp__<server>`.
-- `Launch.instructions` (`instructions-file`): a file appended to the system prompt → Claude `--append-system-prompt-file <file>`.
-- `Launch.parts` (`turn-parts`): ordered `Part`s as the turn input instead of `input` → Claude `--input-format stream-json` and one stdin user message, images as base64 blocks (`png`, `webp`, `gif`, else `jpeg`); an unreadable image fails the launch before spawn.
-- `Launch.deltas` (`turn-deltas`): partial text records in `progress` → Claude `--include-partial-messages`. App-server runs always stream deltas and ignore it.
+- `Launch.mcp` (`mcp-config`): an MCP config file → Claude `--mcp-config <file>`, and every server named in its `mcpServers` joins the `tools` allowlist as `mcp__<server>`; Codex thread `config.mcp_servers.<server>` with `command`, `args`, `env` and `default_tools_approval_mode: "approve"`. A resumed turn may name other servers. Env values never reach an argument.
+- `Launch.instructions` (`instructions-file`): a file appended to the system prompt → Claude `--append-system-prompt-file <file>`; Codex thread `developerInstructions`.
+- `Launch.parts` (`turn-parts`): ordered `Part`s as the turn input instead of `input` → Claude `--input-format stream-json` and one stdin user message, images as base64 blocks (`png`, `webp`, `gif`, else `jpeg`); Codex `turn/start` `text` and `localImage` items in the caller's order. An unreadable image fails the launch before spawn.
+- `Launch.deltas` (`turn-deltas`): `Text` events in `progress` → Claude `--include-partial-messages`; Codex `item/agentMessage/delta`.
+
+### One run path
+
+The caller never selects a transport. The Codex adapter runs a launch with plain text input as `exec --json` (Arguments). A launch with `mcp`, `instructions`, `parts` or `deltas` runs as one `app-server` session owned by that turn:
+
+1. Start `app-server` with the mapped flags and exchange `initialize`/`initialized`. The adapter requests no experimental API.
+2. Send `thread/start`, or `thread/resume` with `excludeTurns: true`, with the mapped policy, model and relay data.
+3. Send `turn/start` with the input and map notifications to events.
+4. Answer every server request with JSON-RPC error `-32601`, since the policy allows no approval and no caller tool protocol exists. Stop the session on turn end.
+
+The returned `Run` behaves the same in both forms: `poll`, `report`, `progress`, `cancel` (turn interrupt, else stop), `session_id` and one `agent.turn` record. `input` on such a run returns `input-unsupported`; its next turn is a `resume`. The stdio session ends with its owner, so a recovered app-server turn rebuilds observation only and never resubmits; a caller that must survive its own restart launches plain text.
+
+### Progress events
+
+| `Event` | Meaning | Claude | Codex app-server | Codex `exec` |
+|---|---|---|---|---|
+| `Text { item, delta }` | Live text, only with `Launch.deltas` | `text_delta` partial record | `item/agentMessage/delta` | absent |
+| `Message { item, text }` | One complete assistant message | `assistant` text block | `item/completed` `agentMessage` | `item.completed` `agent_message` |
+| `ToolStart { id, kind, name }` | A tool began | `assistant` `tool_use` | `item/started` tool item | `item.started` tool item |
+| `ToolEnd { id, status }` | A tool ended | `user` `tool_result` | `item/completed` tool item | `item.completed` tool item |
+| `Quota(Vec<Window>)` | Windows just reported | `rate_limit_event` | `account/rateLimits/updated` | rollout `token_count` |
+| `Context { used, window }` | Context use of the last model call | `assistant` usage and session window | `thread/tokenUsage/updated` | rollout `token_count` |
+| `Activity` | Any other native record, so inactivity watches stay correct | every other record | every other notification | every other record |
+
+Antigravity maps `step_update` and `result` to the events it can name and everything else to `Activity`. Turn end stays `poll` and `report`, never an event. An unknown tool `kind` reads `other`.
 
 `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
 
@@ -200,7 +227,8 @@ A reached limit returns `Report::reached`: the reported reset in unix seconds, o
 | Claude | last `rate_limit_event` of the turn | `rate_limit_info.utilization` (0-1) × 100 | `rate_limit_info.resetsAt` | `rate_limit_info.rateLimitType` (`five_hour`, `seven_day`) |
 | Codex | last `rate_limits` of the turn output, else the last `token_count` in the thread rollout `<home>/sessions/<yyyy>/<mm>/<dd>/rollout-*-<thread>.jsonl` | `primary`/`secondary` `used_percent` (0-100) of the window with higher use | that window's `resets_at` (or now + `resets_in_seconds`) | that window's `window_minutes` as `<n>m` |
 
-- Claude also sends `unifiedWindows` with each window; the top-level window is the binding one, so only it is recorded.
+- A `Window` holds `window` (length as `<n>m`, or the native type), used fraction, reset and native event ID when reported; a missing field stays unknown.
+- `Report.limits` holds every window: Claude `unifiedWindows`, Codex `primary` and `secondary`. `Report.limit` stays the binding window for `agent.turn`: the Claude top-level window, the Codex window with higher use.
 - Codex `exec --json` output carries no limit snapshot today; the rollout of the account home does. A rollout snapshot is the latest one of the thread, which can be from an earlier turn.
 - Percent is rounded to a whole number.
 - Reasons: `not-reported` (no snapshot), `no-rollout` (Codex rollout not found), `partial-snapshot` (percent or reset missing).
@@ -257,7 +285,7 @@ Native CLI turns keep the v0.17 arguments and behavior inside the adapters. `Cli
 |---|---|---|---|
 | `Turn` (default) | `turn` | all | One CLI turn, as in the sections above. |
 | `Background` | `background` | Claude | `--bg` launch; `Launch.input` is the caller's protected file reference. `poll` discovers the job from the launcher's job ID (first line `backgrounded · <job>`; or, on resume, the session), then binds the native transcript `<home>/projects/<canonical root without the Windows verbatim prefix, each non-alphanumeric character as ->/<session>.jsonl`. `cancel` sends the stop request for the verified job. |
-| `AppServer { initialize, thread }` | `app-server` | Codex | `launch`/`resume` start `app-server`, exchange `initialize`/`initialized` and open the thread with the caller's `thread` parameters plus the mapped policy (`write` as `sandbox`, `bypass` with write `any` and `deny` as `approvalPolicy: never`; `roots`, `unelevated` and `effort` refuse) and `model`; non-empty `Launch.input` starts the first turn. `input` starts the next turn with native `text` and `localImage` (path) items in the caller's order. `account` sends one `account/read` with `refreshToken: false` and maps `chatgpt` to `subscription` (with `planType`), `apiKey` to `api-key` and no account to `none`. `send` carries a reply to a server request (dynamic tools, approvals) or a `model/list` / `account/rateLimits/read` read. `progress` returns every native message unchanged, drafts and server requests included. `cancel` interrupts the active turn, else stops the server. `transcript` returns cause `no-transcript` (`Launch.log` holds stderr only). Recovery rebuilds observation only. |
+| Protected app-server | `app-server` | Codex | `ProtectedAppServer::open` only: opens the thread with the caller's `thread` parameters plus the mapped policy (`write` as `sandbox`, `bypass` with write `any` and `deny` as `approvalPolicy: never`; `roots`, `unelevated` and `effort` refuse) and `model`. `input` starts the next turn with native `text` and `localImage` (path) items in the caller's order. `account` sends one `account/read` with `refreshToken: false` and maps `chatgpt` to `subscription` (with `planType`), `apiKey` to `api-key` and no account to `none`. `progress` returns the same events as [one run path](#one-run-path); the host owns server requests. `cancel` interrupts the active turn, else stops the server. `transcript` returns cause `no-transcript` (`Launch.log` holds stderr only). Recovery rebuilds observation only. |
 | `Queue { transcript }` | `app-queue` | Codex | `resume` only: queues `Launch.input` (a reference) into the desktop thread and observes `transcript`. `cancel` returns cause `cancel-unsupported`: desktop cancellation stays a caller UI operation. |
 
 In both modes `launch` returns an error only before submission. A launcher or queue response that fails after submission keeps the `Run`; its state reads `unknown` until native evidence arrives, and nothing resubmits. `checkpoint(run)` returns the private recovery value (cause `no-checkpoint` for an `agentapi` submission; CLI turns: Turn recovery and process setup); `recover(saved, &Launch)` rebuilds the run from it and the same launch fields, without a native call. `session_url` returns the observed Remote Control URL or a cause (Session observation). `progress` and `transcript` read the native transcript. `Launch.title` maps to Claude `--name <t> --remote-control <t>` and Antigravity `--title=<t>`; Codex refuses it. `Launch.deadline` stops a CLI turn at that instant; the run then reads `cancelled` with error `timeout`. A cancelled CLI turn reads `cancelled` with error `interrupted`.
@@ -321,8 +349,8 @@ It does not submit input, change sessions, grant authority or migrate live worke
 |---|---|
 | Launch, resume, session ID | `Runtime::launch`/`resume`; native session receipt, never a generated ID treated as acceptance |
 | Input, files, images | Caller retains input and file/image references; CLI passes caller arguments; app-server passes typed input unchanged |
-| Ask, reply, result | Native tool/request records are observations; app-server caller replies with original request ID; CLI has no added interactive reply channel |
-| Tools and outputs | History blocks retain native calls/results and IDs; dynamic tools remain app-server caller-owned |
+| Ask, reply, result | Native tool/request records are observations; the adapter refuses server requests of its own app-server turn and a protected host replies with the original request ID; CLI has no added interactive reply channel |
+| Tools and outputs | History blocks retain native calls/results and IDs; caller tools arrive over MCP (`Launch.mcp`) |
 | Heartbeat | History progress is source progress only; `poll` process readiness is not useful work or completion |
 | Cancel and recovery | Existing ownership/checkpoint APIs apply; sidecar submission kill never proves server cancellation |
 | Model, effort, accounts, permissions | Caller arguments/environment/account home or app-server parameters; never inferred from requested values |
@@ -345,7 +373,7 @@ Supplying a version is observation input, never a native probe or a qualificatio
 |---|---|---|---|
 | Codex exec JSON | S launch/resume/session/args/cancel/report; L interactive replies/media | S items, tools, lifecycle; L user input absent from exec output | T version/OS; portable fake clients only for this API |
 | Codex desktop rollout | S `NativeTurn` observation/recovery; L caller-owned app submission | S response/event records; L evolving native schema | T version/OS for history; existing runtime evidence remains separate |
-| Codex app-server | S caller-owned requests/replies/tools/input/cancel/recovery; L protected host authority | S caller-recorded JSONL notifications; L unrecognized notifications raw-only | `codex-cli 0.159.3` / macOS arm64: initialize/thread-start capture only; model turns T; protected qualification remains M12.8 |
+| Codex app-server | S one-turn session with MCP/instructions/parts/deltas/cancel; L protected host authority, restart recovery observes only | S caller-recorded JSONL notifications; L unrecognized notifications raw-only | `codex-cli 0.159.3` / macOS arm64: initialize/thread-start capture only; model turns T; protected qualification remains M12.8 |
 | Claude stream JSON | S launch/resume/session/args/cancel/report; L interactive replies | S message blocks, tools, result | `Claude Code 2.1.316` / macOS arm64: initialize control capture only; model turns T |
 | Claude background/Remote Control | S existing launch/job/native receipt/recovery; L caller stop authority | S native message JSONL; L server state and media not observed unless emitted | T version/OS for history |
 | Antigravity agy stream | S launch/resume/session/report; L caller args, media and replies | L text deltas/tool output/result; DONE may have no text | agy 1.4.12 / macOS arm64: existing #198 execution/resume evidence only; new history API T |
