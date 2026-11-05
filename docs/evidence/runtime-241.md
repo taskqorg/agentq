@@ -70,6 +70,14 @@ The two earlier requeues exposed the same missing relationship at different boun
 - Native containment source provenance above is retained only as history; the built binary links no TaskQ crate and dispatches no TaskQ command on the signed route.
 - The signed artifacts and public manifests accompany the task result. This attempt generated a dedicated signing key in private Windows host configuration, outside the repository and the host authority store. Its directory has inheritance disabled and grants access only to the current user and SYSTEM, verified by ACL readback. The key is not in this repository, artifact or board. No policy, trust manifest, initial journal, permit or grant was provisioned into a working host. Same-user uncontained processes remain outside the private-file boundary.
 
+## Merge with newer main
+
+After the publication review, main moved past the candidate with [#242](https://github.com/taskqorg/agentq/pull/242) and [#243](https://github.com/taskqorg/agentq/pull/243). The branch merged main at `7fa3b83e4dbeed67d2fa87813f6cf8669d158645` and was not rebased, so both source pins above stay reachable from it.
+
+`git diff 12507a2 7fa3b83` is empty for `runtime/src/agent/protected.rs`, `runtime/src/agent/host.rs`, `runtime/src/agent/host/`, `runtime/examples/sign_adapter.rs` and `agentq/host.rs`. The merged tree builds with CoreQ `v0.21.0`, revision `18b177c445e92c5df58bd1dea1b473776dd0c6ae`.
+
+The signed artifacts were not rebuilt. They remain binaries of the pinned sources with CoreQ `v0.19.2`, so they do not contain #243. A consumer that needs #243 inside the adapter needs a new build and a new signature.
+
 The publication reviewer must require green `merge_group` CI for this PR's merge result (private fallback: exact-SHA CI); PR/head success alone is insufficient.
 
 ## Final artifact and checks
