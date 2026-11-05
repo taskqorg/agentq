@@ -538,3 +538,14 @@ let recovered = History::recover(&saved)?; // Observation only; no input replay.
 
 Source-fixture provenance, adapter conclusions and remaining native gaps:
 [worker history evidence](../evidence/runtime-202.md).
+
+## Runtime operation and adoption
+
+- It derives from CoreQ v0.18.0 `agent` with its contract tests; TaskQ's argument order and parsers stay unchanged inside the adapters, and Antigravity adds headless `agy` stream-json plus sidecar `new-conversation` / `send-message` and `transcript.jsonl` step observation. Sidecar launch-off is rejected before submission because an existing server does not inherit child environment.
+- `observe(run)` returns one runtime-neutral observation: progress state, native session, and the session URL or its named absence cause with the native evidence text.
+- Claude reads only its own native records (transcript `bridge_status`, background job state, debug log); it never launches or rewrites anything for it, and an unreadable record reads `evidence-unreadable`. Causes and sources: [RUNTIME.md](RUNTIME.md#session-observation).
+- Read-only worker capability and bounded transcript/event observation uses `agent::history`; source identity, raw content, ordering, limits and per-transport support are defined in [RUNTIME.md](RUNTIME.md#worker-capabilities-and-bounded-history). It grants no submission, replay, stop or cleanup authority.
+- Native `agy` lookup appends `~/.local/bin` through `user_bin_path` when PATH lacks it, before falling back to `agentapi`. Explicit `ANTIGRAVITY_HOME` / `ANTIGRAVITY_APP_DATA_DIR` wins; otherwise use `~/.gemini/antigravity-cli` when present, then the legacy `~/.gemini/antigravity`.
+- Worker benchmark runs, viewer data and live scratch workspaces stay outside the repository (`--output`, default `<OS temp>/agentq-benchmarks`); live fixtures pass `--dangerously-skip-permissions` to headless agy turns only.
+- Effective `on` means configured at launch, not verified (P2); the session's `agentq.compress` records prove actual compression. Resolution order, reasons, JSON contract, worker benchmark methodology (`scripts/benchmark-workers.py`, `scripts/benchmark-viewer.html`) and fake-client traces: [RUNTIME.md](RUNTIME.md) and [COMPRESSION-BENCHMARK.md](COMPRESSION-BENCHMARK.md).
+- During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime revision through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](RUNTIME.md#adoption-and-rollback)).
