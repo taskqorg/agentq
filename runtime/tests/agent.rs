@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 mod protected;
 
 fn main() {
+    if std::env::var_os("AGENTQ_FAKE_QUOTA_HTTP").is_some() { return fake_quota_http(); }
     let wrapper: Vec<_> = std::env::args_os().skip(1).collect();
     if wrapper.first().is_some_and(|s| s == "--wrap") {
         std::process::exit(Command::new(&wrapper[1]).args(&wrapper[2..]).status().unwrap().code().unwrap_or(1));
@@ -22,6 +23,10 @@ fn main() {
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
+        ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
+        ("quota_account_read_guards_credentials", quota_account_read_guards_credentials),
+        ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
+        ("rollout_progress_survives_fast_resume_and_recovery", rollout_progress_survives_fast_resume_and_recovery),
         ("antigravity_wrapped_submission_keeps_prompt_and_tail", antigravity_wrapped_submission_keeps_prompt_and_tail),
         ("antigravity_native_submission_tails_and_resumes", antigravity_native_submission_tails_and_resumes),
         ("claude_starts_and_resumes_one_session", claude_starts_and_resumes_one_session),
@@ -66,6 +71,104 @@ fn append(path:&Path, events:&[Value]) {
     use std::io::Write;
     let mut f=std::fs::File::options().create(true).append(true).open(path).unwrap();
     for event in events {writeln!(f,"{event}").unwrap();}
+}
+
+// #246 A1: caller needs select one per-turn session; plain workers retain exec/recovery.
+// Risk: relay input is refused or a caller must implement a second native transport.
+fn automatic_codex_turns_select_transport() {
+    let root = scratch("automatic-transport");
+    let codex = agent::runtime("codex").unwrap();
+    let mut launch = fake_launch("codex", &root, "private request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref())]);
+    launch.deltas = true;
+    let mut run = codex.launch(&launch).unwrap_or_else(|e| panic!("neutral deltas launch refused: {e}"));
+    let until = Instant::now() + Duration::from_secs(10);
+    while codex.poll(&mut run).unwrap() == agent::State::Running {
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(codex.report(&run).unwrap().text.as_deref(), Some("final answer"));
+}
+
+fn fake_quota_http() {
+    let mut input=String::new(); std::io::stdin().read_to_string(&mut input).unwrap();
+    assert!(input.contains("Authorization: Bearer invented-token"));
+    assert!(std::env::args().all(|a|!a.contains("invented-token")),"credentials never enter argv");
+    if let Some(path)=std::env::var_os("AGENTQ_FAKE_QUOTA_CHANGE") {std::fs::write(path,b"invented changed credentials").unwrap();}
+    println!("{}",json!({"seven_day":{"utilization":61,"resets_at":"2026-11-09T00:00:00Z"},"limits":[{"group":"weekly","percent":99,"resets_at":"2026-11-09T00:00:00Z","scope":{"model":{"display_name":"Fixture"}}}]}));
+}
+
+// #246 A3/M12.11: capture a rollout boundary before spawn and retain both progress cursors across recovery.
+// Risk: a fast child loses events, an unreadable supplemental source consumes messages, or recovery emits prior turns.
+fn rollout_progress_survives_fast_resume_and_recovery() {
+    let root=scratch("rollout-progress"); let home=root.join("account"); let dir=home.join("sessions/2026/11/06");std::fs::create_dir_all(&dir).unwrap();
+    let path=dir.join("rollout-native-thread.jsonl");
+    let quota=|used|json!({"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":used,"window_minutes":300,"resets_at":1900000000}},"info":{"last_token_usage":{"total_tokens":12},"model_context_window":100}}});
+    append(&path,&[quota(10)]);
+    let mut l=fake_launch("codex",&root,"x",&[("COREQ_FAKE_HANG","1".as_ref()),("CODEX_HOME",home.as_os_str())]);
+    let file=path.clone();let row=quota(80);
+    l.process.spawned=Some(std::sync::Arc::new(move |_|{append(&file,std::slice::from_ref(&row));Ok(())}));
+    let runtime=agent::runtime("codex").unwrap();let mut run=runtime.resume("native-thread",&l).unwrap();
+    let events=runtime.progress(&mut run).unwrap();
+    let quotas:Vec<_>=events.iter().filter_map(|e|if let agent::Event::Quota(w)=e {Some(w[0].used)} else {None}).collect();
+    assert_eq!(quotas,vec![Some(0.8)],"new rows survive launch; earlier turns do not leak");
+    append(&l.log,&[json!({"type":"item.completed","item":{"type":"agent_message","text":"retained message"}})]);
+    let bytes=std::fs::read(&path).unwrap();std::fs::remove_file(&path).unwrap();
+    assert!(runtime.progress(&mut run).is_err());std::fs::write(&path,bytes).unwrap();
+    assert!(runtime.progress(&mut run).unwrap().iter().any(|e|matches!(e,agent::Event::Message{text,..} if text=="retained message")));
+    let saved=runtime.checkpoint(&run).unwrap();let mut cold=runtime.recover(&saved,&l).unwrap();
+    assert!(runtime.progress(&mut cold).unwrap().is_empty(),"recovery retains delivered progress and rollout boundary");
+    let mut legacy=saved.clone();legacy.as_object_mut().unwrap().remove("rollout_progress");
+    let mut legacy=runtime.recover(&legacy,&l).unwrap();assert!(runtime.progress(&mut legacy).unwrap().is_empty(),"legacy recovery never attributes whole thread history to this turn");
+    runtime.cancel(&mut run).unwrap();let until=Instant::now()+Duration::from_secs(5);
+    while runtime.poll(&mut run).unwrap()==agent::State::Running {assert!(Instant::now()<until);std::thread::sleep(Duration::from_millis(10));}
+}
+
+// #246 A4: every catalogue page uses one short session; account windows need no worker or product protocol.
+fn catalogue_and_account_reads_need_no_turn() {
+    let root=scratch("native-reads"); let bin=root.join(if cfg!(windows) {"codex.exe"} else {"codex"});
+    std::fs::copy(std::env::current_exe().unwrap(),&bin).unwrap();
+    std::fs::write(root.join("auth.json"),b"invented credential binding").unwrap();
+    let keys=["PATH","COREQ_FAKE_AGENT","COREQ_FAKE_APP_SERVER","COREQ_FAKE_CATALOGUE_PAGES"];
+    let saved:Vec<_>=keys.iter().map(|k|(*k,std::env::var_os(k))).collect();
+    let old=std::env::var_os("PATH").unwrap_or_default();
+    let path=std::env::join_paths(std::iter::once(root.clone()).chain(std::env::split_paths(&old))).unwrap();
+    // SAFETY: the custom harness is serial; the read session is closed before restoring the environment.
+    unsafe {std::env::set_var("PATH",path);std::env::set_var("COREQ_FAKE_AGENT","codex");std::env::set_var("COREQ_FAKE_APP_SERVER","1");std::env::set_var("COREQ_FAKE_CATALOGUE_PAGES","1");}
+    let cwd=std::env::current_dir().unwrap();std::env::set_current_dir(&root).unwrap();
+    let runtime=agent::runtime("codex").unwrap();
+    let models=runtime.catalogue(Some(&root)).unwrap();
+    assert_eq!(models.iter().map(|m|m.id.as_str()).collect::<Vec<_>>(),["fixture-model-1","fixture-model-2"]);
+    let windows=runtime.account_limits(Some(&root),1800000000);
+    assert_eq!(windows.len(),2);assert_eq!(windows[1].used,Some(0.9));
+    let requests=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
+    let rows:Vec<Value>=requests.lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(rows.iter().filter(|v|v["method"]=="initialize").count(),2,"one catalogue session, one account session");
+    assert!(rows.iter().all(|v|!matches!(v["method"].as_str(),Some("thread/start"|"thread/resume"|"turn/start"))));
+    std::env::set_current_dir(cwd).unwrap();
+    for (key,value) in saved {unsafe {match value {Some(value)=>std::env::set_var(key,value),None=>std::env::remove_var(key)}}}
+}
+
+// #246 A4: a read binds the credential before/after HTTP, never refreshes, and keeps every model window.
+fn quota_account_read_guards_credentials() {
+    // Native Keychain access needs its own platform proof; this exercises the file credential route.
+    #[cfg(not(target_os="macos"))]
+    {
+        let root=scratch("quota-http"); let bin=root.join(if cfg!(windows) {"curl.exe"} else {"curl"});
+        std::fs::copy(std::env::current_exe().unwrap(),&bin).unwrap();
+        let path=root.join(".credentials.json"); let original=json!({"claudeAiOauth":{"accessToken":"invented-token","expiresAt":2000000000000i64}}).to_string();
+        std::fs::write(&path,&original).unwrap();
+        let old=std::env::var_os("PATH").unwrap_or_default();
+        let new=std::env::join_paths(std::iter::once(root.clone()).chain(std::env::split_paths(&old))).unwrap();
+        // SAFETY: the custom harness runs serially; subprocesses are awaited before environment restoration.
+        unsafe {std::env::set_var("PATH",&new);std::env::set_var("AGENTQ_FAKE_QUOTA_HTTP","1");}
+        let runtime=agent::runtime("claude").unwrap();
+        let windows=runtime.account_limits(Some(&root),1800000000);
+        assert_eq!(windows.len(),2,"{windows:?}");assert_eq!(windows[0].used,Some(0.61));assert_eq!(windows[1].used,Some(0.99));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),original,"no refresh or credential write");
+        unsafe {std::env::set_var("AGENTQ_FAKE_QUOTA_CHANGE",&path);}
+        assert_eq!(runtime.account_limits(Some(&root),1800000000)[0].unknown.as_deref(),Some("credential-changed"));
+        unsafe {std::env::set_var("PATH",old);std::env::remove_var("AGENTQ_FAKE_QUOTA_HTTP");std::env::remove_var("AGENTQ_FAKE_QUOTA_CHANGE");}
+    }
 }
 
 // ---------- fake clients ----------
@@ -169,15 +272,20 @@ fn fake_app_server() {
         match value["method"].as_str() {
             Some("initialize")=>println!("{}",json!({"id":id,"result":{}})),
             Some("initialized")=>{},
-            Some("model/list")=>println!("{}",json!({"id":id,"result":{"data":[{"model":"fixture-model","hidden":false}],"nextCursor":null}})),
+            Some("model/list")=>{
+                let pages=std::env::var_os("COREQ_FAKE_CATALOGUE_PAGES").is_some();
+                let first=value["params"]["cursor"].is_null();
+                println!("{}",json!({"id":id,"result":{"data":[{"model":if pages {if first {"fixture-model-1"} else {"fixture-model-2"}} else {"fixture-model"},"hidden":false}],"nextCursor":if pages && first {json!("second")} else {Value::Null}}}));
+            },
+            Some("account/rateLimits/read")=>println!("{}",json!({"id":id,"result":{"rateLimits":{"primary":{"usedPercent":20,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":90,"windowDurationMins":10080,"resetsAt":1900000000}}}})),
             Some("account/read")=>{
                 assert_eq!(value["params"],json!({"refreshToken":false}),"identity read never refreshes a token");
                 println!("{}",json!({"id":id,"result":{"account":{"type":"chatgpt","email":"private@example.invalid","planType":"plus"},"requiresOpenaiAuth":true}}));
             },
             Some("thread/start")=>{
-                assert_eq!(value["params"]["dynamicTools"][0]["name"],"caller-tool");
-                assert_eq!(value["params"]["developerInstructions"],"private rules");
-                assert!(matches!(value["params"]["sandbox"].as_str(),Some("read-only"|"workspace-write")),"policy maps to thread params");
+                if std::env::var_os("AGENTQ_FAKE_ONE_TURN").is_none() { assert_eq!(value["params"]["dynamicTools"][0]["name"],"caller-tool"); }
+                if let Some(instructions)=value["params"]["developerInstructions"].as_str() {assert_eq!(instructions,"private rules");}
+                if std::env::var_os("AGENTQ_FAKE_ONE_TURN").is_none() {assert!(matches!(value["params"]["sandbox"].as_str(),Some("read-only"|"workspace-write")),"policy maps to thread params");}
                 std::fs::write("app-native-thread","native-thread").unwrap();
                 println!("{}",json!({"id":id,"result":{"thread":{"id":"native-thread"},"model":"fixture-model"}}));
             },
@@ -187,12 +295,17 @@ fn fake_app_server() {
             },
             Some("turn/start")=>{
                 turn+=1;
+                if std::env::var_os("AGENTQ_FAKE_ONE_TURN").is_some() {
+                    turn=std::fs::read_to_string("app-turn-count").ok().and_then(|s|s.parse::<u64>().ok()).unwrap_or(0)+1;
+                    std::fs::write("app-turn-count",turn.to_string()).unwrap();
+                }
                 println!("{}",json!({"id":id,"result":{"turn":{"id":format!("turn-{turn}")}}}));
                 println!("{}",json!({"id":999,"method":"item/tool/call","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"tool":"caller-tool","arguments":{"private":"tool input"}}}));
                 println!("{}",json!({"method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"draft","delta":"private draft"}}));
             },
             None if id==999=>{
-                assert_eq!(value["result"]["success"],true,"only caller's handler can answer native tool requests");
+                if std::env::var_os("AGENTQ_FAKE_ONE_TURN").is_some() {assert_eq!(value["error"]["code"],-32601);}
+                else {assert_eq!(value["result"]["success"],true,"only caller's handler can answer native tool requests");}
                 println!("{}",json!({"method":"item/completed","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"item":{"type":"agentMessage","text":"final answer"}}}));
                 println!("{}",json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":format!("turn-{turn}"),"status":"completed"}}}));
             },
@@ -201,126 +314,72 @@ fn fake_app_server() {
     }
 }
 
-// R47-R50 and owner scope note: the app-server run preserves dynamic tools, private drafts, catalogue and resume.
-// Risk: migration forces exec/MCP, grants a server request, leaks draft text into telemetry, or kills the warm session.
+// #246 A1/A3: one Launch carries relay data; the adapter owns the native protocol and stop.
+// Protected native tools retain their authority checks in support/protected.rs.
 fn app_transport_preserves_native_tools_drafts_and_catalogue() {
-    use agent::State::{Finished, Running};
-    let root=scratch("app-transport");
-    let account=root.join("account");
-    let codex=agent::runtime("codex").unwrap();
-    let store=coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
-    let ctx=Context {product:"fixtureq",version:"1.0.0",project:"other",task:None,route:Some("manager"),account:"work"};
-    // SAFETY: this harness runs its tests one at a time on the main thread.
-    unsafe { std::env::set_var("CODEX_THREAD_ID", "parent"); }
-    let mut session:Option<String>=None;
-    for resumed in [false,true] {
-        let thread=if resumed {json!({"approvalPolicy":"never"})}
-            else {json!({"approvalPolicy":"never","dynamicTools":[{"name":"caller-tool","inputSchema":{"type":"object"}}],"developerInstructions":"private rules"})};
-        let mut l=fake_launch("codex",&root,"",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("CODEX_HOME",account.as_os_str())]);
-        l.log=root.join("private.log");
-        l.mode=agent::Mode::AppServer {initialize:json!({"clientInfo":{"name":"fixtureq","version":"1"}}),thread};
-        l.policy.write=agent::Scope::None;
-        let mut run=match &session {None=>codex.launch(&l),Some(s)=>codex.resume(s,&l)}.unwrap();
-        assert_eq!(codex.session_id(&run).as_deref(),Some("native-thread"));
-        assert_eq!((codex.session_url(&run).unwrap_err().0,codex.transcript(&run).unwrap_err().0),("no-session-url","no-transcript"));
-        codex.send(&mut run,&json!({"method":"model/list","params":{"includeHidden":false,"limit":100}})).unwrap();
-        assert!(codex.send(&mut run,&json!({"method":"thread/start","params":{}})).unwrap_err().starts_with("send-unsupported"));
-        let until=Instant::now()+Duration::from_secs(10);
-        let models=loop {
-            if let Some(m)=codex.progress(&mut run).unwrap().into_iter().find(|e|e["result"]["data"].is_array()) {break m;}
-            assert!(Instant::now()<until);std::thread::sleep(Duration::from_millis(10));
-        };
-        assert_eq!(models["result"]["data"][0]["model"],"fixture-model");
-        codex.input(&mut run,&[agent::Part::Text("private request".into())]).unwrap();
-        let mut drafts=vec![];let mut handled=0;
-        loop {
-            for event in codex.progress(&mut run).unwrap() {
-                if event["method"]=="item/tool/call" {
-                    assert_eq!(event["params"]["tool"],"caller-tool");handled+=1;
-                    assert_eq!(codex.report(&run).unwrap_err(),"running");
-                    codex.send(&mut run,&json!({"id":event["id"],"result":{"success":true,"contentItems":[{"type":"inputText","text":"caller tool result"}]}})).unwrap();
-                }
-                if event["method"]=="item/agentMessage/delta" {drafts.push(event["params"]["delta"].clone());}
-            }
-            match codex.poll(&mut run).unwrap() {Running=>{assert!(Instant::now()<until);std::thread::sleep(Duration::from_millis(10));},s=>{assert_eq!(s,Finished);break;}}
+    let root = scratch("relay-turn");
+    let codex = agent::runtime("codex").unwrap();
+    let instructions = root.join("instructions.txt");
+    let mcp = root.join("mcp.json");
+    std::fs::write(&instructions, "private rules").unwrap();
+    std::fs::write(&mcp, json!({"mcpServers":{"relay":{"command":"invented-relay","args":[],"env":{"TOKEN":"invented-only"}}}}).to_string()).unwrap();
+    let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
+    let ctx = Context { product:"fixtureq", version:"1", project:"other", task:None, route:None, account:"default" };
+    let mut session: Option<String> = None;
+    for _ in 0..2 {
+        let mut l = fake_launch("codex", &root, "private request", &[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref())]);
+        l.deltas = true; l.instructions = Some(instructions.clone()); l.mcp = Some(mcp.clone());
+        l.policy.write = agent::Scope::None; l.policy.approval = agent::Approval::Deny; l.policy.isolated = true;
+        let mut run = match &session { None => codex.launch(&l), Some(s) => codex.resume(s, &l) }.unwrap();
+        let mut events = vec![];
+        let until = Instant::now() + Duration::from_secs(10);
+        while codex.poll(&mut run).unwrap() == agent::State::Running {
+            events.extend(codex.progress(&mut run).unwrap());
+            assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(10));
         }
-        codex.progress(&mut run).unwrap();
-        assert_eq!(handled,1);assert_eq!(drafts,vec![json!("private draft")]);
-        assert_eq!(codex.report(&run).unwrap().text.as_deref(),Some("final answer"));
-        assert!(run.id().is_some(),"native terminal leaves the shared server running");
-        // Distinct routes are product-owned; this probe checks transport/report metadata without double-recording a fake reused turn ID.
-        if !resumed {run.record(&ctx,&store).unwrap().recorded.unwrap();}
-        codex.cancel(&mut run).unwrap();
-        assert_eq!(codex.poll(&mut run).unwrap(),Finished,"a later exit never rewrites the native terminal");
-        session=codex.session_id(&run);
+        events.extend(codex.progress(&mut run).unwrap());
+        assert!(events.iter().any(|e| matches!(e, agent::Event::Text { delta, .. } if delta == "private draft")));
+        assert!(events.iter().any(|e| matches!(e, agent::Event::Message { text, .. } if text == "final answer")));
+        assert_eq!(codex.report(&run).unwrap().text.as_deref(), Some("final answer"));
+        assert!(codex.progress(&mut run).unwrap().is_empty());
+        assert!(matches!(codex.input(&mut run, &[agent::Part::Text("x".into())]), Err(agent::Failure::Refused(agent::Cause("input-unsupported")))));
+        assert!(agent::ProtectedAppServer::requests(&mut run).is_err(), "ordinary turns cannot access the protected protocol");
+        run.record(&ctx, &store).unwrap().recorded.unwrap();
+        assert!(run.record(&ctx, &store).is_err(), "one observation per owned turn");
+        session = codex.session_id(&run);
+        let saved = codex.checkpoint(&run).unwrap();
+        let cold = codex.recover(&saved, &l).unwrap();
+        assert_eq!(codex.report(&cold).unwrap().text.as_deref(), Some("final answer"));
     }
-    unsafe { std::env::remove_var("CODEX_THREAD_ID"); }
-    let metadata=observations(&store)[0].to_string();
-    for private in ["private draft","private request","tool input","caller tool result","final answer"] {assert!(!metadata.contains(private));}
-    let env:Value=serde_json::from_str(&std::fs::read_to_string(root.join("app-transport.json")).unwrap()).unwrap();
-    assert_eq!((&env["home"],&env["inherited"],&env["args"]),(&json!(account),&json!(false),&json!(["app-server"])),"no CLI policy flags reach app-server");
-    assert!(std::fs::read_to_string(root.join("private.log")).unwrap().contains("fixture startup diagnostic"));
-    #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;assert_eq!(std::fs::metadata(root.join("private.log")).unwrap().permissions().mode()&0o777,0o600);}
-    drop(store);std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(observations(&store).len(), 2);
+    let requests = std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
+    let rows: Vec<Value> = requests.lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+    let threads: Vec<_> = rows.iter().filter(|v| matches!(v["method"].as_str(),Some("thread/start"|"thread/resume"))).collect();
+    assert_eq!(threads.len(), 2);
+    assert_eq!(threads[0]["params"]["config"]["mcp_servers"]["relay"]["env"]["TOKEN"], "invented-only");
+    assert_eq!(threads[1]["params"]["excludeTurns"], true);
+    assert!(rows.iter().filter(|v|v["id"]==999).all(|v|v["error"]["code"]==-32601));
+    let metadata = records(&store).iter().map(Value::to_string).collect::<String>();
+    for private in ["private draft", "private request", "invented-only", "final answer"] { assert!(!metadata.contains(private)); }
 }
 
-// #217 A1/A2: `input` forwards ordered text and verified local images as one native turn, exactly once, and a recovered
-// run never replays them; `account` reads identity with `account/read` (`refreshToken: false`) only, and `send` carries
-// no account method. Risk: AssetQ's attachment reaches the worker twice or not at all, a refusal still writes to the
-// native session, or the subscription guard refreshes, writes or leaks a credential.
+// #246 A1 and retained #217 protection: ordered images are submitted exactly once; invalid input never spawns.
 fn app_input_forwards_images_once_and_reads_account_only() {
-    use agent::{Failure, Part, State::Finished};
-    let root=scratch("app-input");
-    let codex=agent::runtime("codex").unwrap();
-    let png=root.join("ref.png");
-    std::fs::write(&png,b"\x89PNG\r\n\x1a\n").unwrap();
-    let mut l=fake_launch("codex",&root,"",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("CODEX_HOME",root.join("account").as_os_str())]);
-    l.log=root.join("private.log");
-    l.mode=agent::Mode::AppServer {initialize:json!({}),thread:json!({"dynamicTools":[{"name":"caller-tool"}],"developerInstructions":"private rules"})};
-    l.policy.write=agent::Scope::None;
-    let mut run=codex.launch(&l).unwrap();
-    let written=||std::fs::read_to_string(root.join("app-input.jsonl")).unwrap().lines().map(|l|serde_json::from_str::<Value>(l).unwrap()).collect::<Vec<_>>();
-    let account=codex.account(&mut run).unwrap();
-    assert_eq!((account.login,account.plan.as_deref()),(agent::Login::Subscription,Some("plus")));
-    for method in ["account/read","account/login/start","account/logout","account/apiKey/set"] {
-        assert!(codex.send(&mut run,&json!({"method":method,"params":{}})).unwrap_err().starts_with("send-unsupported"),"{method}: send has no account path");
-    }
-    let before=written().len();
-    let refused=|c:&'static str|Err(Failure::Refused(agent::Cause(c)));
-    assert_eq!(codex.input(&mut run,&[]),refused("input-empty"));
-    assert_eq!(codex.input(&mut run,&[Part::Text(String::new())]),refused("input-empty"));
-    assert_eq!(codex.input(&mut run,&[Part::Text("x".into()),Part::Image("ref.png".into())]),refused("image-invalid"));
-    assert_eq!(codex.input(&mut run,&[Part::Image(root.join("missing.png"))]),refused("image-invalid"));
-    assert_eq!(written().len(),before,"a refusal writes nothing to the native session");
-    let mut seen=vec![];
-    for parts in [vec![Part::Text("describe".into()),Part::Image(png.clone())],vec![Part::Text("second".into())]] {
-        codex.input(&mut run,&parts).unwrap();
-        let until=Instant::now()+Duration::from_secs(10);
-        loop {
-            for event in codex.progress(&mut run).unwrap() {
-                if event["method"]=="item/tool/call" {codex.send(&mut run,&json!({"id":event["id"],"result":{"success":true,"contentItems":[]}})).unwrap();}
-                seen.push(event);
-            }
-            if codex.poll(&mut run).unwrap()==Finished {break;}
-            assert!(Instant::now()<until,"turn ended");std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    seen.extend(codex.progress(&mut run).unwrap());
-    let turns:Vec<_>=written().into_iter().filter(|m|m["method"]=="turn/start").map(|m|m["params"]["input"].clone()).collect();
-    assert_eq!(turns,vec![json!([{"type":"text","text":"describe"},{"type":"localImage","path":png}]),json!([{"type":"text","text":"second"}])],"each part once, in order");
-    let account_methods:Vec<_>=written().into_iter().filter(|m|m["method"].as_str().is_some_and(|m|m.starts_with("account/"))).collect();
-    assert_eq!(account_methods,vec![json!({"id":account_methods[0]["id"],"method":"account/read","params":{"refreshToken":false}})],"one read, no write");
-    assert!(seen.iter().all(|e|!e.to_string().contains("private@example.invalid")),"identity reply stays private");
-    // Recovery observes only: it neither replays the image turn nor accepts new input or reads.
-    let saved=codex.checkpoint(&run).unwrap();
-    let mut cold=codex.recover(&saved,&l).unwrap();
-    let sent=written().len();
-    assert!(matches!(codex.input(&mut cold,&[Part::Text("describe".into()),Part::Image(png.clone())]),Err(Failure::Failed(_))));
-    assert!(matches!(codex.account(&mut cold),Err(Failure::Failed(_))));
-    assert_eq!(written().len(),sent,"no replay after recovery");
-    codex.cancel(&mut run).unwrap();
-    drop((run,cold));
-    let _=std::fs::remove_dir_all(root);
+    let root = scratch("parts-turn");
+    let codex = agent::runtime("codex").unwrap();
+    let png = root.join("ref.png"); std::fs::write(&png,b"invented image bytes").unwrap();
+    let mut l = fake_launch("codex", &root, "unused", &[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref())]);
+    l.parts = vec![agent::Part::Image("relative.png".into())];
+    assert!(codex.launch(&l).is_err()); assert!(!root.join("app-input.jsonl").exists());
+    l.parts = vec![agent::Part::Text("describe".into()), agent::Part::Image(png.clone())];
+    let mut run = codex.launch(&l).unwrap();
+    let until = Instant::now()+Duration::from_secs(10);
+    while codex.poll(&mut run).unwrap()==agent::State::Running { assert!(Instant::now()<until); std::thread::sleep(Duration::from_millis(10)); }
+    let saved = codex.checkpoint(&run).unwrap(); let mut cold = codex.recover(&saved,&l).unwrap();
+    assert!(codex.input(&mut cold,&l.parts).is_err()); assert!(codex.account(&mut cold).is_err());
+    let rows:Vec<Value>=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap().lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+    let turns:Vec<_>=rows.iter().filter(|v|v["method"]=="turn/start").collect();
+    assert_eq!(turns.len(),1); assert_eq!(turns[0]["params"]["input"],json!([{"type":"text","text":"describe"},{"type":"localImage","path":png}]));
 }
 
 // ---------- helpers ----------
@@ -1087,10 +1146,10 @@ fn off_reaches_codex_queue_and_app_server() {
     assert_eq!(run.optimization().reason, "launch_off");
     let queue = control(&root);
     assert!(queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue lost launch off: {queue}");
-    let mut l = fake_launch("codex", &root, "", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("CODEX_HOME", root.as_os_str())]);
+    let mut l = fake_launch("codex", &root, "owned request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref()), ("CODEX_HOME", root.as_os_str())]);
     l.log = root.join("private.log");
     l.optimization = Intent::Off;
-    l.mode = agent::Mode::AppServer { initialize: json!({}), thread: json!({"dynamicTools":[{"name":"caller-tool"}],"developerInstructions":"private rules","sandbox":"read-only"}) };
+    l.deltas = true;
     let mut run = agent::runtime("codex").unwrap().launch(&l).unwrap();
     let args = serde_json::from_str::<Value>(&std::fs::read_to_string(root.join("app-transport.json")).unwrap()).unwrap()["args"].clone();
     assert!(args[0] == "app-server" && args.as_array().unwrap().iter().any(|s| s.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "app-server lost launch off: {args}");

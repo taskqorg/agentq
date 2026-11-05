@@ -16,6 +16,10 @@ mod protected;
 pub mod host;
 mod adapter;
 mod capture;
+mod events;
+mod limits;
+pub use events::{Event, Model, ToolKind};
+pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
@@ -1066,6 +1070,8 @@ pub struct Report {
     pub session: Option<String>,
     pub usage: Usage,
     pub limit: Snapshot,
+    /// Every reported quota window; an unavailable snapshot names its reason.
+    pub limits: Vec<Window>,
     /// A limit reached before work started, with its reset when known: the caller records it for the account switch.
     pub reached: Option<Option<i64>>,
     /// Telemetry outcome code and error code.
@@ -1107,7 +1113,7 @@ impl Report {
                 }
             };
         let (calls, count, known) = read_calls(events);
-        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), reached, outcome, error, detail,
+        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), limits: limits::read(client, events, rollout), reached, outcome, error, detail,
             text: final_text(events), exit: None, started_ms: unix_ms(), duration_us: 0, recorded: Ok(()) }
     }
 

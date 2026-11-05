@@ -1,0 +1,39 @@
+name: Tag runtime
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  tag:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect a runtime version change
+        id: version
+        shell: python
+        run: |
+          import os, subprocess, tomllib
+          from pathlib import Path
+          current = tomllib.loads(Path('runtime/Cargo.toml').read_text())['package']['version']
+          parent = subprocess.run(['git', 'show', 'HEAD^:runtime/Cargo.toml'], check=True, text=True, capture_output=True).stdout
+          previous = tomllib.loads(parent)['package']['version']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'changed={str(current != previous).lower()}\n')
+      - name: Verify exact-source checks, tag and read back
+        if: steps.version.outputs.changed == 'true'
+        env:
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          CHECKED_RUN: ${{ github.event.workflow_run.id }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/tag_runtime.py
