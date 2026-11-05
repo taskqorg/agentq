@@ -412,6 +412,13 @@ mod tests {
         assert_eq!((turns[1]["outcome"].as_str(), turns[1]["error"].as_str()), (Some("cancelled"), Some("interrupted")));
         assert!(turns[1]["input_tokens"].is_null() && turns[1]["unknown"]["input_tokens"] == "not-reported", "a call without tokens reads null, never zero");
 
+        hermes_call(&data, &json!({"api_request_id": "r-4", "session_id": "h-2", "response_model": "vendor/model name", "usage": {"input_tokens": 1}}), false).unwrap();
+        hermes_turn_end(&data, &json!({"session_id": "h-2", "completed": true}), false).unwrap();
+        let rows = records(&data);
+        let named: Vec<_> = rows.iter().filter(|r| r["session_id"] == "h-2").collect();
+        assert_eq!(named.len(), 2, "a model name the store refuses must not lose the call or the turn");
+        assert!(named.iter().all(|r| r["model"].is_null() && r["unknown"]["model"] == "not-reported"), "{named:?}");
+
         hermes_turn_end(&data, &json!({}), false).unwrap();
         let rows = records(&data);
         let last = kinds(&rows, "agent.turn").into_iter().find(|t| t["session_id"].is_null()).unwrap().clone();

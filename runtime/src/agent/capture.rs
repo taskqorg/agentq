@@ -365,7 +365,9 @@ pub fn session_records(turn: &SessionTurn, ctx: &Context, text: &str) -> Res<Vec
 }
 
 /// The records of one turn whose calls the hook already holds, turn first.
-pub fn session_call_records(turn: &SessionTurn, ctx: &Context, calls: Vec<Call>) -> Res<Vec<Event>> {
+pub fn session_call_records(turn: &SessionTurn, ctx: &Context, mut calls: Vec<Call>) -> Res<Vec<Event>> {
+    // The store refuses a model that is not a code, which would lose the whole turn.
+    for c in &mut calls { c.model = c.model.take().filter(|m| model_code(m)); }
     let mut r = Report::read(Client::Claude, "", &[], None);
     r.usage = sum_usage(&calls, None, !calls.is_empty());
     r.calls = calls;
