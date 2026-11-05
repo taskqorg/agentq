@@ -15,7 +15,39 @@ fn active_files(t: &Tool) -> Vec<String> {
 
 fn recovery_dir(t: &Tool) -> std::path::PathBuf { t.install.join("data/install-recovery") }
 
+fn remove_scratch(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            #[cfg(windows)]
+            if metadata.is_file() && metadata.permissions().readonly() {
+                let mut permissions = metadata.permissions();
+                permissions.set_readonly(false);
+                std::fs::set_permissions(path, permissions).map_err(|e| e.to_string())?;
+            }
+            #[cfg(unix)]
+            let _ = metadata;
+            std::fs::remove_file(path).map_err(|e| e.to_string())
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn cleanup(t: &Tool) -> Result<(), String> {
+    let dir = recovery_dir(t);
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => for entry in entries {
+            remove_scratch(&entry.map_err(|e| e.to_string())?.path())?;
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("install recovery cleanup: {e}")),
+    }
+    std::fs::remove_dir(dir).map_err(|e| format!("install recovery cleanup: {e}"))
+}
+
 fn copy_synced(from: &Path, to: &Path) -> Result<(), String> {
+    // Only owned scratch is removed; a retry may find a staged copy with the original's read-only permissions.
+    remove_scratch(to)?;
     std::fs::copy(from, to).map_err(|e| e.to_string())?;
     #[cfg(windows)]
     let file = {
@@ -74,6 +106,10 @@ fn originals(t: &Tool) -> Result<Value, String> {
         saved[&name] = json!(present);
     }
     coreq::write_durable(&dir.join("ready"), saved.to_string())?;
+    #[cfg(unix)]
+    for parent in [dir.parent().unwrap(), t.install.as_path()] {
+        std::fs::File::open(parent).and_then(|f| f.sync_all()).map_err(|e| format!("install backup directory sync: {e}"))?;
+    }
     Ok(saved)
 }
 
@@ -122,7 +158,7 @@ fn finish(t: &Tool) -> Result<(), String> {
     let dir = recovery_dir(t);
     move_durable(&dir.join("ready"), &dir.join("committed"))?;
     // A committed record never rolls back, even if cleanup is interrupted.
-    let _ = std::fs::remove_dir_all(dir);
+    let _ = cleanup(t);
     Ok(())
 }
 
@@ -137,11 +173,7 @@ fn recover_locked(t: &Tool) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
         Err(e) => return Err(format!("install recovery unknown: {e}")),
     }
-    match std::fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("install recovery cleanup: {e}")),
-    }
+    cleanup(t)
 }
 
 /// Lifecycle startup recovers before the launcher can select a partially activated release; read-only commands stay read-only.
@@ -204,7 +236,7 @@ fn verified_candidate(t: &Tool, name: &str, dir: &Path) -> Result<Vec<u8>, Strin
     }
 }
 
-/// Ok(Some(version)) when a new release became current. CoreQ's check selects the version and prunes old releases.
+/// CoreQ's check selects the available version and prunes old releases, serialized with every installer.
 pub fn check(t: &Tool) -> Result<Option<String>, String> {
     let _lock = crate::executor::lock(&t.install.join("data"))?;
     recover_locked(t)?;
@@ -442,6 +474,36 @@ mod tests {
         assert_eq!(fs::read_to_string(d.join(t.gui_exe_name())).unwrap(), "prior GUI launcher");
         assert!(!d.join("current.pending").exists());
         assert!(!recovery_dir(&t).exists());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// #238 A2: retrying an interrupted restore must preserve read-only originals without getting stuck on staging.
+    #[test]
+    fn interrupted_readonly_restore_can_retry() {
+        let (d, t, bytes) = installed("readonly");
+        let launcher = d.join(t.exe_name());
+        let mut permissions = fs::metadata(&launcher).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&launcher, permissions).unwrap();
+        update::prepare_install(&t, &bytes).unwrap();
+        originals(&t).unwrap();
+        update::activate_install(&t).unwrap();
+        // The process died after staging its original executable, before replacing the active launcher.
+        copy_synced(&recovery_dir(&t).join(t.exe_name()), &recovery_dir(&t).join(format!("{}.restore", t.exe_name()))).unwrap();
+        recover(&t).unwrap();
+        prior_active(&d, &t);
+        assert!(fs::metadata(&launcher).unwrap().permissions().readonly());
+        recover(&t).unwrap();
+        assert!(!recovery_dir(&t).exists());
+        #[cfg(windows)]
+        for entry in fs::read_dir(&d).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                let mut permissions = entry.metadata().unwrap().permissions();
+                permissions.set_readonly(false);
+                fs::set_permissions(entry.path(), permissions).unwrap();
+            }
+        }
         fs::remove_dir_all(d).unwrap();
     }
 

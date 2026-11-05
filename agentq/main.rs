@@ -65,6 +65,8 @@ fn main() {
     if let Some(code) = compression::replay() { std::process::exit(code); }
     let t = tool();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Recovery can rename the executing launcher; remember its role before current_exe changes on Unix.
+    let is_launcher = std::env::current_exe().ok().is_some_and(|exe| t.is_launcher(&exe));
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     if matches!(a.as_slice(), ["update"] | ["update", "--check"] | ["service", "install" | "run" | "restart"])
         || (a.first() == Some(&"onboard") && a.contains(&"--yes")) {
@@ -72,7 +74,7 @@ fn main() {
     }
     // the launcher copy only picks a release (coreq.md § Launcher); hooks run in place, so a release mid-update or a
     // failed start never fails the client's hook (#132)
-    if std::env::current_exe().ok() == Some(t.install.join(t.exe_name())) && t.current().is_some() && args.first().map(String::as_str) != Some("hook") {
+    if is_launcher && t.current().is_some() && args.first().map(String::as_str) != Some("hook") {
         coreq::launcher::launch(&t, &args);
     }
     let code = match a.as_slice() {
