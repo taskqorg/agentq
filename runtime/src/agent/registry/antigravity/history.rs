@@ -124,8 +124,12 @@ pub(super) fn normalize(
 fn block(format: &str, v: Value) -> Value {
     let kind = v["type"].as_str().unwrap_or_default();
     match kind {
-        "text" | "Text" | "input_text" | "output_text" => json!({"type":"text","text":v["text"],"native":v}),
-        "image" | "Image" | "input_image" | "image_url" | "local_image" | "LocalImage" => json!({"type":"image","native":v}),
+        "text" | "Text" | "input_text" | "output_text" => {
+            json!({"type":"text","text":v["text"],"native":v})
+        }
+        "image" | "Image" | "input_image" | "image_url" | "local_image" | "LocalImage" => {
+            json!({"type":"image","native":v})
+        }
         "document" | "attachment" | "file" | "input_file" => {
             json!({"type":"attachment","native":v})
         }
@@ -137,8 +141,10 @@ fn block(format: &str, v: Value) -> Value {
             "id":v.get("tool_use_id").or_else(||v.get("call_id")),
             "output":v.get("content").or_else(||v.get("output")),"native":v})
         }
-        "command_execution" | "commandExecution" | "CommandExecution" => json!({"type":"tool_result","id":v["id"],
-            "name":"shell","input":v["command"],"output":v.get("aggregated_output").or_else(||v.get("aggregatedOutput")),"native":v}),
+        "command_execution" | "commandExecution" | "CommandExecution" => {
+            json!({"type":"tool_result","id":v["id"],
+            "name":"shell","input":v["command"],"output":v.get("aggregated_output").or_else(||v.get("aggregatedOutput")),"native":v})
+        }
         "mcp_tool_call" | "mcpToolCall" | "McpToolCall" | "dynamicToolCall" | "TOOL_RESPONSE" => {
             json!({"type":"tool_result","native":v})
         }

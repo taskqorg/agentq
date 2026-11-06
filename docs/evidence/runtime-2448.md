@@ -40,6 +40,12 @@ Read-only inspection on macOS found 5,177 Claude project transcripts and 4 files
 
 The first real mismatched file was read through the public API without changing its bytes: strict observation refused `history native session differs`; the explicit alias returned the first 128-record page, including 126 original-session records, and its checkpoint recovered. No message text, credentials, session IDs or local paths are included here.
 
+## Integration with universal history (#305)
+
+Rebased onto main at `3259846` after #305. The physical history module move, universal steps, source discovery, Codex copied-parent provenance, Claude native subagent IDs and separate parent binding are preserved. Native provenance and parent-envelope reads dispatch through protocol callbacks alongside the existing identity/normalization reads.
+
+Two integration regressions cover raw PascalCase Codex items and copied-session aliases through `steps()`, checkpoint recovery and foreign-parent rejection. Before completing conflict resolution, the new raw-item check failed on an unknown tool envelope and both the existing native-subagent test and the new parent-binding check failed on native session identity. After restoring the native variants and Claude `agentId` preference inside their runtime modules, all 11 history-step tests, 23 raw-history tests and 2 TaskQ observation tests pass.
+
 ## Local checks
 
 On macOS arm64, after rebasing onto main with CoreQ v0.23.4:

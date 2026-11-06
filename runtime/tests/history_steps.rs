@@ -172,3 +172,43 @@ fn native_step_fixtures_do_not_contain_private_paths_or_timestamps() {
         }
     }
 }
+
+#[test]
+fn raw_history_keeps_pascal_case_native_items() {
+    let p=path("raw-pascal");
+    let rows=[
+        json!({"type":"response_item","payload":{"type":"AgentMessage","id":"m","content":[{"type":"Text","text":"exact"},{"type":"LocalImage","path":"fixture-image"}]}}),
+        json!({"type":"response_item","payload":{"type":"CommandExecution","id":"s","command":"pwd"}}),
+        json!({"type":"response_item","payload":{"type":"McpToolCall","id":"t"}}),
+    ];
+    fs::write(&p,rows.iter().map(|v|format!("{v}\n")).collect::<String>()).unwrap();
+    let page=History::new("codex-rollout","source","session").unwrap().poll(&p).unwrap();
+    assert_eq!(page.events[0]["kind"],"message");assert_eq!(page.events[0]["blocks"][0]["type"],"text");
+    assert_eq!(page.events[0]["blocks"][1]["type"],"image");
+    for event in &page.events[1..] {assert_eq!(event["kind"],"tool");assert_eq!(event["blocks"][0]["type"],"tool_result");}
+    fs::remove_file(p).unwrap();
+}
+
+#[test]
+fn alias_steps_and_subagent_parent_bindings_survive_recovery() {
+    let p=path("alias-steps");
+    let first=json!({"type":"user","uuid":"original-row","sessionId":"original","message":{"content":"first"}});
+    let second=json!({"type":"user","uuid":"copied-row","sessionId":"copy","message":{"content":"second"}});
+    fs::write(&p,format!("{first}\n{second}\n")).unwrap();
+    let mut h=History::with_native_session_alias("claude-native","copy-job","copy","original").unwrap();
+    let page=h.steps(&p,1).unwrap();assert_eq!(page.steps[0].source["session_binding"],"alias");
+    assert_eq!(page.checkpoint["native_session"],"copy");
+    let page=History::recover(&page.checkpoint).unwrap().steps(&p,1).unwrap();assert_eq!(page.steps[0].source["session_binding"],"native");
+    fs::remove_file(p).unwrap();
+
+    let root=path("parent-binding-home");let dir=root.join("projects/project/parent/subagents");fs::create_dir_all(&dir).unwrap();
+    let p=dir.join("agent-child.jsonl");
+    fs::write(&p,format!("{}\n",json!({"type":"user","agentId":"child","sessionId":"parent","message":{"content":"child"}}))).unwrap();
+    let rt=agent::runtime("claude").unwrap();let mut session=rt.history("parent/agent/child",Some(&root),None,None).unwrap();
+    session.steps(1).unwrap();let saved=session.checkpoint();
+    let mut h=History::recover(&saved).unwrap();
+    use std::io::Write;
+    fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(format!("{}\n",json!({"type":"user","agentId":"child","sessionId":"foreign-parent","message":{"content":"foreign"}})).as_bytes()).unwrap();
+    assert_eq!(h.steps(&p,u64::MAX).unwrap_err(),"history native parent differs");assert_eq!(h.checkpoint(),saved);
+    fs::remove_dir_all(root).unwrap();
+}

@@ -557,8 +557,9 @@ text never claims a shell command executed. Native token_usage_record projects i
 per-request usage and ID, separately from cumulative thread/turn totals.
 Codex completed item PascalCase variants and Claude thinking, toolUseResult and
 attachment records are mapped. Fork metadata inside a rollout is provenance, not a
-new session receipt; session_binding keeps its existing native/caller values and a
-separate provenance flag identifies inherited metadata. The first metadata record
+new session receipt; such metadata retains caller binding and a separate
+provenance flag. Other records use native/caller binding unless the caller explicitly
+binds a Claude copied-session alias as described below. The first metadata record
 binds the source. Foreign event
 thread IDs still refuse. Antigravity retains its transport limitations below.
 
@@ -660,7 +661,7 @@ Unknown types keep their raw record, unknown author/kind and normalization limit
 consumers use `validity` to skip unsupported metadata or refuse invalid envelopes
 without parsing native JSON. Forward and backward pages expose the same validity.
 An emitted native session ID must match the bound session; otherwise the page fails without advancing. `History::with_native_session_alias(format, source, session, native_session)` explicitly binds a caller-validated copied Claude job to its original record session ID. It accepts only Claude formats and a non-empty alias distinct from the caller session, before reading. Records may name only that alias or the bound session; any third ID still fails. The alias is saved and validated in the checkpoint; file identity and consumed-prefix checks remain mandatory. The caller must establish the copy relationship outside this API; a filename mismatch alone never authorizes it.
-`session_binding` is `native` on a record carrying the bound ID, `alias` on one carrying the explicit alias, otherwise `caller`, never identity proof. Aliased records expose `native_session` and retain the caller `session`; raw content is unchanged. Existing non-aliased event shapes and IDs stay unchanged.
+`session_binding` is `native` on a record carrying the bound ID, `alias` on one carrying the explicit alias, otherwise `caller`, never identity proof. Aliased records expose `native_session` and retain the caller `session`; raw content is unchanged. Existing non-aliased event shapes and IDs stay unchanged. Later Codex copied-parent metadata retains `provenance: true` with caller binding. Claude subagent identity and its separate native parent remain validated; an explicit copied-session alias does not relax the parent check.
 `pending_bytes` names unconsumed bytes in a forward read, or excluded incomplete tail bytes
 in a backward read; an empty page alone is not a health claim.
 Event IDs bind source/session/offset/raw hash; repeated reads of the same record have the same ID.
