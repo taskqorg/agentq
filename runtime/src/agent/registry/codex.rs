@@ -275,10 +275,14 @@ fn parse_event(cursor: &mut events::Cursor,v: &Value,out: &mut Vec<Event>,thread
         let kind = v["type"].as_str().unwrap_or("");
         let start = method == "item/started" || kind == "item.started";
         let end = method == "item/completed" || kind == "item.completed";
-        if !start && !end { return; }
-        let i = if method.is_empty() { &v["item"] } else { &p["item"] };
+        let completed=end || payload["type"]=="item_completed";
+        let i = if payload["type"]=="item_completed" {&payload["item"]} else if method.is_empty() { &v["item"] } else { &p["item"] };
         let native = i["type"].as_str().unwrap_or("");
         let id = string(&i["id"]);
+        if completed && matches!(native,"imageGeneration"|"image_generation"|"ImageGeneration"|"imageView"|"image_view"|"ImageView") {
+            out.push(Event::Image {item:id.clone(),generated:matches!(native,"imageGeneration"|"image_generation"|"ImageGeneration"),saved_path:string(&i["savedPath"]).or_else(||string(&i["saved_path"])).or_else(||string(&i["path"])),native:i.clone()});
+        }
+        if !start && !end { return; }
         if matches!(native, "agentMessage" | "agent_message") {
             if end { if let Some(text) = string(&i["text"]) { out.push(Event::Message { item: id, text }); } }
         } else if matches!(native, "commandExecution" | "command_execution" | "mcpToolCall" | "mcp_tool_call" | "webSearch" | "web_search" | "fileChange" | "file_change" | "dynamicToolCall" | "dynamic_tool_call" | "collabAgentToolCall" | "collab_tool_call" | "imageView" | "image_view" | "imageGeneration" | "image_generation") {

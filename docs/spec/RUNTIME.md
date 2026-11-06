@@ -979,3 +979,32 @@ Source-fixture provenance, adapter conclusions and remaining native gaps:
 - During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime revision through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](RUNTIME.md#adoption-and-rollback)).
 
 ACP and JSONL RPC candidates use the same unlimited stream transport and canonical history steps. Explicit-source history is available through the runtime trait; native source discovery for unqualified candidates reads unsupported rather than guessing a directory layout.
+
+## History media
+
+`Session::media()` derives a `MediaCatalog` from the same complete native records as
+steps. Each descriptor has kind, MIME, name, size, SHA-256 and a source (inline,
+local path, generated asset or URL), native step/origin links and explicit unknown
+or missing reasons. Claude image/document and nested tool-result blocks, Codex
+input_image/local_image/ImageView/generated assets and Antigravity brain artifact
+references are supported. Codex generated_images/<native-session> and the selected
+Antigravity brain directory are additional native session sources. Structured tool/file-change path references are inspected;
+assistant prose and filename extensions never establish media. Video and audio
+classification requires a real file signature. URLs are retained without fetching.
+
+The catalog decodes inline base64 once per read, deduplicates backing bytes by hash,
+and offers `read(key, start, length)` by descriptor ID, SHA-256 or an explicitly
+referenced path. Only references found in that session and native Antigravity brain
+artifacts enter the catalog. A requested arbitrary path refuses. File reads validate
+the content hash before returning a caller-selected byte range; changed, vanished,
+invalid or inaccessible sources remain explicit. No output ceiling, timeout or
+persistent media/steps cache is introduced. Clients choose display and stream ranges.
+Media catalog descriptors can be emitted as media steps without losing original raw
+source ranges. Archive #283 can copy catalog bytes once by hash while available;
+this API does not claim durable retention after files vanish, and does not write an
+archive or a viewer. Viewers treat media as untrusted content.
+
+Runtime `Event::Image` retains the native item identity, whether it is generated,
+its saved path and the full native image item. Codex imageGeneration/image_generation
+and savedPath/saved_path survive the trait boundary, including generation failure
+with no saved path; consumers need no native JSON parsing for those facts.

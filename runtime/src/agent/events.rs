@@ -31,6 +31,8 @@ pub enum Event {
     Request { id: Value, kind: RequestKind, prompt: Option<String>, choices: Vec<Choice> },
     /// Native session metadata, capabilities or an update without a neutral mapping.
     Metadata { kind: String, data: Value },
+    /// Native image evidence is local content; never telemetry or completion authority.
+    Image { item:Option<String>, generated:bool, saved_path:Option<String>, native:Value },
     Activity,
     Stalled { idle_ms:u64 },
 }
@@ -600,7 +602,7 @@ mod tests {
                         Event::Unsupported{reason}=>self.error=Some(reason),
                         Event::Message{..}|Event::Progress=>self.done(at),
                         Event::TurnEnd{..}=>{self.tools.clear();self.error=None;self.done(at);}
-                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Request{..}|Event::Metadata{..}|Event::Stalled{..}|Event::Activity=>{}
+                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Request{..}|Event::Metadata{..}|Event::Stalled{..}|Event::Image{..}|Event::Activity=>{}
                     }
                 }
             }
