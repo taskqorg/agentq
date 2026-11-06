@@ -51,8 +51,7 @@ impl History {
         let bound=self.offset.saturating_add(bytes);
         let mut derived=BTreeMap::<String,Step>::new();
         let mut changed=BTreeMap::<String,Step>::new();
-        let mut turn:Option<Turn>=None;
-        let mut presentation=json!({});
+        let mut rows=Vec::new();let mut events=Vec::new();
         while consumed < bound {
             let mut row = Vec::new();
             if reader.read_until(b'\n', &mut row).map_err(|e|e.to_string())? == 0 { break; }
@@ -62,6 +61,11 @@ impl History {
             let value: Value = serde_json::from_str(raw).map_err(|_| "history invalid JSON")?;
             if !value.is_object() { return Err("history invalid record".into()); }
             let event = self.event(&value, raw, consumed)?;
+            rows.push(value);events.push(event);consumed+=row.len() as u64;
+        }
+        let mut usage=super::live::usage_steps(&self.format,&events,&rows,self.offset);
+        let mut turn:Option<Turn>=None;let mut presentation=json!({});
+        for (index,(value,event)) in rows.iter().zip(&events).enumerate() {
             let p=value.get("payload").or(value.get("params")).unwrap_or(&value);
             let prompt=value["promptId"].as_str().filter(|_|matches!(value["type"].as_str(),Some("user"|"assistant")));
             let native=p["turn_id"].as_str().or(p["turnId"].as_str()).or(prompt);
@@ -76,14 +80,14 @@ impl History {
             let facts=presentation_facts(&value);
             if !facts["model"].is_null() && facts["model"]!=presentation["model"] {presentation["effort"]=Value::Null;}
             for name in ["model","effort","cli_version"] {if !facts[name].is_null(){presentation[name]=facts[name].clone();}}
-            for mut step in decode(&self.format, &event, &value) {
+            for mut step in decode(&self.format, event, value).into_iter().filter(|s|s.kind!=StepKind::Usage).chain(usage.remove(&index).unwrap_or_default()) {
+                if step.kind==StepKind::Usage {step.part=value["message"]["content"].as_array().map_or(0,Vec::len)+step.part;}
                 for name in ["model","effort","cli_version"] {if step.presentation[name].is_null() && !presentation[name].is_null() {step.presentation[name]=presentation[name].clone();step.presentation["unknown"].as_object_mut().unwrap().remove(name);}}
                 if step.turn.id.is_none() {if let Some(turn)=&turn {step.turn=turn.clone();}}
                 if let Some(previous)=derived.get(&step.id) {step=revise(previous,step);}
                 derived.insert(step.id.clone(),step.clone());
-                if consumed>=self.offset {changed.insert(step.id.clone(),step);}
+                if step.revision>=self.offset {changed.insert(step.id.clone(),step);}
             }
-            consumed += row.len() as u64;
         }
         drop(reader);
         let end = consumed;
@@ -117,6 +121,7 @@ fn merge(old:&mut Value,new:&Value) {
 
 fn revise(previous:&Step,mut next:Step)->Step {
     if matches!(next.kind,StepKind::Tool) && !matches!(previous.kind,StepKind::Tool|StepKind::Unknown) {next.kind=previous.kind;}
+    if next.kind!=StepKind::Usage {
     let mut data=previous.data.clone();
     if next.state=="delta" {
         let output=format!("{}{}",data["output"].as_str().unwrap_or_default(),next.data["delta"].as_str().unwrap_or_default());
@@ -129,6 +134,7 @@ fn revise(previous:&Step,mut next:Step)->Step {
     }
     next.data=data;
     if previous.state=="completed" && next.state!="completed" {next.state=previous.state.clone();}
+    }
     next.origins=previous.origins.clone();next.origins.extend(origin(&next.source));
     if next.parent.is_none(){next.parent=previous.parent.clone();}
     if next.turn.id.is_none(){next.turn=previous.turn.clone();}
@@ -348,7 +354,7 @@ pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
         _ => StepKind::Unknown,
     };
     let data = data(kind,item,record);
-    if kind==StepKind::Usage && !extra.is_empty(){extra}else{
+    if matches!(kind,StepKind::Usage|StepKind::Unknown) && !extra.is_empty(){extra}else{
         let mut steps=vec![base_step(event,record,item,kind,data,0)];steps.extend(extra);steps
     }
 }

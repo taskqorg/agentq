@@ -43,6 +43,7 @@ fn main() {
         ("deadline_stops_a_turn_that_never_ends", deadline_stops_a_turn_that_never_ends),
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
+        ("native_queue_identified_usage_freezes_latest_scoped_requests", native_queue_identified_usage_freezes_latest_scoped_requests),
         ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
         ("typed_log_reads_are_public", typed_log_reads_are_public),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
@@ -1998,4 +1999,24 @@ fn stopped_app_runs_keep_distinct_recoverable_ids() {
         assert_ne!(previous.as_ref(),Some(&stop.id));previous=Some(stop.id);
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// M12.20: raw queue completion and history select the same scoped identified requests before freezing.
+fn native_queue_identified_usage_freezes_latest_scoped_requests() {
+    for mixed in [false,true] {
+        let root=scratch(if mixed {"queue-mixed-usage"}else{"queue-identified-usage"});let path=root.join("native.jsonl");
+        append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);
+        let rt=agent::runtime("codex").unwrap();let mut launch=fake_launch("codex",&root,"owned reference",&[("COREQ_FAKE_CONTROL","1".as_ref())]);launch.mode=agent::Mode::Queue {transcript:path.clone()};
+        let mut run=rt.resume("native-thread",&launch).unwrap();
+        append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}),json!({"type":"turn_context","payload":{"turn_id":"turn","model":"fixture-model"}}),json!({"type":"turn_context","payload":{"turn_id":"other","model":"other-model"}}),json!({"type":"event_msg","payload":{"type":"user_message","message":"owned reference","turn_id":"turn"}})]);
+        if mixed {let u=json!({"input_tokens":99,"cached_input_tokens":0,"output_tokens":1});append(&path,&[json!({"type":"event_msg","payload":{"type":"token_count","turn_id":"turn","info":{"last_token_usage":u,"total_token_usage":u}}})]);}
+        let request=|thread:&str,turn:&str,input:u64|json!({"type":"token_usage_record","payload":{"thread_id":thread,"turn_id":turn,"response_id":"request","usage":{"input_tokens":input,"cached_input_tokens":0,"output_tokens":2}}});
+        append(&path,&[request("native-thread","turn",10)]);assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Running);
+        let saved=rt.checkpoint(&run).unwrap();drop(run);let mut run=rt.recover(&saved,&launch).unwrap();
+        append(&path,&[request("foreign","turn",500),request("native-thread","foreign",500),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}),request("native-thread","turn",12)]);
+        finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);assert_eq!(report.calls[0].id.as_deref(),Some("request"));assert_eq!(report.usage.input,Some(12));assert_eq!(report.calls[0].model.as_deref(),Some("fixture-model"));
+        let context=Context {product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};let frozen=run.snapshot(&context).unwrap();
+        append(&path,&[request("native-thread","turn",999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);assert_eq!(rt.report(&run).unwrap().usage.input,Some(12));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

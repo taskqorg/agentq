@@ -546,6 +546,15 @@ reason; no plan, cost, token total or file edit is invented from assistant prose
 Native request IDs and each registered runtime call parser deduplicate usage;
 history never chooses accounting or limit parsers by runtime-name prefixes. Rollout
 token_count uses per-call last usage, never accumulated totals added to those calls.
+Usage is selected with the complete native turn context available in the caller's
+read window. Identified Codex requests supersede that turn's legacy snapshots. A
+legacy step already delivered on a previous page receives a higher-revision Usage
+step with state `superseded`, null counters and `active: false`; clients upsert it
+and exclude it from accounting. If both forms first appear in one page, only the
+identified request is delivered. A later Usage revision replaces all reported
+fields authoritatively, including nulls and unknown reasons; it never inherits a
+missing old counter, cost, time or model. App-server notifications and native queue
+freeze use the same per-native usage normalization and request revision selection.
 Reasoning tokens are a reported subset of output. Cost is explicitly native-reported
 or unknown; no pricing table is guessed. File rollups retain the native changes and
 source revisions; repeated delivery replaces a change instead of counting it again.

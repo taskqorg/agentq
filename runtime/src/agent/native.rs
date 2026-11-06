@@ -339,4 +339,4 @@ mod tests {
 }
 
 pub use registry::BackgroundJob;
-pub(crate) use registry::{remote_url,claude_link,Absence,append_codex_usage};
+pub(crate) use registry::{remote_url,claude_link,Absence};
