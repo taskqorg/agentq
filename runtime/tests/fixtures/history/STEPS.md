@@ -13,3 +13,10 @@ Orca decoding reference and MIT attribution: `runtime/src/agent/history/NOTICE`.
 callback from a single image-read turn on macOS aarch64. Only model, context-window
 and limit-window fields remain; session identity and reset timestamp are scrubbed.
 Missing five-hour usage is native absence, not zero. No user settings were installed.
+
+The *-media.jsonl fixtures project actual single image-read turns on this Mac:
+Claude Code 2.1.319, codex-cli 0.159.3 and agy 1.5.2. They retain the native image
+block, tool-result and Antigravity artifact URI/quoted argument shapes; identity,
+paths, prompt prose and timestamps are scrubbed. pixel.png is the locally generated
+16x16 red test image, not user media. Orca decoder references remain attributed in
+NOTICE; Antigravity's own native bytes establish the additional artifact shape.
