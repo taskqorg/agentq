@@ -675,7 +675,8 @@ impl Turn {
         self.read()?;
         if self.exit.is_none() {
             if let Some(code) = self.child.try_wait()? {
-                self.exit_unknown = code.is_none();
+                // After our stop of an ended turn, the code is the kill's (Windows 1, Unix -1), not the client's.
+                self.exit_unknown = code.is_none() || self.ended && self.stopping;
                 let code = code.unwrap_or(-1);
                 self.read()?;
                 self.exit = Some(code);
