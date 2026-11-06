@@ -10,15 +10,48 @@ fn digest(path:&Path)->String {
 }
 fn read(path:&Path)->Value {serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()}
 fn save(path:&Path,v:&Value) {std::fs::write(path,v.to_string()).unwrap();}
-fn until()->Instant {Instant::now()+Duration::from_secs(10)}
+// A hang bound, not a speed claim: no scenario waits for it to pass, so it can stay well above an overloaded host's delays.
+fn until()->Instant {Instant::now()+Duration::from_secs(60)}
+
+const READBACK_TIMEOUT:&str="readback unknown: timeout";
+/// #274: a host readback keeps its 5 s production cap and spawns this 60 MB test binary, so an overloaded host can exceed it.
+/// That timeout is unknown authority, never a refusal: it proves no gate, sets no fence, and must not pass an `is_err` check.
+fn refused<T,E:std::fmt::Display>(result:Result<T,E>)->bool {
+    match result {Ok(_)=>false,Err(e)=>{let e=e.to_string();assert!(!e.contains(READBACK_TIMEOUT),"{e}");true}}
+}
+/// #274: `retained()` maps every process failure to one text, so only the time spent can show that its 5 s readback cap expired.
+/// Each failure class under that time stops at once. A slower one, counting the adapter hash before the cap starts, also reruns and still fails on the last attempt.
+fn retained_answer(call:impl FnOnce(Instant)->Result<Value,String>)->Value {
+    let start=Instant::now();
+    call(until()).unwrap_or_else(|e|{
+        assert!(!(e.contains("retained recovery unknown")&&start.elapsed()>=Duration::from_secs(5)),"{e}: {READBACK_TIMEOUT}");
+        panic!("{e}")
+    })
+}
+/// A timed-out attempt reached no verdict, and its consumed operation cannot resume, so only that attempt reruns from a new root.
+/// Any other failure stops at once, and a host that always times out still fails on the last attempt.
+fn rerun_after_readback_timeout(scenario:fn()) {
+    for _ in 1..5 {
+        let Err(panic)=std::panic::catch_unwind(scenario) else {return};
+        let message=panic.downcast_ref::<String>().map(String::as_str).or(panic.downcast_ref::<&str>().copied()).unwrap_or("");
+        if !message.contains(READBACK_TIMEOUT) {std::panic::resume_unwind(panic);}
+        println!("rerun after unfinished attempt: {message}");
+    }
+    scenario();
+}
+/// A timed-out attempt's frontend may still hold its root, so every attempt starts in its own.
+fn fresh(tag:&str)->PathBuf {
+    static ATTEMPT:std::sync::atomic::AtomicU32=std::sync::atomic::AtomicU32::new(0);
+    scratch(&format!("{tag}-{}",ATTEMPT.fetch_add(1,std::sync::atomic::Ordering::Relaxed))).canonicalize().unwrap()
+}
 
 fn authority(root:&Path,revision:&Value,account:&Value)->Value {
-    let exe=std::env::current_exe().unwrap().canonicalize().unwrap();let e=read(&root.join("expected.json"));
+    let exe=std::env::current_exe().unwrap().canonicalize().unwrap();let e=read(&root.join("expected.json"));let hash=digest(&exe);
     json!({"project":root,"runtime":"codex","profile_sha256":e["profile_sha256"],"requested":"workspace-write",
         "saved":{"revision":revision,"grant":{"runtime":"codex","mode":"workspace","project":root,"by":e["approver"],"at":1}},
         "resolved":{"runtime":"codex","requested":"workspace-write","grant":"workspace","effective":"workspace",
-            "enforcement":"invented process double, no native enforcement","refused":null},"executable":exe,"executable_sha256":digest(&exe),
-        "adapter":{"executable":exe,"sha256":digest(&exe)},"account":account,"account_home":e["account_home"]})
+            "enforcement":"invented process double, no native enforcement","refused":null},"executable":exe,"executable_sha256":hash,
+        "adapter":{"executable":exe,"sha256":hash},"account":account,"account_home":e["account_home"]})
 }
 
 pub fn fake_host() {
@@ -120,8 +153,9 @@ fn native_scope(r:&Value,root:&Path,receipt:&Path) {
 
 // M12.8 / #199: a launchd supervisor differs from the consumer's transport frontend.
 // Risk: valid published host readback is rejected before input despite exact live identities.
-pub fn protected_frontend_is_not_scope_supervisor() {
-    let root=scratch("protected-scope").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
+pub fn protected_frontend_is_not_scope_supervisor() { rerun_after_readback_timeout(frontend_scenario); }
+fn frontend_scenario() {
+    let root=fresh("protected-scope");let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
     let home=root.join("account");std::fs::create_dir(&home).unwrap();
     save(&root.join("expected.json"),&json!({"profile_sha256":"b".repeat(64),"account_home":home,"approver":"invented-operator"}));
     std::fs::write(root.join("scope-mode"),b"invented separate supervisor").unwrap();
@@ -139,10 +173,10 @@ pub fn protected_frontend_is_not_scope_supervisor() {
 
 // M12.8 / #199 A1-A5: independent preparation, fresh input gate and original-operation recovery.
 // Risk: stale preparation dispatches, absent roots/descendants or a partial cleanup release capacity, or recovery replays input.
-pub fn protected_preparation_and_completion_recover_original_operation() { prepared_operation(false); }
-pub fn independent_signed_host_recovers_without_taskq() { prepared_operation(true); }
+pub fn protected_preparation_and_completion_recover_original_operation() { rerun_after_readback_timeout(||prepared_operation(false)); }
+pub fn independent_signed_host_recovers_without_taskq() { rerun_after_readback_timeout(||prepared_operation(true)); }
 fn prepared_operation(modern:bool) {
-    let root=scratch("protected-prepared").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
+    let root=fresh("protected-prepared");let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
     let home=root.join("account");std::fs::create_dir(&home).unwrap();
     let expected=json!({"profile_sha256":"b".repeat(64),"account_home":home,"approver":"invented-operator"});
     save(&root.join("expected.json"),&expected);std::fs::write(root.join("scope-mode"),b"invented scope").unwrap();
@@ -188,10 +222,10 @@ fn prepared_operation(modern:bool) {
     }
     // The host, not a second AgentQ resolver, refuses drift between prepare and actual dispatch.
     let mut drift=expected.clone();drift["profile_sha256"]=json!("c".repeat(64));save(&root.join("expected.json"),&drift);
-    assert!(host.prepare(&slot,until()).is_err(),"never replace stale preparation");
-    let mut refused=host.launch_prepared(&recovered,Intent::Off,&root.join("refused.log")).unwrap();
-    let deadline=until();while refused.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
-    assert!(!root.join("request.json").exists(),"drift refusal precedes intent/native launch");drop(refused);
+    assert!(refused(host.prepare(&slot,until())),"never replace stale preparation");
+    let mut drifted=host.launch_prepared(&recovered,Intent::Off,&root.join("refused.log")).unwrap();
+    let deadline=until();while drifted.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
+    assert!(!root.join("request.json").exists(),"drift refusal precedes intent/native launch");drop(drifted);
     save(&root.join("expected.json"),&expected);
     let mut server=if modern {
         save(&handoff.join("launch-intent.json"),recovered.request());
@@ -207,7 +241,7 @@ fn prepared_operation(modern:bool) {
         ("/launch/scope/binding/coalition",json!(0)),
     ] {
         let mut changed=good.clone();*changed.pointer_mut(pointer).unwrap()=value;save(&path,&changed);
-        assert!(server.send(&message,until()).is_err(),"{pointer}");assert!(!root.join("app-input.jsonl").exists());
+        assert!(refused(server.send(&message,until())),"{pointer}");assert!(!root.join("app-input.jsonl").exists());
     }
     save(&path,&good);server.verify(until()).unwrap();
     server.send(&message,until()).unwrap();assert_eq!(server.receive(until()).unwrap().unwrap()["id"],1);
@@ -218,15 +252,15 @@ fn prepared_operation(modern:bool) {
         assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));
     };
     let mut changed=good.clone();changed["launch"]["scope"]["binding"]["coalition"]=json!(124);save(&path,&changed);
-    assert!(server.send(&message,until()).is_err(),"changed live binding fences input");save(&path,&good);
-    assert!(server.send(&message,until()).is_err(),"old observation cannot reopen fenced input");
+    assert!(refused(server.send(&message,until())),"changed live binding fences input");save(&path,&good);
+    assert!(refused(server.send(&message,until())),"old observation cannot reopen fenced input");
     server.cancel(until()).unwrap();let deadline=until();
     while server.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     drop(server);
     let recovered=host.recover_preparation(&checkpoint).unwrap();
     assert_eq!(host.reconcile(&recovered,until()).unwrap()["state"],"unknown","supervisor/root exit is not descendant completion");
     std::fs::write(root.join("lost-reply"),b"interrupted readback after durable intent").unwrap();
-    assert!(host.reconcile(&recovered,until()).is_err());std::fs::remove_file(root.join("lost-reply")).unwrap();
+    assert!(refused(host.reconcile(&recovered,until())));std::fs::remove_file(root.join("lost-reply")).unwrap();
     assert_eq!(wire_request(read(&root.join("request.json")),modern),*recovered.request(),"lost reply never changes slot/key/effect");
     // Invented host-state model, not a native certificate: each partial state retains unknown occupancy.
     let mut completed=read(&path);completed["state"]=json!("completed");completed["launch"]["input_closed"]=json!(true);
@@ -246,7 +280,7 @@ fn prepared_operation(modern:bool) {
         ("/launch/scope/certificate/scope/coalition",json!(124)),("/launch/scope/binding/boot",json!(99)),
     ] {
         let mut changed=completed.clone();*changed.pointer_mut(pointer).unwrap()=value;save(&path,&changed);
-        assert!(host.reconcile(&recovered,until()).is_err(),"{pointer}: retain occupancy");
+        assert!(refused(host.reconcile(&recovered,until())),"{pointer}: retain occupancy");
     }
     save(&path,&completed);assert_eq!(host.reconcile(&recovered,until()).unwrap(),wire_receipt(completed.clone(),modern));
     assert_eq!(host.reconcile(&host.recover_preparation(&checkpoint).unwrap(),until()).unwrap(),wire_receipt(completed.clone(),modern),"duplicate/recovered completion observes same operation");
@@ -259,8 +293,9 @@ fn prepared_operation(modern:bool) {
 // Requirement: no input before fresh exact authority, no widening/replay from untrusted task/env/receipt text.
 // Risk: a forged/stale/unknown receipt starts work, kills a foreign child or reuses an uncertain operation.
 // #193: accept producer-shaped resolved.effective; absent/null/Full/mode-only evidence never opens stdin.
-pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
-    let root=scratch("protected").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
+pub fn protected_launch_refuses_tampering_and_preserves_native_transport() { rerun_after_readback_timeout(launch_scenario); }
+fn launch_scenario() {
+    let root=fresh("protected");let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
     let home=root.join("account");std::fs::create_dir(&home).unwrap();
     let host=ProtectedHost::new(&exe,&digest(&exe)).unwrap();
     assert!(ProtectedHost::new(&exe,&"0".repeat(64)).is_err(),"untrusted adapter refused before execution");
@@ -299,21 +334,21 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
         ("/verified_effective/state",json!("unknown")),("/launch/verified_effective",Value::Null),
     ] {
         let mut changed=good.clone();*changed.pointer_mut(pointer).unwrap()=value;save(&path,&changed);
-        assert!(server.send(&message,until()).is_err(),"{pointer}");
+        assert!(refused(server.send(&message,until())),"{pointer}");
         assert!(!root.join("app-input.jsonl").exists(),"{pointer}: no native input");
     }
     save(&path,&good);
     std::fs::write(root.join("lost-reply"),b"invented interrupted reply").unwrap();
-    assert!(server.send(&message,until()).is_err());assert!(!root.join("app-input.jsonl").exists());
+    assert!(refused(server.send(&message,until())));assert!(!root.join("app-input.jsonl").exists());
     std::fs::remove_file(root.join("lost-reply")).unwrap();
     server.verify(until()).unwrap();
     let mut unknown=good.clone();unknown["state"]=json!("unknown");save(&path,&unknown);
-    assert!(server.send(&message,until()).is_err());assert!(!root.join("app-input.jsonl").exists());
+    assert!(refused(server.send(&message,until())));assert!(!root.join("app-input.jsonl").exists());
     save(&path,&good);server.verify(until()).expect("same binding must recover from an unknown readback without resubmitting");
     std::fs::write(root.join("lost-reply"),b"invented interrupted reply").unwrap();
-    assert!(server.send(&message,until()).is_err());assert!(!root.join("app-input.jsonl").exists());
+    assert!(refused(server.send(&message,until())));assert!(!root.join("app-input.jsonl").exists());
     std::fs::remove_file(root.join("lost-reply")).unwrap();server.verify(until()).unwrap();
-    let mut changed=r.clone();changed["slot"]["key"]=json!("c".repeat(64));assert!(host.observe(&changed,until()).is_err());
+    let mut changed=r.clone();changed["slot"]["key"]=json!("c".repeat(64));assert!(refused(host.observe(&changed,until())));
     let codex=agent::runtime("codex").unwrap();
     let mut l=agent::Launch::new(&root,root.join("run.log"),"","fixtureq");
     l.env=vec![("CODEX_HOME".into(),home.into())];l.model=Some("fixture-model".into());
@@ -337,10 +372,10 @@ pub fn protected_launch_refuses_tampering_and_preserves_native_transport() {
     let mut duplicate=host.launch(r.clone(),ProtectedIdentity{profile_sha256:"b".repeat(64),executable:exe.clone(),executable_sha256:digest(&exe),
         account_home:root.join("account"),approver:"invented-operator".into()},Intent::Off,&root.join("duplicate.log")).unwrap();
     let deadline=until();while duplicate.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
-    assert!(duplicate.send(&message,until()).is_err(),"consumed operation cannot launch again even with a copied receipt");drop(duplicate);
+    assert!(refused(duplicate.send(&message,until())),"consumed operation cannot launch again even with a copied receipt");drop(duplicate);
     // A valid-looking new generation must fence the already-bound transport permanently.
     let mut changed=good.clone();changed["launch"]["host_instance"]=json!("invented-host-2");save(&path,&changed);
-    assert!(codex.input(&mut run,&[agent::Part::Text("next".into())]).is_err());save(&path,&good);assert!(codex.input(&mut run,&[agent::Part::Text("next".into())]).is_err());
+    assert!(refused(codex.input(&mut run,&[agent::Part::Text("next".into())])));save(&path,&good);assert!(refused(codex.input(&mut run,&[agent::Part::Text("next".into())])));
     assert_eq!(host.observe(&r,until()).unwrap(),good,"recovery observes same operation without relaunch");
     assert!(!codex.cancel(&mut run).unwrap(),"a host cancel never proves exit");let deadline=until();
     // Process identity and the transport's exit/EOF observation arrive independently.
@@ -374,13 +409,14 @@ fn signed_host(exe:&Path)->ProtectedHost {
 }
 
 // M12.8 / #241 A2/A3: immutable recovery/cancellation crosses only the signed independent command boundary.
-pub fn signed_retained_recovery_preserves_original_bytes() {
-    let root=scratch("signed-retained").canonicalize().unwrap();let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
+pub fn signed_retained_recovery_preserves_original_bytes() { rerun_after_readback_timeout(retained_scenario); }
+fn retained_scenario() {
+    let root=fresh("signed-retained");let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
     let host=signed_host(&exe);
     let checkpoint=json!({"slot":{"binding":{"root":root}}}).to_string();let receipt=r#"{ "invented": "retained receipt" }"#;
     std::fs::write(root.join("retained-checkpoint"),&checkpoint).unwrap();std::fs::write(root.join("retained-receipt"),receipt).unwrap();
-    assert_eq!(host.reconcile_retained(&checkpoint,receipt,until()).unwrap()["state"],"unknown");
-    assert_eq!(host.cancel_retained(&checkpoint,receipt,until()).unwrap()["state"],"unknown");
+    assert_eq!(retained_answer(|until|host.reconcile_retained(&checkpoint,receipt,until))["state"],"unknown");
+    assert_eq!(retained_answer(|until|host.cancel_retained(&checkpoint,receipt,until))["state"],"unknown");
     assert!(!root.join("app-input.jsonl").exists());assert!(!root.join("request.json").exists());
     assert_eq!(std::fs::read_to_string(root.join("retained-receipt")).unwrap(),receipt);
     std::fs::remove_dir_all(root).unwrap();
