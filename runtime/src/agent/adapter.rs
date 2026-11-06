@@ -649,6 +649,8 @@ pub trait Runtime: Send + Sync {
     fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window>;
     /// Native events from complete JSONL log records, without a run or native process.
     fn log_events(&self, log: &str) -> Vec<Event>;
+    /// log_events per source record, with its source line and native time.
+    fn log_records(&self, log: &str) -> Vec<super::events::LogRecord>;
     /// Read-only account email/ID or project; unknown and unsupported identities stay absent.
     fn account_identity(&self, home: Option<&Path>) -> Option<String>;
     /// Request the stop; true when the exit is already confirmed.
@@ -1064,6 +1066,8 @@ impl Runtime for Adapter {
         let values=log.lines().filter_map(|line|serde_json::from_str(line).ok()).collect();
         super::events::Cursor::new(true).read(self.client,values)
     }
+
+    fn log_records(&self, log: &str) -> Vec<super::events::LogRecord> { super::events::log_records(self.client,log) }
 
     fn account_identity(&self, home: Option<&Path>) -> Option<String> { super::limits::identity(self.client,home) }
 

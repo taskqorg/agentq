@@ -18,7 +18,7 @@ mod adapter;
 mod capture;
 mod events;
 mod limits;
-pub use events::{Event, Model, ToolKind};
+pub use events::{Event, LogRecord, Model, RecordTime, TimeFault, ToolKind};
 pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
@@ -1084,8 +1084,10 @@ pub struct Report {
     pub limits: Vec<Window>,
     /// A limit reached before work started, with its reset when known: the caller records it for the account switch.
     pub reached: Option<Option<i64>>,
-    /// Claude background tools still live according to this log, never process liveness proof.
+    /// Claude background jobs still live according to this log, never process liveness proof.
     pub background_job: bool,
+    /// One fixed tool label per such job, oldest first; never a description, command or task ID.
+    pub live_background: Vec<String>,
     /// Telemetry outcome code and error code.
     pub outcome: &'static str,
     pub error: &'static str,
@@ -1125,7 +1127,8 @@ impl Report {
                 }
             };
         let (calls, count, known) = read_calls(events);
-        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), limits: limits::read(client, events, rollout), reached, background_job: client==Client::Claude && events::background_job(events), outcome, error, detail,
+        let live_background = if client==Client::Claude {events::live_background(events)} else {vec![]};
+        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), limits: limits::read(client, events, rollout), reached, background_job: !live_background.is_empty(), live_background, outcome, error, detail,
             text: final_text(events), exit: None, started_ms: unix_ms(), duration_us: 0, recorded: Ok(()) }
     }
 
