@@ -311,7 +311,7 @@ fn call_record(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx
     text("host", host().as_deref(), "not-reported");
     if c.aggregate { v["source"] = json!("turn-aggregate"); }
     if let Some(reason)=c.accounting_unknown {
-        unknown.insert("usage".into(),json!(reason));
+        v["counts"]=json!({"usage_overlap_unknown":1});
         for field in ["input_tokens","cache_read_tokens","cache_write_tokens","output_tokens","reasoning_tokens"] {v[field]=Value::Null;unknown.insert(field.into(),json!(reason));}
     }
     who.caller_fields(&mut v);
@@ -648,7 +648,7 @@ mod tests {
         let frozen=freeze("agent.turn","owned",&report.observation(Client::Codex,&ctx),&report,Client::Codex,&ctx).unwrap();
         for record in &frozen.records[1..] {
             assert!(record.observation["input_tokens"].is_null() && record.observation["output_tokens"].is_null());
-            assert_eq!(record.observation["unknown"]["usage"],"unassociated-usage-overlap");assert!(record.observation["context_tokens"].is_null());
+            assert_eq!(record.observation["unknown"]["input_tokens"],"unassociated-usage-overlap");assert!(record.observation["context_tokens"].is_null());
             assert_eq!(record.observation["counts"]["cost_source_unknown"],1);assert!(record.observation["counts"]["cost_native_nanousd"].is_null());
         }
         assert_eq!(Frozen::restore(&frozen.save()).unwrap(),frozen);

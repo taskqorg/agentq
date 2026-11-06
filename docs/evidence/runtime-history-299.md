@@ -115,3 +115,24 @@ Report.reason and cost survive together, direct-process termination remains sepa
 from numeric exit and stopped-turn meaning. Final focused proof: 25 accounting/scope/
 live/steps tests, two native queue tests, three #327 seam/cleanup/freeze regressions,
 offline selftest, pinned lint and diff check pass. No full local suite or paid turn.
+
+The final accounting review keeps raw request IDs as facts and scopes logical Usage
+identities/deduplication by native turn. Two accepted native queue turns may each
+name response r without rewriting each other's history or frozen call. Call now
+exposes native_turn independently of id and accounting_unknown independently of
+its reported native buckets. Missing native association between legacy and
+identified observations is explicit unassociated-usage-overlap: raw evidence stays,
+derived history/live counters and aggregate usage/count are unknown, countable is
+false, and already-delivered observations receive authoritative revisions with both
+origins. Frozen telemetry omits those potentially overlapping counters/cost and
+carries metadata-only uncertainty instead of silently adding two measured calls.
+
+The branch incorporates main #325's mandatory SessionStore/ownership API with no
+opt-out. Queue fixtures explicitly adopt their owned native sessions; production
+ownership guards, persisted stop_id and #327 reason/termination/reaped evidence
+remain intact. Final focused checks: 27 accounting/scope/live/steps tests, six
+queue/native-seam/cleanup/freeze tests and the ambiguous frozen-telemetry regression
+pass, plus offline selftest, pinned lint and diff check. These include raw reused
+response IDs across separately accepted turns, both recovered-page overlap orders,
+authoritative missing fields and frozen restore. Full local suites, speculative
+app-server equal-total behavior and new native/paid turns were not run.
