@@ -5,7 +5,7 @@ This file is the procedure for Codex, Claude Code and Hermes when a user asks to
 ## Install
 
 1. Find the OS and runtime of the agent's user. Native Windows and WSL are separate installs; a Windows project opened in WSL does not make the Windows agent a Linux one.
-2. Read `https://github.com/taskqorg/agentq/releases/latest/download/latest.json`. Download the file for the platform (`macos-aarch64`, `macos-x86_64`, `linux-x86_64`, `linux-aarch64`, `windows-x86_64`) and `SHA256SUMS` from `https://github.com/taskqorg/agentq/releases/latest/download/<name>` into a new temporary folder. Check the sha256; a mismatch stops the install. On macOS and Linux run `chmod +x`.
+2. Read `https://github.com/taskqorg/agentq/releases/latest/download/latest.json`. Download the file for the platform (`macos-aarch64`, `linux-x86_64`, `windows-x86_64`) and `SHA256SUMS` from `https://github.com/taskqorg/agentq/releases/latest/download/<name>` into a new temporary folder. Check the sha256; a mismatch stops the install. On macOS and Linux run `chmod +x`.
 3. Run `<binary> onboard`. It lists ready agents and writes nothing. Detection is not installation.
 4. Tell the user which agents were found and what changes, then ask once: "Found Codex and Claude Code. Connect both?" Skip the question if the user already named the agents.
 5. On consent run `<binary> onboard --yes [codex|claude|hermes..]`. The command installs agentq into `~/.local/share/agentq` (Windows `%LOCALAPPDATA%\agentq`), applies agentq.md § 4 and installs the service. A named conflict stops that file; never replace a foreign optimizer or custom provider by guess.
