@@ -1273,6 +1273,7 @@ impl Runtime for Adapter {
     }
 
     fn recover(&self, saved: &Value, l: &Launch) -> Res<Run> {
+        saved["stop_id"].as_str().filter(|s|native::plain_id(s)).ok_or("run stop identity invalid")?;
         let me = table(self.client);
         let mut owner_spec=preflight::spec(self,l);owner_spec.session=saved["owner"]["session"].as_str().ok_or("session-owner-unknown: checkpoint has no owner")?.into();
         let acquire=||l.session_store.acquire(&owner_spec,false,Some(&saved["owner"]));
@@ -1391,7 +1392,8 @@ pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, 
     if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
     let (spec, _) = adapter.spec(l, session.unwrap_or("-").into(), session.is_some())?;
     let owner=l.session_store.acquire(&spec,session.is_none(),None)?;
-    owner.spawned(server.id())?;owner.submit()?;
+    owner.spawned(server.id())?;
+    if !l.input.is_empty() || !l.parts.is_empty() {owner.submit()?;}
     let optimization = server.optimization();
     let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l)?;
     let mut run=adapter.run(Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);Ok(run)

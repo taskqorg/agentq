@@ -148,13 +148,13 @@ impl SessionOwner {
 }
 fn valid_session(session:&str)->Res<()> {if !session.starts_with('-') && native::plain_id(session) {Ok(())} else {Err("session requires a native session ID".into())}}
 fn binding(spec:&Spec)->Res<Value> {
-    let home=spec_home(spec).map(|p|p.canonicalize().map_err(|_|"session account home unavailable")).transpose()?;
+    let home=spec_home(spec).map(|p|p.canonicalize().map_err(|_|"session-owner-unknown: account home unavailable")).transpose()?;
     Ok(json!({"schema":"agentq-owner/1","runtime":spec.client.code(),"root":spec.root.canonicalize().map_err(|e|e.to_string())?,"home":home,
         "controller":NativeProcess::read(std::process::id())?.ok_or("session-owner-unknown: controller identity unavailable")?}))
 }
 fn scope(row:&Value,spec:&Spec)->Res<()> {let expected=binding(spec)?;if row["schema"]!="agentq-owner/1" || ["runtime","root","home"].iter().any(|k|row[*k]!=expected[*k]) {Err("session-owner-unknown: runtime, project or account differs".into())} else {Ok(())}}
 fn path(root:&Path,runtime:&str,session:&str)->PathBuf {root.join(format!("{}.json",crate::sha256_hex(format!("{runtime}/{session}").as_bytes())))}
-fn lock(path:&Path)->Res<coreq::file_lock::Lock> {coreq::file_lock::try_lock(path).map_err(|e|format!("session-busy: {e}"))}
+fn lock(path:&Path)->Res<coreq::file_lock::Lock> {coreq::file_lock::try_lock(path).map_err(|e|match e {std::fs::TryLockError::WouldBlock=>"session-busy: another writer holds admission".into(),std::fs::TryLockError::Error(e)=>format!("session-owner-unknown: {e}")})}
 fn read(path:&Path)->Res<Option<Value>> {match std::fs::read(path) {Ok(b)=>serde_json::from_slice(&b).map(Some).map_err(|_|"session-owner-unknown: unreadable record".into()),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(e)=>Err(format!("session-owner-unknown: {e}"))}}
 fn save(path:&Path,row:&Value)->Res<()> {coreq::write_durable(path,serde_json::to_vec(row).map_err(|e|e.to_string())?)}
 fn process(value:&Value)->Res<Option<NativeProcess>> {if value.is_null() {Ok(None)} else {serde_json::from_value(value.clone()).map(Some).map_err(|_|"session-owner-unknown: invalid native identity".into())}}

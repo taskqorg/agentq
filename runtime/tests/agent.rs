@@ -1784,6 +1784,7 @@ fn antigravity_native_submission_tails_and_resumes() {
     let stop=ag.stop_event(&mut run,u64::MAX).unwrap().unwrap();
     assert!(stop.last_activity.is_some(),"receipt separators retain subsequent activity: {:?}",stop.activity_unknown);
     assert_eq!(stop.last_activity.unwrap().source["format"],"agy-stream");
+    drop(run);ag.adopt(&session,&l,&[]).unwrap();
     l.input="timeout".into(); l.deadline=Some(Instant::now()+Duration::from_millis(100));
     let mut run=ag.resume(&session,&l).unwrap();
     finish(ag, &mut run);
