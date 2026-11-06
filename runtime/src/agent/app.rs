@@ -34,17 +34,22 @@ impl AppServer {
         std::thread::spawn(move || {
             let mut reader=BufReader::new(stdout);
             loop {
-                let mut line=String::new();
-                let result=(&mut reader).take(8*1024*1024+1).read_line(&mut line);
+                // Bytes first: the bound can fall inside a valid character, which must read as size and not as invalid UTF-8.
+                let mut line=Vec::new();
+                let result=(&mut reader).take(8*1024*1024+1).read_until(b'\n',&mut line);
                 let event=match result {
                     Ok(0)=>break,
-                    Ok(_) if line.len()>8*1024*1024 || !line.ends_with('\n')=>Err("app-server record incomplete or exceeds 8 MiB".into()),
-                    Ok(_) if !line.trim_start().starts_with(['{','['])=>{
-                        if let Err(e)=diagnostics.write_all(line.as_bytes()) {let _=output.send(Err(format!("app-server diagnostic log: {e}")));break;}
-                        continue;
+                    Ok(_) if line.len()>8*1024*1024=>Err("app-server record exceeds 8 MiB; native state unknown".into()),
+                    Ok(n) if line.last()!=Some(&b'\n')=>Err(format!("app-server stream ended inside a record after {n} bytes; native state unknown")),
+                    Ok(_)=>match std::str::from_utf8(&line) {
+                        Err(_)=>Err("app-server record invalid; native state unknown".into()),
+                        Ok(text) if !text.trim_start().starts_with(['{','['])=>{
+                            if let Err(e)=diagnostics.write_all(&line) {let _=output.send(Err(format!("app-server diagnostic log: {e}")));break;}
+                            continue;
+                        },
+                        Ok(text)=>serde_json::from_str::<Value>(text).map_err(|_|"app-server record invalid; native state unknown".into())
+                            .and_then(|v|if v.is_object() {Ok(v)} else {Err("app-server record shape invalid; native state unknown".into())}),
                     },
-                    Ok(_)=>serde_json::from_str::<Value>(&line).map_err(|_|"app-server record invalid; native state unknown".into())
-                        .and_then(|v|if v.is_object() {Ok(v)} else {Err("app-server record shape invalid; native state unknown".into())}),
                     Err(e)=>Err(format!("app-server read failed: {e}")),
                 };
                 let failed=event.is_err();
