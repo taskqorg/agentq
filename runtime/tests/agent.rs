@@ -20,6 +20,12 @@ fn main() {
     if let Some(file) = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].iter().find_map(|k| std::env::var_os(k)).map(|h| PathBuf::from(h).join("fake-ready.json")).filter(|f| f.is_file()) {
         return fake_ready(&file);
     }
+    if let Some(file) = std::env::var_os("AGENTQ_FAKE_VERSION_LOG") {
+        append(Path::new(&file), &[json!("version")]);
+        println!("{}", std::env::var("AGENTQ_FAKE_VERSION").unwrap_or_default());
+        return;
+    }
+    if let Some(file) = std::env::var_os("AGENTQ_FAKE_ENV_DUMP") { dump_environment(Path::new(&file)); }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
@@ -65,6 +71,13 @@ fn main() {
         ("deferred_record_keeps_the_turn_of_its_terminal_poll", deferred_record_keeps_the_turn_of_its_terminal_poll),
         ("snapshot_fixes_every_runtime_at_its_terminal_poll", snapshot_fixes_every_runtime_at_its_terminal_poll),
         ("snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart", snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart),
+        ("child_environment_is_scrubbed_and_guarded", child_environment_is_scrubbed_and_guarded),
+        ("launches_refuse_bypass_and_argv_secrets", launches_refuse_bypass_and_argv_secrets),
+        ("readiness_reads_with_the_accounts_scope", readiness_reads_with_the_accounts_scope),
+        ("version_cache_follows_the_binary_identity", version_cache_follows_the_binary_identity),
+        ("preflight_refuses_with_a_named_cause", preflight_refuses_with_a_named_cause),
+        ("codex_folder_trust_uses_the_clients_writer", codex_folder_trust_uses_the_clients_writer),
+        ("hooks_list_reads_native_trust", hooks_list_reads_native_trust),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
@@ -330,6 +343,19 @@ fn fake_app_server() {
         match value["method"].as_str() {
             Some("initialize")=>println!("{}",json!({"id":id,"result":{}})),
             Some("initialized")=>{},
+            Some("config/read")=>{
+                let projects=std::fs::read_to_string("fake-projects.json").ok().and_then(|t|serde_json::from_str::<Value>(&t).ok()).unwrap_or(json!({}));
+                println!("{}",json!({"id":id,"result":{"config":{"projects":projects},"layers":[{"name":{"type":"user"},"version":"v-current"}]}}));
+            },
+            Some("config/batchWrite")=>{
+                if std::env::var_os("AGENTQ_FAKE_WRITE_REFUSED").is_some() {println!("{}",json!({"id":id,"error":{"code":-32600,"message":"refused"}}));continue;}
+                if std::env::var_os("AGENTQ_FAKE_WRITE_CONFLICT").is_some() {println!("{}",json!({"id":id,"error":{"code":-32600,"data":{"config_write_error_code":"configVersionConflict"}}}));continue;}
+                std::fs::write("fake-projects.json",value["params"]["edits"][0]["value"].to_string()).unwrap();
+                println!("{}",json!({"id":id,"result":{"status":"ok"}}));
+            },
+            Some("hooks/list")=>println!("{}",json!({"id":id,"result":{"data":[{"cwd":value["params"]["cwds"][0],"hooks":[
+                {"key":"h.json:stop:0:0","eventName":"stop","command":"agentq hook codex Stop","sourcePath":"h.json","currentHash":"sha256:native","trustStatus":"untrusted","enabled":true},
+                {"key":"h.json:session_start:0:0","eventName":"sessionStart","command":"other","sourcePath":"h.json","currentHash":"sha256:foreign","trustStatus":"trusted","enabled":false}],"warnings":[],"errors":[]}]}})),
             Some("model/list")=>{
                 let pages=std::env::var_os("COREQ_FAKE_CATALOGUE_PAGES").is_some();
                 let first=value["params"]["cursor"].is_null();
@@ -1764,6 +1790,232 @@ fn runtime_trait_exposes_native_seams() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// The variables the child environment rules name, as the child sees them.
+fn dump_environment(file: &Path) {
+    let names=["ANTHROPIC_API_KEY","OPENAI_API_KEY","CODEX_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","CLAUDECODE","CLAUDE_CODE_SESSION_ID","CLAUDE_CODE_MESSAGING_TOKEN","CODEX_THREAD_ID",
+        "GH_TOKEN","GIT_TERMINAL_PROMPT","GIT_ASKPASS","SSH_ASKPASS_REQUIRE","GCM_INTERACTIVE","GIT_SSH_COMMAND"];
+    let seen:serde_json::Map<String,Value>=names.iter().filter_map(|k|std::env::var(k).ok().map(|v|(k.to_string(),json!(v)))).collect();
+    std::fs::write(file,Value::Object(seen).to_string()).unwrap();
+}
+
+/// Run `body` with inherited variables set, then restore them. The harness is serial.
+fn with_parent_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+    let saved:Vec<_>=vars.iter().map(|(k,_)|(*k,std::env::var_os(k))).collect();
+    // SAFETY: this harness runs its tests one at a time on the main thread.
+    unsafe {for (k,v) in vars {std::env::set_var(k,v);}}
+    let out=body();
+    unsafe {for (k,v) in saved {match v {Some(v)=>std::env::set_var(k,v),None=>std::env::remove_var(k)}}}
+    out
+}
+
+// #284 A5, M12.17. Failing before: a parent session's key and id reached the worker, and git could prompt.
+// Risk: a worker bills the wrong account, joins its parent's session, or hangs on a credential prompt.
+fn child_environment_is_scrubbed_and_guarded() {
+    let root=scratch("child-env"); let dump=root.join("env.json");
+    let inherited=[("ANTHROPIC_API_KEY","invented-parent"),("OPENAI_API_KEY","invented-parent"),("CLAUDE_CODE_OAUTH_TOKEN","invented-parent"),("CLAUDECODE","1"),
+        ("CLAUDE_CODE_SESSION_ID","parent"),("CLAUDE_CODE_MESSAGING_TOKEN","invented-parent"),("GH_TOKEN","invented-tool"),("GIT_TERMINAL_PROMPT","1"),("GIT_ASKPASS","parent-window")];
+    let git_config=root.join("empty-gitconfig"); std::fs::write(&git_config,"").unwrap();
+    let run=|extra:&[(&str,&std::ffi::OsStr)]|->Value{
+        let mut env:Vec<(&str,&std::ffi::OsStr)>=vec![("AGENTQ_FAKE_ENV_DUMP",dump.as_os_str())]; env.extend_from_slice(extra);
+        let claude=agent::runtime("claude").unwrap();
+        let mut run=claude.launch(&fake_launch("claude",&root,"x",&env)).unwrap();
+        finish(claude,&mut run);
+        serde_json::from_str(&std::fs::read_to_string(&dump).unwrap()).unwrap()
+    };
+    let mut parent:Vec<(&str,&str)>=inherited.to_vec(); let config=git_config.to_str().unwrap(); parent.push(("GIT_CONFIG_GLOBAL",config));
+    with_parent_env(&parent,||{
+        let seen=run(&[]);
+        for k in ["ANTHROPIC_API_KEY","OPENAI_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","CLAUDECODE","CLAUDE_CODE_SESSION_ID","CLAUDE_CODE_MESSAGING_TOKEN"] {assert!(seen.get(k).is_none(),"{k} inherited: {seen}");}
+        assert_eq!(seen["GH_TOKEN"],"invented-tool","a tool credential is the caller's configuration");
+        assert_eq!(seen["GIT_TERMINAL_PROMPT"],"0");
+        assert_eq!(seen["GIT_ASKPASS"],"agentq-no-askpass");
+        assert_eq!(seen["SSH_ASKPASS_REQUIRE"],"never");
+        assert_eq!(seen["GCM_INTERACTIVE"],"never");
+        assert_eq!(seen["GIT_SSH_COMMAND"],"ssh -oBatchMode=yes");
+        // A caller who means a value passes it; its own ssh command stays.
+        let seen=run(&[("OPENAI_API_KEY","invented-caller".as_ref()),("GIT_SSH_COMMAND","caller-ssh".as_ref()),("GIT_TERMINAL_PROMPT","1".as_ref())]);
+        assert_eq!((&seen["OPENAI_API_KEY"],&seen["GIT_SSH_COMMAND"],&seen["GIT_TERMINAL_PROMPT"]),(&json!("invented-caller"),&json!("caller-ssh"),&json!("1")));
+        // A configured ssh command is never replaced.
+        std::fs::write(&git_config,"[core]\n\tsshCommand = configured-ssh\n").unwrap();
+        if Command::new("git").arg("--version").output().is_ok() {assert!(run(&[]).get("GIT_SSH_COMMAND").is_none(),"core.sshCommand stays in charge");}
+    });
+}
+
+// #284 A2/A5, M4.13, M12.17. Failing before: the flag and a key passed through to the native argv.
+// Risk: hook trust is skipped, or a secret shows in a process listing.
+fn launches_refuse_bypass_and_argv_secrets() {
+    let root=scratch("argv-refusals");
+    let claude=agent::runtime("claude").unwrap(); let codex=agent::runtime("codex").unwrap();
+    let error=|r:Result<agent::Run,String>|r.err().expect("launch refused");
+    let mut l=fake_launch("codex",&root,"x",&[]);
+    l.host_args=vec!["--dangerously-bypass-hook-trust".into()];
+    assert_eq!(error(codex.launch(&l)),"hook-trust-bypass-refused");
+    assert_eq!(codex.launch_refusal("hook-trust-bypass-refused"),Some(agent::Cause("hook-trust-bypass-refused")));
+    let mut l=fake_launch("codex",&root,"x",&[]);
+    l.command.push("--dangerously-bypass-hook-trust".into());
+    assert_eq!(error(codex.launch(&l)),"hook-trust-bypass-refused");
+    let spec=agent::NativeSpec {root:root.clone(),args:vec!["--dangerously-bypass-hook-trust".into()],..Default::default()};
+    assert_eq!(codex.command(Command::new("x"),&spec).err().as_deref(),Some("hook-trust-bypass-refused"));
+    let mut l=fake_launch("codex",&root,"x",&[]);
+    l.host_args=vec!["-c".into(),"shell_environment_policy.set.X_TOKEN=invented".into()];
+    assert_eq!(error(codex.launch(&l)),"secret-in-argv");
+    let mut l=fake_launch("claude",&root,"x",&[]);
+    l.settings_env=vec![("MY_API_KEY".into(),"invented".into())];
+    assert_eq!(error(claude.launch(&l)),"secret-in-argv");
+    assert_eq!(claude.launch_refusal("secret-in-argv"),Some(agent::Cause("secret-in-argv")));
+    // Codex takes settings_env as its child environment, not argv.
+    let mut l=fake_launch("codex",&root,"x",&[]);
+    l.settings_env=vec![("MY_API_KEY".into(),"invented".into())];
+    let mut run=codex.launch(&l).unwrap(); finish(codex,&mut run);
+    assert_eq!(codex.launch_refusal("Not inside a trusted directory and --skip-git-repo-check was not specified."),Some(agent::Cause("workspace-untrusted")));
+}
+
+// #284 A4, M12.16. Failing before: the account's environment did not reach the read, so a parent's key answered for it.
+// Risk: `ready`, catalogue or limits describe another account.
+fn readiness_reads_with_the_accounts_scope() {
+    let root=scratch("account-scope"); let home=root.join("account"); std::fs::create_dir_all(&home).unwrap();
+    let binary=root.join(if cfg!(windows) {"configured-runtime.exe"} else {"configured-runtime"});
+    std::fs::copy(std::env::current_exe().unwrap(),&binary).unwrap();
+    let dump=root.join("env.json");
+    let scope=agent::AccountScope {home:Some(home.clone()),env:vec![("AGENTQ_FAKE_ENV_DUMP".into(),dump.clone().into()),("OPENAI_API_KEY".into(),"invented-account".into())],executable:Some(binary.clone())};
+    let codex=agent::runtime("codex").unwrap();
+    std::fs::write(home.join("fake-ready.json"),json!({"version":"codex-cli 0.200.0","status":"Logged in using ChatGPT\n","expect":["-c","forced_login_method=\"chatgpt\"","login","status"]}).to_string()).unwrap();
+    let r=with_parent_env(&[("OPENAI_API_KEY","invented-parent")],||codex.ready_for(&scope));
+    assert_eq!((r.install.state,r.version.state,r.login.state),("ok","ok","ok"),"{r:?}");
+    assert_eq!(r.install.detail,binary.display().to_string(),"the account's binary");
+    std::fs::remove_file(home.join("fake-ready.json")).unwrap();
+    // A named home variable selects the account as `home` does.
+    let by_env=agent::AccountScope {home:None,env:vec![("CODEX_HOME".into(),home.clone().into())],executable:Some(binary.clone())};
+    std::fs::write(home.join("fake-ready.json"),json!({"version":"codex-cli 0.200.0","status":"Not logged in\n","expect":["-c","forced_login_method=\"chatgpt\"","login","status"]}).to_string()).unwrap();
+    assert_eq!(codex.ready_for(&by_env).login.state,"missing");
+    std::fs::remove_file(home.join("fake-ready.json")).unwrap();
+    let cwd=std::env::current_dir().unwrap(); std::env::set_current_dir(&root).unwrap();
+    let scope=agent::AccountScope {env:[("COREQ_FAKE_AGENT","codex"),("COREQ_FAKE_APP_SERVER","1"),("OPENAI_API_KEY","invented-account")].map(|(k,v)|(k.into(),v.into())).into_iter().chain([("AGENTQ_FAKE_ENV_DUMP".into(),dump.clone().into())]).collect(),..scope};
+    let models=with_parent_env(&[("OPENAI_API_KEY","invented-parent")],||codex.catalogue_for(&scope)).unwrap();
+    assert_eq!(models[0].id,"fixture-model");
+    let seen:Value=serde_json::from_str(&std::fs::read_to_string(&dump).unwrap()).unwrap();
+    assert_eq!(seen["OPENAI_API_KEY"],"invented-account");
+    std::fs::remove_file(&dump).unwrap();
+    assert!(with_parent_env(&[("OPENAI_API_KEY","invented-parent")],||codex.account_limits_for(&scope,1800000000)).iter().all(|w|w.unknown.is_none()));
+    let seen:Value=serde_json::from_str(&std::fs::read_to_string(&dump).unwrap()).unwrap();
+    assert_eq!(seen["OPENAI_API_KEY"],"invented-account");
+    std::env::set_current_dir(cwd).unwrap();
+}
+
+// #284 A4, M12.16. Failing before: every read spawned the client, and an old reading could not name its next step.
+// Risk: a self-update keeps reading the old version, so an outdated client reads ready, or the reverse.
+fn version_cache_follows_the_binary_identity() {
+    let root=scratch("version-cache"); let home=root.join("account"); std::fs::create_dir_all(&home).unwrap();
+    let binary=root.join(if cfg!(windows) {"client-binary.exe"} else {"client-binary"});
+    std::fs::copy(std::env::current_exe().unwrap(),&binary).unwrap();
+    let log=root.join("versions.jsonl");
+    let scope=|version:&str|agent::AccountScope {home:Some(home.clone()),env:vec![("AGENTQ_FAKE_VERSION_LOG".into(),log.clone().into()),("AGENTQ_FAKE_VERSION".into(),version.into())],executable:Some(binary.clone())};
+    let spawns=||std::fs::read_to_string(&log).unwrap_or_default().lines().count();
+    let codex=agent::runtime("codex").unwrap();
+    let old=codex.ready_for(&scope("codex-cli 0.161.0"));
+    assert_eq!(old.version.state,"outdated");
+    assert_eq!(old.version.detail,"codex-cli 0.161.0 is below 0.162.0; update Codex CLI to 0.162.0 or newer");
+    let spawned=spawns();
+    codex.ready_for(&scope("codex-cli 0.161.0"));
+    // The login status spawn counts too, so only the version read is in question: one more for login.
+    assert_eq!(spawns(),spawned+1,"the unchanged binary answers from the cache");
+    // A self-update replaces the file.
+    let mut bytes=std::fs::read(&binary).unwrap(); bytes.push(0); std::fs::write(&binary,&bytes).unwrap();
+    assert_eq!(codex.ready_for(&scope("codex-cli 0.170.0")).version.state,"ok","a new identity reads again");
+    // A script keeps its bytes when the client behind it updates, so it is never cached.
+    if !cfg!(windows) {
+        let shim=root.join("client-shim");
+        std::fs::write(&shim,format!("#!/bin/sh\nexec \"{}\" \"$@\"\n",binary.display())).unwrap();
+        #[cfg(unix)] std::fs::set_permissions(&shim,std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let by_shim=|version:&str|agent::AccountScope {executable:Some(shim.clone()),..scope(version)};
+        assert_eq!(codex.ready_for(&by_shim("codex-cli 0.170.0")).version.state,"ok");
+        assert_eq!(codex.ready_for(&by_shim("codex-cli 0.161.0")).version.state,"outdated","a shim reads again");
+    }
+}
+
+// #284 goal. Failing before: a launch started an outdated or logged-out client and failed later without a cause.
+fn preflight_refuses_with_a_named_cause() {
+    let root=scratch("preflight"); let home=root.join("account"); std::fs::create_dir_all(&home).unwrap();
+    let bin=root.join("bin"); std::fs::create_dir_all(&bin).unwrap();
+    let codex=agent::runtime("codex").unwrap();
+    let mut l=agent::Launch::new(&root,root.join("worker.log"),"x","fixtureq");
+    l.preflight=true; l.home=Some(home.clone());
+    l.env=vec![("PATH".into(),bin.clone().into())];
+    let error=codex.launch(&l).err().expect("no client on the account's PATH");
+    assert!(error.starts_with("client-missing"),"{error}");
+    assert_eq!(codex.launch_refusal(&error),Some(agent::Cause("client-missing")));
+    std::fs::copy(std::env::current_exe().unwrap(),bin.join(if cfg!(windows) {"codex.exe"} else {"codex"})).unwrap();
+    let write=|version:&str,status:&str|std::fs::write(home.join("fake-ready.json"),json!({"version":version,"status":status,"expect":["-c","forced_login_method=\"chatgpt\"","login","status"]}).to_string()).unwrap();
+    write("codex-cli 0.100.0","Logged in using ChatGPT\n");
+    let error=codex.launch(&l).err().expect("outdated");
+    assert!(error.starts_with("client-outdated") && error.contains("update Codex CLI"),"{error}");
+    let bytes=std::fs::read(bin.join(if cfg!(windows) {"codex.exe"} else {"codex"})).unwrap();
+    std::fs::write(bin.join(if cfg!(windows) {"codex.exe"} else {"codex"}),[bytes,vec![0]].concat()).unwrap();
+    write("codex-cli 0.200.0","Not logged in\n");
+    assert_eq!(codex.launch(&l).err().as_deref(),Some("login-required"));
+    assert_eq!(codex.launch_refusal("login-required"),Some(agent::Cause("login-required")));
+}
+
+// #284 A3, M12.15. Failing before: no request reached the client, so a worker stopped at its trust prompt.
+// Risk: AgentQ races Codex's own writer, or rewrites a level the user set.
+fn codex_folder_trust_uses_the_clients_writer() {
+    let root=scratch("codex-folder-trust"); let project=root.join("project"); std::fs::create_dir_all(&project).unwrap();
+    let home=root.join("account"); std::fs::create_dir_all(&home).unwrap();
+    let binary=root.join(if cfg!(windows) {"codex-native.exe"} else {"codex-native"});
+    std::fs::copy(std::env::current_exe().unwrap(),&binary).unwrap();
+    let cwd=std::env::current_dir().unwrap(); std::env::set_current_dir(&root).unwrap();
+    let scope=|extra:&[(&str,&str)]|agent::AccountScope {home:Some(home.clone()),executable:Some(binary.clone()),
+        env:[("COREQ_FAKE_AGENT","codex"),("COREQ_FAKE_APP_SERVER","1")].iter().chain(extra).map(|(k,v)|((*k).into(),(*v).into())).collect()};
+    let soon=||Instant::now()+Duration::from_secs(10);
+    let codex=agent::runtime("codex").unwrap();
+    assert_eq!(codex.trust_folder(&project,&scope(&[("AGENTQ_FAKE_WRITE_REFUSED","1")]),soon()),Err(agent::Failure::Refused(agent::Cause("trust-write-failed"))));
+    assert!(!root.join("fake-projects.json").exists());
+    assert_eq!(codex.trust_folder(&project,&scope(&[("AGENTQ_FAKE_WRITE_CONFLICT","1")]),Instant::now()+Duration::from_secs(3)),Err(agent::Failure::Refused(agent::Cause("trust-locked"))));
+    assert_eq!(codex.trust_folder(&project,&scope(&[]),soon()),Ok(agent::Trust::Granted));
+    let rows:Vec<Value>=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap().lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+    let write=rows.iter().rev().find(|v|v["method"]=="config/batchWrite").unwrap();
+    assert_eq!(write["params"]["expectedVersion"],"v-current","the client's own version check");
+    assert_eq!(write["params"]["edits"].as_array().unwrap().len(),1,"one exact folder");
+    let saved:Value=serde_json::from_str(&std::fs::read_to_string(root.join("fake-projects.json")).unwrap()).unwrap();
+    assert_eq!(saved.as_object().unwrap().len(),1);
+    assert_eq!(saved.as_object().unwrap().values().next().unwrap()["trust_level"],"trusted");
+    assert_eq!(codex.trust_folder(&project,&scope(&[]),soon()),Ok(agent::Trust::Unchanged));
+    let key=saved.as_object().unwrap().keys().next().unwrap().clone();
+    std::fs::write(root.join("fake-projects.json"),json!({&key:{"trust_level":"untrusted"}}).to_string()).unwrap();
+    assert_eq!(codex.trust_folder(&project,&scope(&[]),soon()),Err(agent::Failure::Refused(agent::Cause("trust-conflict"))),"a level the user set stays");
+    // Launch.trust runs first and fails the launch with the cause.
+    let bin=root.join("bin"); std::fs::create_dir_all(&bin).unwrap();
+    std::fs::copy(&binary,bin.join(format!("codex{}",std::env::consts::EXE_SUFFIX))).unwrap();
+    let mut l=fake_launch("codex",&root,"x",&[]);
+    l.command=vec![]; l.home=Some(home.clone()); l.trust=Some(project.clone()); l.env.clear();
+    l.env.extend(scope(&[]).env); l.env.push(("PATH".into(),bin.clone().into()));
+    assert_eq!(codex.launch(&l).err().as_deref(),Some("trust-conflict"),"the launch refuses before spawn");
+    assert_eq!(codex.launch_refusal("trust-conflict"),Some(agent::Cause("trust-conflict")));
+    // Without a request nothing is written.
+    let before=std::fs::read(root.join("fake-projects.json")).unwrap();
+    let plain=agent::Launch {trust:None,command:vec![exe()],..l.clone()};
+    let mut run=codex.launch(&plain).unwrap(); finish(codex,&mut run);
+    assert_eq!(std::fs::read(root.join("fake-projects.json")).unwrap(),before);
+    std::env::set_current_dir(cwd).unwrap();
+}
+
+// #284 A1. Failing before: the runtime had no read, so nothing could know a hook was skipped.
+fn hooks_list_reads_native_trust() {
+    let root=scratch("hooks-list");
+    let binary=root.join(if cfg!(windows) {"codex-native.exe"} else {"codex-native"});
+    std::fs::copy(std::env::current_exe().unwrap(),&binary).unwrap();
+    let cwd=std::env::current_dir().unwrap(); std::env::set_current_dir(&root).unwrap();
+    let scope=agent::AccountScope {home:Some(root.clone()),executable:Some(binary),env:[("COREQ_FAKE_AGENT","codex"),("COREQ_FAKE_APP_SERVER","1")].map(|(k,v)|(k.into(),v.into())).to_vec()};
+    let hooks=agent::runtime("codex").unwrap().hooks(&root,&scope,Instant::now()+Duration::from_secs(10)).unwrap();
+    assert_eq!((hooks[0].key.as_str(),hooks[0].trust.as_str(),hooks[0].hash.as_deref(),hooks[0].enabled),("h.json:stop:0:0","untrusted",Some("sha256:native"),true));
+    assert!(!hooks[1].enabled);
+    let args:Value=serde_json::from_str(&std::fs::read_to_string(root.join("app-transport.json")).unwrap()).unwrap();
+    assert_eq!(args["args"],json!(["app-server","--disable","plugins"]),"a short read starts no plugins");
+    std::env::set_current_dir(cwd).unwrap();
+    let claude=agent::runtime("claude").unwrap();
+    assert_eq!(claude.hooks(&root,&agent::AccountScope::default(),Instant::now()),Err(agent::Failure::Refused(agent::Cause("hook-trust-unsupported"))));
+}
+
 // Readiness fake: `fake-ready.json` in the login home maps `--version` and the status command to their output.
 fn fake_ready(file: &Path) {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
@@ -1771,7 +2023,7 @@ fn fake_ready(file: &Path) {
     let key = if args == ["--version"] { "version" } else { "status" };
     if key == "status" { assert_eq!(args, v["expect"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect::<Vec<_>>()); }
     print!("{}", v[key].as_str().unwrap_or(""));
-    std::process::exit(v["code"].as_i64().unwrap_or(0) as i32);
+    std::process::exit(if key == "status" { v["status_code"].as_i64() } else { None }.or(v["code"].as_i64()).unwrap_or(0) as i32);
 }
 
 // pilotq#363 / taskq#2324: `ready` reads the native login status and minimum version through the trait, so products keep
@@ -1789,10 +2041,26 @@ fn ready_reads_native_login_and_minimum_version() {
         ("codex", &codex_status, "codex-cli 0.161.9", "Logged in using an API key - sk-***\n", "outdated", "api-key"),
         ("codex", &codex_status, "codex-cli 0.170.0", "Not logged in\n", "ok", "missing"),
     ];
-    for (name, expect, version, status, want_version, want_login) in cases {
+    for (i, (name, expect, version, status, want_version, want_login)) in cases.iter().enumerate() {
         std::fs::write(home.join("fake-ready.json"), json!({"version": version, "status": status, "expect": expect}).to_string()).unwrap();
-        let r = agent::runtime(name).unwrap().ready(Some(Path::new(&exe())), Some(&home));
+        // Each version is its own binary: the version text is cached by binary identity (M12.16).
+        let binary = home.join(format!("client-{i}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(exe(), &binary).unwrap();
+        let r = agent::runtime(name).unwrap().ready(Some(&binary), Some(&home));
         assert_eq!((r.install.state, r.version.state, r.login.state), ("ok", *want_version, *want_login), "{name} {version} {status}");
+    }
+    // #284 A4. Failing before: native clients exit 1 when logged out, which read as `unknown`, so preflight let them start.
+    let logged_out: &[(&str, &[&str], &str, &str, &str)] = &[
+        ("codex", &codex_status, "codex-cli 0.200.0", "Not logged in\n", "missing"),
+        ("claude", &claude_status, "2.2.0 (Claude Code)", r#"{"loggedIn":false,"authMethod":"none"}"#, "missing"),
+        ("codex", &codex_status, "codex-cli 0.200.0", "config error\n", "unknown"),
+    ];
+    let status_only = home.join(format!("status-only{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(exe(), &status_only).unwrap();
+    for (name, expect, version, status, want) in logged_out {
+        std::fs::write(home.join("fake-ready.json"), json!({"version": version, "status": status, "expect": expect, "status_code": 1}).to_string()).unwrap();
+        let r = agent::runtime(name).unwrap().ready(Some(&status_only), Some(&home));
+        assert_eq!(r.login.state, *want, "{name} {status}");
     }
     let r = agent::runtime("codex").unwrap().ready(Some(&home.join("absent")), Some(&home));
     assert_eq!((r.install.state, r.login.state), ("missing", "unknown"));

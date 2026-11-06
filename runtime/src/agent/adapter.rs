@@ -144,6 +144,10 @@ pub struct Launch {
     pub host_args: Vec<OsString>,
     /// Session environment (capability `settings-env`). A Claude launch puts it in argv: never secrets; use `env` for those.
     pub settings_env: Vec<(String, String)>,
+    /// One exact folder to pre-seed as trusted before spawn (capability `folder-trust`); None edits nothing.
+    pub trust: Option<PathBuf>,
+    /// Check the client and login before spawn; a definite problem refuses with its cause.
+    pub preflight: bool,
 }
 
 /// How a run reaches the runtime; every mode but `Turn` needs the descriptor capability of the same name.
@@ -171,7 +175,7 @@ impl Launch {
     pub fn new(root: impl Into<PathBuf>, log: impl Into<PathBuf>, input: impl Into<String>, product: impl Into<String>) -> Self {
         Launch { root: root.into(), log: log.into(), input: input.into(), policy: Policy::default(), model: None, effort: None, compact_hook: None,
             env: vec![], command: vec![], optimization: Intent::Inherit, product: product.into(), install: None, accounts: None,
-            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![] }
+            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![], trust: None, preflight: false }
     }
 }
 
@@ -651,9 +655,17 @@ pub trait Runtime: Send + Sync {
     /// Read the login's model catalogue; no turn or product protocol handler is needed.
     fn catalogue(&self, home: Option<&Path>) -> Res<Vec<Model>> { self.catalogue_with_executable(home, None) }
     /// Read with the caller-configured native executable, using normal lookup only when absent.
-    fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>>;
+    fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> {
+        self.catalogue_for(&AccountScope { home: home.map(Path::to_path_buf), env: vec![], executable: executable.map(Path::to_path_buf) })
+    }
+    /// M12.16: read with the account's home, environment and binary.
+    fn catalogue_for(&self, scope: &AccountScope) -> Res<Vec<Model>>;
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window>;
-    fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window>;
+    fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window> {
+        self.account_limits_for(&AccountScope { home: home.map(Path::to_path_buf), ..Default::default() }, now)
+    }
+    /// M12.16: read with the account's home, environment and binary.
+    fn account_limits_for(&self, scope: &AccountScope, now: i64) -> Vec<Window>;
     /// Native events from complete JSONL log records, without a run or native process.
     fn log_events(&self, log: &str) -> Vec<Event>;
     /// log_events per source record, with native time, assistant failure, lifecycle label and saved permission mode.
@@ -673,7 +685,15 @@ pub trait Runtime: Send + Sync {
     /// Poll, then the native session and session URL or its absence cause, in one record.
     fn observe(&self, run: &mut Run) -> Observation;
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause>;
-    fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready;
+    fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready {
+        self.ready_for(&AccountScope { home: home.map(Path::to_path_buf), env: vec![], executable: executable.map(Path::to_path_buf) })
+    }
+    /// M12.16: read with the account's home, environment and binary.
+    fn ready_for(&self, scope: &AccountScope) -> Ready;
+    /// M12.15: pre-seed the client's trust of one exact folder by `until`, on request only (capability `folder-trust`).
+    fn trust_folder(&self, folder: &Path, scope: &AccountScope, until: Instant) -> Result<Trust, Failure>;
+    /// M4.11: every hook the client lists for `root` (capability `hook-trust`). Read-only.
+    fn hooks(&self, root: &Path, scope: &AccountScope, until: Instant) -> Result<Vec<Hook>, Failure>;
     fn quota(&self, accounts: &Accounts, now: i64) -> Quota;
     fn running(&self) -> usize;
     fn protected_paths(&self, home: Option<&Path>) -> Vec<PathBuf>;
@@ -740,9 +760,9 @@ static ADAPTERS: [Adapter; 3] = [
     Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
         capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
-            "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } },
+            "instructions-file", "turn-parts", "turn-deltas", "settings-env", "folder-trust"] } },
     Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt", models: &[], minimum: "0.162.0",
-        capabilities: &["turn", "resume", "quota-snapshot", "account-limits", "catalogue", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env", "mcp-config", "instructions-file", "turn-parts", "turn-deltas"] } },
+        capabilities: &["turn", "resume", "quota-snapshot", "account-limits", "catalogue", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env", "mcp-config", "instructions-file", "turn-parts", "turn-deltas", "folder-trust", "hook-trust"] } },
     Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "",
         capabilities: &["turn", "resume", "title", "account-limits"] } },
 ];
@@ -937,6 +957,15 @@ impl Adapter {
             if set && (l.mode != Mode::Turn || !self.descriptor.has(capability)) { return Err(format!("{capability} unsupported by {name}")); }
         }
         if !l.host_args.is_empty() && l.policy != Policy::default() { return Err(format!("host-args require the native policy on {name}")); }
+        super::prepare::refuse_bypass(&l.host_args)?;
+        super::prepare::refuse_bypass(&l.command)?;
+        super::prepare::refuse_secret_args(&l.host_args)?;
+        // Subscription policy clears these two after the caller's values, so they never reach argv.
+        if self.client == Client::Claude {
+            let cleared = |k: &String| l.policy.subscription && matches!(k.as_str(), "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN");
+            let settings: Vec<_> = l.settings_env.iter().filter(|(k, _)| !cleared(k)).cloned().collect();
+            super::prepare::refuse_secret_settings(&settings)?;
+        }
         if app && !l.host_args.is_empty() { return Err("host-args unsupported with relay input".into()); }
         if !l.settings_env.is_empty() && (!matches!(l.mode, Mode::Turn | Mode::Background) || !self.descriptor.has("settings-env")) {
             return Err(format!("settings-env unsupported by {name}"));
@@ -981,6 +1010,17 @@ impl Adapter {
             if q.off || !q.free { return Err("quota-exhausted".into()); }
         }
         if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
+        let scope = AccountScope { home: l.home.clone(), env: l.env.clone(), executable: None };
+        if l.preflight && l.command.is_empty() {
+            let r = self.ready_for(&scope);
+            if r.install.state == "missing" { return Err(format!("client-missing: {}", r.install.detail)); }
+            if r.version.state == "outdated" { return Err(format!("client-outdated: {}", r.version.detail)); }
+            if r.login.state == "missing" || l.policy.subscription && r.login.state == "api-key" { return Err("login-required".into()); }
+        }
+        if let Some(folder) = &l.trust {
+            let budget = Instant::now() + Duration::from_secs(20);
+            self.trust_folder(folder, &scope, l.deadline.map_or(budget, |d| d.min(budget))).map_err(|e| e.to_string())?;
+        }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let command = base(&l.command, self.client)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
@@ -1059,7 +1099,7 @@ impl Runtime for Adapter {
         }
     }
 
-    fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> { self.needs("catalogue")?; super::limits::catalogue(home, executable) }
+    fn catalogue_for(&self, scope: &AccountScope) -> Res<Vec<Model>> { self.needs("catalogue")?; super::limits::catalogue(scope) }
 
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window> {
         let events = log.lines().filter_map(|l| serde_json::from_str(l).ok()).collect::<Vec<_>>();
@@ -1067,7 +1107,7 @@ impl Runtime for Adapter {
         super::limits::read(self.client, &events, path.as_deref())
     }
 
-    fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window> { super::limits::account(self.client, home, now) }
+    fn account_limits_for(&self, scope: &AccountScope, now: i64) -> Vec<Window> { super::limits::account(self.client, scope, now) }
 
     fn log_events(&self, log: &str) -> Vec<Event> {
         let values=log.lines().filter_map(|line|serde_json::from_str(line).ok()).collect();
@@ -1200,17 +1240,15 @@ impl Runtime for Adapter {
         }
     }
 
-    fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready {
+    fn ready_for(&self, scope: &AccountScope) -> Ready {
         let check = |state, detail: &str| Check { state, detail: detail.into() };
-        let exe = match executable {
-            Some(p) if p.is_absolute() || p.components().count() > 1 => Ok(p.to_path_buf()),
-            Some(p) => Ok(which_in(&p.to_string_lossy(), &std::env::var_os("PATH").unwrap_or_default())),
-            None => self::executable(self.client),
-        };
+        let exe = super::prepare::scope_executable(self.client, scope);
         let run = |exe: &Path, args: &[&str], budget| {
             let mut c = Command::new(exe);
             c.args(args);
-            if let Some(h) = home { c.env(self.client.home_var(), h); }
+            super::prepare::clean(&mut c);
+            c.envs(scope.env.iter().map(|(k, v)| (k, v)));
+            if let Some(h) = scope.home_of(self.client) { c.env(self.client.home_var(), h); }
             crate::quiet(&mut c);
             crate::process::output("agent.ready", &mut c, Duration::from_secs(budget))
         };
@@ -1221,19 +1259,24 @@ impl Runtime for Adapter {
             Err(e) => return Ready { install: check("unknown", &e), version: check("unknown", "executable unknown"), login: check("unknown", "executable unknown") },
         };
         let minimum = self.descriptor.minimum;
-        let version = match run(&exe, &["--version"], 5) {
-            Ok(o) => match String::from_utf8_lossy(&o.stdout).lines().next().map(str::trim).filter(|s| !s.is_empty()) {
+        let read = || run(&exe, &["--version"], 5).map(|o| String::from_utf8_lossy(&o.stdout).lines().next().map(str::trim).filter(|s| !s.is_empty()).map(String::from));
+        let version = match super::prepare::version_text(&exe, read) {
+            Ok(text) => match text.as_deref() {
                 None => check("unknown", "version not reported"),
                 Some(v) if minimum.is_empty() => check("ok", v),
                 Some(v) => match (version_parts(v), version_parts(minimum)) {
-                    (Some(have), Some(need)) if have < need => check("outdated", &format!("{v} is below {minimum}")),
+                    (Some(have), Some(need)) if have < need => check("outdated", &format!("{v} is below {minimum}; update {} to {minimum} or newer", self.descriptor.label)),
                     (Some(_), _) => check("ok", v),
                     (None, _) => check("unknown", &format!("{v} is not a version")),
                 },
             },
             Err(e) => check("unknown", &e.to_string()),
         };
-        let status = |args: &[&str]| run(&exe, args, 10).map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)));
+        // A logged-out client exits nonzero and still names its state, so its text decides; unreadable text reads unknown below.
+        let status = |args: &[&str]| match run(&exe, args, 10) {
+            Ok(o) | Err(crate::process::Failure::Exit(o)) => Ok(format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
+            Err(e) => Err(e),
+        };
         let login = match self.client {
             Client::Claude => match status(&["auth", "status", "--json"]) {
                 Ok(out) => match serde_json::from_str::<Value>(out.trim()).ok().or_else(|| out.lines().find_map(|l| serde_json::from_str(l).ok())) {
@@ -1258,6 +1301,15 @@ impl Runtime for Adapter {
             Client::Antigravity => check("unknown", "no login status command"),
         };
         Ready { install: check("ok", &exe.to_string_lossy()), version, login }
+    }
+
+    fn trust_folder(&self, folder: &Path, scope: &AccountScope, until: Instant) -> Result<Trust, Failure> {
+        super::prepare::trust_folder(self.client, folder, scope, until)
+    }
+
+    fn hooks(&self, root: &Path, scope: &AccountScope, until: Instant) -> Result<Vec<Hook>, Failure> {
+        if !self.descriptor.has("hook-trust") { return Err(Failure::Refused(Cause("hook-trust-unsupported"))); }
+        super::prepare::hooks(root, scope, until).map_err(Failure::Failed)
     }
 
     fn quota(&self, accounts: &Accounts, now: i64) -> Quota {
@@ -1360,7 +1412,10 @@ impl Runtime for Adapter {
         optimization
     }
 
-    fn command(&self, base: Command, spec: &NativeSpec) -> Res<Command> { Ok(command(base, &self.native(spec))) }
+    fn command(&self, base: Command, spec: &NativeSpec) -> Res<Command> {
+        super::prepare::refuse_bypass(&spec.args)?;
+        Ok(command(base, &self.native(spec)))
+    }
 
     fn turn(&self, base: Command, spec: &NativeSpec, log: &Path, input: &str, process: &Process) -> Res<Turn> {
         Turn::start(base, &self.native(spec), log, input, process)
@@ -1388,8 +1443,11 @@ impl Runtime for Adapter {
 
     fn launch_refusal(&self, text: &str) -> Option<Cause> {
         let lower = text.to_ascii_lowercase();
+        if let Some(cause) = super::prepare::CAUSES.iter().find(|c| text.starts_with(**c)) { return Some(Cause(cause)); }
         let cause = match self.client {
             Client::Claude if text.contains("Workspace not trusted") => "workspace-untrusted",
+            Client::Claude if text.starts_with("login-required") => "login-required",
+            Client::Codex if text.contains("Not inside a trusted directory") => "workspace-untrusted",
             Client::Claude if text.contains("No conversation found with session ID") => "session-missing",
             Client::Claude if text.contains("Not logged in") || text.contains("/login") => "login-required",
             Client::Codex if text.contains("app-server thread/resume refused") => "session-missing",

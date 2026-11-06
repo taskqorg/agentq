@@ -33,6 +33,12 @@ pub struct Want {
 }
 
 impl Want {
+    /// The event of an owned `hooks.json` edit.
+    pub fn hook_event(&self) -> Option<&str> {
+        (self.append && self.key.len() == 2 && self.key[0] == "hooks").then(|| self.key[1].as_str())
+    }
+    /// The command of an owned `hooks.json` edit.
+    pub fn hook_command(&self) -> Option<String> { self.value["hooks"][0]["command"].as_str().map(String::from) }
     /// The configuration field this edit serves (CONFIGURATION A3): `routing`, `hooks` or `mcp`.
     pub fn field(&self) -> &'static str {
         if self.instruction { return "instructions"; }
@@ -70,9 +76,49 @@ pub fn claude_json() -> PathBuf {
     std::env::var_os("CLAUDE_CONFIG_DIR").map(|d| PathBuf::from(d).join(".claude.json")).unwrap_or_else(|| home().join(".claude.json"))
 }
 
+/// The Windows spelling Codex runs: its hook shell breaks on a quoted command token, so such a hook never starts (M4.11).
+fn codex_windows_hook(exe: &str, event: &str, system_root: Option<&str>) -> String {
+    let path = exe.replace('\\', "/");
+    if path.chars().all(|c| c.is_ascii_alphanumeric() || "_.:/~-".contains(c)) { return format!("{path} hook codex {event}"); }
+    // `--%` passes the rest verbatim under PowerShell, `/v:off` stops `!` expansion and `@` keeps the path quotes under cmd.
+    let root = system_root.filter(|r| r.chars().all(|c| c.is_ascii_alphanumeric() || r"_.:\~-".contains(c))).unwrap_or(r"C:\Windows");
+    format!(r#"{root}\System32\cmd.exe --% /d /v:off /c @"{path}" hook codex {event}"#)
+}
+
+fn hook_command(agent: &str, exe: &str, event: &str) -> String {
+    if cfg!(windows) && agent == "codex" { return codex_windows_hook(exe, event, std::env::var("SystemRoot").ok().as_deref()); }
+    format!("\"{exe}\" hook {agent} {event}")
+}
+
+/// Rewrite an owned Codex hook still in the quoted spelling, in the journal first (M4.1). Its trust follows through `hook_trust::ensure`.
+pub fn migrate_quoted_codex_hooks(root: &Path, exe: &Path, journal: &Path) -> Result<Vec<String>, String> {
+    if !cfg!(windows) { return Ok(vec![]); }
+    let file = root.join("hooks.json");
+    let Some(mut text) = read_config(&file)? else { return Ok(vec![]) };
+    let exe = exe.display().to_string();
+    let spelled = |command: &str| json!(command).to_string();
+    let mut j = load(journal);
+    let mut changed = false;
+    for event in ["SessionStart", "Stop"] {
+        let (old, new) = (spelled(&format!("\"{exe}\" hook codex {event}")), spelled(&hook_command("codex", &exe, event)));
+        if !text.contains(&old) { continue; }
+        text = text.replace(&old, &new);
+        changed = true;
+        for e in j.iter_mut().filter(|e| e["file"] == file.display().to_string().as_str()) {
+            if let Some(after) = serde_json::to_string(&e["after"]).ok().filter(|a| a.contains(&old)) {
+                e["after"] = serde_json::from_str(&after.replace(&old, &new)).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    if !changed { return Ok(vec![]); }
+    save(journal, &j)?;
+    write_atomic(&file, &text)?;
+    Ok(vec![format!("edited: {} (hook command spelling)", file.display())])
+}
+
 pub fn wants(agent: &str, root: &Path, claude_json: &Path, exe: &Path) -> Vec<Want> {
     let exe = exe.display().to_string();
-    let hook = |event: &str| json!({"type": "command", "command": format!("\"{exe}\" hook {agent} {event}"), "timeout": 5});
+    let hook = |event: &str| json!({"type": "command", "command": hook_command(agent, &exe, event), "timeout": 5});
     let tools: Vec<Value> = crate::mcp::tools().as_array().into_iter().flatten().map(|t| t["name"].clone()).collect();
     let w = |file: PathBuf, key: &[&str], value: Value, append: bool| Want { file, key: key.iter().map(|k| k.to_string()).collect(), value, append, routing: None, agent: agent.into(), instruction: false };
     match agent {
@@ -115,6 +161,65 @@ pub fn routing_wants(agent: &str, root: &Path, port: u16) -> Vec<Want> {
         ],
         _ => vec![],
     }
+}
+
+/// A journaled `hooks.json` entry of this Codex root exists.
+pub fn owns_hooks(journal: &Path, root: &Path) -> bool {
+    let file = root.join("hooks.json").display().to_string();
+    load(journal).iter().any(|e| e["file"] == file.as_str())
+}
+
+/// The owned Codex trust block of one exact hook (M4.11).
+pub fn hook_trust_want(root: &Path, key: &str, hash: &str) -> Want {
+    Want { file: root.join("config.toml"), key: ["hooks", "state", key].map(String::from).to_vec(), value: json!({"trusted_hash": hash}), append: false, routing: None, agent: "codex".into(), instruction: false }
+}
+
+/// The hook key of a journaled trust block.
+pub fn hook_state_key(e: &Value) -> Option<String> {
+    match e["key"].as_array()?.as_slice() {
+        [a, b, k] if a == "hooks" && b == "state" => k.as_str().map(String::from),
+        _ => None,
+    }
+}
+
+/// Journaled trust blocks stay in scope for capture, disable and enable, like instruction blocks.
+pub fn hook_trust_wants(agent: &str, root: &Path, entries: &[Value]) -> Vec<Want> {
+    if agent != "codex" { return vec![]; }
+    let file = root.join("config.toml").display().to_string();
+    let mut out: Vec<Want> = vec![];
+    for e in entries.iter().filter(|e| e["file"] == file.as_str()) {
+        let (Some(key), Some(after)) = (hook_state_key(e), e["after"].as_str()) else { continue };
+        let Some(hash) = hook_state(after, &key).and_then(|s| s.trusted_hash) else { continue };
+        if !out.iter().any(|w| w.key[2] == key) { out.push(hook_trust_want(root, &key, &hash)); }
+    }
+    out
+}
+
+/// A `[hooks.state.<key>]` table of `config.toml`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct HookState { pub trusted_hash: Option<String>, pub enabled: Option<bool> }
+
+/// The key of a `[hooks.state.<key>]` header line, in either TOML string form.
+fn hook_state_header(line: &str) -> Option<String> {
+    let inner = line.trim().strip_prefix("[hooks.state.")?.strip_suffix(']')?;
+    if let Some(s) = inner.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) { return Some(s.into()); }
+    serde_json::from_str(inner).ok()
+}
+
+/// The state of `key`, in either TOML string form Codex and AgentQ write; none when the table is absent.
+pub fn hook_state(text: &str, key: &str) -> Option<HookState> {
+    let mut lines = text.lines();
+    lines.find(|l| hook_state_header(l).as_deref() == Some(key))?;
+    let mut state = HookState::default();
+    for line in lines.take_while(|l| !l.trim_start().starts_with('[')) {
+        let Some((name, value)) = line.split_once('=') else { continue };
+        match name.trim() {
+            "trusted_hash" => state.trusted_hash = serde_json::from_str(value.trim()).ok(),
+            "enabled" => state.enabled = value.trim().parse().ok(),
+            _ => {}
+        }
+    }
+    Some(state)
 }
 
 pub(crate) fn load(journal: &Path) -> Vec<Value> {
@@ -371,6 +476,7 @@ fn detached_in(e: &Value, text: &str) -> Result<bool, String> {
             ["mcp_servers", "agentq"] | ["model_providers", "agentq"] => text.contains(&format!("[{}]", keys.join(".")))
                 || text.lines().any(|l| l.trim_start().starts_with("agentq:")),
             ["plugins", "enabled"] => text.contains("agentq"),
+            ["hooks", "state", key] => hook_state(text, key).is_some(),
             _ if e["field"] == "instructions" => text.contains("<!-- agentq:start -->") || text.contains("<!-- agentq:end -->"),
             _ => true,
         };
@@ -636,6 +742,14 @@ fn sep(text: &str) -> &'static str {
 /// Appends `[mcp_servers.agentq]`; JSON strings and arrays are valid TOML values. A top-level key goes first in
 /// the file, where it cannot fall into a table.
 fn place_toml(text: &str, w: &Want) -> Result<(String, Option<Value>), String> {
+    if let [a, b, key] = &w.key[..] && a == "hooks" && b == "state" {
+        let block = format!("[hooks.state.{}]\n{}", json!(key), fields(w).map(|(k, v)| format!("{k} = {v}\n")).collect::<String>());
+        if text.contains(&block) { return Ok((text.into(), None)); }
+        // A state in the other string form or with other values is foreign (M4.2).
+        if hook_state(text, key).is_some() { return Err(format!("hooks.state for {key} has a foreign value")); }
+        let after = format!("{}{block}", sep(text));
+        return Ok((format!("{text}{after}"), Some(entry(&w.key, "text", after.into()))));
+    }
     let name = w.key.join(".");
     if let [k] = &w.key[..] {
         let line = format!("{k} = {}\n", w.value);
@@ -745,6 +859,14 @@ pub fn selftest() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #284 A1. Failing before: real Codex on Windows starts no hook whose command holds a quote, so its records were lost.
+    #[test]
+    fn codex_windows_hook_holds_no_quoted_command_token() {
+        assert_eq!(codex_windows_hook(r"C:\Users\a\.agentq\agentq.exe", "Stop", None), "C:/Users/a/.agentq/agentq.exe hook codex Stop");
+        assert_eq!(codex_windows_hook(r"C:\Users\a b\agentq.exe", "Stop", Some(r"D:\Win")), r#"D:\Win\System32\cmd.exe --% /d /v:off /c @"C:/Users/a b/agentq.exe" hook codex Stop"#);
+        assert!(codex_windows_hook(r"C:\a b\agentq.exe", "Stop", Some(r"C:\odd & path")).starts_with(r"C:\Windows\System32\cmd.exe"), "an unspellable root falls back");
+    }
 
     fn snapshot(files: &[PathBuf]) -> Vec<Option<String>> {
         files.iter().map(|f| std::fs::read_to_string(f).ok()).collect()

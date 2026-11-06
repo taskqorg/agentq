@@ -101,7 +101,15 @@ impl AppServer {
 
 /// Caller-owned server transport: preserve all policy arguments and the account, without CLI `exec` flags.
 pub(crate) fn app_server_command(mut base: Command, spec: &Spec) -> Res<Command> {
+    let mut command=read_server_command(base,spec)?;
+    super::prepare::ssh_guard(&mut command,spec);
+    Ok(command)
+}
+
+/// The same server for a bounded native read, which runs no git.
+pub(crate) fn read_server_command(mut base: Command, spec: &Spec) -> Res<Command> {
     if spec.client != Client::Codex {return Err("app-server requires Codex".into());}
+    super::prepare::refuse_bypass(&spec.args)?;
     base.arg("app-server").args(&spec.args);
     Ok(environment(base,spec))
 }
@@ -223,7 +231,7 @@ impl AppSession {
         if let Some((id, method)) = self.pending {
             if message["id"].as_u64() == Some(id) {
                 if !message["error"].is_null() {
-                    if matches!(method,"model/list"|"account/read"|"account/rateLimits/read") {
+                    if matches!(method,"model/list"|"account/read"|"account/rateLimits/read"|"hooks/list"|"config/read"|"config/batchWrite") {
                         if method=="account/rateLimits/read" {
                             self.latest_limits=None;self.window_groups.clear();self.latest_windows=limits::unknown("native-read-refused");
                             if self.active && self.terminal.is_none() {self.limits=None;self.windows=self.latest_windows.clone();}

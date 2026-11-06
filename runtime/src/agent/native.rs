@@ -4,6 +4,7 @@ use super::*;
 /// Claude assigns the job/session on a start. Resume never overrides its saved settings or permissions.
 pub(crate) fn background_command(mut base: Command, spec: &Spec) -> Res<Command> {
     if spec.client != Client::Claude { return Err("background requires Claude".into()); }
+    super::prepare::refuse_bypass(&spec.args)?;
     base.arg("--bg");
     if spec.resume {
         if !plain_id(&spec.session) { return Err("background session invalid".into()); }

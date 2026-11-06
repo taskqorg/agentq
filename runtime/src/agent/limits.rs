@@ -122,7 +122,13 @@ pub(super) fn read(client: Client, events: &[Value], rollout: Option<&Path>) -> 
     unknown("not-reported")
 }
 
-fn exchange(server: &mut app::AppServer, session: &mut app::AppSession, request: Value, until: Instant) -> Res<Value> {
+pub(super) fn exchange(server: &mut app::AppServer, session: &mut app::AppSession, request: Value, until: Instant) -> Res<Value> {
+    let m=exchange_raw(server,session,request,until)?;
+    if m.get("error").is_some() {Err("native read refused".into())} else {Ok(m)}
+}
+
+/// One exchange whose native error reply stays with the caller.
+pub(super) fn exchange_raw(server: &mut app::AppServer, session: &mut app::AppSession, request: Value, until: Instant) -> Res<Value> {
     server.send(&request, until)?;
     loop {
         let m=server.receive(until)?.ok_or("native read deadline")?;
@@ -131,21 +137,18 @@ fn exchange(server: &mut app::AppServer, session: &mut app::AppSession, request:
             continue;
         }
         session.observe(&m)?;
-        if m["id"]==request["id"] && m.get("method").is_none() {
-            return if m.get("error").is_some() {Err("native read refused".into())} else {Ok(m)};
-        }
+        if m["id"]==request["id"] && m.get("method").is_none() {return Ok(m);}
     }
 }
 
 /// One bounded native read session with no thread or turn. Credentials stay in the client's home.
-fn codex_read<T>(home: Option<&Path>, executable: Option<&Path>, read: impl FnOnce(&mut app::AppServer, &mut app::AppSession, Instant)->Res<T>) -> Res<T> {
+pub(super) fn codex_read<T>(scope: &prepare::AccountScope, args: &[&str], until: Instant, read: impl FnOnce(&mut app::AppServer, &mut app::AppSession, Instant)->Res<T>) -> Res<T> {
     let root=std::env::current_dir().map_err(|_|"working directory unavailable")?;
-    let spec=Spec {client:Client::Codex,root,session:"-".into(),resume:false,args:vec![],env:vec![],home:home.map(Path::to_path_buf)};
+    let spec=Spec {client:Client::Codex,root,session:"-".into(),resume:false,args:args.iter().map(OsString::from).collect(),env:scope.env.clone(),home:scope.home.clone()};
     let log=std::env::temp_dir().join(format!("agentq-read-{}.log",crate::incident::uuid()));
-    let exe=match executable {Some(path)=>super::codex_native(path.to_path_buf())?,None=>adapter::runtime("codex").ok_or("runtime missing")?.executable(None)?};
-    let mut server=app::AppServer::spawn(app::app_server_command(Command::new(exe),&spec)?,&log,&Process::default())?;
+    let exe=match &scope.executable {Some(path)=>super::codex_native(path.clone())?,None=>prepare::scope_executable(Client::Codex,scope)?};
+    let mut server=app::AppServer::spawn(app::read_server_command(Command::new(exe),&spec)?,&log,&Process::default())?;
     let result=(|| {
-        let until=Instant::now()+Duration::from_secs(30);
         let mut session=app::AppSession::new(&spec)?;
         let initialize=session.initialize(json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}))?;
         exchange(&mut server,&mut session,initialize,until)?;
@@ -156,8 +159,10 @@ fn codex_read<T>(home: Option<&Path>, executable: Option<&Path>, read: impl FnOn
     let result=result?; stopped?; Ok(result)
 }
 
-pub(super) fn catalogue(home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> {
-    codex_read(home, executable, |server,session,until| {
+fn read_until() -> Instant {Instant::now()+Duration::from_secs(30)}
+
+pub(super) fn catalogue(scope: &prepare::AccountScope) -> Res<Vec<Model>> {
+    codex_read(scope, &[], read_until(), |server,session,until| {
         let mut models=vec![]; let mut cursor=Value::Null;
         for _ in 0..100 {
             let request=session.request("model/list",json!({"cursor":cursor,"limit":100,"includeHidden":false}))?;
@@ -175,13 +180,14 @@ pub(super) fn catalogue(home: Option<&Path>, executable: Option<&Path>) -> Res<V
     })
 }
 
-pub(super) fn account(client: Client, home: Option<&Path>, now: i64) -> Vec<Window> {
-    let explicit=home.is_some() || std::env::var_os(client.home_var()).is_some();
-    let Some(home) = home.map(Path::to_path_buf).or_else(|| base_home(client)) else { return unknown("home-unavailable"); };
+pub(super) fn account(client: Client, scope: &prepare::AccountScope, now: i64) -> Vec<Window> {
+    let named=scope.home_of(client);
+    let explicit=named.is_some() || std::env::var_os(client.home_var()).is_some();
+    let Some(home) = named.or_else(|| base_home(client)) else { return unknown("home-unavailable"); };
     if client != Client::Codex { return oauth_account(client, &home, explicit, now); }
     let path = home.join("auth.json");
     let before = match credential_snapshot(&path) { Ok(b) => b, Err(_) => return unknown("credential-unreadable") };
-    let response = codex_read(Some(&home), None, |server,session,until| {let request=session.request("account/rateLimits/read",json!({}))?;exchange(server,session,request,until)});
+    let response = codex_read(&prepare::AccountScope {home:Some(home.clone()),..scope.clone()}, &[], read_until(), |server,session,until| {let request=session.request("account/rateLimits/read",json!({}))?;exchange(server,session,request,until)});
     if credential_snapshot(&path).ok().as_ref() != Some(&before) { return unknown("credential-changed"); }
     match response {
         Ok(v) => reported(client, &v, now.max(0) as u64).unwrap_or_else(|| unknown("not-reported")),
@@ -203,7 +209,7 @@ pub(super) fn identity(client: Client, home: Option<&Path>) -> Option<String> {
     match client {
         Client::Codex=>{
             let path=home.join("auth.json"); let before=credential_snapshot(&path).ok()?;
-            let reply=codex_read(Some(&home),None,|server,session,until|{
+            let reply=codex_read(&prepare::AccountScope {home:Some(home.clone()),..Default::default()},&[],read_until(),|server,session,until|{
                 let request=session.request("account/read",json!({"refreshToken":false}))?;
                 exchange(server,session,request,until)
             }).ok()?;

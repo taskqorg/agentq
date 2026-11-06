@@ -187,7 +187,10 @@ fn write(h: &Host, c: &profiles::Client, field: &str, value: &str) -> Result<(),
         (f, _) => {
             let claude_json = c.files.get(1).cloned().unwrap_or_default();
             let wants: Vec<onboard::Want> = onboard::wants(agent_of(c), &c.root, &claude_json, &h.exe).into_iter().filter(|w| w.field() == f).collect();
-            onboard::apply(&wants, &journal).map_err(|_| "write_failed").and_then(failed)
+            onboard::apply(&wants, &journal).map_err(|_| "write_failed").and_then(failed)?;
+            // M4.11: a hook Codex has not been told to trust is skipped.
+            if f == "hooks" && c.agent == "codex" { crate::hook_trust::ensure(&c.root, &h.exe, &journal, None).map_err(|_| "write_failed").and_then(failed)?; }
+            Ok(())
         }
     }
 }

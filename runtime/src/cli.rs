@@ -51,8 +51,16 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let ctx = Context { product: text(c, "product")?, version: text(c, "version")?, project: c["project"].as_str().unwrap_or("other"),
         task, route: c["route"].as_str(), account: c["account"].as_str().unwrap_or(agent::DEFAULT) };
     let store = path(&v, "store")?;
+    let command = strings(&v, "command")?;
+    agent::refuse_bypass_flag(&command)?;
+    // M12.15: an exact folder the caller requests; nothing is edited without it.
+    if let Some(folder) = path(&v, "trust")? {
+        let scope = agent::AccountScope { home: path(&v, "home")?, env: env.clone(), executable: None };
+        let until = deadline.map_or(Instant::now() + Duration::from_secs(20), |d: Instant| d.min(Instant::now() + Duration::from_secs(20)));
+        agent::runtime(client.code()).ok_or("runtime missing")?.trust_folder(&folder, &scope, until).map_err(|e| e.to_string())?;
+    }
     // The caller's base command (a sandbox wrapper or another executable), else the client's own executable.
-    let base = match strings(&v, "command")?.split_first() {
+    let base = match command.split_first() {
         Some((exe, rest)) => { let mut c = Command::new(exe); c.args(rest); c }
         None => Command::new(agent::executable(client)?),
     };

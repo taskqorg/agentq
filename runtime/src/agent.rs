@@ -18,6 +18,9 @@ mod adapter;
 mod capture;
 mod events;
 mod limits;
+mod prepare;
+pub use prepare::{AccountScope, GIT_GUARD, Hook, Trust};
+pub(crate) use prepare::refuse_bypass as refuse_bypass_flag;
 pub use events::{AssistantFailure, Event, LogRecord, Model, RecordTime, TimeFault, ToolKind};
 pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
@@ -297,13 +300,14 @@ pub(crate) fn args(spec: &Spec) -> Vec<OsString> {
 /// inherited session variables of an enclosing client are removed so a child never joins its parent's session.
 pub(crate) fn command(mut base: Command, spec: &Spec) -> Command {
     base.args(args(spec));
-    environment(base, spec)
+    let mut command = environment(base, spec);
+    prepare::ssh_guard(&mut command, spec);
+    command
 }
 
 fn environment(mut base: Command, spec: &Spec) -> Command {
-    base.current_dir(&spec.root).env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CODEX_THREAD_ID")
-        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
-        .envs(spec.env.iter().map(|(k, v)| (k, v)));
+    prepare::clean(&mut base);
+    base.current_dir(&spec.root).envs(spec.env.iter().map(|(k, v)| (k, v)));
     if let Some(home) = &spec.home { base.env(spec.client.home_var(), home); }
     crate::quiet(&mut base);
     base
@@ -531,6 +535,7 @@ fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d|
 impl Turn {
     /// Spawn `command(base, spec)` with `text` on stdin; output appends to `log`, so a resume continues earlier turns.
     pub(crate) fn start(mut base: Command, spec: &Spec, log: &Path, text: &str, process: &Process) -> Res<Turn> {
+        prepare::refuse_bypass(&spec.args)?;
         if let Some(dir) = log.parent() { std::fs::create_dir_all(dir).map_err(|e| format!("agent log directory: {e}"))?; }
         let out = File::options().create(true).append(true).open(log).map_err(|e| format!("agent log: {e}"))?;
         let err = out.try_clone().map_err(|e| format!("agent log: {e}"))?;

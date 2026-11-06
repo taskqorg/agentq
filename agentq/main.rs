@@ -9,6 +9,7 @@ mod connect;
 mod control;
 mod engines;
 mod hooks;
+mod hook_trust;
 mod host;
 mod executor;
 mod local;
@@ -274,7 +275,8 @@ fn doctor(t: &Tool) -> i32 {
         None => line(false, format!("install: none at {}; run `agentq onboard --yes`", t.install.display())),
     }
     for (good, l) in host::check() { line(good, l); }
-    let report = control_report(t);
+    let mut report = control_report(t);
+    add_hook_trust(t, &mut report);
     let service = &report["service"];
     line(matches!(service["state"].as_str(), Some("running" | "stopped")), format!("service: {} ({})", service["state"].as_str().unwrap_or("unknown"), service["reason"].as_str().unwrap_or("fresh process and status readback")));
     line(report["control"] != "unknown", format!("control: {}", report["control"].as_str().unwrap_or("unknown")));
@@ -295,6 +297,7 @@ fn doctor(t: &Tool) -> i32 {
         line(p["integration"]["configuration"] == "detached", format!("integration: {} disabled, configuration {}, runtime {}", p["kind"].as_str().unwrap_or("unknown"),
             p["integration"]["configuration"].as_str().unwrap_or("unknown"), p["integration"]["runtime"].as_str().unwrap_or("unknown")));
     }
+    for (good, l) in hook_trust::lines(&report["hook_trust"]) { line(good, l); }
     for p in report["configuration"]["profiles"].as_array().into_iter().flatten()
         .filter(|p| p["kind"] == "antigravity" && p["integration"]["desired"] != "disabled") {
         let hooks = p["hooks"].as_str().unwrap_or("unknown");
@@ -564,8 +567,18 @@ fn control_report(t: &Tool) -> Value {
         "control": if state.is_ok() && config.is_ok() { "readable" } else { "unknown" }})
 }
 
+/// M4.12: only while the journal holds owned hooks; a disabled agent holds none by intent. This does not depend on the
+/// profile projection, whose absence must not hide a skipped hook. `doctor` and `status` alone start Codex for this.
+fn add_hook_trust(t: &Tool, report: &mut Value) {
+    let root = onboard::root("codex");
+    if onboard::owns_hooks(&journal(t), &root) && control::disabled(&t.install.join("data"), "codex") != Ok(true) {
+        report["hook_trust"] = hook_trust::status(&root, &t.install.join(t.exe_name()), None);
+    }
+}
+
 fn control_status(t: &Tool, json: bool) -> i32 {
-    let report = control_report(t);
+    let mut report = control_report(t);
+    add_hook_trust(t, &mut report);
     if json { println!("{report}"); } else {
         println!("service: {}", report["service"]["state"].as_str().unwrap_or("unknown"));
         println!("integration: {}, optimization: {} (configured, runtime verification separate)", report["integration"].as_str().unwrap_or("unknown"), report["optimization"].as_str().unwrap_or("unknown"));
@@ -576,8 +589,10 @@ fn control_status(t: &Tool, json: bool) -> i32 {
                 p["integration"]["runtime"].as_str().unwrap_or("unknown"), p["optimization"].as_str().unwrap_or("unsupported"),
                 p["effective"]["adapter"].as_str().unwrap_or("unsupported"), p["effective"]["state"].as_str().unwrap_or("unknown"));
         }
+        for (_, l) in hook_trust::lines(&report["hook_trust"]) { println!("{l}"); }
     }
-    i32::from(report["control"] == "unknown")
+    let hooks_ok = report["hook_trust"].is_null() || report["hook_trust"]["state"] == "ok";
+    i32::from(report["control"] == "unknown" || !hooks_ok)
 }
 
 fn now() -> u64 {
@@ -939,6 +954,13 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
             println!("routing: {a} proxy on 127.0.0.1:{p} {state}");
         }),
         Err(e) => fail(&e, "fix it, then run `agentq onboard --yes` again"),
+    }
+    // M4.11: Codex skips a hook it has not been told to trust; a failure stays visible in doctor below.
+    if agents.contains(&"codex") {
+        match hook_trust::ensure(&onboard::root("codex"), &exe, &journal(t), None) {
+            Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+            Err(e) => println!("hooks: codex trust unknown ({e}); run `agentq onboard --yes codex`"),
+        }
     }
     doctor(t);
     if agents.contains(&"antigravity") {

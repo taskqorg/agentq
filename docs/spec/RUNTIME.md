@@ -14,7 +14,7 @@ Each adapter implements every operation. The sections below remain the binding d
 | `resume(session, &Launch)` | The same for an existing opaque session ID. |
 | `input(run, parts)` | Send more user input to a running session as ordered `Part`s: `Text` or `Image` (an absolute path to a local file the caller already verified). A protected app-server run starts its next turn with exactly these parts, once; a later turn never repeats earlier parts. Refusals are typed `Failure::Refused(cause)` before any native write: `input-empty`; `image-unsupported` without capability `image-input`; `image-invalid` for a relative path or a missing file; `input-unsupported` for a one-process CLI, background or queue run, whose next turn is a `resume`. A native or transport error is `Failure::Failed` and is never retried. |
 | `account(run)` | Read-only login identity of a session run (capability `account`): `Login` `subscription`, `api-key` or `none`, and the native plan name when reported. It never refreshes, writes or exports a credential, token or email. Other runs return `Failure::Refused` cause `account-unsupported`; an unrecognized login reads as `Failure::Failed`, never as a guess. |
-| `catalogue(home)`, `catalogue_with_executable(home, executable)` | Models the login in `home` can use (capability `catalogue`): Codex uses the supplied executable when present (otherwise native lookup), then one bounded `model/list` over its own short app-server session, with no run. Other runtimes refuse with `catalogue unsupported by <name>`; a caller then offers descriptor `models`. |
+| `catalogue(home)`, `catalogue_with_executable(home, executable)`, `catalogue_for(&AccountScope)` | Models the login in `home` can use (capability `catalogue`): Codex uses the supplied executable when present (otherwise native lookup), then one bounded `model/list` over its own short app-server session, with no run. Other runtimes refuse with `catalogue unsupported by <name>`; a caller then offers descriptor `models`. |
 | `cancel(run)` | Request the stop; returns whether exit is already confirmed. `poll` confirms it later. It never proves server-side stop (see Arguments). |
 | `poll(run)` | `running`, `finished`, `failed` or `unknown` from the existing end detection. |
 | `report(run)` | The `Report` of a finished run; a running one returns cause `running`. |
@@ -27,14 +27,14 @@ Each adapter implements every operation. The sections below remain the binding d
 | `session_url(run)` | The URL or cause of `observe` (Session observation), without polling. |
 | `observe(run)` | One runtime-neutral `Observation`: `poll` state (a failed poll reads `unknown` with its error), native session, and session URL or absence cause with its native detail (Session observation). |
 | `transcript(run)` | The caller log the run appends to. |
-| `ready(executable, home)` | `install` (the given executable, else the CLI on `PATH`), `version` (`--version` within 5 s; `outdated` below the descriptor `minimum`) and `login` in `home` (none: the client's own). Login runs the native status command within 10 s: Claude `auth status --json` reads `ok` only for `loggedIn` with `authMethod` `claude.ai` and `apiProvider` `firstParty`; Codex `-c forced_login_method="chatgpt" login status` reads `ok` for `Logged in using ChatGPT`. Another login reads `api-key`, none reads `missing`, and a failed or unreadable status reads `unknown`. Antigravity has no status command: its credential file is absent and reads `unknown`. Each check carries a reason. |
+| `ready(executable, home)`, `ready_for(&AccountScope)` | `install` (the given executable, else the CLI on `PATH`), `version` (`--version` within 5 s, cached by binary identity; `outdated` below the descriptor `minimum`, with the next step in its detail) and `login` in `home` (none: the client's own) ([account scope](#account-scope)). Login runs the native status command within 10 s: Claude `auth status --json` reads `ok` only for `loggedIn` with `authMethod` `claude.ai` and `apiProvider` `firstParty`; Codex `-c forced_login_method="chatgpt" login status` reads `ok` for `Logged in using ChatGPT`. Another login reads `api-key`, none reads `missing`, also when the client exits nonzero with that text, and a failed or unreadable status reads `unknown`. Antigravity has no status command: its credential file is absent and reads `unknown`. Each check carries a reason. |
 | `quota(&Accounts, now)` | The account a launch takes, whether every account is disabled, and the hold end when every enabled account is limited. |
 | `running()` | Runs of this adapter in this process that have not reached a terminal poll and were not dropped. |
 | `protected_paths(home)` | Native home folders and files a run must not overwrite: Claude home and `.claude.json`, Codex home, Antigravity home and its sibling `config`. |
 | `home_env(tool, label)` | The home variable pointing at `<base home>/<tool>-accounts/<label>`; none for `default`, which keeps the caller's own home. |
 | `checkpoint(run)`, `recover(saved, &Launch)` | Private recovery value of a CLI turn, background or queue run, and the run rebuilt from it without a native call (Turn recovery and process setup, Compatibility sessions). An `agentapi` submission returns cause `no-checkpoint`. |
 | `log_limits(log, session, home)` | Every quota `Window` in caller-held log text, else in the session's native transcript in `home`, each with its native event ID when reported. No run, no write ([limit snapshot](#limit-snapshot)). |
-| `account_limits(home, now)` | Every quota `Window` of the login in `home`, from its native read-only source (capability `account-limits`): Codex `account/rateLimits/read`, Claude OAuth usage, Antigravity code-assist. A credential file changed during the read makes the result unknown. An absent Codex `auth.json` does not block its native app-server read (native credential stores are supported); unreadable existing files and changes during the read remain unknown. Never refreshes or exports a credential. |
+| `account_limits(home, now)`, `account_limits_for(&AccountScope, now)` | Every quota `Window` of the login in `home`, from its native read-only source (capability `account-limits`): Codex `account/rateLimits/read`, Claude OAuth usage, Antigravity code-assist. A credential file changed during the read makes the result unknown. An absent Codex `auth.json` does not block its native app-server read (native credential stores are supported); unreadable existing files and changes during the read remain unknown. Never refreshes or exports a credential. |
 | `classify(log)` | The `Report` of caller-held log text without a run: the same `Report::read` as a finished turn, with no exit code, deadline or rollout. `detail` holds the native reason of `auth-rejected` or `model-capacity`. One event classifies as its own one-line log. |
 | `executable(path)` | The client executable resolved on `path` (none: the process `PATH`), as in Arguments; Codex resolves its native executor. Unresolved names come back bare; nothing is spawned. |
 | `home()` | The client's own home (Arguments, `protected_paths`). |
@@ -43,7 +43,9 @@ Each adapter implements every operation. The sections below remain the binding d
 | `prepare(intent, product, &mut NativeSpec, install)` | The optimization intent applied to a caller-built spec, as `launch` applies it. |
 | `command(base, &NativeSpec)`, `turn(base, &NativeSpec, log, input, &Process)` | The native turn command (Arguments), and one `Turn` started with it: `id`, `poll`, `kill`, `wait`, `report`. For a caller that adds native arguments of its own; `launch` stays the default. |
 | `background_launch`, `jobs`, `job`, `stop_job` | Capability `background`: the launcher exchange, the job list (`filtered` adds the project filter), one validated `BackgroundJob` row and its stop request (Compatibility sessions). Other runtimes refuse with `background unsupported by <name>`. |
-| `launch_refusal(text)` | The named cause of a launch failure, from its stderr or `launch`/`resume` error text: `workspace-untrusted` (Claude `Workspace not trusted`), `session-missing` (Claude `No conversation found with session ID`, Codex `app-server thread/resume refused`), `login-required` (Claude `Not logged in` or `/login`; Codex `401`, `login` or `log in`, any case); otherwise none. Callers match the cause, never the text. |
+| `trust_folder(folder, &AccountScope, until)` | Capability `folder-trust`: pre-seed the client's trust of one exact folder ([folder trust](#folder-trust)). Returns `Trust::Granted` or `Trust::Unchanged`, else `Failure::Refused` with its cause. |
+| `hooks(root, &AccountScope, until)` | Capability `hook-trust`: every hook Codex lists for `root`, with its key, source file, hash and trust status ([hook trust](#hook-trust)). Read-only. |
+| `launch_refusal(text)` | The named cause of a launch failure, from its stderr or `launch`/`resume` error text: every launch preparation cause below; `workspace-untrusted` (Claude `Workspace not trusted`, Codex `Not inside a trusted directory`), `session-missing` (Claude `No conversation found with session ID`, Codex `app-server thread/resume refused`), `login-required` (Claude `Not logged in` or `/login`; Codex `401`, `login` or `log in`, any case); otherwise none. Callers match the cause, never the text. |
 | `app_queue`, `app_server_command` | Capabilities `app-queue` and `app-server`: the desktop-thread queue exchange and the app-server command for a caller-owned host. Other runtimes refuse with `<capability> unsupported by <name>`. |
 
 `NativeSpec` is the caller's view of one native session for these operations: `root`, `session`, `resume`, `args` (native client arguments in the Arguments position), `home` and `env`; the adapter adds its own client. Callers gate each optional operation on `descriptor().has(capability)`.
@@ -52,8 +54,8 @@ Descriptor data, the only runtime metadata a caller reads. `models` are the mode
 
 | `name` | `label` | `brand` | `family` | `models` | `minimum` | `capabilities` |
 |---|---|---|---|---|---|---|
-| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `account-limits`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas`, `settings-env` |
-| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `account-limits`, `catalogue`, `app-queue`, `app-server`, `effort`, `image-input`, `account`, `host-args`, `settings-env`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas` |
+| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `account-limits`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas`, `settings-env`, `folder-trust` |
+| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `account-limits`, `catalogue`, `app-queue`, `app-server`, `effort`, `image-input`, `account`, `host-args`, `settings-env`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas`, `folder-trust`, `hook-trust` |
 | `antigravity` | Antigravity | Google | `gemini` | | | `turn`, `resume`, `title`, `account-limits` |
 
 ### Session observation
@@ -207,7 +209,7 @@ M12.12 lets a caller launch through the trait when its host configuration holds 
 - `Launch.settings_env` (`settings-env`, CLI turn and background modes): environment of the session, as text.
   - Claude: one `--settings` JSON `env`, joined with `Launch.compact_hook` and the effective child's `AGENTQ_OPTIMIZATION`, `TASKQ_TASK` and `AGENTQ_LAUNCHER` (including inherited values), which win over a caller value. Settings `AGENTQ_OPTIMIZATION=off` reaches optimization resolution before installation state is read and forces child and session `off`. Subscription-only policy clears `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` in both child and settings after caller values. A background session runs under the Claude daemon, whose environment is not the launcher child's; settings `env` reaches it and survives resume. Other settings values do not join the child environment, so `Launch.env` stays the place for child variables.
   - Codex: child environment after `Launch.env`, so a settings value wins.
-  - The values of a Claude launch enter argv, so a caller never puts secrets here. Secrets stay in `Launch.env`.
+  - The values of a Claude launch enter argv, so a caller never puts secrets here. Secrets stay in `Launch.env`. A non-empty value under a secret-like name refuses ([child environment](#child-environment)).
   - Antigravity, queue and protected app-server launches refuse with `settings-env unsupported by <name>`; an ordinary Codex turn forwards this environment to its child in either native form.
 - `Runtime::launcher_output(run)` (`background`): the raw `Result<Output, Failure>` of the launcher exchange that `background_launch` returns, handed over once so the caller can record it and tell a refusal from an uncertain response with `launch_refusal`. A run without a launcher reads cause `no-launcher`. A second call and a recovered run read cause `launcher-output-unavailable`, because the output is not part of the checkpoint. A foreign run reads `foreign-run`. The run's own state does not change: an unobserved job stays `unknown` and never resubmits.
 
@@ -226,6 +228,82 @@ A consumer service that re-executes itself reattaches its live CLI turn children
 - `spawned(&Child)` runs after spawn and before any input is written, for example to assign a Windows Job Object through the child handle. An error kills and reaps the child and fails the launch with that error.
 - Background, queue, job list and stop launchers are bounded exchanges owned and reaped by `coreq::process`; they get only `quiet` and no caller hooks, because the native background job they start is not their child.
 
+## Launch preparation
+
+A launch starts ready or refuses with a named cause. `Launch.trust` and `Launch.preflight` are explicit requests; a launch that sets neither edits nothing and spawns as before.
+
+- `Launch.trust` names one folder for `trust_folder`, run before spawn. The deadline is 20 s, or `Launch.deadline` when earlier. An error fails the launch with its cause.
+- `Launch.preflight` runs `ready_for` with the launch's home, environment and native executable before spawn. It refuses `client-missing`, `client-outdated` and `login-required`. An `unknown` part never refuses, because the client's own start decides. A launch with `Launch.command` skips it: the wrapper owns its own readiness.
+
+### Hook trust
+
+Codex runs a user hook only when `config.toml` holds `[hooks.state."<key>"]` `trusted_hash` equal to the hash of that hook. Without it, a new or changed hook is skipped, so `Stop` and `SessionStart` records are silently lost.
+
+- **Source.** `hooks/list` over one bounded `app-server` session in the selected home, with plugin startup off. `agentq` selects the entries with the exact command, event and source file of its own `hooks.json` entries. Any other entry is never trusted.
+- **Key.** `<source file>:<event label>:<group index>:<handler index>`, as Codex reports it. The key moves when an earlier hook in the same event is added or removed.
+- **Fallback.** When the read fails, for example with no CLI installed, the key is built from the position in `hooks.json` and the hash is the SHA-256 of the sorted compact JSON `{"event_name":<label>,"hooks":[{"async":false,"command":<command>,"timeout":<s>,"type":"command"}]}`, prefixed `sha256:`. It is checked against native `hooks/list` values in the qualification. A hash scheme a later Codex changes reads `modified` at the next native read, and onboarding replaces it.
+- **Spelling.** On Windows, Codex starts no hook whose command holds a quoted command token, so such a hook never runs, trusted or not. The command is the bare path with `/` when every character is one of `A-Za-z0-9_.:/~-`, else `<SystemRoot>\System32\cmd.exe --% /d /v:off /c @"<path>" hook codex <event>`. `onboard --yes` rewrites an owned entry in the old quoted spelling, journal first. macOS and Linux keep the quoted path.
+- **Write.** `onboard --yes` and the `hooks` field of `configure` write through the ownership journal. Uninstall, `disable` and `direct` handling follow every other owned block. A journaled block with another hash or a key that no longer exists is removed before the current one is written.
+- **Conflict.** A state for the key that the journal does not own stays. The hook reads `modified` or `disabled` and the `conflict:` line names it.
+
+`doctor` and `status` (`hook_trust` in `--json`) list each owned hook as `trusted`, `untrusted`, `modified`, `disabled` or `absent`. Anything but `trusted` fails with the next step. Trust does not prove a hook ran: the evidence of its latest run stays separate (`agentq.md` § 1).
+
+`--dangerously-bypass-hook-trust` refuses with `hook-trust-bypass-refused` in `Launch.host_args`, `Launch.command`, `NativeSpec.args` and `agentq agent turn` `args`. No AgentQ path passes it. A qualification fixture may run the native CLI with it directly on an isolated home it created and discards; it never goes through the runtime.
+
+### Folder trust
+
+`trust_folder` is the only runtime write to client configuration, and only on request.
+
+| Cause | Meaning |
+|---|---|
+| `trust-path-refused` | The folder is relative, not an existing folder, a filesystem root, the user's or the client's home, an ancestor of a home, or a path Claude would look up under another Unicode form. |
+| `trust-unsupported` | The runtime has no folder trust (Antigravity). |
+| `trust-config-missing` | The Claude configuration file does not exist yet: the account has no first run. Nothing is created. |
+| `trust-config-unreadable` | The configuration exists but is not a readable JSON object with an object `projects`. It is never overwritten. |
+| `trust-locked` | The client's lock stayed held, or Codex reported a version conflict, until the deadline. |
+| `trust-deadline` | The client's writer did not answer by the deadline. |
+| `trust-conflict` | The user set this folder to another trust level. It stays. |
+| `trust-write-failed` | The write or its native call failed. |
+| `trust-readback-failed` | The value was not present after the write. |
+
+- **Claude.** The file is `.config.json` in `CLAUDE_CONFIG_DIR` or `~/.claude` when it exists, else `.claude.json` in `CLAUDE_CONFIG_DIR` or the user's home. The lock is the directory `<file>.lock` that Claude itself uses; a held lock is never broken. Under it the file is reread, `projects.<key>.hasTrustDialogAccepted` set to `true`, other fields kept, and the replacement renamed over the target with its permissions. The key is the canonical path, with `/` on Windows.
+- **Codex.** Codex has no cross-process file lock; its own serialized writer is `config/batchWrite` with `expectedVersion`. One bounded `app-server` session reads the user layer version, upserts `projects.<key>.trust_level = "trusted"` and retries a version conflict until the deadline. The key is the canonical path without a verbatim drive prefix, lowercased on Windows, as Codex stores it.
+- A successful write reads the value back before it returns.
+- Trust is inherited downward by Claude, so an ancestor of a home would trust the home. Trust is never removed by the runtime: the caller that requested it owns that decision.
+
+### Account scope
+
+`AccountScope { home, env, executable }` names one account's view. `ready_for`, `catalogue_for` and `account_limits_for` use all three: the client runs from `executable` (else the lookup on the scope's `PATH`), with the [child environment](#child-environment), then `env`, then the home variable. The older signatures call these with an empty `env`.
+
+The version text is cached in the process per canonical executable path, with its length and modification time as identity. A self-update replaces the file or moves its symlink, so it reads again. A script or npm shim is not a binary and is never cached: its bytes stay the same when the client behind it updates.
+
+`outdated` reads `<version> is below <minimum>; update <label> to <minimum> or newer`.
+
+### Child environment
+
+Every runtime child, including bounded native exchanges and readiness reads, removes these inherited variables. A caller who means one passes it in `Launch.env` or `AccountScope.env`, which apply afterwards. The protected host keeps its own clean environment.
+
+| Kind | Variables |
+|---|---|
+| Session | `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_JOB_DIR`, `CLAUDE_PID`, `CODEX_THREAD_ID`, `CODEX_SANDBOX`, `CODEX_SANDBOX_NETWORK_DISABLED`, `ANTIGRAVITY_CONVERSATION_ID` |
+| Client auth | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
+
+Home variables, `PATH`, routing variables and tool credentials such as `GH_TOKEN` stay: they are the caller's configuration, not another session's identity.
+
+The git credential guard is set before the caller's environment:
+
+| Variable | Value | Stops |
+|---|---|---|
+| `GIT_TERMINAL_PROMPT` | `0` | git's own terminal prompt |
+| `GIT_ASKPASS` | `agentq-no-askpass`, a name that does not exist | an inherited or configured askpass program, which may open a window; git fails at once and a credential helper still runs first |
+| `SSH_ASKPASS_REQUIRE` | `never` | ssh's askpass |
+| `GCM_INTERACTIVE` | `never` | Git Credential Manager prompts |
+| `GIT_SSH_COMMAND` | `ssh -oBatchMode=yes` | ssh passphrase and host-key prompts on a terminal |
+
+A worker start sets `GIT_SSH_COMMAND` only when the child has neither `GIT_SSH_COMMAND` nor `GIT_SSH` and one `git config --get core.sshCommand` (2 s) in the project finds none, so a configured ssh command is never replaced. That command then owns its own prompts. A Claude background daemon started by the launcher inherits this environment and has no terminal. A daemon that already runs keeps its own environment; a caller that needs the guard there adds `agent::GIT_GUARD` to `Launch.settings_env`.
+
+A secret never enters argv. `Launch.settings_env` of a Claude launch and `Launch.host_args` refuse with `secret-in-argv` when a non-empty value sits under a name containing `API_KEY`, `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL`. Subscription policy clears `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` first, so those two never reach argv under it.
+
 ## Session model
 
 - One native session belongs to one conversation or one task attempt.
@@ -236,7 +314,7 @@ A consumer service that re-executes itself reattaches its live CLI turn children
 
 ## Arguments
 
-The caller builds the base command: the client executable from `agent::executable`, or a sandbox wrapper around it. `agent::command` appends the arguments, sets the project root as working directory, removes `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID` and `ANTIGRAVITY_CONVERSATION_ID`, adds the caller's environment and sets the account home.
+The caller builds the base command: the client executable from `agent::executable`, or a sandbox wrapper around it. `agent::command` appends the arguments, sets the project root as working directory, applies the [child environment](#child-environment), adds the caller's environment and sets the account home.
 
 | Client | Start | Resume |
 |---|---|---|
@@ -565,6 +643,7 @@ History lifecycle events are descriptive only; existing terminal/identity parser
 | `command` | Optional base command (sandbox wrapper or another executable); default `agent::executable` |
 | `input` | Turn text on stdin of the client (required) |
 | `timeout_s` | Optional deadline, 1-86400 s; past it the turn reads `cancelled`/`timeout` |
+| `trust` | Optional absolute folder to pre-seed before the turn ([folder trust](#folder-trust)); its cause fails the request. Null edits nothing |
 | `optimization` | `inherit` (default), `off` or `on` |
 | `context` | `product`, `version` (required), `project` (default `other`), `task` `[task, attempt]` or null, `route`, `account` (default `default`) |
 | `store` | Absolute CoreQ telemetry store path for the `agent.turn` and `agent.call` records; null records nothing |

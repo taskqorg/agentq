@@ -49,6 +49,10 @@ Quality, latency, resource and savings budgets must be agreed before engine sele
 
 Worker runtime benchmarks (`python3 scripts/benchmark-workers.py`, [COMPRESSION-BENCHMARK.md](COMPRESSION-BENCHMARK.md#worker-runtime-benchmark-methodology-and-viewer)) execute the four standardized worker tasks (`T1-context-navigation`, `T2-instruction-adherence`, `T3-noisy-command-compression`, `T4-code-patch-verification`) across `codex`, `claude` and `antigravity` with `optimization` `off` vs `on`, storing dated/versioned JSON reports outside the repository and rendering them in the generated viewer.
 
+## Launch preparation qualification
+
+`python3 scripts/qualify-launch-preparation.py` runs the real Codex, Claude and git on isolated homes against a local stub, with no account and no working profile ([contract](RUNTIME.md#launch-preparation)). It runs one real Codex turn without and one with trust, so the skipped hook and the fix are both observed. Records: [Windows and macOS](../evidence/runtime-284.md).
+
 ## Accounting qualification
 
 Live check for [ACCOUNTING O4](ACCOUNTING.md#o4-qualification) (#108). Persistent chain checks: `accounting::tests::consumer_fixtures` runs every published case, producer-path cases included; `tests/compression.rs` requires equal accounting from local stats and their queued spans, unknown for an empty store, and a gap, reset or unknown reason after a failed append, a lost journal or a corrupt one, and unknown for a deleted day file under an intact journal. A call that can write neither its record nor a failure marker leaves no evidence, so local observed intervals carry reason `unproven` and local totals stay lower bounds (`compression::tests::no_evidence_chain`).

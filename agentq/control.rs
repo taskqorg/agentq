@@ -79,6 +79,7 @@ pub fn wants(c: &profiles::Client, data: &Path, exe: &Path) -> Vec<onboard::Want
     let mut entries = onboard::load(&data.join("owned.json"));
     if let Ok(s) = state(data) { entries.extend(s["profiles"][c.agent]["entries"].as_array().into_iter().flatten().cloned()); }
     w.extend(onboard::instruction_wants(c.agent, &c.root, &entries));
+    w.extend(onboard::hook_trust_wants(c.agent, &c.root, &entries));
     w
 }
 

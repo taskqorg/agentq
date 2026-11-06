@@ -63,6 +63,7 @@ agentq runs these external tools on a host ([specq host requirements](https://gi
 | Python | 3.11, below 3.14, with `venv` and `ensurepip` | headroom venv, `check compression` | all except macOS x64 (no headroom wheels) |
 | Windows PowerShell | 5.1 | process inventory, service registration check, user PATH | Windows |
 | OS components | supplied by the OS release | service unit, process inventory, connection count, host name, hidden key input and protected native launch | macOS `launchctl ps lsof id hostname stty sandbox-exec`; Linux `systemctl ps id hostname stty`; Windows `schtasks taskkill netstat hostname whoami icacls` |
+| `git` (optional) | none | `core.sshCommand` read before a worker start ([child environment](RUNTIME.md#child-environment)); when absent the guard is set | all |
 | `security`, `secret-tool` (optional) | none | Langfuse key storage; when absent, the `data/langfuse` file | macOS, Linux |
 
 ## Host requirement notes

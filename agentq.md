@@ -41,7 +41,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 | `agentq uninstall [--dry-run]` | § 9; none left: `already removed`. |
 
 - Each `hook` run stamps the event time as configuration evidence. A run that cannot read stdin or write stdout records `data/evidence/<agent>.<event>.failed` with its time and error. A successful run moves it to `<agent>.<event>.last_failure`, so `.failed` exists exactly while the latest run failed; the last failure stays for the heartbeat (§ 6).
-- `doctor` checks install, host tools (§ 5), service, engines, owned edits count, local SQLite integrity, telemetry queue and optional keys. Each recorded hook failure fails, an unreadable record included.
+- `doctor` checks install, host tools (§ 5), service, engines, Codex trust of the owned hooks (M4.12), owned edits count, local SQLite integrity, telemetry queue and optional keys. Each recorded hook failure fails, an unreadable record included.
 - `doctor` reports per agent its routing and whether that is intended (§ 5): an onboarded agent intended routed but not routed fails with `run agentq onboard --yes`; an unknown intent fails. Ports and routing drift join when the service owns them; `onboard --yes` reapplies owned edits.
 
 ## 2. MCP tools
@@ -67,7 +67,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 | Runtime | Files and edits |
 |---|---|
 | Codex CLI and Desktop | `config.toml`: `model_provider = "agentq"`, `[model_providers.agentq]` loopback `/v1`, `wire_api = "responses"`, websockets; `[mcp_servers.agentq]` runs `<install>/agentq mcp codex`, `enabled_tools` the three tools, `index_document` `approval_mode = "approve"` unless the user set one. |
-| Codex hooks and telemetry | `hooks.json`: `SessionStart` and `Stop` (M6.11) run `agentq hook codex <event>`. Observability plugin config points its exporter at the loopback OTLP port. |
+| Codex hooks and telemetry | `hooks.json`: `SessionStart` and `Stop` (M6.11) run `agentq hook codex <event>`, in the [spelling Codex runs](docs/spec/RUNTIME.md#hook-trust). `config.toml`: journaled hook trust for exactly those entries (M4.11). Observability plugin config points its exporter at the loopback OTLP port. |
 | Claude Code CLI and Desktop Code | `settings.json`: `env.ANTHROPIC_BASE_URL` loopback, telemetry env pointing at the loopback OTLP port, `SessionStart`, `PreToolUse`, `PostToolUse` and `Stop` hooks; `Stop` reads model calls and writes session records (§ 6). Outside auto mode, PreToolUse wraps qualified Bash commands with `agentq run`. `~/.claude.json`: `mcpServers.agentq`. |
 | Claude Desktop Chat | `claude_desktop_config.json`: `mcpServers.agentq` only; no routing (PRODUCT R1). |
 | Hermes | `config.yaml`: `mcp_servers.agentq`, `plugins.enabled` `agentq` with the shipped plugin files (`transform_tool_result`, `post_api_request`, `on_session_end`); Langfuse plugin tags. Hermes keeps its own Langfuse exporter configuration (§ 6). |
@@ -79,6 +79,11 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - A JSON config that starts with a UTF-8 BOM is parsed without it; the edit writes it without the BOM and its `edited:` line says `UTF-8 BOM stripped`. Uninstall restores the original bytes, BOM included.
 - [CONFIGURATION A1–A5](docs/spec/CONFIGURATION.md) owns profile projection and separately authorized typed management with revision checks, journaled apply, host readback and real-client verification. Observation enrollment grants no configuration authority.
 - Typed envelopes and host acceptance: `agentq/configure.rs` with fixtures `docs/spec/configuration-fixtures.json`. Local guarded apply, readback and hook evidence: `agentq configure`, `agentq/executor.rs` (CONFIGURATION "Host executor"). Remote operations are released before qualification #95.
+### Codex hook trust
+- **M4.11** Onboarding trusts only AgentQ's exact `SessionStart` and `Stop` entries of the selected `hooks.json`, as a journaled `[hooks.state."<key>"]` `trusted_hash` in `config.toml`. Key and hash come from what Codex reports through `hooks/list`; a computed hash is only the fallback when that read fails.
+- **M4.12** `doctor` and `status` report an untrusted, modified, disabled or absent owned hook as a failure with `run agentq onboard --yes codex` or the named next step. A computed reading says so; when nothing can be read the state is `unknown`, which also fails.
+- **M4.13** AgentQ never passes `--dangerously-bypass-hook-trust`, except on an AgentQ-owned isolated home that it created and discards. The runtime refuses the flag on every launch.
+- A foreign or user-set state for the same key stays and reads as a named conflict (M4.2). [Hook trust detail](docs/spec/RUNTIME.md#hook-trust).
 ### Temporary controls
 - **M4.4** Compression and integration state are independent. Host optimization off writes `compression.enabled=false`, on writes `true`. Agent off writes `compression.agents.<agent>=false`, on removes that key; a host pause preserves agent preferences.
 - **M4.5** All adapters and anonymous `agentq run` obey the host switch; per-agent isolation requires a known agent. Previously transmitted Codex replay bytes never change.
@@ -174,7 +179,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M12.3** A plain turn needs no service, engine, MCP server or installation; the library and `agentq agent turn` never write the installation. Callers keep grants, permissions, model, effort, input files, storage, process ownership, stop authority and UI.
 - **M12.4** Each finished turn appends exactly one attributable `agent.turn` observation to the caller's CoreQ store; recovery and repeated observation never count it twice. The child gets `AGENTQ_LAUNCHER` unless `TASKQ_TASK` or `AGENTQ_LAUNCHER` is set, so § 6 M6.9 holds.
 - **M12.5** Each launch states optimization intent `inherit`, `off` or `on` and gets the effective state `on`, `off` or `unknown` with a reason, read from the installation without writing it. Host and agent switches and disable win; `on` never enables anything.
-- **M12.6** A launch never edits global or client configuration, previously transmitted replay bytes, provider or model. `off` reaches the optimizer only through the child: env `AGENTQ_OPTIMIZATION=off`, and for a Codex profile routed through agentq the per-launch header override `x-agentq-optimization: off`.
+- **M12.6** A launch never edits global or client configuration, previously transmitted replay bytes, provider or model, except the folder trust a caller requests by exact path (M12.15). `off` reaches the optimizer only through the child: env `AGENTQ_OPTIMIZATION=off`, and for a Codex profile routed through agentq the per-launch header override `x-agentq-optimization: off`.
 - **M12.7** Every compression adapter treats `off` as disabled for that session. An absent or failed optimizer keeps native output (P1); a runtime failure stays a runtime failure.
 - **M12.8** Protected app-server launches optionally use a caller-trusted signed host adapter, existing grants and authenticated caller-owned permits; no TaskQ binary, command, slot service or certificate authority is required. Non-launching preparation binds the actual caller and existing authority.
   Launch revalidates preparation. Fresh readback binds project/profile, runtime/account/image, approver/revision, operation and native incarnation before any input. Unknown or changed authority refuses; uncertain work is observed, never replayed.
@@ -194,6 +199,9 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
   A finished run's records are frozen at its terminal observation: `Run::snapshot` returns them without a store lock, and later log bytes or queue delay never change them. [Detail](docs/spec/RUNTIME.md#deferred-persistence).
   Records and runtime children inherit the caller's CoreQ `project`, `task`, `attempt`, `actor` and `entry`; a missing value reads null with a reason. [Detail](docs/spec/RUNTIME.md#observation).
 - **M12.14** `agent.turn` also carries the exit code, session id, user and system CPU and peak RSS. Peak RSS is the largest sampled sum of the live processes of the tree; per-process peaks are never summed. A process the run does not own reads null with a reason.
+- **M12.15** Folder trust is written only for an exact path the caller requests, for Claude and Codex, under the client's own lock or writer, with a deadline. Home, a filesystem root and any ancestor of home refuse. A failure reads as a named cause; without a request nothing is edited ([detail](docs/spec/RUNTIME.md#folder-trust)).
+- **M12.16** `ready`, `catalogue` and limit reads run with the account's home, environment and binary. The version cache key is the binary identity, so a self-update invalidates it. An installed client below its minimum reads `outdated` with a next step ([detail](docs/spec/RUNTIME.md#account-scope)).
+- **M12.17** Every runtime child scrubs the documented inherited auth and session variables and gets a non-interactive git credential guard; a caller's `Launch.env` wins. A secret never enters argv: a launch that would put one there refuses ([detail](docs/spec/RUNTIME.md#child-environment)).
 - Binding [runtime operation, observation, native lookup, benchmarks and adoption](docs/spec/RUNTIME.md#runtime-operation-and-adoption).
 
 ## Linked detail

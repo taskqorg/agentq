@@ -1,5 +1,17 @@
 # Runtime changelog
 
+## 0.14.0
+
+- Add `AccountScope { home, env, executable }` with `ready_for`, `catalogue_for` and `account_limits_for`. The older signatures call them with an empty `env`, so they behave as before.
+- `ready` caches the version text per canonical binary, with its length and modification time as identity; a script or npm shim is never cached. `outdated` now names its next step in `detail`.
+- Add `Runtime::trust_folder(folder, &AccountScope, until)` (capability `folder-trust`) and `Launch.trust`: one exact folder, under Claude's lock or Codex's own writer, with named causes. Nothing is edited without a request.
+- Add `Runtime::hooks(root, &AccountScope, until)` (capability `hook-trust`): what Codex lists through `hooks/list`.
+- Add `Launch.preflight`: refuse `client-missing`, `client-outdated` or `login-required` before spawn. `launch_refusal` recognizes every launch preparation cause, and Codex `Not inside a trusted directory` as `workspace-untrusted`.
+- **Behavior change.** Every runtime child now removes the [documented](../docs/spec/RUNTIME.md#child-environment) inherited session and client auth variables, and gets the git credential guard (`agent::GIT_GUARD`). A caller that relied on an inherited client key passes it in `Launch.env`, which still wins. `GH_TOKEN` and other tool credentials stay.
+- **Behavior change.** `--dangerously-bypass-hook-trust` refuses with `hook-trust-bypass-refused`, and a non-empty value under a secret-like name in Claude `Launch.settings_env` or `Launch.host_args` refuses with `secret-in-argv`.
+
+Consumers implementing `Runtime` must implement `ready_for`, `catalogue_for`, `account_limits_for`, `trust_folder` and `hooks` instead of the older read methods. Consumers constructing `Launch` with a struct literal add `trust` and `preflight`; `Launch::new` is unchanged. Native arguments, grants and the CoreQ pin stay unchanged.
+
 ## 0.13.0
 
 - `LogRecord` and `History` events expose assistant failures, lifecycle display labels and saved Claude permission modes without consumer native parsing. `AssistantFailure` retains the native code, `auth-rejected`/`client-error` classification and local detail. Exhaustive LogRecord constructors/patterns must add the new fields or use `..`.
