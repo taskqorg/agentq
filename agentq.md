@@ -33,7 +33,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 | `agentq direct [agent..]` | Restore direct provider access: remove routing edits only, keep MCP and telemetry; works when the service is down (PRODUCT R4). Records the agents in `config.json` `direct`, so direct is intended; `onboard --yes` clears that and routes again. |
 | `agentq optimization on\|off [codex\|claude\|hermes\|antigravity] [--dry-run]` | Change the host compression switch or one agent's preference without editing native client files or restarting clients (§ 4). |
 | `agentq disable\|enable [codex\|claude\|hermes\|claude-desktop\|antigravity] [--dry-run]` | Reversibly detach selected owned integrations or restore the saved supported fields; data and installation stay. No target selects the installation; enable without a saved disable is unchanged (§ 4). |
-| `agentq status [--json]` | Fresh local integration, compression and service state, including intentional disable, pending reload/drain, aliases, conflicts and observation time; works with the service stopped. |
+| `agentq status [--json]` | Fresh local integration, compression, proxy (M5.6) and service state, including intentional disable, pending reload/drain, aliases, conflicts and observation time; works with the service stopped. |
 | `agentq configure [<profile> <field>=<value>.. [--yes]]` | Profile projection, typed plan, or guarded apply with host readback under the lifecycle lock (§ 4). Released before qualification #95. |
 | `agentq check compression [codex\|claude\|both] [--codex PATH] [--claude PATH] [--fixture cargo\|pytest] [--output DIR]` | Live native CLI qualification with the embedded checker, Python and the chosen installed runner, default cargo (§ 3). |
 | `agentq doctor`, `agentq telemetry status\|verify [agent]\|export`, `agentq incidents [list\|show]` | Health of install, host, service, engines and agents (M1.3); queue status, synthetic read-back check and local JSONL export (§ 6); local incident reports and what would be sent (§ 7). |
@@ -101,6 +101,9 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M5.2** One OS unit per host and runtime runs the service; there is no other resident process. More than one `service run` is an error naming every pid.
 - **M5.3** Release trust is HTTPS plus who can push tags; installers and self-update check only the sha256. A failing selftest publishes nothing.
 - **M5.4** agentq has no administrator rights and installs only its engines. Data in `data/` changes only additively (compatibility N/N-1).
+- **M5.5** The service and its proxy workers run at normal OS priority. On Windows `service run` raises itself from the Task Scheduler default (below-normal CPU, low I/O, low memory) before it starts a worker.
+- **M5.6** Each agent whose configuration selects its loopback proxy reads proxy `answering`, `starting` or `failed` with a named cause in `status`, `doctor`, `status.json` and the heartbeat. An HTTP reply is the only proof of `answering`.
+  A silent proxy reads `failed` after 300 s; a worker silent for its whole last 900 s is replaced. agentq never edits client configuration for this: `agentq direct` stays the explicit fallback ([detail](docs/spec/SERVICE.md#proxy-supervision)).
 ### Layout, release and service
 - Binding [layout, release artifacts, service ownership, installation, update and status](docs/spec/SERVICE.md#installation-and-service-layout).
 ### Host requirements
@@ -147,7 +150,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 
 ## 8. State
 - **M8.1** State other than local telemetry stays plain files with atomic rename and one lifecycle lock. Interrupted transactions resume or roll back from the journal on next start.
-- `<install>/data/`: `owned.json` (journal), `config.json` (incident opt-out, mode, ports, `direct`, `compression`, `profile`), `installation`, `resource-key`, `langfuse` (fallback), `originals/`, `runs/`, `provider/`, `model/`, `sessions/` (M6.9), `observations.sqlite3` and `observe/` (M6.11), `queue/` (with `state.json`: last delivery/error/dropped), `incidents/`.
+- `<install>/data/`: `owned.json` (journal), `config.json` (incident opt-out, mode, ports, `direct`, `compression`, `profile`), `installation`, `resource-key`, `langfuse` (fallback), `originals/`, `runs/`, `provider/`, `model/`, `sessions/` (M6.9), `observations.sqlite3` and `observe/` (M6.11), `queue/` (with `state.json`: last delivery/error/dropped), `incidents/`, `proxy.json` (M5.6).
 - Older `stats/`, `traces/` and `name-migration.json` files stay unread until `uninstall` removes `data/`.
 - Local telemetry uses `telemetry.sqlite3` (SQLite/WAL, FULL, 2 s busy timeout, 64 MiB including sidecars); stats/traces retain 7 days, exports 256 samples per operation. Preserve event IDs, atomic coverage and optional export. OTLP events persist locally before optional delivery; compression uses its canonical stats row.
 - `stats --records` exports retained metadata for local qualification. `telemetry export` emits versioned metadata-only JSONL with errors and unknown completeness.

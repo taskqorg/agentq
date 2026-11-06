@@ -7,7 +7,7 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 `agentq.installation` carries `status.json` fields ([agentq.md § 5](../../agentq.md#5-install-layout-and-service)) plus:
 
 - `agentq.routing` is the `status.json` `agents` object as a JSON string: per agent with a config root its `routing` (routed, direct, bypassed, unknown), `reason`, `intended` and `intended_reason`; `{}` when none.
-- `agentq.routing_problems` lists `<agent> <routing> (<reason>)` for each agent intended routed but not routed and `<agent> intended unknown (<reason>)`, else `none`.
+- `agentq.routing_problems` lists `<agent> <routing> (<reason>)` for each agent intended routed but not routed, `<agent> proxy failed (<cause>)` for one that reads routed with a failed proxy, and `<agent> intended unknown (<reason>)`, else `none`.
 - `agentq.hooks` is a JSON array with one object per agent and event that has a record ([agentq.md § 1](../../agentq.md#1-commands) hook evidence): `agent`, `event`, `state` of the latest run (`ok`, `failed`, `unknown` with `reason` `unreadable success stamp` or `unreadable failure record` when its success stamp, failure record or retained last failure is unreadable), `last_ok_at` (unix seconds or null) and `last_failure` (`{at, error}`, kept after a later success; null when it never failed).
 - `agentq.hook_failures` lists `<agent> <event> (<error>)` for each hook whose latest run failed, else `none`.
 - `agentq.model_backlog`: see [Claude transcript reading](#claude-transcript-reading).

@@ -31,6 +31,26 @@ Section references and P/M rule IDs below refer to [agentq.md](../../agentq.md).
 - `selftest` checks the count on a built-in Windows process list.
 - `service install` never overwrites a running exe (Windows os error 32): identical release bytes are reused and the launcher is renamed aside, as in [update](#update-and-worker-swap). `selftest` checks this with its own running binary and the BOM strip on a built-in fixture.
 
+## Proxy supervision
+
+Scope: each agent whose `config.toml` selects its fixed loopback proxy (M5.5, M5.6). Each service pass probes the worker with `GET /livez` (1 s connect, 5 s reply). A TCP accept is not proof, because the kernel accepts while the interpreter is stalled; only `HTTP/1.x 200` is. `data/proxy.json` holds, per agent, the port, the worker's start, the time of the last reply, the start of the current silence and the time of the last pass.
+
+| `proxy.state` | `proxy.cause` | Meaning |
+|---|---|---|
+| `answering` | none | The proxy returned 200 now or within the last 5 s. |
+| `starting` | `proxy_starting` | A new worker has not replied and the silence is under 300 s. |
+| `failed` | `proxy_start_timeout` | No reply for 300 s since the start of the silence; the worker keeps its chance to finish. |
+| `failed` | `proxy_not_responding` | The worker replied earlier and does not reply now. |
+| `failed` | `proxy_not_started` | No record, or no service pass in the last 90 s. |
+
+- A worker that is at least 900 s old and silent for at least 900 s is ended with its process tree, because the Windows venv launcher is only the parent of the real interpreter. The next worker starts in the same pass.
+- The 900 s are per worker: a slow start on a starved host is progress, and a replacement discards it. The silence clock survives the replacement, so a worker that never replies keeps reading `failed`.
+- `proxy` also carries `port` and, when not answering, `silent_for` in seconds. It holds no path or request data.
+- A replacement interrupts streams on that worker. They have had no proxy reply for 900 s.
+- `failed` does not edit `config.toml`: a running client caches its provider, so an edit would not reach it, and an automatic edit could change routing against the owner's intent. The status line names `agentq direct <agent>` as the fallback.
+- `routing` keeps its values and its TCP check, so a stalled proxy can read `routing: routed` with `proxy: failed`. `doctor` fails on `proxy.state` `failed`.
+- On Windows the priority raise covers CPU class, I/O priority and memory priority, read back by a test through a child process. A failed raise is logged to the service log and the service keeps running.
+
 ## Update and worker swap
 
 - `service install`, `onboard --yes` and update install through CoreQ `prepare_install`, then `activate_install`. The lifecycle lock covers checking (including `update --check`), pruning, download staging, preparation, activation and recovery. Preparation writes only `releases/<ver>/`; activation replaces the launchers, then durably writes `previous` and `current`.
@@ -46,7 +66,7 @@ Section references and P/M rule IDs below refer to [agentq.md](../../agentq.md).
 
 `<install>/status.json` holds the coreq keys (`host`, `version`, `pid`, `at`, `project`, `error`, `update`), published as [tests/fixtures/status.json](../../tests/fixtures/status.json) and as release asset `status.json` with the release version; a test keeps the fixture equal to the written keys. It adds:
 
-- `agents`: per agent with a config root its `routing` (routed, direct, bypassed, unknown) and `reason`, `intended` and `intended_reason`.
+- `agents`: per agent with a config root its `routing` (routed, direct, bypassed, unknown) and `reason`, `intended` and `intended_reason`, plus additive `proxy` when `routing` is routed or unknown ([proxy supervision](#proxy-supervision)).
 - `intended` is `routed` for an agent with shipped routing, onboarded (an owned edit under its root) and not `agentq direct`; else `direct`. `intended_reason` is `onboarded`, `routing not shipped`, `` `agentq direct` `` or `not onboarded`.
 - Intent is `unknown`, never direct, when `owned.json` (not a list of entries with a `file`) or `config.json` (not an object whose `direct` lists names) is unreadable or of another shape. Claude Code and Hermes are intended direct until their routing ships.
 - `mcp`, `hooks`, `engines` (per engine its pin and `ready` or `unavailable`), queue `{pending, oldest_age, last_delivery, dropped}`, `model_backlog` ([telemetry](TELEMETRY.md#claude-transcript-reading)), newest incident.

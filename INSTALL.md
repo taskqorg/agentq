@@ -25,7 +25,7 @@ A user request to remove agentq allows this step.
 
 Use the commands from [README](README.md#temporarily-disable-optimization-or-integrations) with 0.9.0 or later for the current namespace. The current direct OpenAI provider definition supports resume after detach without an active AgentQ integration. Existing chats bound to the retired provider are intentionally not migrated: start new Codex chats.
 
-1. Read `agentq status --json`. Distinguish a compression preference, configured integration, runtime evidence and service health; none implies the others.
+1. Read `agentq status --json`. Distinguish a compression preference, configured integration, runtime evidence, proxy state and service health; none implies the others. `agents.<agent>.proxy` reads `answering`, `starting` or `failed` with a named `cause`; on `failed`, `agentq direct <agent>` restores direct provider access.
 2. For compression only, run `agentq optimization off [codex|claude|hermes]`; omit the agent for the host. Resume with `on`. The host switch preserves individually disabled preferences. No native config edits or client restart.
 3. For complete integration detach, run `agentq disable [codex|claude|hermes|claude-desktop] --dry-run`, then the same command without `--dry-run`. Omit the agent for the installation. Explicit user intent is consent; do not add another approval round. Preview aliases because CLI and Desktop can share a profile.
 4. Keep active workers and conversations. If status is pending, close/reload affected clients normally and repeat disable; never kill them or force a timeout. Host disable suspends export, automatic activation and remote configuration while needed transport drains. Foreign registrations or unknown scope remain conflicts.

@@ -281,11 +281,11 @@ fn doctor(t: &Tool) -> i32 {
     if service["state"] != "stopped" {
         for l in engines::check(&t.install) { line(!l.contains("unavailable"), l); }
     }
-    let agents = routing::agents(&t.install.join("data"));
-    for (a, r) in agents.as_object().into_iter().flatten() {
+    for (a, r) in report["agents"].as_object().into_iter().flatten() {
         let want = r["intended"].as_str().unwrap_or("unknown");
         let fix = if want == "routed" && r["routing"] != "routed" { "; run `agentq onboard --yes`" } else { "" };
         line(r["routing"] != "unknown" && want != "unknown" && fix.is_empty(), format!("routing: {a} {} ({}), intended {want} ({}){fix}", r["routing"].as_str().unwrap_or("unknown"), r["reason"].as_str().unwrap_or(""), r["intended_reason"].as_str().unwrap_or("")));
+        if let Some(l) = routing::proxy_line(a, r) { line(r["proxy"]["state"] != "failed", format!("proxy: {l}")); }
     }
     for f in executor::hook_failures(&t.install.join("data")) {
         if f.split_whitespace().next().is_some_and(|a| control::disabled(&t.install.join("data"), a) == Ok(true)) { continue; }
@@ -556,7 +556,7 @@ fn control_report(t: &Tool) -> Value {
     let optimization: Vec<_> = owned.iter().filter(|p| p["effective"]["state"] != "unsupported").map(|p| {
         if p["effective"]["state"] == "unknown" { "unknown" } else if p["effective"]["state"] == "configured" { "on" } else { "off" }
     }).collect();
-    serde_json::json!({"schema": 1, "at": now(), "service": service, "configuration": configuration,
+    serde_json::json!({"schema": 1, "at": now(), "service": service, "configuration": configuration, "agents": routing::agents(&data),
         "integration": control::summary(&integration), "optimization": control::summary(&optimization), "engines": engines::status(&t.install),
         "host_disabled": state.as_ref().ok().map(|s| &s["host_disabled"]),
         "compression": config.as_ref().ok().map(|c| serde_json::json!({"enabled": c["compression"]["enabled"].as_bool().unwrap_or(true),
@@ -575,6 +575,9 @@ fn control_status(t: &Tool, json: bool) -> i32 {
                 p["integration"]["desired"].as_str().unwrap_or("unknown"), p["integration"]["configuration"].as_str().unwrap_or("unknown"),
                 p["integration"]["runtime"].as_str().unwrap_or("unknown"), p["optimization"].as_str().unwrap_or("unsupported"),
                 p["effective"]["adapter"].as_str().unwrap_or("unsupported"), p["effective"]["state"].as_str().unwrap_or("unknown"));
+        }
+        for (a, r) in report["agents"].as_object().into_iter().flatten() {
+            if let Some(l) = routing::proxy_line(a, r) { println!("{l}"); }
         }
     }
     i32::from(report["control"] == "unknown")
@@ -775,6 +778,8 @@ fn single_instance_selftest() -> bool {
 
 /// One status pass every 30 s, update check hourly; a new release exits 75 so the unit restarts into it.
 fn serve(t: &Tool) -> ! {
+    // before any worker starts, so it inherits normal priority (agentq.md M5.5)
+    if let Err(e) = routing::normal_priority() { eprintln!("agentq: priority: {e}"); }
     // a release with a new engine pin installs it here; status keeps its 30 s pace meanwhile
     let install = t.install.clone();
     let maintain = control::host_disabled(&install.join("data")) == Ok(false);
