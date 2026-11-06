@@ -69,11 +69,11 @@ fn enable_wants(h: &executor::Host, c: &profiles::Client, r: &Value) -> Result<V
     record_scope(c, r, &h.data, &h.exe)?;
     let entries = r["entries"].as_array().ok_or("invalid saved entries")?;
     let current = onboard::capture(&wants(c, &h.data, &h.exe), &h.data.join("owned.json"))?;
-    if entries.iter().any(|e| onboard::detached(e) != Ok(true) && !current.iter().any(|n| n["file"] == e["file"] && n["key"] == e["key"])) {
+    if entries.iter().filter(|e| !onboard::retired_entry(e)).any(|e| onboard::detached(e) != Ok(true) && !current.iter().any(|n| n["file"] == e["file"] && n["key"] == e["key"])) {
         return Err("owned value changed".into());
     }
     let direct = r["direct"] == true || config(&h.data)?["direct"].as_array().is_some_and(|a| a.iter().any(|a| a == c.agent));
-    let fields: Vec<_> = entries.iter().filter(|e| !(direct && e["field"] == "routing")).cloned().collect();
+    let fields: Vec<_> = entries.iter().filter(|e| !onboard::retired_entry(e) && !(direct && e["field"] == "routing")).cloned().collect();
     onboard::saved_wants(wants(c, &h.data, &h.exe), &fields)
 }
 
@@ -362,4 +362,32 @@ mod tests {
         assert!(std::fs::read_to_string(home.join("hooks.json")).unwrap().contains("later-hook"));
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn old_disabled_profile_ignores_retired_scope_and_never_restores_it() {
+        let root = std::env::temp_dir().join(format!("agentq-old-disabled-{}", crate::resource::new_id()));
+        let home = root.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let h = executor::Host { data:root.join("install/data"),exe:root.join("install/agentq"),
+            clients:vec![profiles::Client {kind:"codex",agent:"codex",root:home.clone(),files:vec![home.join("config.toml"),home.join("hooks.json")]}],
+            installation:"fixture".into(),generation:0,grant:Value::Null };
+        onboard::apply(&wants(&h.clients[0], &h.data, &h.exe), &h.data.join("owned.json")).unwrap();
+        let mut ready = |_: &[u16], _: bool| Ok(());
+        integrations(&h, Some("codex"), false, false, json!({}), &mut ready).unwrap();
+        let mut s = state(&h.data).unwrap();
+        for (field,key,kind,after) in [
+            ("routing",json!(["model_provider"]),"text",json!("model_provider = \"agentq\"\n")),
+            ("mcp",json!(["mcp_servers","agentq"]),"text",json!("[mcp_servers.agentq]\ncommand = \"agentq\"\n")),
+            ("hooks",json!(["hooks","PreToolUse"]),"append",json!({"hooks":[{"command":"agentq hook codex PreToolUse"}]})),
+        ] {
+            s["profiles"]["codex"]["entries"].as_array_mut().unwrap().push(json!({"file":home.join(if field=="hooks" {"hooks.json"}else{"config.toml"}),"key":key,"field":field,"kind":kind,"after":after,"agent":"codex","source":"0".repeat(64)}));
+        }
+        save(&h.data, "integration.json", &s).unwrap();
+        assert_eq!(integrations(&h,Some("codex"),false,false,json!({}),&mut ready).unwrap()["outcome"], "applied");
+        assert_eq!(integrations(&h,Some("codex"),true,false,json!({}),&mut ready).unwrap()["outcome"], "applied");
+        assert!(!home.join("config.toml").exists());
+        let hooks = std::fs::read_to_string(home.join("hooks.json")).unwrap();
+        assert!(hooks.contains("SessionStart") && hooks.contains("Stop") && !hooks.contains("PreToolUse"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

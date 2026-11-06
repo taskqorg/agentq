@@ -202,6 +202,7 @@ pub fn capture(wants: &[Want], journal: &Path) -> Result<Vec<Value>, String> {
     };
     let mut out = vec![];
     for e in j {
+        if retired_entry(&e) { continue; }
         let file = e["file"].as_str().ok_or("invalid owned entry")?;
         if !wants.iter().any(|w| w.file == Path::new(file)) { continue; }
         let keys: Vec<String> = e["key"].as_array().ok_or("invalid owned key")?.iter()
@@ -264,7 +265,7 @@ pub fn capture(wants: &[Want], journal: &Path) -> Result<Vec<Value>, String> {
 
 /// Reapply the current canonical writer only for the fields present in the saved owned receipts.
 pub fn saved_wants(wants: Vec<Want>, entries: &[Value]) -> Result<Vec<Want>, String> {
-    if entries.iter().any(|e| !wants.iter().any(|w| {
+    if entries.iter().filter(|e| !retired_entry(e)).any(|e| !wants.iter().any(|w| {
         let kind = if w.instruction { e["kind"] == "text" }
             else if w.key == ["$file"] { e["kind"] == "file" }
             else if w.file.extension().is_some_and(|s| s == "json") { e["kind"] == if w.append { "append" } else { "set" } }
@@ -276,14 +277,67 @@ pub fn saved_wants(wants: Vec<Want>, entries: &[Value]) -> Result<Vec<Want>, Str
     Ok(wants.into_iter().filter(|w| entries.iter().any(|e| e["file"] == w.file.display().to_string() && e["key"] == json!(w.key))).collect())
 }
 
-/// Explicit onboarding removes only journal-owned retired integrations; later edits remain conflicts.
+/// Retired fields stay readable in old disabled-profile receipts, but are never enabled again.
+pub fn retired_entry(e: &Value) -> bool {
+    matches!(e["field"].as_str(), Some("routing" | "mcp" | "instructions"))
+        || e["routing"].is_string()
+        || e["key"].as_array().is_some_and(|k| k.iter().any(|v| matches!(v.as_str(), Some("mcp_servers" | "mcpServers" | "PreToolUse" | "PostToolUse" | "model_provider" | "model_providers"))))
+        || e["after"].as_str().is_some_and(|s| s.contains("<!-- agentq:start -->"))
+}
+
+/// Split legacy JSON parent receipts before retiring only their removed children.
+fn split_retired(e: Value, out: &mut Vec<Value>) {
+    if e["kind"] == "set" && e["after"].is_object() && e["key"].as_array().is_some_and(|k| k.is_empty() || k.len() == 1 && matches!(k[0].as_str(), Some("hooks" | "mcpServers" | "mcp_servers" | "agentq"))) {
+        for (key, value) in e["after"].as_object().unwrap() {
+            let mut child = e.clone();
+            child["key"].as_array_mut().unwrap().push(key.clone().into());
+            child["after"] = value.clone();
+            child["retired_parent"] = e.get("retired_parent").cloned().unwrap_or_else(|| crate::configure::digest(&e).into());
+            split_retired(child, out);
+        }
+    } else { out.push(e); }
+}
+
+/// Ownership, not release age, authorizes cleanup. Missing agent fields in old receipts are supported.
 pub fn retire(journal: &Path, agents: &[&str]) -> Result<Vec<String>, String> {
+    let clients: Vec<_> = crate::profiles::clients().into_iter().filter(|c| agents.contains(&c.agent)).collect();
+    retire_with(journal, agents, &clients)
+}
+
+fn retire_with(journal: &Path, agents: &[&str], clients: &[crate::profiles::Client]) -> Result<Vec<String>, String> {
+    let mut entries = vec![];
+    if let Some(text) = read_config(journal)? {
+        let old: Vec<Value> = serde_json::from_str(&text).map_err(|_| "owned.json unreadable")?;
+        if old.iter().any(|e| !e["file"].is_string() || !e["key"].as_array().is_some_and(|k| k.iter().all(Value::is_string))
+            || !matches!(e["kind"].as_str(), Some("set" | "append" | "text" | "replace" | "file")) || e.get("after").is_none()) {
+            return Err("owned.json unreadable".into());
+        }
+        for e in &old { split_retired(e.clone(), &mut entries); }
+        if entries != old { save(journal, &entries)?; }
+    }
     restore_where(journal, false, true, &|_, e| {
-        agents.iter().any(|a| e["agent"] == *a || e["routing"] == *a) && (
-            e["routing"].is_string()
-            || e["key"].as_array().is_some_and(|k| k.iter().any(|v| matches!(v.as_str(), Some("mcp_servers" | "mcpServers" | "PreToolUse" | "PostToolUse"))))
-            || e["after"].as_str().is_some_and(|s| s.contains("<!-- agentq:start -->")))
+        let key = e["key"].as_array();
+        let specific = key.is_some_and(|k| k.iter().any(|k| k == "agentq"))
+            || e["after"].to_string().contains(" hook ") && e["after"].to_string().contains("agentq")
+            || e["after"].as_str().is_some_and(|s| s.contains("<!-- agentq:start -->"));
+        let scoped = e["file"].as_str().is_some_and(|f| clients.iter().any(|c| Path::new(f).starts_with(&c.root) || c.files.iter().any(|p| p == Path::new(f))));
+        retired_entry(e) && (agents.iter().any(|a| e["agent"] == *a || e["routing"] == *a)
+            || e["agent"].is_null() && (specific || scoped))
     })
+}
+
+/// Called at every service start under the lifecycle lock, before reconciliation or senders.
+pub fn migrate(journal: &Path, clients: &[crate::profiles::Client], exe: &Path) -> Result<Vec<String>, String> {
+    let agents: Vec<_> = clients.iter().map(|c| c.agent).collect();
+    let mut out = retire_with(journal, &agents, clients)?;
+    let entries = load(journal);
+    for c in clients.iter().filter(|c| c.agent == "hermes") {
+        let sources: Vec<_> = wants(c.agent, &c.root, Path::new(""), exe).into_iter().filter(|w| w.key == ["$file"]
+            && entries.iter().any(|e| e["file"] == w.file.display().to_string() && e["key"] == json!(["$file"]) && e["kind"] == "file")).collect();
+        // No activation entries: disabled or unowned integrations cannot be enabled by an update.
+        out.extend(apply(&sources, journal)?);
+    }
+    Ok(out)
 }
 
 pub fn instruction_wants(_agent: &str, _root: &Path, _entries: &[Value]) -> Vec<Want> { vec![] }
@@ -420,7 +474,7 @@ pub fn detach(journal: &Path, entries: &[Value], dry: bool) -> Result<Vec<String
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
         Err(_) => return Err("owned.json unreadable".into()),
     };
-    j.retain(|e| !entries.iter().any(|n| n["source"].as_str() == Some(crate::configure::digest(e).as_str())));
+    j.retain(|e| !entries.iter().any(|n| n["source"].as_str() == Some(crate::configure::digest(e).as_str()) || n["source"].is_string() && n["source"] == e["retired_parent"]));
     if journal.exists() { save(journal, &j)?; }
     Ok(out)
 }
@@ -909,11 +963,71 @@ mod tests {
         let mut wants = vec![w(&["model_provider"], json!("agentq")), w(&["model_providers","agentq"], json!({"name":"AgentQ","base_url":"http://127.0.0.1:41234/v1","wire_api":"responses","requires_openai_auth":true,"supports_websockets":true}))];
         wants.extend(super::wants("codex", &root, &root.join("unused.json"), &root.join("agentq")));
         apply(&wants, &journal).unwrap();
-        retire(&journal, &["codex"]).unwrap();
+        let clients = vec![crate::profiles::Client { kind:"codex", agent:"codex", root:root.clone(), files:vec![file.clone(), root.join("hooks.json")] }];
+        let mut receipts = load(&journal);
+        for e in &mut receipts { e.as_object_mut().unwrap().shift_remove("agent"); }
+        save(&journal, &receipts).unwrap();
+        assert_eq!(crate::profiles::legacy_route(&clients)["state"], "problem");
+        migrate(&journal, &clients, &root.join("agentq")).unwrap();
+        assert_eq!(crate::profiles::legacy_route(&clients)["state"], "absent");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("{native}\n{CODEX_DIRECT_PROVIDER}"));
         assert_eq!(load(&journal).len(), 2, "record hooks stay owned");
-        assert!(retire(&journal, &["codex"]).unwrap().is_empty());
+        assert!(migrate(&journal, &clients, &root.join("agentq")).unwrap().is_empty());
         assert!(std::fs::read_to_string(root.join("hooks.json")).unwrap().contains("hook codex Stop"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_retires_agentless_parents_and_refreshes_only_owned_plugin() {
+        let root = std::env::temp_dir().join(format!("agentq-old-start-{}", crate::resource::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let journal = root.join("owned.json");
+        let claude = root.join("claude");
+        let hermes = root.join("hermes");
+        std::fs::create_dir_all(&claude).unwrap();
+        let settings = claude.join("settings.json");
+        let hooks = json!({"SessionStart":[{"hooks":[{"command":"agentq hook claude SessionStart"}]}],
+            "PreToolUse":[{"hooks":[{"command":"agentq hook claude PreToolUse"}]}],
+            "PostToolUse":[{"hooks":[{"command":"agentq hook claude PostToolUse"}]}],
+            "Stop":[{"hooks":[{"command":"agentq hook claude Stop"}]}]});
+        std::fs::write(&settings, json!({"hooks":hooks, "model":"native"}).to_string()).unwrap();
+        let cj = root.join(".claude.json");
+        let mcp = json!({"agentq":{"command":"agentq", "args":["mcp","claude"]}});
+        std::fs::write(&cj, json!({"mcpServers":{"agentq":mcp["agentq"], "foreign":{"command":"keep"}}}).to_string()).unwrap();
+        let mut entries = vec![json!({"file":settings,"key":["hooks"],"kind":"set","after":hooks}),
+            json!({"file":cj,"key":["mcpServers"],"kind":"set","after":mcp})];
+        // A foreign edit must stay, with its unresolved receipt and an explicit conflict.
+        let codex = root.join("codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("config.toml"), "[mcp_servers.agentq]\ncommand = \"foreign\"\n").unwrap();
+        entries.push(json!({"file":codex.join("config.toml"),"key":["mcp_servers","agentq"],"kind":"text","after":"[mcp_servers.agentq]\ncommand = \"agentq\"\n"}));
+        save(&journal, &entries).unwrap();
+        let mut plugin = wants("hermes", &hermes, &cj, &root.join("agentq"));
+        plugin.retain(|w| w.key == ["$file"]);
+        plugin[0].value = "old agentq compress hermes".into();
+        apply(&plugin, &journal).unwrap();
+        let clients = vec![
+            crate::profiles::Client {kind:"claude-code",agent:"claude",root:claude.clone(),files:vec![settings.clone(),cj.clone()]},
+            crate::profiles::Client {kind:"codex",agent:"codex",root:codex.clone(),files:vec![codex.join("config.toml")]},
+            crate::profiles::Client {kind:"hermes",agent:"hermes",root:hermes.clone(),files:vec![hermes.join("config.yaml")]},
+        ];
+        let saved = capture(&wants("claude", &claude, &cj, &root.join("agentq")), &journal).unwrap();
+        let out = migrate(&journal, &clients, &root.join("agentq")).unwrap();
+        assert!(out.iter().any(|s| s.starts_with("conflict:")));
+        let after = std::fs::read_to_string(&settings).unwrap();
+        assert!(after.contains("SessionStart") && after.contains("Stop") && after.contains("native"));
+        assert!(!after.contains("PreToolUse") && !after.contains("PostToolUse"));
+        let mcp_after = std::fs::read_to_string(cj).unwrap();
+        assert!(!mcp_after.contains("agentq") && mcp_after.contains("foreign"));
+        assert!(std::fs::read_to_string(codex.join("config.toml")).unwrap().contains("foreign"));
+        assert!(!std::fs::read_to_string(hermes.join("plugins/agentq/__init__.py")).unwrap().contains("compress"));
+        assert!(!hermes.join("config.yaml").exists(), "startup must not add activation");
+        assert!(migrate(&journal, &clients, &root.join("agentq")).unwrap().iter().all(|l| !l.starts_with("restored:")));
+        detach(&journal, &saved, false).unwrap();
+        assert!(!load(&journal).iter().any(|e| e["file"] == settings.display().to_string()), "old saved recovery links survive parent normalization");
+        std::fs::write(&journal, "corrupt").unwrap();
+        assert_eq!(migrate(&journal, &clients, &root.join("agentq")), Err("owned.json unreadable".into()));
+        assert_eq!(std::fs::read_to_string(&journal).unwrap(), "corrupt");
         std::fs::remove_dir_all(root).unwrap();
     }
 

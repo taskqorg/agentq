@@ -17,3 +17,9 @@ Native `codex exec resume` exited 0, emitted `thread.started` with the same conv
 ## Automated checks
 
 The PR records the candidate commit and results for `cargo test --locked`, `cargo run --locked -- selftest`, the contract lint from specq `7e9adf57287553176d8b3be61c2b22565543dc51`, Hermes record-hook checks. Native fleet migration, Windows resume and long-running service qualification remain outside this change.
+
+## Upgrade regression coverage
+
+Service startup now calls the same locked migration exercised by `retirement_preserves_saved_provider_and_record_hooks`: an old routed config and agent-less ownership journal become the exact direct definition while SessionStart/Stop remain. `startup_retires_agentless_parents_and_refreshes_only_owned_plugin` covers pre-v0.8 parent MCP/hook receipts, a foreign MCP sibling, later foreign edits, idempotence, record-only Hermes source without new activation, and corrupt ownership refusal. `old_disabled_profile_ignores_retired_scope_and_never_restores_it` exercises repeated disable and enable of a saved old profile without returning retired fields. `legacy_route_problem_is_readonly_and_not_release_health` covers IPv4, localhost, IPv6, the direct definition and unreadable config. These isolated checks exercise the startup migration implementation; no installed host service or working profile was migrated.
+
+DashQ handoff: its enrollment configuration UI still offers retired fields and its result renderer must handle the executor's `feature_retired` refusal. This PR changes no DashQ code.

@@ -3,7 +3,7 @@
 agentq installs and observes native agents on one host, and owns the reusable worker runtime that other products launch turns through (§ 12). It is one static binary and one runtime library on [coreq](https://github.com/taskqorg/coreq) with no server, relay or dashboard of its own.
 This file holds every agentq decision; its linked detail files hold binding detail.
 
-It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 4; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
+It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 5; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
 
 ## Principles
 - **P1 Never break the agent.** Any agentq failure keeps the original tool output and the client's own login, model, approvals and sandbox.
@@ -20,26 +20,26 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 
 | Command | Does |
 |---|---|
-| `agentq onboard [agent..]` | Read-only discovery: ready Codex, Claude Code, Claude Desktop, Hermes and Antigravity profiles per runtime; missing input; other optimizers. No writes. |
+| `agentq onboard [agent..]` | Read-only discovery: ready Codex, Claude Code, Claude Desktop, Hermes and Antigravity profiles per runtime; missing input; integration conflicts. No writes. |
 | `agentq onboard --yes [agent..]` | Install the release, apply § 4 record hooks for the selected agents, then (re)start the service and run `doctor`. Verify recording by a real native turn. Repeat is safe. |
 | `agentq enroll <https url> [--headless]` | DashQ provider-backed browser approval (headless: link and code only); protected observation grant and projected snapshot receipt (§ 6). Released before qualification #95. |
 | `agentq connection status [--json]`, `agentq disconnect`, `agentq langfuse` | Connection, projection, export and revocation state with the next action; disconnect stops sending at once and retries the revoke. Released before qualification #95. `langfuse`: standalone mode, reads Langfuse host and keys from hidden stdin into protected storage (§ 6). |
 | `agentq agent host --action <action> --request <json>` | Independent protected host prepare, launch, observe, cancel and reconcile under existing authority (§ 12); no admission service. |
 | `agentq agent turn` | Run one Codex, Claude or Antigravity turn through `agentq-runtime` from a JSON request on stdin; prints the JSON report (§ 12). Needs no service, engine, MCP server or install. |
 | `agentq agent preflight` | Check one launch request from JSON on stdin and print its readiness report; `--repair` applies only M12.16 repairs. No model call (§ 12). Target: #284. |
-| `agentq hook <agent> <event>`, `agentq model codex` | Hook handler for § 4 events, JSON on stdin and stdout (M1.2); loopback provider entry for one finished Codex model call, JSON on stdin, queues `agentq.model` (§ 6). |
+| `agentq hook <agent> <event>`, `agentq model codex` | Hook handler for § 4 events, JSON on stdin and stdout (M1.2); record entry for one finished Codex model call, JSON on stdin, queues `agentq.model` (§ 6). |
 | `agentq profile [--json]`, `agentq profile trace on [<minutes>]\|off` | Ranked profile of measured operations against their budgets; detailed trace switch (§ 6). |
-| `agentq direct [agent..]` | Restore direct provider access: remove routing edits only, keep MCP and telemetry; works when the service is down (PRODUCT R4). Records the agents in `config.json` `direct`, so direct is intended; `onboard --yes` clears that and routes again. |
+| `agentq direct [agent..]` | Restore journal-owned legacy routing only; preserve record hooks, telemetry and the exact direct Codex definition for saved chats. Works with the service stopped (PRODUCT R4); foreign edits remain conflicts. |
 | `agentq disable\|enable [codex\|claude\|hermes\|claude-desktop\|antigravity] [--dry-run]` | Reversibly detach selected owned integrations or restore the saved supported fields; data and installation stay. No target selects the installation; enable without a saved disable is unchanged (§ 4). |
-| `agentq status [--json]` | Fresh local integration, compression and service state, including intentional disable, pending reload/drain, aliases, conflicts and observation time; works with the service stopped. |
+| `agentq status [--json]` | Fresh local integration and service state, including intentional disable, pending reload, aliases, conflicts and observation time; works with the service stopped. |
 | `agentq configure [<profile> <field>=<value>.. [--yes]]` | Profile projection, typed plan, or guarded apply with host readback under the lifecycle lock (§ 4). Released before qualification #95. |
-| `agentq doctor`, `agentq telemetry status\|verify [agent]\|export`, `agentq incidents [list\|show]` | Health of install, host, service, engines and agents (M1.3); queue status, synthetic read-back check and local JSONL export (§ 6); local incident reports and what would be sent (§ 7). |
-| `agentq update [--check]`, `agentq selftest`, `agentq service install\|run\|pause\|resume\|status\|restart\|stop\|uninstall\|list` | Transactional update and coreq service (§ 5); selftest checks the binary, built-in fixtures, a transactional install of its own bytes and engine pins. |
+| `agentq doctor`, `agentq telemetry status\|verify [agent]\|export`, `agentq incidents [list\|show]` | Health of install, host, service and agents (M1.3); queue status, synthetic read-back check and local JSONL export (§ 6); local incident reports and what would be sent (§ 7). |
+| `agentq update [--check]`, `agentq selftest`, `agentq service install\|run\|pause\|resume\|status\|restart\|stop\|uninstall\|list` | Transactional update and coreq service (§ 5); selftest checks the binary, built-in fixtures, a transactional install of its own bytes and local telemetry. |
 | `agentq uninstall [--dry-run]` | § 9; none left: `already removed`. |
 
 - Each `hook` run stamps the event time as configuration evidence. A run that cannot read stdin or write stdout records `data/evidence/<agent>.<event>.failed` with its time and error. A successful run moves it to `<agent>.<event>.last_failure`, so `.failed` exists exactly while the latest run failed; the last failure stays for the heartbeat (§ 6).
-- `doctor` checks install, host tools (§ 5), service, engines, owned edits count, local SQLite integrity, telemetry queue and optional keys. Each recorded hook failure fails, an unreadable record included.
-- `doctor` reports per agent its routing and whether that is intended (§ 5): an onboarded agent intended routed but not routed fails with `run agentq onboard --yes`; an unknown intent fails. Ports and routing drift join when the service owns them; `onboard --yes` reapplies owned edits.
+- `doctor` checks install, host tools (§ 5), service, owned edits count, local SQLite integrity, telemetry queue and optional keys. Each recorded hook failure fails, an unreadable record included.
+- `doctor` and `status` report a selected legacy `agentq` loopback provider as `legacy_agentq_route`, with next step `agentq direct`; unreadable config means unknown. Service status and heartbeat carry this diagnosis too.
 
 ## 2. Retired retrieval tools
 - **M2.1** AgentQ registers no MCP document tools. `get_original` retires with compression; local measured use of `index_document` and `search_document` is recorded in [OPTIMIZATION-RETIRED.md](docs/spec/OPTIMIZATION-RETIRED.md).
@@ -51,7 +51,8 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 ## 4. Hooks and config edits per runtime
 - **M4.1** Each edit is recorded in the ownership journal (§ 9) before it is written.
 - **M4.2** Existing foreign optimizers or custom providers stop the edit for that file with a named conflict; nothing is replaced by guess.
-- **M4.3** New integrations never route model traffic or register optimizer tools.
+- **M4.3** New integrations never route model traffic or register optimizer tools. Each service start retires journal-owned legacy routing, MCP, wrapping hooks and instruction blocks before export or configuration reconciliation; unchanged Hermes plugin files follow the record-only release.
+- Retirement is idempotent, includes pre-v0.8 receipts, preserves foreign edits and never re-enables disabled profiles.
 ### Edits per runtime
 | Runtime | Files and edits |
 |---|---|
@@ -68,7 +69,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 ### Temporary controls
 - **M4.4** Integration enable/disable controls record hooks independently of native agent execution.
 - **M4.5** Retained optimizer data is not rewritten or deleted by this retirement; uninstall retains its explicit removal scope.
-- **M4.6** Full disable persists intent before removing owned routing, MCP, hooks, Hermes plugin files/activation and journaled instruction blocks. It keeps the installation, release/engine assets, local data, originals, keys, grants and queued observations under their existing retention.
+- **M4.6** Full disable persists intent before removing owned routing, MCP, hooks, Hermes plugin files/activation and journaled instruction blocks. It keeps the installation, release assets, local data, originals, keys, grants and queued observations under their existing retention.
 - **M4.7** Only explicit `enable` clears disable intent; onboarding, service install/restart and configure cannot reconnect a disabled profile (`integration_disabled`). Manual binary update remains available without reactivation. `direct` keeps its routing-only meaning.
 - **M4.8** Corrupt or unreadable lifecycle state (`data/integration.json`) means unknown and blocks mutations and integration edits rather than resetting state.
 - **M4.9** Detaching configuration does not unload a running client's cached provider, hooks or MCP. agentq preserves active work and reports reload evidence separately.
@@ -76,17 +77,16 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - That direct definition is not an attached optimization. The compatibility block is never replaced with loopback routing; later edits remain conflicts. It stays after uninstall, and previously detached installations can be repaired with it when the name is absent.
 - While a host disable is pending, the service runs only required transport and recovery: export, automatic update activation and remote configuration application are suspended. The enrolled DashQ snapshot keeps its 60 s cadence with lifecycle `pending_disable` (§ 5), so DashQ can name the host disabled.
 - Resume is never repaired by rewriting conversation history, provider IDs in stored chats, authentication, model, approvals or sandbox. Native login, model, approvals, sandbox and foreign telemetry settings are outside disable and enable.
-- New or restored Desktop Chat MCP registrations use `agentq mcp claude-desktop`, so its disable intent is independent of Claude Code. Existing shared `mcp claude` connections have no caller identity and stay pending reload; Claude Code is never disabled to guess their caller.
 - Native qualification is reported per client and platform; code checks alone do not qualify working profiles. Rollout to the existing Mac, Windows and FRA installations is authorized for release 0.8.0 only, with the Desktop and reboot gaps recorded in the integration-control plan; those paths stay unqualified and this is not a stable-platform claim.
-- Under disable, foreign entries and later edits remain and conflicts are explicit; shared roots and registrations switch together. Lifecycle state, transitions, locks, drain, service handling, status and revisions: [INTEGRATION-CONTROL.md](docs/spec/INTEGRATION-CONTROL.md).
+- Under disable, foreign entries and later edits remain and conflicts are explicit; shared roots and registrations switch together. Lifecycle state, transitions, locks, service handling, status and revisions: [INTEGRATION-CONTROL.md](docs/spec/INTEGRATION-CONTROL.md).
 ### Namespace
-- **M4.10** The MCP server, Codex provider, managed instruction markers and Hermes plugin are named `agentq`. No old namespace alias is registered and no command renames old registrations. Existing Codex chats are not migrated: histories stay intact, but chats bound to the retired provider must be replaced by new chats.
+- **M4.10** The retained Codex provider and Hermes record plugin are named `agentq`. No MCP server or old namespace alias is registered. Saved chats retain their provider ID and resume through the exact direct definition; histories stay intact.
 
 ## 5. Install layout and service
 - **M5.1** coreq owns layout, update, launcher, rollback, service units and `status.json`; agentq passes tool name `agentq`, install folder and release repository `taskqorg/agentq`.
 - **M5.2** One OS unit per host and runtime runs the service; there is no other resident process. More than one `service run` is an error naming every pid.
 - **M5.3** Release trust is HTTPS plus who can push tags; installers and self-update check only the sha256. A failing selftest publishes nothing.
-- **M5.4** agentq has no administrator rights and installs only its engines. Data in `data/` changes only additively (compatibility N/N-1).
+- **M5.4** agentq has no administrator rights and installs only its own release. Data in `data/` changes only additively (compatibility N/N-1).
 ### Layout, release and service
 - Binding [layout, release artifacts, service ownership, installation, update and status](docs/spec/SERVICE.md#installation-and-service-layout).
 ### Host requirements
@@ -102,7 +102,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M6.2** Metadata only: no raw content, arguments, keys or paths. Retained historical optimization events remain readable.
 - **M6.3** Unknown is never zero: a missing value omits its attribute and names the reason. Estimates carry an `estimate` label and never count as observed usage.
 - **M6.4** Secrets live in Keychain (`security`), Secret Service (`secret-tool`) or a 0600 file `data/langfuse` where neither works (Windows until a Credential Manager binding lands); never in config, argv, logs or telemetry. curl gets them through its stdin config.
-- Target: Langfuse project `Agents` over OTLP HTTP JSON, `<host>/api/public/otel/v1/traces` with Basic auth. Native exporters (Codex observability plugin, Claude Code Langfuse env) send to the loopback OTLP port; agentq queues them with its own events. The Hermes Langfuse plugin sends directly; agentq never edits its `.env` and adds no intake path for it.
+- Target: Langfuse project `Agents` over OTLP HTTP JSON, `<host>/api/public/otel/v1/traces` with Basic auth. AgentQ queues its own native record events; it installs no loopback OTLP intake or native exporter overrides. The Hermes Langfuse plugin sends directly; agentq never edits its `.env` and adds no intake path for it.
 - Standalone mode: `agentq langfuse` reads host, public key and secret key (three lines, secret without echo); the queue posts straight to Langfuse. The host is `https://`, or `http://` on loopback only.
 - Team mode: the accepted [connection contract](docs/spec/ENROLLMENT.md) amends §§ 1/5/6/8. Coreq enrollment uses DashQ's identity provider; the service sends allowlisted snapshots and eligible events. DashQ projection works without Langfuse; forwarding credentials stay server-side; standalone stays available.
 - Events, one OTLP span each named after the event: `agentq.installation` (heartbeat at service start and hourly), `agentq.incident` (§ 7), `agentq.resource`, `agentq.model`. dashq reads them for its Agents view.
@@ -141,7 +141,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 ## 9. Ownership and uninstall
 - **M9.1** The journal records each created or reused component and each edit (file, key path, before value, after value) before mutation.
 - **M9.2** `uninstall` restores owned values whose current value still equals the recorded after value, keeps later foreign edits and reports conflicts. `uninstall --dry-run` prints every restore and removal.
-- `uninstall` stops and removes the service unit, engines, data and install folder. Logins, shared keys, reused components, exported history and the Codex direct definition (§ 4) stay. A second run says `already removed`.
+- `uninstall` stops and removes the service unit, data and install folder. Logins, shared keys, reused components, exported history and the Codex direct definition (§ 4) stay. A second run says `already removed`.
 
 ## 10. Retired Node install
 - **M10.1** agentq does not detect, name or remove the retired Node package `@alexkirs/agent-context`, its `~/.agent-context` folder or the retired namespace. Files left there stay untouched.
@@ -188,12 +188,12 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 ## Linked detail
 - [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): product outcomes R1–R14.
 - [docs/spec/VERIFICATION.md](docs/spec/VERIFICATION.md): minimal product acceptance and live check records.
-- [docs/spec/ACCOUNTING.md](docs/spec/ACCOUNTING.md): optimization result definitions O1–O4.
+- [docs/spec/ACCOUNTING.md](docs/spec/ACCOUNTING.md): historical optimization result definitions O1–O4 (retired).
 - [docs/spec/OPTIMIZATION-RETIRED.md](docs/spec/OPTIMIZATION-RETIRED.md): retirement evidence, MCP usage and return condition.
-- [docs/spec/COMPRESSION-BENCHMARK.md](docs/spec/COMPRESSION-BENCHMARK.md): compression qualification checks, native client check rules and evidence limits.
+- [docs/spec/COMPRESSION-BENCHMARK.md](docs/spec/COMPRESSION-BENCHMARK.md): retired compression qualification history and evidence limits.
 - [docs/spec/CONFIGURATION.md](docs/spec/CONFIGURATION.md): profile projection and typed configuration A1–A5.
 - [docs/spec/ENROLLMENT.md](docs/spec/ENROLLMENT.md): DashQ connection contract.
-- [docs/spec/INTEGRATION-CONTROL.md](docs/spec/INTEGRATION-CONTROL.md): temporary control lifecycle, transitions, drain, status and revisions.
+- [docs/spec/INTEGRATION-CONTROL.md](docs/spec/INTEGRATION-CONTROL.md): temporary control lifecycle, transitions, status and revisions.
 - [docs/spec/SERVICE.md](docs/spec/SERVICE.md): install layout, release artifacts, command registration, service processes, update, status, host tools and release observation.
 - [docs/spec/TELEMETRY.md](docs/spec/TELEMETRY.md): heartbeat attributes, model call mapping, resource probes and profiling.
 - [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md): agent runtime arguments, end detection, usage, limits, accounts, compatibility modes, the `agentq agent` JSON contract, optimization intent, consumer inventory and adoption boundaries.

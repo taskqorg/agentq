@@ -15,6 +15,7 @@ struct Req {
 
 const CURL: Req = Req { name: "curl", program: "curl", args: &["--version"], min: "7.55.1", pick: |_| Some("7.55.1"),
     fix: "install curl 7.55.1 or newer from the OS package manager" };
+#[cfg(test)]
 const TAR: Req = Req { name: "tar", program: "tar", args: &["--version"], min: "bsdtar 3.3.2 or GNU tar 1.29",
     pick: |v| if v.contains("bsdtar") { Some("3.3.2") } else if v.contains("GNU tar") { Some("1.29") } else { None },
     fix: "install bsdtar (libarchive) 3.3.2 or GNU tar 1.29 or newer from the OS package manager" };
@@ -22,16 +23,16 @@ const POWERSHELL: Req = Req { name: "powershell", program: "powershell", args: &
     min: "5.1", pick: |_| Some("5.1"), fix: "install Windows PowerShell 5.1 (Windows Management Framework 5.1)" };
 
 const OS: &[&str] = if cfg!(target_os = "macos") {
-    &["launchctl", "ps", "lsof", "id", "hostname", "stty", "sandbox-exec"]
+    &["launchctl", "ps", "id", "hostname", "stty", "sandbox-exec"]
 } else if cfg!(windows) {
-    &["schtasks", "taskkill", "netstat", "hostname", "whoami", "icacls"]
+    &["schtasks", "taskkill", "hostname", "whoami", "icacls"]
 } else {
     &["systemctl", "ps", "id", "hostname", "stty"]
 };
 
 /// Every requirement as `doctor` lines: (requirement met, line).
 pub fn check() -> Vec<(bool, String)> {
-    let mut lines = vec![versioned(&CURL, Path::new(CURL.program)), versioned(&TAR, Path::new(TAR.program))];
+    let mut lines = vec![versioned(&CURL, Path::new(CURL.program))];
     if cfg!(windows) {
         lines.push(versioned(&POWERSHELL, Path::new(POWERSHELL.program)));
     }

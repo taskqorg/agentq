@@ -219,6 +219,11 @@ fn doctor(t: &Tool) -> i32 {
     }
     for (good, l) in host::check() { line(good, l); }
     let report = control_report(t);
+    if report["retirement"]["state"] == "conflict" || report["retirement"]["state"] == "unknown" {
+        line(false, format!("retirement: {}; inspect service log and resolve owned conflicts", report["retirement"]["state"].as_str().unwrap_or("unknown")));
+    }
+    let route = &report["legacy_route"];
+    line(route["state"] == "absent", format!("legacy routing: {}{}", route["state"].as_str().unwrap_or("unknown"), if route["state"] == "problem" { "; Next: agentq direct" } else { "" }));
     let service = &report["service"];
     line(matches!(service["state"].as_str(), Some("running" | "stopped")), format!("service: {} ({})", service["state"].as_str().unwrap_or("unknown"), service["reason"].as_str().unwrap_or("fresh process and status readback")));
     line(report["control"] != "unknown", format!("control: {}", report["control"].as_str().unwrap_or("unknown")));
@@ -481,6 +486,8 @@ fn control_report(t: &Tool) -> Value {
     let owned: Vec<_> = configuration["profiles"].as_array().into_iter().flatten().filter(|p| p["owned"] == true || p["integration"]["desired"] == "disabled").collect();
     let integration: Vec<_> = owned.iter().map(|p| match p["integration"]["configuration"].as_str() { Some("attached") => "on", Some("detached") => "off", _ => "unknown" }).collect();
     serde_json::json!({"schema": 1, "at": now(), "service": service, "configuration": configuration,
+        "retirement": read_status(t, 3 * PASS).map(|s| s["retirement"].clone()),
+        "legacy_route": profiles::legacy_route(&clients),
         "integration": control::summary(&integration),
         "host_disabled": state.as_ref().ok().map(|s| &s["host_disabled"]),
         "control": if state.is_ok() && config.is_ok() { "readable" } else { "unknown" }})
@@ -491,13 +498,15 @@ fn control_status(t: &Tool, json: bool) -> i32 {
     if json { println!("{report}"); } else {
         println!("service: {}", report["service"]["state"].as_str().unwrap_or("unknown"));
         println!("integration: {}", report["integration"].as_str().unwrap_or("unknown"));
+        if !report["retirement"].is_null() { println!("retirement: {}", report["retirement"]["state"].as_str().unwrap_or("unknown")); }
+        if report["legacy_route"]["state"] != "absent" { println!("legacy routing: {}\nNext: agentq direct", report["legacy_route"]["state"].as_str().unwrap_or("unknown")); }
         for p in report["configuration"]["profiles"].as_array().into_iter().flatten() {
             println!("{}: integration {}, configuration {}, runtime {}", p["kind"].as_str().unwrap_or("unknown"),
                 p["integration"]["desired"].as_str().unwrap_or("unknown"), p["integration"]["configuration"].as_str().unwrap_or("unknown"),
                 p["integration"]["runtime"].as_str().unwrap_or("unknown"));
         }
     }
-    i32::from(report["control"] == "unknown")
+    i32::from(report["control"] == "unknown" || report["legacy_route"]["state"] != "absent")
 }
 
 fn now() -> u64 {
@@ -663,12 +672,14 @@ fn serve(t: &Tool) -> ! {
     std::thread::spawn(move || {
         host::problems().iter().for_each(|l| eprintln!("agentq: {l}"));
     });
+    let migration = executor::lock(&t.install.join("data")).and_then(|_lock| {
+        let lines = onboard::migrate(&journal(t), &profiles::clients(), &t.install.join(t.exe_name()))?;
+        for line in &lines { eprintln!("agentq: {line}"); }
+        executor::reconcile(&executor::Host::local(&t.install, t.install.join(t.exe_name()), now()));
+        Ok(serde_json::json!({"state": if lines.iter().any(|l| l.starts_with("conflict:")) { "conflict" } else { "retired" }}))
+    }).unwrap_or_else(|e| { eprintln!("agentq: retirement: {e}"); serde_json::json!({"state":"unknown", "reason":"retirement_failed"}) });
     let install = t.install.clone();
     std::thread::spawn(move || telemetry::sender(&install, PASS));
-    // CONFIGURATION "Host executor": an operation interrupted by the last stop resolves before anything else
-    if let Ok(_lock) = executor::lock(&t.install.join("data")) {
-        executor::reconcile(&executor::Host::local(&t.install, t.install.join(t.exe_name()), now()));
-    }
     let mut checked = 0;
     let mut error = None;
     let launched = std::env::current_exe().ok() == Some(t.release_exe(VERSION));
@@ -690,6 +701,8 @@ fn serve(t: &Tool) -> ! {
             std::process::exit(75);
         }
         let mut s = status::common(t, &host(), PROJECT, now(), error.clone(), None);
+        s["retirement"] = migration.clone();
+        s["legacy_route"] = profiles::legacy_route(&profiles::clients());
         s["release"] = release::observe(t, now());
         s["queue"] = telemetry::status(&t.install.join("data"), now());
         s["model_backlog"] = model::backlog(&t.install.join("data"));

@@ -54,6 +54,31 @@ pub fn clients() -> Vec<Client> {
     clients
 }
 
+/// Old selected loopback routing no longer has a resident provider. This reads no credentials.
+pub fn legacy_route(clients: &[Client]) -> Value {
+    let Some(c) = clients.iter().find(|c| c.agent == "codex") else { return json!({"state":"absent"}) };
+    let text = match std::fs::read_to_string(c.root.join("config.toml")) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return json!({"state":"absent"}),
+        Err(_) => return json!({"state":"unknown", "reason":"unreadable_config"}),
+    };
+    let mut section = "";
+    let (mut selected, mut loopback) = (false, false);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') { section = line.split('#').next().unwrap_or("").trim(); continue; }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let value = value.trim().trim_matches(['"', '\'']).split(['"', '\'']).next().unwrap_or("");
+        if section.is_empty() && key.trim() == "model_provider" { selected = value == "agentq"; }
+        if section == "[model_providers.agentq]" && key.trim() == "base_url" {
+            let host = value.split_once("://").map(|(_, s)| s.split('/').next().unwrap_or(""));
+            loopback = host.is_some_and(|s| s == "localhost" || s.starts_with("localhost:") || s.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback()) || s.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback()));
+        }
+    }
+    if selected && loopback { json!({"state":"problem", "reason":"legacy_agentq_route", "next":"agentq direct"}) }
+    else { json!({"state":"absent"}) }
+}
+
 fn sign(key: &hmac::Key, parts: &[&[u8]]) -> String {
     let mut s = hmac::Context::with_key(key);
     for p in parts {
@@ -170,6 +195,7 @@ pub fn profile(c: &Client, data: &Path, journal: &Path, key: &hmac::Key) -> Valu
     let mut overrides = None;
     let (hooks, plugin, adapter) = match c.kind {
         "codex" => {
+            if legacy_route(std::slice::from_ref(c))["state"] == "problem" { conflicts.push("legacy_agentq_route"); }
             overrides = (!unread(0)).then(|| texts[0].as_deref().unwrap_or("").lines().filter(|l| l.trim_start().starts_with("[profiles.")).count());
             (json_doc(1).map(|d| hooked(&d, "codex", &["SessionStart", "Stop"])).as_deref().map_or("unknown", hooks_state), "unsupported", "hook")
         }
@@ -279,4 +305,20 @@ mod tests {
         assert!(!text.contains(&d.display().to_string()) && !text.contains("agentq-profiles"), "no path in {text}");
         let _ = std::fs::remove_dir_all(d);
     }
+    #[test]
+    fn legacy_route_problem_is_readonly_and_not_release_health() {
+        let root = std::env::temp_dir().join(format!("agentq-route-problem-{}", crate::resource::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let clients = vec![Client {kind:"codex",agent:"codex",root:root.clone(),files:vec![root.join("config.toml")]}];
+        for url in ["http://127.0.0.1:1234/v1", "http://localhost:1234/v1", "http://[::1]:1234/v1"] {
+            std::fs::write(root.join("config.toml"), format!("model_provider = 'agentq' # selected\n[model_providers.agentq]\nbase_url = \"{url}\"\n")).unwrap();
+            assert_eq!(legacy_route(&clients), json!({"state":"problem","reason":"legacy_agentq_route","next":"agentq direct"}));
+        }
+        std::fs::write(root.join("config.toml"), format!("model_provider = \"agentq\"\n{}", onboard::CODEX_DIRECT_PROVIDER)).unwrap();
+        assert_eq!(legacy_route(&clients)["state"], "absent");
+        std::fs::write(root.join("config.toml"), b"\xff").unwrap();
+        assert_eq!(legacy_route(&clients)["state"], "unknown");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

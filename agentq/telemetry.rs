@@ -406,7 +406,8 @@ fn problems(p: Vec<String>) -> String {
 fn heartbeat(install: &Path, data: &Path, now: u64) -> Value {
     let q = status(data, now);
     let observed: Value = std::fs::read_to_string(install.join("status.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
-    json!({"agentq.queue_pending": q["pending"], "agentq.queue_dropped": q["dropped"],
+    json!({"agentq.legacy_route": crate::profiles::legacy_route(&crate::profiles::clients()), "agentq.retirement": match observed["retirement"]["state"].as_str() { Some("retired" | "conflict") => json!({"state":observed["retirement"]["state"]}), _ => json!({"state":"unknown", "reason":"retirement_unverified"}) },
+        "agentq.queue_pending": q["pending"], "agentq.queue_dropped": q["dropped"],
         "agentq.hook_failures": problems(crate::executor::hook_failures(data)), "agentq.hooks": crate::executor::hooks(data),
         "agentq.release": crate::release::project(&observed["release"], now), "agentq.model_backlog": crate::model::backlog(data),
         "agentq.ids_unknown": "an installation event has no session"})
@@ -680,4 +681,17 @@ mod tests {
         assert!(e.starts_with("curl: `") && e.contains("agentq-no-such-curl") && !e.contains("sk-lf"), "{e}");
         let _ = std::fs::remove_dir_all(d);
     }
+    #[test]
+    fn heartbeat_retirement_is_an_allowlisted_diagnosis() {
+        let root = std::env::temp_dir().join(format!("agentq-retirement-beat-{}", crate::resource::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for state in ["retired", "conflict", "arbitrary private value"] {
+            std::fs::write(root.join("status.json"), json!({"retirement":{"state":state,"error":"secret-path"}}).to_string()).unwrap();
+            let projected = heartbeat(&root, &root.join("data"), crate::now())["agentq.retirement"].clone();
+            assert_eq!(projected["state"], if state == "arbitrary private value" { "unknown" } else { state });
+            assert!(!projected.to_string().contains("private") && !projected.to_string().contains("secret"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }
