@@ -383,6 +383,7 @@ impl Run {
     pub(crate) fn stop_facts(&mut self) -> Res<super::history::stop::Facts> {
         use super::history::stop::Facts;
         Ok(match &mut self.body {
+            Body::Acp(s) => s.stop_facts(self.stop_id.clone())?,
             Body::Turn(t) => Facts {run:self.stop_id.clone(),format:protocol(t.client).stream_history,path:t.log.clone(),start:t.start,exited:Some(t.has_exited()),native_end:t.ended,exit:if t.exit_unknown {None}else{t.exit},lost_owner:t.exit_unknown && !(t.ended && t.stopping)},
             Body::Native(n) => Facts {run:self.stop_id.clone(),format:protocol(n.spec.client).native_history,path:n.turn.path().into(),start:0,exited:None,native_end:n.report.is_some(),exit:None,lost_owner:false},
             Body::App(a) => {
