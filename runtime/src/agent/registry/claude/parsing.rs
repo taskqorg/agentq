@@ -49,7 +49,7 @@ pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
         } else {
             ("ok", "none")
         };
-        calls.push(Call {
+        calls.push(Call {native_turn:None,accounting_unknown:None,
             cost_usd:crate::agent::history::live::native_cost(u).or_else(||crate::agent::history::live::native_cost(v)),
             id: Some(id.into()),
             at_ms: v["timestamp"]

@@ -59,16 +59,21 @@ pub fn write_statusline(path:&Path,raw:&str)->Res<()> {
 }
 
 /// Read-scoped accounting facts; raw rows remain the source of truth.
-pub(crate) struct UsageRevision {pub row:usize,pub call:super::super::Call,pub superseded_at:Option<usize>}
+pub(crate) struct UsageRevision {pub row:usize,pub revised_at:usize,pub call:super::super::Call,pub superseded_at:Option<usize>}
 pub(crate) fn usage_rows(read:fn(&[Value])->(Vec<super::super::Call>,Option<u64>,bool),rows:&[Value])->Vec<UsageRevision> {
-    rows.iter().enumerate().flat_map(|(row,value)|read(std::slice::from_ref(value)).0.into_iter().map(move |call|UsageRevision {row,call,superseded_at:None})).collect()
+    rows.iter().enumerate().flat_map(|(row,value)|read(std::slice::from_ref(value)).0.into_iter().map(move |call|UsageRevision {row,revised_at:row,call,superseded_at:None})).collect()
 }
 pub(super) fn usage_steps(format:&str,events:&[Value],rows:&[Value],offset:u64)->BTreeMap<usize,Vec<Step>> {
     let mut out=BTreeMap::<usize,Vec<Step>>::new();
     for fact in (super::super::registry::history_protocol(format).expect("native history protocol").history_usage)(rows) {
         let event=&events[fact.row];let call=&fact.call;
-        let mut step=super::steps::base_step(event,&rows[fact.row],&json!({"id":format!("usage:{}",call.id.clone().unwrap_or_else(||event["id"].as_str().unwrap_or_default().to_string()))}),StepKind::Usage,call_json(call),0);
+        let mut step=super::steps::base_step(event,&rows[fact.row],&json!({"id":format!("usage:{}",json!([call.native_turn,call.id.clone().unwrap_or_else(||event["id"].as_str().unwrap_or_default().to_string())]))}),StepKind::Usage,call_json(call),0);
         step.author="system".into();step.data["active"]=json!(true);
+        if let Some(turn)=&call.native_turn {step.turn.id=Some(turn.clone());step.turn.native_id=Some(turn.clone());step.turn.unknown=None;}
+        if fact.revised_at>fact.row {
+            let changed=&events[fact.revised_at];step.revision=changed["start"].as_u64().unwrap_or(0);step.source=changed.clone();
+            step.origins.push(json!({"source":changed["source"],"start":changed["start"],"end":changed["end"],"sha256":changed["sha256"]}));
+        }
         if let Some(at)=fact.superseded_at {
             let replaced=&events[at];
             if event["start"].as_u64().unwrap_or(0)>=offset || replaced["start"].as_u64().unwrap_or(0)<offset {continue;}
@@ -129,8 +134,13 @@ fn call_json(call:&super::super::Call)->Value {
     if call.id.is_none(){unknown.insert("id".into(),json!("native request id not reported"));}
     if call.model.is_none(){unknown.insert("model".into(),json!("native model not reported"));}
     if call.at_ms.is_none(){unknown.insert("time".into(),json!("native time not reported"));}
-    json!({"id":call.id,"input":call.input,"cache_read":call.cache_read,"cache_write":call.cache_write,"output":call.output,"reasoning":call.reasoning,
-        "model":call.model,"time":call.at_ms,"cost_usd":call.cost_usd,"cost_source":call.cost_usd.map(|_|"native-reported"),"aggregate":call.aggregate,"unknown":unknown})
+    if let Some(reason)=call.accounting_unknown {unknown.insert("accounting".into(),json!(reason));}
+    let mut value=json!({"id":call.id,"native_turn":call.native_turn,"accounting_unknown":call.accounting_unknown,"countable":call.accounting_unknown.is_none(),"input":call.input,"cache_read":call.cache_read,"cache_write":call.cache_write,"output":call.output,"reasoning":call.reasoning,
+        "model":call.model,"time":call.at_ms,"cost_usd":call.cost_usd,"cost_source":call.cost_usd.map(|_|"native-reported"),"aggregate":call.aggregate,"unknown":unknown});
+    if let Some(reason)=call.accounting_unknown {
+        for field in ["input","cache_read","cache_write","output","reasoning","cost_usd","cost_source"] {value[field]=Value::Null;value["unknown"][field]=json!(reason);}
+    }
+    value
 }
 
 impl super::sessions::Session {
@@ -203,6 +213,7 @@ impl super::sessions::Session {
         }
         let cost=rows.iter().rev().find_map(|v|if v["type"]=="result" {native_cost(v)}else{None});
         let mut unknown=BTreeMap::new();
+        if let Some(reason)=calls.iter().find_map(|c|c.accounting_unknown){unknown.insert("usage".into(),reason.into());}
         if cost.is_none(){unknown.insert("cost_usd".into(),"native turn cost not reported".into());}
         if plan.is_null(){unknown.insert("plan".into(),"native plan not reported".into());}
         if todos.is_null(){unknown.insert("todos".into(),"native todos not reported".into());}
@@ -225,9 +236,9 @@ fn cost_metadata(value:&mut Value,cost:Option<f64>) {
 
 pub(crate) fn call_metadata(value:&mut Value,call:&super::super::Call,parent:&str) {
     value["parent"]=json!(crate::sha256_hex(parent.as_bytes()));
-    let context=call.input.and_then(|n|n.checked_add(call.cache_read?)).and_then(|n|n.checked_add(call.cache_write?));
+    let context=call.accounting_unknown.is_none().then_some(call.input).flatten().and_then(|n|n.checked_add(call.cache_read?)).and_then(|n|n.checked_add(call.cache_write?));
     value["context_tokens"]=json!(context);
     if context.is_none(){value["unknown"]["context_tokens"]=json!("not-reported");}
-    cost_metadata(value,call.cost_usd);
+    cost_metadata(value,call.accounting_unknown.is_none().then_some(call.cost_usd).flatten());
 }
 pub(crate) fn turn_metadata(value:&mut Value,report:&super::super::Report) {cost_metadata(value,report.usage.cost_usd);}

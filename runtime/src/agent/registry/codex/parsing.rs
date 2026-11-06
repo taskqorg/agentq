@@ -41,7 +41,7 @@ pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
     }
     let mut calls = vec![];
     for (index,v) in events.iter().enumerate().filter(|(_,v)| v["type"] == "turn.completed") {
-        if v["response_id"].is_string() && events[index+1..].iter().any(|later|later["type"]=="turn.completed" && later["response_id"]==v["response_id"]) {continue;}
+        if v["response_id"].is_string() && events[index+1..].iter().any(|later|later["type"]=="turn.completed" && later["response_id"]==v["response_id"] && later["turn_id"]==v["turn_id"]) {continue;}
         let id = v["response_id"].as_str().map(String::from).or_else(||v.get("total_usage").map(Value::to_string));
         let u = &v["usage"];
         let read = u["cached_input_tokens"].as_u64();
@@ -50,7 +50,7 @@ pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
         } else {
             ("ok", "none")
         };
-        calls.push(Call {
+        calls.push(Call {native_turn:v["turn_id"].as_str().map(String::from),accounting_unknown:None,
             cost_usd:crate::agent::history::live::native_cost(u).or_else(||crate::agent::history::live::native_cost(v)),
             id,
             at_ms: v["timestamp"]

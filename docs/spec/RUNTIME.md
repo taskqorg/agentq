@@ -533,7 +533,9 @@ The explicit legacy `ProtectedHost::new` API stays available to consumers pinned
 
 ## Live run data
 
-Legacy accounting identities include the owning native turn; no snapshot retirement occurs without positive same-turn association. Native queue usage without an explicit turn ID inherits only its verified current accepted task boundary. LiveData prefers the registered native context measurement, preserving its unknown fields; an input estimate is used only when native context is absent.
+Unassociated legacy/request observations remain separate raw evidence with `accounting_unknown: unassociated-usage-overlap`, `countable:false` and null derived counters/cost. Aggregate call count and usage stay unknown until native scope resolves the overlap. A later overlap observation revises already-delivered usage authoritatively, with both origins; it does not retire another turn or invent a request. Consumers must not sum non-countable observations.
+
+All identified-request and legacy accounting identities include the owning native turn while preserving the raw native request ID as a separate fact; no snapshot retirement occurs without positive same-turn association. Native queue usage without an explicit turn ID inherits only its verified current accepted task boundary. LiveData prefers the registered native context measurement, preserving its unknown fields; an input estimate is used only when native context is absent.
 
 Every step exposes neutral `presentation` fields: model, effort, cli_version, sidechain
 and meta. Native model/effort/version context carries forward; native per-record flags

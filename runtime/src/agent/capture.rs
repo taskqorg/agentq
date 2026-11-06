@@ -14,6 +14,10 @@ const TRACE_CONTEXT: &str = "COREQ_TRACE_CONTEXT";
 pub struct Call {
     /// Native identity of the request, when the client names one.
     pub id: Option<String>,
+    /// Native turn scope of this request, independently of its raw request ID.
+    pub native_turn: Option<String>,
+    /// Independent-request accounting is unresolved; reported buckets may overlap another observation.
+    pub accounting_unknown: Option<&'static str>,
     pub at_ms: Option<u64>,
     pub input: Option<u64>,
     pub cache_read: Option<u64>,
@@ -306,10 +310,14 @@ fn call_record(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx
     text("session_id", session_code(session), "session-unknown");
     text("host", host().as_deref(), "not-reported");
     if c.aggregate { v["source"] = json!("turn-aggregate"); }
+    if let Some(reason)=c.accounting_unknown {
+        unknown.insert("usage".into(),json!(reason));
+        for field in ["input_tokens","cache_read_tokens","cache_write_tokens","output_tokens","reasoning_tokens"] {v[field]=Value::Null;unknown.insert(field.into(),json!(reason));}
+    }
     who.caller_fields(&mut v);
     v["unknown"] = Value::Object(unknown);
     super::history::live::call_metadata(&mut v,c,parent_key);
-    let key = crate::sha256_hex(format!("{turn_key}\0{}", c.id.clone().unwrap_or_else(|| index.to_string())).as_bytes());
+    let key = crate::sha256_hex(format!("{turn_key}\0{}", json!([c.native_turn,c.id.clone().unwrap_or_else(||index.to_string())])).as_bytes());
     (key, shared(&v))
 }
 
@@ -628,4 +636,22 @@ mod tests {
         assert_eq!(time_ms("2026-10-19T08:32:09Z"), Some(1_792_398_729_000));
         assert_eq!(time_ms("yesterday"), None);
     }
+    #[test]
+    fn ambiguous_native_usage_freezes_unknown_counters_without_double_counting() {
+        let ctx=Context {product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};
+        let usage=json!({"input_tokens":10,"cached_input_tokens":0,"output_tokens":2,"cost_usd":0.1});
+        let report=read(Client::Codex,&[
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":usage,"total_token_usage":usage}}}),
+            json!({"type":"token_usage_record","payload":{"response_id":"r","usage":usage}}),
+        ]);
+        assert_eq!(report.usage.unknown,Some("unassociated-usage-overlap"));assert!(report.usage.input.is_none() && report.usage.calls.is_none());
+        let frozen=freeze("agent.turn","owned",&report.observation(Client::Codex,&ctx),&report,Client::Codex,&ctx).unwrap();
+        for record in &frozen.records[1..] {
+            assert!(record.observation["input_tokens"].is_null() && record.observation["output_tokens"].is_null());
+            assert_eq!(record.observation["unknown"]["usage"],"unassociated-usage-overlap");assert!(record.observation["context_tokens"].is_null());
+            assert_eq!(record.observation["counts"]["cost_source_unknown"],1);assert!(record.observation["counts"]["cost_native_nanousd"].is_null());
+        }
+        assert_eq!(Frozen::restore(&frozen.save()).unwrap(),frozen);
+    }
+
 }

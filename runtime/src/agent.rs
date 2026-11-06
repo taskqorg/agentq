@@ -575,6 +575,7 @@ pub struct Usage {
 /// The turn's token sums of its calls; a call without a value makes that sum unknown, never smaller.
 pub(crate) fn sum_usage(calls: &[Call], count: Option<u64>, known: bool) -> Usage {
     if !known { return Usage { unknown: Some("no-usage"), ..Usage::default() }; }
+    if let Some(reason)=calls.iter().find_map(|c|c.accounting_unknown){return Usage {unknown:Some(reason),..Usage::default()};}
     let sum = |f: fn(&Call) -> Option<u64>| calls.iter().try_fold(0u64, |a, c| a.checked_add(f(c)?));
     let mut models = BTreeMap::<&str, u64>::new();
     for m in calls.iter().filter_map(|c| c.model.as_deref()) { *models.entry(m).or_default() += 1; }

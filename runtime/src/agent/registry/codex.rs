@@ -900,7 +900,7 @@ fn usage_context(row:&Value)->Option<(Option<u64>,Option<u64>)> {
 fn history_usage(rows:&[Value])->Vec<crate::agent::history::live::UsageRevision> {
     let mut current=None::<String>;let mut model=Value::Null;let mut models=std::collections::BTreeMap::new();
     let mut counters=std::collections::BTreeMap::<String,Vec<Value>>::new();
-    let mut explicit=std::collections::BTreeMap::new();let mut legacy=Vec::new();let mut out=Vec::new();
+    let mut explicit=std::collections::BTreeMap::new();let mut legacy=Vec::new();let mut out=Vec::new();let mut forms=Vec::new();
     for (index,row) in rows.iter().enumerate() {
         let p=row.get("payload").or(row.get("params")).unwrap_or(row);
         if row["type"]=="turn_context" {if let Some(turn)=p["turn_id"].as_str(){models.insert(turn.to_string(),p["model"].clone());}else{model=p["model"].clone();}}
@@ -909,7 +909,7 @@ fn history_usage(rows:&[Value])->Vec<crate::agent::history::live::UsageRevision>
         let model=turn.as_ref().and_then(|turn|models.get(turn)).unwrap_or(&model);
         let normalized=if row["type"]=="token_usage_record" {
             if let Some(turn)=&turn {explicit.entry(turn.clone()).or_insert(index);}
-            Some(json!({"type":"turn.completed","response_id":p["response_id"],"call":true,"usage":p["usage"],"model":p.get("model").unwrap_or(model),"timestamp":row["timestamp"]}))
+            Some(json!({"type":"turn.completed","response_id":p["response_id"],"call":true,"turn_id":turn,"usage":p["usage"],"model":p.get("model").unwrap_or(model),"timestamp":row["timestamp"]}))
         } else if p["type"]=="token_count" && p["info"]["total_token_usage"].is_object() || row["method"]=="thread/tokenUsage/updated" {
             let events=counters.entry(turn.clone().unwrap_or_default()).or_default();let before=events.len();
             if row["method"]=="thread/tokenUsage/updated" {append_app_usage(events,row);}else{append_codex_usage(events,&p["info"]["last_token_usage"],&p["info"]["total_token_usage"],false);}
@@ -917,24 +917,33 @@ fn history_usage(rows:&[Value])->Vec<crate::agent::history::live::UsageRevision>
         }else if row["type"]=="turn.completed"{Some(row.clone())}else{None};
         if let Some(event)=normalized {
             for mut call in read_calls(std::slice::from_ref(&event)).0 {
-                if p["type"]=="token_count" {
-                    if let Some(turn)=&turn {
-                        call.id=Some(crate::sha256_hex(json!(["native-legacy-usage",turn,call.id]).to_string().as_bytes()));
-                        legacy.push((out.len(),turn.clone()));
-                    }
+                if p["type"]=="token_count" || row["type"]=="token_usage_record" {
+                    call.native_turn=turn.clone();forms.push((out.len(),row["type"]=="token_usage_record",turn.clone()));
+                    if p["type"]=="token_count" {if let Some(turn)=&turn {legacy.push((out.len(),turn.clone()));}}
                 }
-                out.push(crate::agent::history::live::UsageRevision {row:index,call,superseded_at:None});
+                out.push(crate::agent::history::live::UsageRevision {row:index,revised_at:index,call,superseded_at:None});
             }
         }
     }
     for (index,turn) in legacy {out[index].superseded_at=explicit.get(&turn).copied();}
+    let mut any=[None::<usize>;2];let mut unscoped=[None::<usize>;2];
+    for &(index,identified,ref turn) in &forms {
+        if out[index].superseded_at.is_some(){continue;}
+        let slot=usize::from(identified);any[slot].get_or_insert(out[index].row);
+        if turn.is_none(){unscoped[slot].get_or_insert(out[index].row);}
+    }
+    for (index,identified,turn) in forms {
+        if out[index].superseded_at.is_some(){continue;}
+        let opposite=usize::from(!identified);let overlap=if turn.is_none(){any[opposite]}else{unscoped[opposite]};
+        if let Some(row)=overlap {out[index].call.accounting_unknown=Some("unassociated-usage-overlap");out[index].revised_at=out[index].row.max(row);}
+    }
     out
 }
 fn selected_calls(rows:&[Value],last_turn:bool)->Vec<Call> {
     let start=if last_turn {rows.iter().rposition(|r|r["payload"]["type"]=="task_started").unwrap_or(0)}else{0};
     let revisions=history_usage(rows);let mut ids=std::collections::BTreeSet::new();let mut calls=Vec::new();
     for revision in revisions.into_iter().rev().filter(|r|r.row>=start && r.superseded_at.is_none()) {
-        if revision.call.id.as_ref().is_none_or(|id|ids.insert(id.clone())) {calls.push(revision.call);}
+        if revision.call.id.as_ref().is_none_or(|id|ids.insert((revision.call.native_turn.clone(),id.clone()))) {calls.push(revision.call);}
     }
     calls.reverse();calls
 }

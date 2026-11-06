@@ -48,6 +48,7 @@ fn main() {
         ("deadline_stops_a_turn_that_never_ends", deadline_stops_a_turn_that_never_ends),
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
+        ("native_queue_reused_response_keeps_distinct_frozen_turns",native_queue_reused_response_keeps_distinct_frozen_turns),
         ("native_queue_identified_usage_freezes_latest_scoped_requests", native_queue_identified_usage_freezes_latest_scoped_requests),
         ("native_queue_untagged_usage_keeps_verified_task_scope", native_queue_untagged_usage_keeps_verified_task_scope),
         ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
@@ -2157,3 +2158,8 @@ fn native_queue_untagged_usage_keeps_verified_task_scope() {
  let owned=steps.iter().find(|s|s.kind==agent::history::StepKind::Usage && s.turn.native_id.as_deref()==Some("turn") && s.data["input"]==10).unwrap();assert_eq!(owned.data["id"],json!(report.calls[0].id));
  let context=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};let frozen=run.snapshot(&context).unwrap();append(&path,&[usage(999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);std::fs::remove_dir_all(root).unwrap();
 }
+
+fn native_queue_reused_response_keeps_distinct_frozen_turns(){
+let root=scratch("queue-reused-response");let path=root.join("native.jsonl");append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);let rt=agent::runtime("codex").unwrap();let mut sum=0;let mut frozen_turns=vec![];
+for turn in ["t1","t2"]{let input=format!("owned {turn}");let mut l=fake_launch("codex",&root,&input,&[("COREQ_FAKE_CONTROL","1".as_ref())]);l.mode=agent::Mode::Queue{transcript:path.clone()};let mut run=rt.resume("native-thread",&l).unwrap();append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),json!({"type":"event_msg","payload":{"type":"user_message","message":input,"turn_id":turn}}),json!({"type":"token_usage_record","payload":{"thread_id":"native-thread","turn_id":turn,"response_id":"r","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}}),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn}})]);finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);sum+=report.calls.len();let ctx=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};frozen_turns.push(run.snapshot(&ctx).unwrap());}
+assert_ne!(frozen_turns[0],frozen_turns[1]);let live=rt.history("native-thread",None,Some(&path),None).unwrap().live_data(None).unwrap();println!("NATIVE_REPEATED_RESPONSE frozen_calls={sum} live_calls={}",live.calls.len());assert_eq!(live.calls.len(),sum,"distinct accepted native turns cannot collapse in public history");std::fs::remove_dir_all(root).unwrap();}
