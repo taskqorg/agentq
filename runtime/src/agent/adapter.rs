@@ -656,7 +656,7 @@ pub trait Runtime: Send + Sync {
     fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window>;
     /// Native events from complete JSONL log records, without a run or native process.
     fn log_events(&self, log: &str) -> Vec<Event>;
-    /// log_events per source record, with its source line and native time.
+    /// log_events per source record, with native time, assistant failure, lifecycle label and saved permission mode.
     fn log_records(&self, log: &str) -> Vec<super::events::LogRecord>;
     /// Read-only account email/ID or project; unknown and unsupported identities stay absent.
     fn account_identity(&self, home: Option<&Path>) -> Option<String>;

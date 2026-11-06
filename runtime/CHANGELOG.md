@@ -1,5 +1,11 @@
 # Runtime changelog
 
+## 0.13.0
+
+- `LogRecord` and `History` events expose assistant failures, lifecycle display labels and saved Claude permission modes without consumer native parsing. `AssistantFailure` retains the native code, `auth-rejected`/`client-error` classification and local detail. Exhaustive LogRecord constructors/patterns must add the new fields or use `..`.
+- `classify` recognizes Claude assistant API failures, including `authentication_failed`, and retains the cause through a final failed result. Later successful results and new turn boundaries do not inherit earlier failures. Live completion, launch policy, source identities and checkpoints are unchanged.
+- Native-free migration checks retain exact-input/duplicate/restart observation and verify lifecycle/quota separation and permission-baseline readback. See [task #277 evidence](../docs/evidence/runtime-277.md).
+
 ## 0.12.0
 
 - Add `Run::snapshot(&Context) -> Res<Frozen>` for deferred persistence, and `Frozen::{events, append, save, restore}`. A snapshot needs no store, lock or native call, and repeated calls return the same value with the first caller context.

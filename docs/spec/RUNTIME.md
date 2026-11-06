@@ -154,7 +154,39 @@ Antigravity event qualification requires a native tool completion with status `D
 
 ### Log records
 
-`LogRecord { line, time, events }` is one source record: its zero-based `line` in the supplied text, its `RecordTime` and the events it produced. Records keep source order; events inside a record keep native order. A line that does not start with `{` is a diagnostic and yields no record.
+`LogRecord { line, time, events, assistant_failure, lifecycle, permission_mode }` is one source record: its zero-based `line` in the supplied text, its `RecordTime` and the events it produced. Records keep source order; events inside a record keep native order. A line that does not start with `{` is a diagnostic and yields no record.
+
+`assistant_failure` is an optional `AssistantFailure { code, error, detail }`. A Claude
+assistant record with `isApiErrorMessage: true` or a string `error` is a failure;
+`code` retains the native error string when reported, `error` is `auth-rejected`
+for `authentication_failed` and `client-error` otherwise, and `detail` retains
+its text blocks in order without rewriting their strings. Missing code or text
+stays null. Successful assistant prose and user-supplied error-shaped content do
+not become failures. `classify` also recognizes these records: the latest result
+or assistant failure determines the turn outcome, so a later successful result
+supersedes an earlier failed request. A failed Claude result retains the cause
+of its most recent assistant record, bounded by the previous result or system
+init/turn-duration boundary. It does not inherit an earlier failure across a
+successful assistant record or a turn boundary. An assistant failure alone is not a new
+native process-completion or cleanup receipt; live turn-end detection is unchanged.
+
+`lifecycle` is an optional display label, independent of turn acceptance or
+completion. Native lifecycle names replace `task_` with `turn_` and underscores,
+dots and slashes with spaces: for example `turn started`, `turn complete`,
+`system compact boundary` and `session started` (native `init`). Quota-only
+records have no label. Unknown shapes have no inferred lifecycle.
+
+`permission_mode` retains a nonempty Claude `permissionMode` string on that
+record, otherwise null. It is saved observation, never a permission grant or a
+fallback to requested or earlier permissions. Callers validate it against their
+accepted resume baseline; absent, unsupported or changed modes stay unknown or
+refuse. A later record without a mode does not assert the previous mode.
+
+These three fields are also top-level projections on each `history` event.
+Consumers need neither `raw` nor a block's native JSON for these decisions.
+They remain private local content and are never exported as telemetry.
+Adding fields requires consumers constructing or exhaustively destructuring
+`LogRecord` to update their patterns; existing event variants and checkpoints stay unchanged.
 
 A line that starts with `{` and does not parse yields a record with time `Malformed` and `Unsupported`. A caller that holds only complete lines treats it as unknown; a caller that may hold a partial last line waits for its newline.
 
@@ -572,7 +604,7 @@ Consumers of the runtime and CoreQ on their default branches when this page chan
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
 | AssetQ | `coreq` v0.19.2, `agentq-runtime` tag `runtime-v0.2.0` (which resolves its own `coreq` v0.18.0) | Pinned; a newer revision follows its own contract and qualification |
 
-- Runtime crate version 0.12.0; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
+- Runtime crate version 0.13.0; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. After a runtime version change merges to main and that exact source passes the `Test` workflow on Linux, macOS and Windows, `.github/workflows/runtime-tag.yml` invokes `scripts/tag_runtime.py`. The script checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - One CoreQ source: a consumer that uses CoreQ directly spells the runtime's exact CoreQ dependency, currently `coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.0" }`. Cargo treats `tag` and `rev` at the same commit as two sources, and then two `Store` types. `tests/runtime_publication.py` resolves such a consumer and refuses more than one CoreQ source.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.
