@@ -8,9 +8,9 @@ use super::super::super::events::{string,tool_kind,audit_path,audit_command,nati
 use super::*;
 use super::super::super::limits::{window,unknown,reset,https,token_text,oauth_account};
 
-static ACP: crate::agent::acp::Config=crate::agent::acp::Config {args:&["acp"],env:&[],home_var:"GEMINI_HOME",home_arg:Some("--gemini-dir"),modes:&[(Approval::Plan,"plan"),(Approval::Edits,"accept-edits")],rejected_versions:&["1.4.2","1.4.3","1.4.4","1.4.5"],bypass_args:&["--dangerously-skip-permissions"],question_prefixes:&["interaction_"],home:acp_home};
+static ACP: crate::agent::acp::Config=crate::agent::acp::Config {minimum:"1.5.2",args:&["acp"],env:&[],home_var:"GEMINI_HOME",home_arg:Some("--gemini-dir"),modes:&[(Approval::Plan,"plan"),(Approval::Edits,"accept-edits")],rejected_versions:&["1.4.2","1.4.3","1.4.4","1.4.5"],bypass_args:&["--dangerously-skip-permissions"],question_prefixes:&["interaction_"],home:acp_home};
 static ADAPTER: Adapter = Adapter {client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "1.5.2",
-        capabilities: &["history", "turn", "resume", "turn-parts", "turn-deltas", "image-input", "mcp-config", "acp", "account-limits"] } , ops: NativeOps {acp:Some(&ACP),catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"ANTIGRAVITY_HOME",alternate_home_var:Some("ANTIGRAVITY_APP_DATA_DIR"),session_vars:&["ANTIGRAVITY_CONVERSATION_ID"],auth_vars:&["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, preparation, restore_preparation:None, sandbox:None,hook_status:None, limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
+        capabilities: &["history", "turn", "resume", "turn-parts", "turn-deltas", "image-input", "mcp-config", "acp", "account-limits"] } , ops: NativeOps {acp:Some(&ACP),catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"GEMINI_HOME",alternate_home_var:None,session_vars:&["ANTIGRAVITY_CONVERSATION_ID"],auth_vars:&["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, preparation, restore_preparation:None, sandbox:None,hook_status:None, limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
 
 pub(super) const ENTRY: Entry = Entry { name:"antigravity", aliases:&["agy"], order:4, profile_order:4, worker_order:2, onboard:true,
     profile:Profile {kind:"antigravity",label:"Antigravity",aliases:&["agy"],operations:&["hooks"]},
@@ -43,12 +43,12 @@ fn extras(_: &Policy) -> Vec<OsString> { vec![] }
 fn env(l: &Launch, spec: &mut Spec) { spec.env.extend(l.settings_env.iter().map(|(k,v)| (k.into(),v.into()))); }
 fn settings(_: &Launch, _: &mut Spec) {}
 fn login(_: Command,_:bool) -> Check {check("unknown","no login status command")}
-fn protected(home: PathBuf) -> Vec<PathBuf> { let mut v=vec![home.clone()]; if let Some(p)=home.parent() {v.push(p.join("config"));} v }
+fn protected(home: PathBuf) -> Vec<PathBuf> {vec![home.clone(),home.join("config")]}
 fn refusal(_: &str) -> Option<Cause> { None }
 fn transcript(_: &str, _: Option<&Path>) -> Option<PathBuf> { None }
 fn link(_: &Run) -> Result<String,native::Absence> { Err((Cause("no-session-url"),None)) }
 fn session_link(_: &NativeSpec, _: Option<&str>) -> Result<String,native::Absence> { Err((Cause("no-session-url"),None)) }
-fn config_root() -> PathBuf { base_home(Client::Antigravity).and_then(|h|h.parent().map(Path::to_path_buf)).unwrap_or_else(||host_home().join(".gemini")) }
+fn config_root() -> PathBuf { base_home(Client::Antigravity).unwrap_or_else(||host_home().join(".gemini")) }
 fn files(root: &Path) -> Vec<PathBuf> { vec![root.join("config/hooks.json")] }
 fn setup(root: &Path, _: &Path, exe: &Path) -> Vec<Edit> {
     vec![edit("antigravity",root.join("config/hooks.json"),&["agentq","enabled"],json!(true),false),
@@ -76,10 +76,7 @@ fn acp_home() -> Option<PathBuf> {
     std::env::var_os("GEMINI_HOME").filter(|h|!h.is_empty()).map(PathBuf::from).or_else(||std::env::var_os("HOME").or_else(||std::env::var_os("USERPROFILE")).map(|h|Path::new(&h).join(".gemini")))
 }
 
-fn native_home() -> Option<PathBuf> {
-    std::env::var_os("ANTIGRAVITY_HOME").filter(|v|!v.is_empty()).or_else(||std::env::var_os("ANTIGRAVITY_APP_DATA_DIR").filter(|v|!v.is_empty())).map(PathBuf::from)
-        .or_else(||std::env::var_os("HOME").or_else(||std::env::var_os("USERPROFILE")).map(|h|{let cli=Path::new(&h).join(".gemini/antigravity-cli");if cli.is_dir() {cli} else {Path::new(&h).join(".gemini/antigravity")}}))
-}
+fn native_home() -> Option<PathBuf> {acp_home()}
 fn native_executable(path: &OsStr) -> Res<PathBuf> {Ok(antigravity_executable(path))}
 fn new_session() -> String {"-".into()}
 fn native_args(spec: &Spec) -> Vec<OsString> {
@@ -188,7 +185,7 @@ fn read_snapshot(events:&[Value],_rollout:Option<&Path>)->Snapshot {
 
 fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {if events.iter().any(|v|v["type"]=="acp") {return crate::agent::acp::read_report(text,events,rollout);} let end_index=events.iter().rposition(|v|v["event"]=="result" || matches!(v["type"].as_str(),Some("PLANNER_RESPONSE"|"TOOL_RESPONSE"|"turn.failed"|"turn.cancelled"))).filter(|i|ends(&events[*i])); classify_report(text,events,rollout,end_index)}
 
-static PROTOCOL: Protocol=Protocol {stream_history:"agy-stream",native_history:"antigravity-sidecar",history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},history_formats:&["agy-stream","antigravity-sidecar"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,history_usage:|rows|crate::agent::history::live::usage_rows(read_calls,rows),history_context:|_|None,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:prepare_command,input_bytes:input_bytes,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
+static PROTOCOL: Protocol=Protocol {stream_history:"agy-stream",native_history:"antigravity-sidecar",history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},history_formats:&["agy-stream","antigravity-sidecar","acp"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,history_usage:|rows|crate::agent::history::live::usage_rows(read_calls,rows),history_context:|_|None,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:prepare_command,input_bytes:input_bytes,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
 fn code_assist_call(token: &str, host: &str, method: &str, body: Value) -> String {
     format!("url = \"https://{host}/v1internal:{method}\"\nheader = \"Authorization: Bearer {token}\"\nheader = \"Content-Type: application/json\"\nheader = \"User-Agent: antigravity/hub/2.28.2\"\ndata = {}\n",json!(body.to_string()))
@@ -243,8 +240,8 @@ fn account_identity(home:Option<&Path>)->Option<String> {let client=Client::Anti
 fn credentials(home:&Path,explicit:bool)->Res<String> {
  #[cfg(target_os="macos")] {if !explicit {if let Some(text)=limits::keychain("gemini",Some("antigravity"))? {return Ok(text);}}}
  // shortcut: Windows keyring-only logins read unknown; add its native reader when qualified.
- if let Ok(text)=std::fs::read_to_string(home.join("antigravity-oauth-token")) {return Ok(text);}
- if !explicit {if let Some(parent)=home.parent() {if let Ok(text)=std::fs::read_to_string(parent.join("oauth_creds.json")) {return Ok(text);}}} Err("credential-unreadable".into())
+ if let Ok(text)=std::fs::read_to_string(home.join("antigravity-cli/antigravity-oauth-token")) {return Ok(text);}
+ if let Ok(text)=std::fs::read_to_string(home.join("oauth_creds.json")) {return Ok(text);} Err("credential-unreadable".into())
 }
 
 fn access_token(oauth:&Value,now:i64)->Res<&str> {
@@ -527,3 +524,17 @@ fn preparation(_: &Launch, _: &Repair) -> (LaunchCheck, LaunchCheck) {
 fn limits_for(l:&Launch,now:i64)->Vec<Window> {super::super::super::limits::account(Client::Antigravity,preflight::home(&ADAPTER,l).as_deref(),None,now)}
 
 fn validate(args:&[OsString],_:&[(String,String)],_:&Policy)->Res<()> {validate_arguments(args)}
+
+#[cfg(test)] mod home_tests {
+    use super::*;
+    #[test] fn gemini_root_binds_credentials_quota_and_protection() {
+        let root=crate::scratch("gemini-root");let file=root.join("antigravity-cli/antigravity-oauth-token");std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let token=json!({"access_token":"fixture-only","expiry_date":1}).to_string();std::fs::write(&file,&token).unwrap();
+        assert_eq!(credentials(&root,true).unwrap(),token);
+        assert_eq!(account_limits(Some(&root),None,1800000000)[0].unknown.as_deref(),Some("credential-expired"));
+        assert_eq!(account_identity(Some(&root)),None);
+        assert_eq!(protected(root.clone()),vec![root.clone(),root.join("config")]);
+        std::fs::remove_file(&file).unwrap();std::fs::write(root.join("oauth_creds.json"),&token).unwrap();assert_eq!(credentials(&root,true).unwrap(),token);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -251,7 +251,7 @@ fn quota_account_read_guards_credentials() {
 fn project_identity_read_stays_inside_adapter() {
     let root=scratch("project-identity");let bin=root.join(if cfg!(windows) {"curl.exe"} else {"curl"});
     std::fs::copy(std::env::current_exe().unwrap(),&bin).unwrap();
-    let file=root.join("antigravity-oauth-token");
+    let file=root.join("antigravity-cli/antigravity-oauth-token");std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     let credential=json!({"access_token":"invented-token","expiry_date":4102444800000i64}).to_string();
     std::fs::write(&file,&credential).unwrap();
     let keys=["PATH","AGENTQ_FAKE_QUOTA_HTTP","AGENTQ_FAKE_PROJECT_IDENTITY","AGENTQ_FAKE_QUOTA_CHANGE"];
@@ -281,6 +281,7 @@ fn fake(client: &str) {
         std::fs::write("terminal.json",json!({"args":args,"pid":std::process::id()}).to_string()).unwrap();
         while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}return;
     }
+    if client=="antigravity" && args.last().is_some_and(|a|a=="--version") {println!("agy 1.5.2");return;}
     if args.first().is_some_and(|a|a=="acp") {return fake_acp(&args);}
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
@@ -329,7 +330,7 @@ fn fake(client: &str) {
     sessions[&session] = json!(turn);
     std::fs::write(&store, sessions.to_string()).unwrap();
     // The record lets the test read argv, stdin and environment the child got.
-    let home_var = match client { "claude" => "CLAUDE_CONFIG_DIR", "antigravity" => "ANTIGRAVITY_HOME", _ => "CODEX_HOME" };
+    let home_var = match client { "claude" => "CLAUDE_CONFIG_DIR", "antigravity" => "GEMINI_HOME", _ => "CODEX_HOME" };
     let record = json!({"args": args, "input": input, "home": std::env::var(home_var).ok(),
         "inherited": std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() || std::env::var("CODEX_THREAD_ID").is_ok() || std::env::var("ANTIGRAVITY_CONVERSATION_ID").is_ok(),
         "extra": std::env::var("FAKE_EXTRA").ok(),
