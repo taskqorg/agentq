@@ -29,6 +29,13 @@ pub(super) fn reported(client: Client, v: &Value, now: u64) -> Option<Vec<Window
     let claude_info = if v["type"] == "rate_limit_event" {Some(&v["rate_limit_info"])}
         else {v.get("quotaLimits").filter(|v|v.is_object()).or_else(||v.pointer("/apiErrorParams/rate_limit_info").filter(|v|v.is_object()))};
     if let Some(i) = claude_info.filter(|_|client == Client::Claude) {
+        let mut info=i.clone();
+        if v["type"]!="rate_limit_event" && info.is_object() {
+            let fallback=&v["apiErrorParams"]["rate_limit_info"];
+            if info["rateLimitType"].as_str().is_none() {info["rateLimitType"]=fallback["rateLimitType"].clone();}
+            if info["resetsAt"].as_u64().is_none() {info["resetsAt"]=fallback["resetsAt"].clone();}
+        }
+        let i=&info;
         let mut windows = vec![];
         if let Some(all) = i["unifiedWindows"].as_object() {
             for (name, w) in all {
@@ -368,6 +375,10 @@ mod tests {
             json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day","resetsAt":1900000000}}),
             json!({"type":"assistant","quotaLimits":{"status":"rejected","rateLimitType":"seven_day","resetsAt":1900000000}}),
             json!({"type":"assistant","apiError":"usage_limit_reached","apiErrorParams":{"rate_limit_info":{"status":"rejected","rateLimitType":"seven_day","resetsAt":1900000000}}}),
+            json!({"type":"assistant","quotaLimits":{"status":"rejected","resetsAt":1900000000},"apiErrorParams":{"rate_limit_info":{"rateLimitType":"seven_day"}}}),
+            json!({"type":"assistant","quotaLimits":{"status":"rejected"},"apiErrorParams":{"rate_limit_info":{"rateLimitType":"seven_day","resetsAt":1900000000}}}),
+            json!({"type":"assistant","quotaLimits":{"status":"rejected","rateLimitType":7,"resetsAt":"bad"},"apiErrorParams":{"rate_limit_info":{"rateLimitType":"seven_day","resetsAt":1900000000}}}),
+            json!({"type":"assistant","quotaLimits":{"status":"rejected","rateLimitType":"seven_day","resetsAt":1900000000},"apiErrorParams":{"rate_limit_info":{"rateLimitType":"five_hour","resetsAt":1800000000}}}),
         ] {
             let runtime=adapter::runtime("claude").unwrap();
             let log=row.to_string();

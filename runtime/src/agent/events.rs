@@ -30,6 +30,8 @@ pub(super) struct Cursor {
     last_text: Option<String>,
     model: Option<String>,
     seen: HashSet<String>,
+    #[serde(default)]
+    start_limit: StartLimit,
 }
 
 fn string(v: &Value) -> Option<String> { v.as_str().map(String::from) }
@@ -84,6 +86,9 @@ impl Cursor {
     pub fn read_owned(&mut self, client: Client, values: Vec<Value>, thread: Option<&str>, turn: Option<&str>) -> Vec<Event> {
         let mut out = vec![];
         for v in values {
+            if matches!(self.start_limit,StartLimit::Pending) {
+                if let Some(start)=StartLimit::read(&v) {self.start_limit=start;}
+            }
             let before = out.len();
             if let Some(w) = limits::reported(client, &v, (unix_ms()/1000).max(0) as u64) { out.push(Event::Quota(w)); }
             match client {
@@ -93,7 +98,10 @@ impl Cursor {
             }
             let terminal=if client==Client::Codex && v["method"]=="turn/completed" && (thread.is_none() || thread==v["params"]["threadId"].as_str() && turn.is_some_and(|t|v["params"]["turn"]["id"].as_str()==Some(t))) {
                 match v["params"]["turn"]["status"].as_str() {Some("completed")=>Some("ok"),Some("failed")=>Some("failed"),Some("interrupted")=>Some("cancelled"),_=>None}
-            } else if ends(&v) {Some(Report::read(client,&v.to_string(),std::slice::from_ref(&v),None).outcome)} else {None};
+            } else if ends(&v) {
+                let outcome=Report::read(client,&v.to_string(),std::slice::from_ref(&v),None).outcome;
+                Some(match (self.start_limit,outcome) { (StartLimit::Reached(_),_)=>"refused",(StartLimit::Working,"refused")=>"failed",_=>outcome })
+            } else {None};
             if let Some(outcome)=terminal {out.push(Event::TurnEnd {outcome});}
             if out.len() == before { out.push(Event::Activity); }
         }
@@ -264,6 +272,35 @@ fn notifications(text: &str, jobs: &mut BTreeMap<String,String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #258 A1: a limit after work is failure, while pre-work rejection remains a refusal across reads/recovery.
+    #[test]
+    fn log_terminal_keeps_prior_work_context() {
+        for (name, start, end) in [
+            ("codex",json!({"type":"item.started","item":{"id":"tool","type":"command_execution"}}),json!({"type":"turn.failed","error":{"message":"usage limit"}})),
+            ("antigravity",json!({"event":"step_update","step_update":{"step_type":"tool"}}),json!({"event":"result","result":{"status":"ERROR","error":"quota exceeded"}})),
+            ("antigravity",json!({"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command"}]}),json!({"type":"PLANNER_RESPONSE","status":"ERROR","content":"quota exceeded"})),
+        ] {
+            let runtime=adapter::runtime(name).unwrap();
+            for (rows, expected) in [(vec![end.clone()],"refused"),(vec![start.clone(),end.clone()],"failed")] {
+                let log=rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+                assert_eq!(runtime.classify(&log).outcome,expected);
+                assert!(matches!(runtime.log_events(&log).last(),Some(Event::TurnEnd{outcome}) if *outcome==expected),"{name}: {log}");
+            }
+            let client=Client::parse(name).unwrap();
+            let mut cursor=Cursor::default();cursor.read(client,vec![start]);
+            let mut old=serde_json::to_value(&Cursor::default()).unwrap();old.as_object_mut().unwrap().remove("start_limit");
+            let _:Cursor=serde_json::from_value(old).unwrap();
+            let mut recovered:Cursor=serde_json::from_value(serde_json::to_value(&cursor).unwrap()).unwrap();
+            for c in [&mut cursor,&mut recovered] {
+                assert!(matches!(c.read(client,vec![end.clone()]).last(),Some(Event::TurnEnd{outcome:"failed"})));
+            }
+        }
+        let runtime=adapter::runtime("claude").unwrap();
+        let log=format!("{}\n{}",json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}),json!({"type":"result","is_error":true}));
+        assert_eq!(runtime.classify(&log).outcome,"refused");
+        assert!(matches!(runtime.log_events(&log).last(),Some(Event::TurnEnd{outcome:"refused"})));
+    }
+
     // #258 A1/M12.9: callers can read all attempt transports without constructing a Run.
     #[test]
     fn public_log_events_keep_timeout_order_and_terminal_evidence() {
