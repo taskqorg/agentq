@@ -178,6 +178,16 @@ pub fn request(request:&str)->Res<Value> {
     if v["action"]=="list" {return serde_json::to_value(rt.history_sessions(home)?).map_err(|e|e.to_string());}
     let session=v["session"].as_str().ok_or("history session required")?;
     let mut reader=rt.history(session,home,path("source")?,v.get("checkpoint").filter(|v|!v.is_null()))?;
+    if v["action"]=="media" || v["action"]=="media_bytes" {
+        let media=reader.media()?;
+        if v["action"]=="media_bytes" {
+            let key=v["key"].as_str().ok_or("media key required")?;
+            let start=v["start"].as_u64().ok_or("media start required")?;
+            let length=v["length"].as_u64().ok_or("media length required")?;
+            return Ok(json!({"bytes":media.read(key,start,length)?,"checkpoint":reader.checkpoint()}));
+        }
+        return Ok(json!({"media":media.items,"steps":media.steps(),"checkpoint":reader.checkpoint()}));
+    }
     if v["action"]=="live" {
         return serde_json::to_value(reader.live_data(path("statusline")?)?).map_err(|e|e.to_string());
     }

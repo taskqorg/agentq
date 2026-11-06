@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StepKind { Message, Thinking, Shell, FileChange, Tool, Mcp, Web, Subagent, Image, Question, Approval, Compaction, Usage, Context, Windows, Plan, Todo, FileRollup, Hook, ReadTruncation, Diagnostics, Queue, Link, Metadata, Stop, Unknown }
+pub enum StepKind { Message, Thinking, Shell, FileChange, Tool, Mcp, Web, Subagent, Image, Media, Question, Approval, Compaction, Usage, Context, Windows, Plan, Todo, FileRollup, Hook, ReadTruncation, Diagnostics, Queue, Link, Metadata, Stop, Unknown }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn { pub id: Option<String>, pub native_id:Option<String>, pub session: String, pub unknown: Option<String> }
@@ -305,6 +305,7 @@ pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
                 "text"|"Text"|"input_text"|"output_text" => StepKind::Message,
                 "thinking"|"redacted_thinking"|"reasoning" => StepKind::Thinking,
                 "image"|"Image"|"input_image"|"image_url"|"local_image"|"LocalImage" => StepKind::Image,
+                "document"|"audio"|"video"=>StepKind::Media,
                 "server_tool_use"=>StepKind::Web,
                 "tool_search_tool_result"=>StepKind::Tool,
                 "tool_use" => tool_kind(block["name"].as_str().unwrap_or_default()),

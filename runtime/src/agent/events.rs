@@ -21,6 +21,8 @@ pub enum Event {
     Unsupported { reason: &'static str },
     Quota(Vec<Window>),
     Context { used: Option<u64>, window: Option<u64> },
+    /// Native image evidence is local content; never telemetry or completion authority.
+    Image { item:Option<String>, generated:bool, saved_path:Option<String>, native:Value },
     Activity,
     Stalled { idle_ms:u64 },
 }
@@ -587,7 +589,7 @@ mod tests {
                         Event::Unsupported{reason}=>self.error=Some(reason),
                         Event::Message{..}|Event::Progress=>self.done(at),
                         Event::TurnEnd{..}=>{self.tools.clear();self.error=None;self.done(at);}
-                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Activity|Event::Stalled{..}=>{}
+                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Image{..}|Event::Activity|Event::Stalled{..}=>{}
                     }
                 }
             }
@@ -791,7 +793,9 @@ mod tests {
         }
         for kind in ["commandExecution", "command_execution", "mcpToolCall", "mcp_tool_call", "webSearch", "web_search", "fileChange", "file_change", "dynamicToolCall", "dynamic_tool_call", "collabAgentToolCall", "collab_tool_call", "imageView", "image_view", "imageGeneration", "image_generation"] {
             let events=Cursor::default().read(Client::Codex, vec![json!({"method":"item/started","params":{"item":{"type":kind,"id":"tool"}}}),json!({"method":"item/completed","params":{"item":{"type":kind,"id":"tool","status":"completed"}}})]);
-            assert!(matches!(&events[..], [Event::ToolStart{..}, Event::ToolEnd{..}]), "{kind}: {events:?}");
+            if kind.starts_with("image") {
+                assert!(matches!(&events[..], [Event::ToolStart{..}, Event::Image{..}, Event::ToolEnd{..}]), "{kind}: {events:?}");
+            }else{assert!(matches!(&events[..], [Event::ToolStart{..}, Event::ToolEnd{..}]), "{kind}: {events:?}");}
         }
     }
 
