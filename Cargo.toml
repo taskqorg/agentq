@@ -9,7 +9,7 @@ name = "agentq"
 path = "agentq/main.rs"
 
 [dependencies]
-coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.21.0" }
+coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.0" }
 agentq-runtime = { path = "runtime" }
 serde_json = { version = "1", features = ["preserve_order"] }
 ring = "0.17"

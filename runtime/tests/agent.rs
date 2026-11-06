@@ -59,6 +59,8 @@ fn main() {
         ("settings_env_off_precedes_state_read", settings_env_off_precedes_state_read),
         ("settings_env_keeps_inherited_launch_markers", settings_env_keeps_inherited_launch_markers),
         ("launcher_output_is_handed_over_once", launcher_output_is_handed_over_once),
+        ("caller_context_reaches_records_and_children", caller_context_reaches_records_and_children),
+        ("agent_turn_command_inherits_its_caller_from_the_environment", agent_turn_command_inherits_its_caller_from_the_environment),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
@@ -233,7 +235,7 @@ fn fake(client: &str) {
     std::io::stdin().read_to_string(&mut input).unwrap();
     if client == "antigravity" { input = serde_json::from_str::<Value>(&input).unwrap()["message"]["content"].as_str().unwrap().to_string(); }
     if std::env::var("COREQ_FAKE_CONTROL").is_ok() && args.first().is_some_and(|a| matches!(a.as_str(), "agents" | "stop" | "queue")) {
-        let record=json!({"args":args,"home":std::env::var(if client=="claude" {"CLAUDE_CONFIG_DIR"} else {"CODEX_HOME"}).ok()});
+        let record=json!({"args":args,"home":std::env::var(if client=="claude" {"CLAUDE_CONFIG_DIR"} else {"CODEX_HOME"}).ok(),"trace_context":std::env::var("COREQ_TRACE_CONTEXT").ok()});
         std::fs::write("native-control.json",record.to_string()).unwrap();
         // Claude's `--cwd` filter lists nothing for roots under `.claude/worktrees` (#222).
         let missed=std::env::var_os("FAKE_CWD_FILTER_EMPTY").is_some() && args.iter().any(|a|a=="--cwd");
@@ -280,7 +282,7 @@ fn fake(client: &str) {
     let record = json!({"args": args, "input": input, "home": std::env::var(home_var).ok(),
         "inherited": std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() || std::env::var("CODEX_THREAD_ID").is_ok() || std::env::var("ANTIGRAVITY_CONVERSATION_ID").is_ok(),
         "extra": std::env::var("FAKE_EXTRA").ok(),
-        "optimization": std::env::var("AGENTQ_OPTIMIZATION").ok(), "launcher": std::env::var("AGENTQ_LAUNCHER").ok()});
+        "optimization": std::env::var("AGENTQ_OPTIMIZATION").ok(), "launcher": std::env::var("AGENTQ_LAUNCHER").ok(), "trace_context": std::env::var("COREQ_TRACE_CONTEXT").ok()});
     std::fs::write(format!("fake-turn-{turn}.json"), record.to_string()).unwrap();
     // A gated turn runs until the test creates the gate file, so the caller can checkpoint and recover it mid-turn.
     if let Ok(gate) = std::env::var("COREQ_FAKE_GATE") { while !Path::new(&gate).exists() { std::thread::sleep(Duration::from_millis(20)); } }
@@ -314,7 +316,7 @@ fn fake_app_server() {
     use std::io::BufRead;
     let args:Vec<_>=std::env::args().skip(1).collect();
     assert_eq!(args[0],"app-server");
-    std::fs::write("app-transport.json",json!({"home":std::env::var("CODEX_HOME").ok(),"inherited":std::env::var("CODEX_THREAD_ID").is_ok(),"args":args}).to_string()).unwrap();
+    std::fs::write("app-transport.json",json!({"home":std::env::var("CODEX_HOME").ok(),"inherited":std::env::var("CODEX_THREAD_ID").is_ok(),"args":args,"trace_context":std::env::var("COREQ_TRACE_CONTEXT").ok()}).to_string()).unwrap();
     let mut turn=0;
     println!("fixture startup diagnostic");
     for line in std::io::stdin().lock().lines() {
@@ -1219,6 +1221,164 @@ fn json_turns_run_plain_without_the_optimizer() {
         assert!(agentq_runtime::cli::turn(&json!({"client": "other"}).to_string(), None).is_err());
     }
     assert!(!install.exists(), "a plain turn never creates the installation");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn agent_rows(store: &coreq::telemetry::Store) -> Vec<Value> {
+    records(store).into_iter().filter(|o| o["kind"] == "agent.turn" || o["kind"] == "agent.call").collect()
+}
+
+/// The caller fields a child received, or None when it received no context.
+fn child_fields(seen: &Value) -> Option<Value> {
+    let text = seen["trace_context"].as_str()?;
+    coreq::telemetry::capture::TraceContext::decode(text).expect("a child gets a valid context");
+    Some(serde_json::from_str::<Value>(text.strip_prefix("2 ")?).unwrap()[2].clone())
+}
+
+fn one_claude_turn(root: &Path, ctx: &Context, store: &coreq::telemetry::Store) -> Value {
+    std::fs::create_dir_all(root).unwrap();
+    let claude = agent::runtime("claude").unwrap();
+    let mut l = fake_launch("claude", root, "brief", &[]);
+    l.policy.approval = agent::Approval::Auto;
+    let mut run = claude.launch(&l).unwrap();
+    finish(claude, &mut run);
+    run.record(ctx, store).unwrap().recorded.unwrap();
+    record(root, 1)
+}
+
+// Chain: agentq.md M12.13, RUNTIME.md § Observation, CoreQ R55 (#260 A2, A3). Risk: a nested record or a runtime child loses
+// a caller field, a missing value reads as known, an explicit Context is overwritten, or a stale or unrelated caller lends
+// its context. The consumer's own CoreQ `Store` type reaches `Run::record` (A1).
+fn caller_context_reaches_records_and_children() {
+    use coreq::telemetry::{Store, capture::Capture};
+    use tracing_subscriber::prelude::*;
+    let root = scratch("caller-context");
+    let store = std::sync::Arc::new(Store::open(&root.join("telemetry.db")).unwrap());
+    let capture = Capture::new(store.clone(), "fixtureq", "1").unwrap();
+    let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(capture.clone()));
+    let bare = Context { product: "fixtureq", version: "1.0.0", project: "other", task: None, route: None, account: "default" };
+    let caller = json!({"project": "fixture/project", "task": 2428, "attempt": 6678267388_u64, "actor": "worker", "entry": 77});
+    let new_rows = |seen: &mut usize| { let rows = agent_rows(&store); let new = rows[*seen..].to_vec(); *seen = rows.len(); new };
+    let mut seen = 0;
+    let check = |rows: &[Value], want: &Value, what: &str| {
+        assert!(rows.iter().any(|o| o["kind"] == "agent.turn") && rows.iter().any(|o| o["kind"] == "agent.call"), "{what}: {rows:?}");
+        for row in rows {
+            for key in ["project", "task", "attempt", "actor", "entry"] {
+                assert_eq!(row[key], want[key], "{what}: {key} of {row}");
+                assert!(row["unknown"].get(key).is_none(), "{what}: a known {key} has no reason: {row}");
+            }
+            assert!(!row.to_string().contains("secret"), "{what}: only the five fields pass: {row}");
+        }
+    };
+
+    tracing::dispatcher::with_default(&dispatch, || {
+        let _caller = tracing::info_span!("caller", project = "fixture/project", task = 2428_u64, attempt = 6678267388_u64, actor = "worker", entry = 77_u64, private = "secret").entered();
+        let _nested = tracing::info_span!("nested").entered();
+        // A CLI turn: its records and its child.
+        let child = one_claude_turn(&root.join("cli"), &bare, &store);
+        assert_eq!(child_fields(&child), Some(caller.clone()), "CLI child");
+        check(&new_rows(&mut seen), &caller, "nested CLI turn");
+        // An app-server session: its record and its child.
+        let dir = root.join("app");
+        std::fs::create_dir_all(&dir).unwrap();
+        let codex = agent::runtime("codex").unwrap();
+        let mut l = fake_launch("codex", &dir, "request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref())]);
+        l.deltas = true;
+        let mut run = codex.launch(&l).unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while codex.poll(&mut run).unwrap() == agent::State::Running { codex.progress(&mut run).unwrap(); assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(10)); }
+        run.record(&bare, &store).unwrap().recorded.unwrap();
+        let transport = serde_json::from_str::<Value>(&std::fs::read_to_string(dir.join("app-transport.json")).unwrap()).unwrap();
+        assert_eq!(child_fields(&transport), Some(caller.clone()), "app-server child");
+        let rows = new_rows(&mut seen);
+        let turn = rows.iter().find(|o| o["kind"] == "agent.turn").expect("app-server turn");
+        for key in ["project", "task", "attempt", "actor", "entry"] { assert_eq!(turn[key], caller[key], "app-server {key}"); }
+        // A bounded native exchange, through CoreQ process execution.
+        let dir = root.join("queue");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.jsonl");
+        append(&path, &[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":dir}})]);
+        let mut q = fake_launch("codex", &dir, "owned input reference", &[("COREQ_FAKE_CONTROL", "1".as_ref())]);
+        q.mode = agent::Mode::Queue { transcript: path };
+        codex.resume("native-thread", &q).unwrap();
+        assert_eq!(child_fields(&control(&dir)), Some(caller.clone()), "native exchange");
+        new_rows(&mut seen);
+        // An explicit Context wins; the caller still supplies what it does not state.
+        let explicit = Context { project: "owner/explicit", task: Some((9, 1)), ..bare.clone() };
+        one_claude_turn(&root.join("explicit"), &explicit, &store);
+        check(&new_rows(&mut seen), &json!({"project": "owner/explicit", "task": 9, "attempt": 1, "actor": "worker", "entry": 77}), "explicit Context");
+    });
+
+    // A partial caller: each missing value is null with its reason, never another caller's value.
+    tracing::dispatcher::with_default(&dispatch, || {
+        let _partial = tracing::info_span!("partial", task = 7_u64).entered();
+        let child = one_claude_turn(&root.join("partial"), &bare, &store);
+        assert_eq!(child_fields(&child), Some(json!({"task": 7})), "partial caller child");
+        for row in new_rows(&mut seen) {
+            assert_eq!((row["project"].as_str(), row["task"].as_u64()), (Some("other"), Some(7)), "{row}");
+            assert!(row["attempt"].is_null() && row["unknown"]["attempt"] == "no-attempt", "{row}");
+            assert!(row["actor"].is_null() && row["unknown"]["actor"] == "not-collected", "{row}");
+            assert!(row["entry"].is_null() && row["unknown"]["entry"] == "not-collected", "{row}");
+        }
+    });
+
+    // No caller: a stale inherited value goes, and records keep their existing nulls and reasons.
+    // SAFETY: this harness runs its tests one at a time on the main thread.
+    unsafe { std::env::set_var("COREQ_TRACE_CONTEXT", "1 00000000000000000000000000000001.1 00000000000000000000000000000001.2"); }
+    let child = one_claude_turn(&root.join("none"), &bare, &store);
+    unsafe { std::env::remove_var("COREQ_TRACE_CONTEXT"); }
+    assert!(child["trace_context"].is_null(), "a stale context never reaches a child: {child}");
+    let rows = new_rows(&mut seen);
+    assert!(rows.iter().any(|o| o["kind"] == "agent.turn") && rows.iter().any(|o| o["kind"] == "agent.call"));
+    for row in rows {
+        assert_eq!(row["project"], "other", "{row}");
+        for (key, why) in [("task", "no-task"), ("attempt", "no-task"), ("actor", "not-collected"), ("entry", "not-collected")] {
+            assert!(row[key].is_null() && row["unknown"][key] == why, "{key}: {row}");
+        }
+        assert!(row["input_tokens"].is_u64() || row["unknown"]["input_tokens"].is_string(), "unknown tokens keep their reason: {row}");
+        assert_eq!(row["unknown"]["trace"], "not-traced", "{row}");
+    }
+    capture.finish().unwrap();
+    drop(capture); drop(dispatch); drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// Chain: M12.13, RUNTIME.md § Observation (#260 A2). Risk: `agentq agent turn` has no collector, so its records lose the
+// caller and CoreQ removes the context before its child starts; an invalid value must not change the turn.
+fn agent_turn_command_inherits_its_caller_from_the_environment() {
+    let root = scratch("json-caller");
+    let exe = std::env::current_exe().unwrap();
+    let trace = "00000000000000000000000000000001.1";
+    let caller = json!({"project": "fixture/project", "task": 2428, "attempt": 3, "actor": "worker", "entry": 77});
+    let valid = format!("2 {}", json!([trace, trace, caller]));
+    for (name, context) in [("valid", valid.as_str()), ("invalid", "2 not-a-context")] {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let request = json!({"client": "claude", "root": dir, "log": dir.join("turns.log"), "input": "brief", "timeout_s": 30,
+            "command": [exe], "env": {"COREQ_FAKE_AGENT": "claude"}, "home": dir.join("home"), "store": dir.join("telemetry.db"),
+            "context": {"product": "fixtureq", "version": "1.0.0", "route": "manager", "account": "default"}});
+        // SAFETY: this harness runs its tests one at a time on the main thread.
+        unsafe { std::env::set_var("COREQ_TRACE_CONTEXT", context); }
+        let report = agentq_runtime::cli::turn(&request.to_string(), Some(&dir.join("no-install")));
+        unsafe { std::env::remove_var("COREQ_TRACE_CONTEXT"); }
+        let report = report.unwrap();
+        assert_eq!((report["outcome"].as_str(), report["recorded"].as_str()), (Some("ok"), Some("ok")), "{name}: {report}");
+        let store = coreq::telemetry::Store::open(&dir.join("telemetry.db")).unwrap();
+        let rows = agent_rows(&store);
+        assert!(rows.iter().any(|o| o["kind"] == "agent.turn") && rows.iter().any(|o| o["kind"] == "agent.call"), "{name}");
+        let seen = record(&dir, 1);
+        if name == "valid" {
+            assert_eq!(seen["trace_context"].as_str(), Some(valid.as_str()), "the child continues the caller");
+            for row in &rows { for key in ["project", "task", "attempt", "actor", "entry"] { assert_eq!(row[key], caller[key], "{key}: {row}"); } }
+        } else {
+            assert!(seen["trace_context"].is_null(), "an invalid context never reaches the child: {seen}");
+            for row in &rows {
+                assert_eq!(row["project"], "other", "{row}");
+                assert!(row["actor"].is_null() && row["unknown"]["actor"] == "not-collected", "{row}");
+            }
+        }
+        drop(store);
+    }
     let _ = std::fs::remove_dir_all(root);
 }
 

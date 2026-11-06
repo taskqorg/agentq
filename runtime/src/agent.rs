@@ -21,6 +21,7 @@ mod limits;
 pub use events::{Event, Model, ToolKind};
 pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
+pub(crate) use capture::with_environment_caller;
 pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
@@ -553,7 +554,7 @@ impl Turn {
             base = command(base, spec);
             AntigravityTranscript::default()
         };
-        crate::telemetry::capture::inherit_context(&mut base);
+        capture::inherit_caller(&mut base);
         let started = Instant::now();
         let started_ms = unix_ms();
         base.stdin(Stdio::piped()).stdout(if native_agentapi {Stdio::piped()} else {Stdio::from(out)}).stderr(err);
@@ -1139,7 +1140,8 @@ impl Report {
             json!(v)
         };
         let why = self.usage.unknown.unwrap_or("not-reported");
-        let (task, attempt) = ctx.task.map_or((None, None), |(t, a)| (Some(t), Some(a)));
+        let who = capture::Attribution::of(ctx);
+        let (task, attempt) = (who.task, who.attempt);
         let limit_why = self.limit.unknown.unwrap_or("not-reported");
         // A signalled child has no code; a Windows code reads as its unsigned DWORD.
         let exit = self.exit.and_then(|c| if cfg!(windows) { Some(u64::from(c as u32)) } else { u64::try_from(c).ok() });
@@ -1148,8 +1150,8 @@ impl Report {
         let mut v = json!({
             "product": ctx.product, "version": ctx.version, "operation": "agent.turn", "kind": "agent.turn",
             "trace": null, "span": null, "started_ms": self.started_ms.max(0), "duration_us": self.duration_us,
-            "outcome": self.outcome, "error": self.error, "project": ctx.project, "runtime": runtime, "account": ctx.account,
-            "task": num("task", task, "no-task"), "attempt": num("attempt", attempt, "no-task"),
+            "outcome": self.outcome, "error": self.error, "project": who.project, "runtime": runtime, "account": ctx.account,
+            "task": num("task", task, "no-task"), "attempt": num("attempt", attempt, who.no_attempt()),
             "input_tokens": num("input_tokens", self.usage.input, why), "cache_read_tokens": num("cache_read_tokens", self.usage.cache_read, why),
             "cache_write_tokens": num("cache_write_tokens", self.usage.cache_write, why), "output_tokens": num("output_tokens", self.usage.output, why),
             "reasoning_tokens": num("reasoning_tokens", self.usage.reasoning, why),
@@ -1171,6 +1173,7 @@ impl Report {
         text(&mut v, &mut unknown, "limit_window", self.limit.window.as_deref(), limit_why);
         text(&mut v, &mut unknown, "session_id", capture::session_code(self.session.as_deref()), "session-unknown");
         text(&mut v, &mut unknown, "host", capture::host().as_deref(), "not-reported");
+        who.caller_fields(&mut v);
         v["unknown"] = Value::Object(unknown);
         v
     }

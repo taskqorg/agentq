@@ -1,11 +1,13 @@
 //! `agent.turn` and `agent.call` capture (agentq.md M12.13, M12.14; docs/spec/RUNTIME.md § Observation).
 use super::{Client, Context, Report, Res, model_code, read_calls, sum_usage};
-use crate::telemetry::{Event, Store, shared};
+use crate::telemetry::{Event, Store, capture::TraceContext, shared};
 use serde_json::{Map, Value, json};
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 const SAMPLE: Duration = Duration::from_secs(1);
+const TRACE_CONTEXT: &str = "COREQ_TRACE_CONTEXT";
 
 /// One model request read from native records; a value the client did not report is None.
 #[derive(Clone, Debug, PartialEq)]
@@ -247,18 +249,65 @@ pub(crate) fn rollout_calls(text: &str, last_turn: bool) -> Vec<Call> {
     read_calls(&events).0
 }
 
+thread_local! {
+    /// The caller of `agentq agent turn`, which runs no collector (`with_environment_caller`).
+    static COMMAND_CALLER: RefCell<Option<TraceContext>> = const { RefCell::new(None) };
+}
+
+/// Run one `agentq agent turn` with a valid `COREQ_TRACE_CONTEXT` as its caller. An invalid value stays unknown.
+pub(crate) fn with_environment_caller<T>(action: impl FnOnce() -> T) -> T {
+    let caller = std::env::var(TRACE_CONTEXT).ok().and_then(|text| TraceContext::decode(&text).ok());
+    COMMAND_CALLER.set(caller);
+    let out = action();
+    COMMAND_CALLER.set(None);
+    out
+}
+
+/// Give a turn's child the caller's context. CoreQ removes the value without a current span, so a command's caller is restored.
+pub(crate) fn inherit_caller(command: &mut std::process::Command) {
+    crate::telemetry::capture::inherit_context(command);
+    if TraceContext::current().is_none() && let Some(caller) = COMMAND_CALLER.with_borrow(Clone::clone) {
+        command.env(TRACE_CONTEXT, caller.encode());
+    }
+}
+
+/// The `project`, `task`, `attempt`, `actor` and `entry` of a record (agentq.md M12.13, CoreQ R55): explicit `Context`
+/// values first, then the caller's. `actor` and `entry` stay absent without a caller, so `shared` names their reason.
+pub(crate) struct Attribution { pub project: String, pub task: Option<u64>, pub attempt: Option<u64>, actor: Option<String>, entry: Option<u64> }
+
+impl Attribution {
+    pub(crate) fn of(ctx: &Context) -> Self {
+        // ponytail: `TraceContext` has no field accessor, so this reads its documented v2 encoding; use an accessor if CoreQ adds one.
+        let fields = TraceContext::current().or_else(|| COMMAND_CALLER.with_borrow(Clone::clone)).map(|c| c.encode())
+            .and_then(|text| serde_json::from_str::<(String, String, Map<String, Value>)>(text.strip_prefix("2 ")?).ok())
+            .map_or_else(Map::new, |(_, _, fields)| fields);
+        let number = |key: &str| fields.get(key).and_then(Value::as_u64);
+        let (task, attempt) = ctx.task.map_or_else(|| (number("task"), number("attempt")), |(t, a)| (Some(t), Some(a)));
+        let project = fields.get("project").and_then(Value::as_str).filter(|_| ctx.project == "other").unwrap_or(ctx.project).to_string();
+        Self { project, task, attempt, actor: fields.get("actor").and_then(Value::as_str).map(String::from), entry: number("entry") }
+    }
+    /// Why `attempt` is null.
+    pub(crate) fn no_attempt(&self) -> &'static str { if self.task.is_some() { "no-attempt" } else { "no-task" } }
+    /// Set a known `actor` and `entry` on a record.
+    pub(crate) fn caller_fields(&self, v: &mut Value) {
+        if let Some(actor) = &self.actor { v["actor"] = json!(actor); }
+        if let Some(entry) = self.entry { v["entry"] = json!(entry); }
+    }
+}
+
 fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str) -> Res<Event> {
     let mut unknown = Map::new();
     let mut num = |name: &str, v: Option<u64>, why: &str| -> Value {
         if v.is_none() { unknown.insert(name.into(), json!(why)); }
         json!(v)
     };
-    let (task, attempt) = ctx.task.map_or((None, None), |(t, a)| (Some(t), Some(a)));
+    let who = Attribution::of(ctx);
+    let (task, attempt) = (who.task, who.attempt);
     let mut v = json!({
         "product": ctx.product, "version": ctx.version, "operation": "agent.call", "kind": "agent.call",
         "trace": null, "span": null, "started_ms": num("started_ms", c.at_ms, "not-reported"), "duration_us": num("duration_us", None, "not-reported"),
-        "outcome": c.outcome, "error": c.error, "project": ctx.project, "runtime": runtime, "account": ctx.account,
-        "task": num("task", task, "no-task"), "attempt": num("attempt", attempt, "no-task"),
+        "outcome": c.outcome, "error": c.error, "project": who.project, "runtime": runtime, "account": ctx.account,
+        "task": num("task", task, "no-task"), "attempt": num("attempt", attempt, who.no_attempt()),
         "input_tokens": num("input_tokens", c.input, "not-reported"), "cache_read_tokens": num("cache_read_tokens", c.cache_read, "not-reported"),
         "cache_write_tokens": num("cache_write_tokens", c.cache_write, "not-reported"), "output_tokens": num("output_tokens", c.output, "not-reported"),
         "reasoning_tokens": num("reasoning_tokens", c.reasoning, "not-reported"),
@@ -274,6 +323,7 @@ fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx:
     text("session_id", session_code(session), "session-unknown");
     text("host", host().as_deref(), "not-reported");
     if c.aggregate { v["source"] = json!("turn-aggregate"); }
+    who.caller_fields(&mut v);
     v["unknown"] = Value::Object(unknown);
     let key = crate::sha256_hex(format!("{turn_key}\0{}", c.id.clone().unwrap_or_else(|| index.to_string())).as_bytes());
     Event::identified("agent.call", &key, shared(&v))
