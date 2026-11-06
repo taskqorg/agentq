@@ -229,3 +229,25 @@ fn protected_scope_stream_waits_for_idle_native_output() {
     writer.join().unwrap();fs::remove_dir_all(&root).unwrap();
     assert_eq!(copied.map_err(|e|e.raw_os_error()),Ok(6));assert_eq!(bytes,b"native");
 }
+
+// #266: a stderr copy holding the process stderr lock blocked the stdout failure log while native stderr stayed idle.
+// Risk: the retain-scope exit waits for native stderr to close, so a caller never sees the failure.
+#[cfg(target_os="macos")]
+#[test]
+fn protected_scope_stdout_failure_exits_while_native_stderr_is_idle() {
+    use std::{io::{BufReader,Write},os::unix::net::UnixStream,time::Duration};
+    struct Closed;
+    impl Write for Closed {
+        fn write(&mut self,_:&[u8])->std::io::Result<usize> {Err(std::io::ErrorKind::BrokenPipe.into())}
+        fn flush(&mut self)->std::io::Result<()> {Ok(())}
+    }
+    let (output,mut native_stdout)=UnixStream::pair().unwrap();
+    let (errors,native_stderr)=UnixStream::pair().unwrap();
+    let (done,finished)=std::sync::mpsc::channel();
+    std::thread::spawn(move||{let _=done.send(scope::forward(&mut BufReader::new(output),errors,&mut Closed));});
+    std::thread::sleep(Duration::from_millis(200)); // The stderr copy is reading before stdout fails.
+    native_stdout.write_all(b"native").unwrap();
+    let outcome=finished.recv_timeout(Duration::from_secs(2));
+    drop(native_stderr);
+    assert_eq!(outcome.map_err(|e|e.to_string()),Ok(Err("native stdout interrupted; retain scope".to_string())));
+}

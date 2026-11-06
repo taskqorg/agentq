@@ -51,6 +51,15 @@ pub(super) fn accept(listener:&UnixListener,until:Instant)->Res<UnixStream> {
         Err(_)=>return Err("scope connection unknown; never repeat dispatch".into()),
     }}
 }
+// The stdout failure log and every caller's stderr write must not wait for idle native stderr (#266).
+pub(super) fn forward(output:&mut BufReader<UnixStream>,errors:UnixStream,stdout:&mut impl Write)->Res<()> {
+    errors.set_read_timeout(None).map_err(|_|"scope stderr stream unavailable")?;
+    let stderr=std::thread::spawn(move||io::copy(&mut &errors,&mut io::stderr()));
+    output.get_ref().set_read_timeout(None).map_err(|_|"scope stdout stream unavailable")?;
+    io::copy(output,stdout).map_err(|e|{let _=writeln!(io::stderr(),"agentq: native stdout copy: {e}");"native stdout interrupted; retain scope"})?;
+    stderr.join().map_err(|_|"native stderr interrupted")?.map_err(|_|"native stderr delivery unknown")?;
+    Ok(())
+}
 fn launchctl(args:&[&str])->Res<String> {
     let out=coreq::process::output("protected.scope.launchctl",std::process::Command::new("/bin/launchctl").args(args).stdin(Stdio::null()),WAIT)
         .map_err(|e|{eprintln!("agentq: `/bin/launchctl {}`: {}",args.first().copied().unwrap_or("unknown"),e.class());"native job command unacknowledged; retain intent, never retry"})?;
@@ -106,11 +115,7 @@ pub(super) fn launch(install:&Path,home:&Path,r:&Request,key:&str)->Res<()> {
     output.get_mut().write_all(format!("{}\n",serde_json::to_string(r).map_err(|_|"request serialization failed")?).as_bytes()).map_err(|_|"scope input delivery unknown; never replay")?;
     let mut input=output.get_ref().try_clone().map_err(|_|"scope input unavailable")?;
     std::thread::spawn(move||{let _=io::copy(&mut io::stdin().lock(),&mut input);let _=input.shutdown(Shutdown::Write);});
-    errors.set_read_timeout(None).map_err(|_|"scope stderr stream unavailable")?;
-    let stderr=std::thread::spawn(move||io::copy(&mut &errors,&mut io::stderr().lock()));
-    output.get_ref().set_read_timeout(None).map_err(|_|"scope stdout stream unavailable")?;
-    io::copy(&mut output,&mut io::stdout().lock()).map_err(|e|{eprintln!("agentq: native stdout copy: {e}");"native stdout interrupted; retain scope"})?;
-    stderr.join().map_err(|_|"native stderr interrupted")?.map_err(|_|"native stderr delivery unknown")?;
+    forward(&mut output,errors,&mut io::stdout().lock())?;
     let ended=record(install,r,key)?;
     if ended["native_ok"]==true {Ok(())}else{Err("native stream ended without a successful root outcome; reconcile original scope".into())}
 }

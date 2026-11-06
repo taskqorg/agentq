@@ -22,6 +22,16 @@ The same state made the binding read and the input and stderr streams depend on 
 
 `scope::accept` clears `O_NONBLOCK` on the accepted stream before it sets the existing 5 s deadlines. The test passes after the fix.
 
+Review of the first candidate found a second defect in the error log that this task added. The stderr copy held the process stderr lock while native stderr stayed idle, so the stdout failure log waited for that lock and the retain-scope error did not return until native stderr closed. `protected_scope_stdout_failure_exits_while_native_stderr_is_idle` runs the frontend's own `scope::forward` with a closed stdout and an idle native stderr. On macOS 27.2 arm64, before this fix:
+
+```text
+assertion `left == right` failed
+  left: Err("timed out waiting on channel")
+ right: Ok(Err("native stdout interrupted; retain scope"))
+```
+
+The stderr copy now writes to `io::stderr()` and takes the lock per write. The log also uses `writeln!` and ignores its own write error, so a closed frontend stderr cannot panic the retained-scope exit. The test passes after the fix.
+
 No no-replay, fencing or retained-scope code or assertion changed: an interrupted copy still returns the same retained-scope error, and the `protected_` guards are unedited.
 
 ## Retained operation
