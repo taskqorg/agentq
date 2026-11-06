@@ -101,3 +101,17 @@ recovery with retirement, authoritative missing fields, and explicit-only/mixed
 native queue requests with foreign records and post-completion revisions.
 Full local suites and new paid/native turns were not run. Native Windows recovery
 and actual sidecar-server termination remain unproved.
+
+The second accounting review adds turn-scoped legacy identities and refuses
+retirement without positive same-turn association. Two-turn client upserts now
+converge with fresh history and live-data reads whether an explicit request arrives
+with its legacy snapshot or on the next recovered page. Native queue capture binds
+untagged legacy usage only to the verified accepted current task, including recovery,
+and rejects foreign thread/turn scope. Native Context callbacks now supply LiveData
+before any labelled input estimate, keeping a later missing measurement unknown.
+
+The branch incorporates main #327 without changing process/auth evidence: classified
+Report.reason and cost survive together, direct-process termination remains separate
+from numeric exit and stopped-turn meaning. Final focused proof: 25 accounting/scope/
+live/steps tests, two native queue tests, three #327 seam/cleanup/freeze regressions,
+offline selftest, pinned lint and diff check pass. No full local suite or paid turn.
