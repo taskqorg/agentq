@@ -8,6 +8,10 @@ on:
   merge_group:
 permissions:
   contents: read
+# A new push to a pull request replaces its older run.
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   contract:
     runs-on: ubuntu-latest
@@ -25,17 +29,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    # macOS runs on the self-hosted Apple-silicon runner except for fork pull requests; the matrix value keeps the required check name.
-    runs-on: ${{ matrix.os == 'macos-latest' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "macOS", "ARM64", "taskq-mac"]') || matrix.os }}
+    # GitHub-hosted runners are free for this public repository and run in parallel; the host Mac also runs the agents.
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
       AGENTQ_SELFTEST_OFFLINE: '1'
     steps:
       - uses: actions/checkout@v6
       - run: rustup default stable
-      # Only main pushes save the cache; the self-hosted runner keeps its own target directory.
+      # Only main pushes save the cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: runner.environment == 'github-hosted'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: python tests/hermes_adapter.py
