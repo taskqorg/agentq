@@ -16,11 +16,6 @@ jobs:
             local: '["self-hosted", "macOS", "ARM64", "taskq-mac"]'
             triple: aarch64-apple-darwin
             target: macos-aarch64
-          # No local Intel Mac or Linux arm64 host.
-          - hosted: '"macos-15-intel"'
-            local: '"macos-15-intel"'
-            triple: x86_64-apple-darwin
-            target: macos-x86_64
           - hosted: '"windows-latest"'
             local: '["self-hosted", "Windows", "X64", "agentq-win"]'
             triple: x86_64-pc-windows-msvc
@@ -30,10 +25,6 @@ jobs:
             local: '["self-hosted", "Linux", "X64", "agentq-wsl"]'
             triple: x86_64-unknown-linux-musl
             target: linux-x86_64
-          - hosted: '"ubuntu-24.04-arm"'
-            local: '"ubuntu-24.04-arm"'
-            triple: aarch64-unknown-linux-musl
-            target: linux-aarch64
     # A release builds on our hosts; pull requests, forks included, stay on disposable GitHub runners.
     runs-on: ${{ fromJSON(github.event_name == 'push' && matrix.local || matrix.hosted) }}
     # The Windows host keeps its default PowerShell execution policy, which refuses the runner's script files.
