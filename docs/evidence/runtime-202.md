@@ -1,5 +1,7 @@
 # Worker capabilities and history: task 202
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../spec/OPTIMIZATION-RETIRED.md).
+
 [Owner requirement and acceptance](https://github.com/taskqorg/agentq/issues/202):
 “Owner requires spec-driven Codex/Claude/Antigravity parity, especially missing Antigravity transcripts. One reusable contract and normalized observation API for TaskQ.”
 

@@ -1,6 +1,6 @@
 # Minimal product acceptance
 
-Status: target gate for [PRODUCT revision 5](PRODUCT.md). Test observable outcomes through real interfaces. A scenario may cover several requirements and use a small data table; do not write a test per function.
+Status: target gate for [PRODUCT revision 6](PRODUCT.md). Test observable outcomes through real interfaces. A scenario may cover several requirements and use a small data table; do not write a test per function.
 
 ## Core scenarios
 
@@ -24,7 +24,7 @@ Isolated fixtures cover a legacy routed Codex config becoming the exact direct s
 
 Real Codex resume uses a copied existing saved-provider session in an isolated temporary profile with unchanged authentication mode and native model/permissions. [Retirement evidence](../evidence/279-retirement.md) records the actual result and limits; it does not authorize deployment to working profiles.
 
-Compression acceptance, installed compression checks, old accounting qualification and paired optimizer benchmarks are retired with [the decision](OPTIMIZATION-RETIRED.md). Retained historical stats remain readable; no deleted checker is a current acceptance gate. Return requires a paired test with real token savings and no quality loss. Export profiling continues independently; empty/corrupt inputs remain unknown.
+Compression acceptance, installed compression checks, old accounting qualification and paired optimizer benchmarks are retired with [the decision](OPTIMIZATION-RETIRED.md). Retained historical stats remain readable; no deleted checker is a current acceptance gate. The sole return condition stays in that decision. Export profiling continues independently; empty/corrupt inputs remain unknown.
 
 ## Resource sample qualification
 
@@ -78,9 +78,11 @@ Hermes onboarding ships the §4 `agentq` transform plugin through the existing o
 
 ## Shared worker runtime
 
-PRODUCT R13 and agentq.md M12.1–M12.7: `cargo test --locked -p agentq-runtime` runs deterministic Claude/Codex clients on each CI platform. It retains CLI/background/app/app-server, Remote Control, input/terminal recovery, dynamic tools, private drafts, catalogue, account/policy and idempotent attributable usage protection from CoreQ v0.18.0. JSON turns need no optimizer installation; launch intent and host-disable tests preserve native output and prior replay bytes. The external consumer in `examples/runtime-consumer` builds from a published immutable runtime revision and runs both fake clients. These checks do not qualify a consumer's native installation or UI; adoption and rollback remain [consumer-owned](RUNTIME.md#adoption-and-rollback).
+PRODUCT R13 and agentq.md M12.1–M12.7: `cargo test --locked -p agentq-runtime` runs deterministic Claude/Codex clients on each CI platform. It retains CLI/background/app/app-server, Remote Control, input/terminal recovery, dynamic tools, private drafts, catalogue, account/policy and idempotent attributable usage protection from CoreQ v0.18.0. JSON turns need no onboarding or service; compatibility-intent checks verify the retired no-op without provider or environment overrides. The external consumer in `examples/runtime-consumer` builds from a published immutable runtime revision and runs both fake clients. These checks do not qualify a consumer's native installation or UI; adoption and rollback remain [consumer-owned](RUNTIME.md#adoption-and-rollback).
 
 ## Antigravity and worker benchmark candidate
+
+Historical qualification at the cited revisions, including the corrections below. Optimization, wrapping hooks, the benchmark viewer and installed-compression checks are retired; they are not current acceptance gates. Current decision: [optimization retirement](OPTIMIZATION-RETIRED.md).
 
 PRODUCT R13, agentq.md § 12: regression checks cover native hook `toolCall.args`, permission delegation, start/resume arguments, transcript boundaries and partial records, terminal tool-call handling, usage deduplication, missing counters, limits and configuration attachment. Benchmark smoke histories are protocol checks only. Native Antigravity cancellation, account isolation, usage semantics and installed compression remain unqualified until observed with the caller's native environment. The HTML viewer requires visual inspection at desktop and narrow widths; fixture scores do not qualify native quality or savings.
 

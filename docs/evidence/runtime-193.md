@@ -1,5 +1,7 @@
 # Protected receipt wire compatibility: task 193
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../spec/OPTIMIZATION-RETIRED.md).
+
 [Task #193](https://github.com/taskqorg/agentq/issues/193) requires consuming the published host authority receipt without weakening verification. This corrects the M12.8 wire lookup; the optional adapter, existing protected API and CoreQ-only runtime dependencies remain unchanged (M12.2–M12.3). Native composed/image qualification stays Open under A4.
 
 ## Producer and defect

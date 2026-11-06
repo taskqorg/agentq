@@ -1,9 +1,9 @@
 # agentq contract
 
-agentq installs and observes native agents on one host, and owns the reusable worker runtime that other products launch turns through (§ 12). It is one static binary and one runtime library on [coreq](https://github.com/taskqorg/coreq) with no server, relay or dashboard of its own.
+AgentQ is the single worker layer for native agents: prepare, launch, resume, observe, control, history and archive (§12). Products keep admission, grants, scheduling and UI. It ships one static binary and one runtime library on [coreq](https://github.com/taskqorg/coreq), with optional host recording and no server, relay or dashboard of its own.
 This file holds every agentq decision; its linked detail files hold binding detail.
 
-It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 5; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
+It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 6; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
 
 ## Principles
 - **P1 Never break the agent.** Any agentq failure keeps the original tool output and the client's own login, model, approvals and sandbox.
@@ -78,7 +78,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - That direct definition is not an attached optimization. The compatibility block is never replaced with loopback routing; later edits remain conflicts. It stays after uninstall, and previously detached installations can be repaired with it when the name is absent.
 - While a host disable is pending, the service runs only required transport and recovery: export, automatic update activation and remote configuration application are suspended. The enrolled DashQ snapshot keeps its 60 s cadence with lifecycle `pending_disable` (§ 5), so DashQ can name the host disabled.
 - Resume is never repaired by rewriting conversation history, provider IDs in stored chats, authentication, model, approvals or sandbox. Native login, model, approvals, sandbox and foreign telemetry settings are outside disable and enable.
-- Native qualification is reported per client and platform; code checks alone do not qualify working profiles. Rollout to the existing Mac, Windows and FRA installations is authorized for release 0.8.0 only, with the Desktop and reboot gaps recorded in the integration-control plan; those paths stay unqualified and this is not a stable-platform claim.
+- Native qualification is per client and platform; code checks alone do not qualify working profiles. Earlier rollout records in the historical control plan apply only to their cited releases; unrun Desktop and reboot checks remain unknown.
 - Under disable, foreign entries and later edits remain and conflicts are explicit; shared roots and registrations switch together. Lifecycle state, transitions, locks, service handling, status and revisions: [INTEGRATION-CONTROL.md](docs/spec/INTEGRATION-CONTROL.md).
 ### Namespace
 - **M4.10** The retained Codex provider and Hermes record plugin are named `agentq`. No MCP server or old namespace alias is registered. Saved chats retain their provider ID and resume through the exact direct definition; histories stay intact.
@@ -133,8 +133,8 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 
 ## 8. State
 - **M8.1** State other than local telemetry stays plain files with atomic rename and one lifecycle lock. Interrupted transactions resume or roll back from the journal on next start.
-- `<install>/data/`: `owned.json` (journal), `config.json` (incident opt-out, mode and `profile`; legacy optimizer keys stay unused), `installation`, `resource-key`, `langfuse` (fallback), `originals/`, `runs/`, `provider/`, `model/`, `sessions/` (M6.9), `observations.sqlite3` and `observe/` (M6.11), `queue/` (with `state.json`: last delivery/error/dropped), `incidents/`.
-- Older `stats/`, `traces/` and `name-migration.json` files stay unread until `uninstall` removes `data/`.
+- `<install>/data/`: `owned.json` (journal), `config.json` (incident opt-out and `profile`; legacy optimizer keys stay unused), `installation`, `resource-key`, `langfuse` (fallback), `model/`, `sessions/` (M6.9), `observations.sqlite3` and `observe/` (M6.11), `queue/` (with `state.json`: last delivery/error/dropped), `incidents/`.
+- Legacy `originals/`, `runs/`, `provider/`, `stats/`, `traces/` and `name-migration.json` stay retained and unused until `uninstall` removes `data/`.
 - Local telemetry uses `telemetry.sqlite3` (SQLite/WAL, FULL, 2 s busy timeout, 64 MiB including sidecars); stats/traces retain 7 days, exports 256 samples per operation. Preserve event IDs, atomic coverage and optional export. Events persist locally before optional delivery; historical stats rows stay readable.
 - `telemetry export` emits versioned metadata-only JSONL with errors and unknown completeness.
 - Dashboard duties (fleet view, versions, last seen, health, usage, incidents, access control) belong to dashq, which reads optional Langfuse events and authenticated snapshots under the connection contract. agentq ships no panel and no dashboard JSON.
@@ -148,11 +148,13 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M10.1** agentq does not detect, name or remove the retired Node package `@alexkirs/agent-context`, its `~/.agent-context` folder or the retired namespace. Files left there stay untouched.
 
 ## 11. PRODUCT.md map
-- R1/R5/R7: installation, record-hook onboarding, ownership and removal (§§ 1/4/5/9).
-- R2/R3: retired retrieval and optimization (§§ 2/3); R4: native work and exact Codex provider compatibility (§ 4).
-- R6/R8/R9/R10: transactional releases, local state, honest recording and DashQ projection (§§ 5/6/8).
-- R11/R12: static binary, runtime library and spec-first work (Principles).
-- R13/R14: reusable runtime, compatible no-op optimization intent and preflight (§ 12).
+- R1/R5/R7: optional host installation, record hooks, ownership and removal (§§1/4/5/9).
+- R2/R3: explicitly retired retrieval and optimization (§§2/3); the linked retirement decision owns the parked note.
+- R4: preserve native work, saved-chat provider compatibility and authority (§§4/12).
+- R6/R8/R9/R10: transactional updates, local lifecycle state, attributable call/turn observations, honest unknowns and optional DashQ projection (§§5/6/8/9/12).
+- R11/R12: static binary, reusable library, shared primitives and spec-first changes (Principles).
+- R13: one worker layer, per-runtime registry, policy, recovery, control and history (§12); history/archive ownership follows [specq agent runtimes](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md#step-history-and-archive).
+- R14: ordered worker preflight and owned repairs (§12); native qualification remains separate.
 
 ## 12. Agent runtime
 - **M12.1** `agentq-runtime` (folder `runtime/`, Rust library `agentq_runtime`) starts, resumes, cancels and observes Codex CLI, Claude Code and Antigravity (`antigravity`) turns: CLI and `agentapi` turns, Claude background jobs, Codex app and app-server sessions, Remote Control, session recovery, dynamic tools, private drafts, the model catalogue and account selection.
@@ -197,7 +199,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 ## Linked detail
 - [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): product outcomes R1–R14.
 - [docs/spec/VERIFICATION.md](docs/spec/VERIFICATION.md): minimal product acceptance and live check records.
-- [docs/spec/ACCOUNTING.md](docs/spec/ACCOUNTING.md): historical optimization result definitions O1–O4 (retired).
+- [docs/spec/ACCOUNTING.md](docs/spec/ACCOUNTING.md): archived optimization definitions O1–O4, not current acceptance.
 - [docs/spec/OPTIMIZATION-RETIRED.md](docs/spec/OPTIMIZATION-RETIRED.md): retirement evidence, MCP usage and return condition.
 - [docs/spec/COMPRESSION-BENCHMARK.md](docs/spec/COMPRESSION-BENCHMARK.md): retired compression qualification history and evidence limits.
 - [docs/spec/CONFIGURATION.md](docs/spec/CONFIGURATION.md): profile projection and typed configuration A1–A5.

@@ -1,5 +1,7 @@
 # Shared runtime extraction: task 182
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../spec/OPTIMIZATION-RETIRED.md).
+
 Scope: [task 182](https://github.com/taskqorg/agentq/issues/182), [owner request](https://github.com/taskqorg/assetq/blob/main/docs/intake/2026-11-01-owner-request.md) and [architecture](https://github.com/taskqorg/assetq/blob/main/docs/architecture.md). The implementation continues the existing task branch and PR 183; CoreQ and consumer installations are unchanged.
 
 ## Applied contract

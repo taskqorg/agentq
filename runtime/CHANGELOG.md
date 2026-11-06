@@ -1,5 +1,7 @@
 # Runtime changelog
 
+Entries describe behavior at their released revisions. Current AgentQ identity and support: [the worker-layer contract](../agentq.md); historical optimization intent remains a compatible no-op under [the retirement decision](../docs/spec/OPTIMIZATION-RETIRED.md).
+
 ## 0.14.0
 
 [Regression and local transcript evidence](../docs/evidence/runtime-2448.md).

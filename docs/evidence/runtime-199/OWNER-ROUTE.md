@@ -1,5 +1,7 @@
 # Protected owner-route handoff
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../../spec/OPTIMIZATION-RETIRED.md).
+
 This is the bounded source handoff requested by [PM note 6571952645](https://github.com/taskqorg/agentq/issues/199#issuecomment-6571952645). It advances independent review/publication of PR #200 while native A1/A3 remain unknown (M12.8, R12, TaskQ §7). Root performs native qualification after reviewed source publication. The worker does not invoke this route against a real host or remove `TASKQ_ATTEMPT`.
 
 ## Artifact and prerequisites

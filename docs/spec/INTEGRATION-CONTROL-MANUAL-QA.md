@@ -1,5 +1,7 @@
 # Integration control: remaining native acceptance
 
+Historical record for the cited releases. Optimization commands, adapters and acceptance below are retired; they are not current setup or rollout instructions. Current behavior: [agentq.md](../../agentq.md); the sole parked decision and return condition: [OPTIMIZATION-RETIRED](OPTIMIZATION-RETIRED.md).
+
 This worksheet closes the Desktop and native macOS/Windows service gates in the [execution plan](INTEGRATION-CONTROL-PLAN.md). CLI, adapter and Linux-container evidence does not replace these observations.
 
 ## Environment

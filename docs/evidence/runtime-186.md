@@ -1,5 +1,7 @@
 # Protected runtime consumer handoff
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../spec/OPTIMIZATION-RETIRED.md).
+
 Task: [AgentQ #186](https://github.com/taskqorg/agentq/issues/186). Owner request and acceptance: “Let AssetQ and other consumers launch an app-server through existing protected host authority and receive evidence bound to the actual native operation.” Applied rules: agentq.md M12.2–M12.8, P1–P3; TaskQ R8/R9 and §3; specq Testing, development/merge-candidate run policy. Native host qualification remains separate from portable runtime checks.
 
 ## Immutable inputs

@@ -1,6 +1,6 @@
-# Install and remove through an agent
+# Install the AgentQ worker layer
 
-This file is the procedure for Codex, Claude Code and Hermes when a user asks to install or remove agentq. Decisions: [agentq.md](agentq.md). Keep the user's login, model, approvals and sandbox. Never print keys, login files or whole configs.
+AgentQ is the shared worker layer for preparation, launch, observation, control, history and archive. This procedure installs or removes its optional host recording and service for Codex, Claude Code, Hermes and Antigravity. A plain runtime-library or JSON turn needs no onboarding or service. Decisions: [agentq.md](agentq.md). Keep the user's login, model, approvals and sandbox. Never print keys, login files or whole configs.
 
 ## Install
 
@@ -33,4 +33,4 @@ Use [the controls](README.md#commands). Saved Codex chats retain their provider 
 
 ## DashQ connection target
 
-Accepted, pending implementation: [ENROLLMENT](docs/spec/ENROLLMENT.md). Once qualified, use `agentq enroll <https-url>` and approve once in the browser (headless: link/code elsewhere). The command verifies a real dashboard snapshot. No file/key copying or repeated onboarding; use connection status and disconnect for recovery. Do not advertise this path as available before its release gate passes.
+The connection contract and qualification state are in [ENROLLMENT](docs/spec/ENROLLMENT.md). For a qualified release, use `agentq enroll <https-url>` and approve once in the browser (headless: link/code elsewhere). The command verifies a real dashboard snapshot. No file/key copying or repeated onboarding; use connection status and disconnect for recovery. Do not advertise this path as available before its release gate passes.

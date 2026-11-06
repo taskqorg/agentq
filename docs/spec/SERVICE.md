@@ -64,7 +64,7 @@ agentq runs these external tools on a host ([specq host requirements](https://gi
 - Native record integrations use the clients from agentq.md §4. Worker launches require the selected runtime CLI and its native login/version readiness (§12); no compression checker or command wrapper remains.
 - `gh` is not called: incident delivery (agentq.md § 7) is not wired into this binary yet and adds its row when it is.
 - The optional protected host uses macOS `launchctl bootstrap`, `kickstart`, `print` and `bootout`, `sandbox-exec -p`, native process/image identity, peer credentials, `KERN_BOOTTIME`, sandbox queries and resource-coalition accounting. Missing or unsupported native evidence refuses input and retains occupancy; Windows signature verification provides no containment.
-- Wrapper exceptions: the run adapter keeps native stderr unchanged, so its RTK failures stay stats outcome `failed`; the Python finder probes candidates and its error names every candidate tried; a read of the optional key store falls back to the file without a log line, while a failed write is logged. coreq's own calls (update, enrollment, service unit) follow coreq.
+- Wrapper exceptions: the worker adapter keeps native stderr unchanged and failed exits remain failed turns. A read of the optional key store falls back to the file without a log line, while a failed write is logged. coreq's own calls (update, enrollment, service unit) follow coreq.
 
 ## Release observation fields
 
