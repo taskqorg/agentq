@@ -22,6 +22,7 @@ Each adapter explicitly implements every required operation. `account_limits_wit
 
 | Operation | Contract in this runtime |
 |---|---|
+| `preflight(&Launch, &Repair)` | Ordered readiness checks and explicitly authorized preparation, with no model call ([Worker preflight](#worker-preflight)). |
 | `launch(&Launch)` | Check `quota` when `Launch.accounts` is set (none free: error `quota-exhausted`), map `Policy` (refusal names the part), apply optimization intent, start one turn and return a `Run`. |
 | `resume(session, &Launch)` | The same for an existing opaque session ID. |
 | `input(run, parts)` | Send more user input to a running session as ordered `Part`s: `Text` or `Image` (an absolute path to a local file the caller already verified). A protected app-server run starts its next turn with exactly these parts, once; a later turn never repeats earlier parts. Refusals are typed `Failure::Refused(cause)` before any native write: `input-empty`; `image-unsupported` without capability `image-input`; `image-invalid` for a relative path or a missing file; `input-unsupported` for a one-process CLI, background or queue run, whose next turn is a `resume`. A native or transport error is `Failure::Failed` and is never retried. |
@@ -39,7 +40,7 @@ Each adapter explicitly implements every required operation. `account_limits_wit
 | `session_url(run)` | The URL or cause of `observe` (Session observation), without polling. |
 | `observe(run)` | One runtime-neutral `Observation`: `poll` state (a failed poll reads `unknown` with its error), native session, and session URL or absence cause with its native detail (Session observation). |
 | `transcript(run)` | The caller log the run appends to. |
-| `ready(executable, home)` | `install` (the given executable, else the CLI on `PATH`), `version` (`--version` within 5 s; `outdated` below the descriptor `minimum`) and `login` in `home` (none: the client's own). Login runs the native status command within 10 s: Claude `auth status --json` reads `ok` only for `loggedIn` with `authMethod` `claude.ai` and `apiProvider` `firstParty`; Codex `-c forced_login_method="chatgpt" login status` reads `ok` for `Logged in using ChatGPT`. Another login reads `api-key`, none reads `missing`, and a failed or unreadable status reads `unknown`. Antigravity has no status command: its credential file is absent and reads `unknown`. Each check carries a reason. |
+| `ready(executable, home)` | `install` (the given executable, else the CLI on `PATH`), `version` (`--version` within 5 s; `outdated` below the descriptor `minimum`) and `login` in `home` (none: the client's own). Login runs the native status command within 10 s: Claude `auth status --json` reads `ok` only for `loggedIn` with `authMethod` `claude.ai` and `apiProvider` `firstParty`; Codex `-c forced_login_method="chatgpt" login status` reads `ok` for `Logged in using ChatGPT`. Another login reads `api-key`, none reads `missing`, and a failed or unreadable status reads `unknown`. Antigravity has no status command: its credential file is absent and reads `unknown`. Each check carries a reason. `ready_for` and preflight use the launch policy: subscription-only Codex probes force ChatGPT; other probes report the selected authentication mode. |
 | `quota(&Accounts, now)` | The account a launch takes, whether every account is disabled, and the hold end when every enabled account is limited. |
 | `running()` | Runs of this adapter in this process that have not reached a terminal poll and were not dropped. |
 | `protected_paths(home)` | Native home folders and files a run must not overwrite: Claude home and `.claude.json`, Codex home, Antigravity home and its sibling `config`. |
@@ -240,7 +241,7 @@ A consumer service that re-executes itself reattaches its live CLI turn children
 
 ## Worker preflight
 
-Binding detail of M12.15–M12.17 and PRODUCT R14. Target of [#284](https://github.com/taskqorg/agentq/issues/284); until it ships, callers keep today's `ready` and `quota` reads.
+Binding detail of M12.15–M12.17 and PRODUCT R14. `ready` and `quota` remain available as individual read-only probes. `ready_for`, `catalogue_for` and `account_limits_for` bind reads to the same `Launch` executable, wrapper, home and environment.
 
 `Runtime::preflight(&Launch, Repair)` returns one `Readiness`: a list of checks in the order below, each with state, cause, native detail and next step. `launch` and `resume` run it first, without repair. `agentq agent preflight` exposes it to non-Rust callers. Resume also verifies the session's account, home and runtime against the saved run.
 
@@ -249,7 +250,7 @@ Binding detail of M12.15–M12.17 and PRODUCT R14. Target of [#284](https://gith
 | 1 | Client | Executable resolves and version meets the descriptor `minimum` | `client-missing`, `client-outdated` |
 | 2 | Account | The requested home exists and belongs to this account; native login status reads ok. There is never a fallback to another account | `account-home-missing`, `login-required` |
 | 3 | Capacity | `quota` picks an account, or the caller set no accounts | `quota-exhausted`, with the hold end |
-| 4 | Workspace | Root is an existing folder; writable when `Policy` needs writes; native client trust covers the exact path | `workspace-missing`, `workspace-unwritable`, `workspace-untrusted` |
+| 4 | Workspace | Root is an existing folder; writable when `Policy` needs writes; native effective trust covers the requested path, including its ancestor and worktree rules | `workspace-missing`, `workspace-unwritable`, `workspace-untrusted` |
 | 5 | Permissions | Every `Policy` part maps to this runtime; the native sandbox starts on this host when one is required | `policy <part> unsupported by <name>`, `sandbox-unavailable` |
 | 6 | Inputs | Model is in the catalogue when the catalogue is readable; MCP config, instructions and images are readable | `model-unavailable`, `input-invalid` |
 | 7 | Storage | Caller log path and CoreQ store are writable | `storage-unavailable` |
@@ -267,6 +268,14 @@ Binding detail of M12.15–M12.17 and PRODUCT R14. Target of [#284](https://gith
 
 A `Readiness` is part of the run's report, and its states and cause codes join `agent.turn` as metadata. Native detail stays local (M6.2). `ok` is never inferred from a missing check.
 
+`Launch.readiness` is `Continue` by default or `Strict`. `Launch.store`, when supplied, joins the caller log storage check. The selected command, wrapper arguments, account home and child environment are used for the probes; no version result is cached. A missing explicit home or a conflicting home/environment selection refuses rather than falling back.
+
+`Run::readiness`, its final report and its checkpoint retain local check details. The frozen `agent.turn` carries fixed `counts` keys `preflight.<check>.<state>[.<cause>]`, each with value 1; native errors, paths and next-step text stay local. `Observation.phase` reads `starting` until native evidence, then `started`; the existing poll state remains compatible. `starting_ms` is the run's observed age.
+
+Inherited session markers are removed. With an explicit account home, inherited `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY` and `GOOGLE_APPLICATION_CREDENTIALS` are removed across provider families; explicit caller values survive unless subscription policy clears them. Child Git clears inherited askpass programs and disables terminal and credential-manager prompts by default. Explicit caller environment values remain authoritative. SSH defaults to `ssh -oBatchMode=yes` unless the caller supplied `GIT_SSH_COMMAND`. Recognizable secrets in native arguments and hook-trust bypass flags refuse before spawn.
+
+Codex probes native sandbox startup by running a no-op command through `codex sandbox -P :read-only --include-managed-config`, with no model call or writes. This proves host sandbox startup; policy mapping is checked separately. Windows elevated setup is never run by preflight; the caller must select unelevated mode for a read-only probe. A mapped sandbox policy whose host startup cannot be natively probed remains `unknown` (`sandbox-unverified`). A failed catalogue probe remains unknown. These are not native qualification claims.
+
 ### Cost
 
 Preflight makes no model call and costs no tokens. It adds no new timeout, cache or budget: each check runs once per launch, and native probes keep their existing limits (`--version` 5 s, login 10 s). A probe that ends without an answer reads `unknown`. A check is read-only unless `Repair` allows it. Limits and caches join only when telemetry shows a real problem.
@@ -275,15 +284,21 @@ Preflight makes no model call and costs no tokens. It adds no new timeout, cache
 
 `Repair` lists what the caller authorizes; the default is none. Allowed repairs:
 
-- Exact-path client trust: Claude `hasTrustDialogAccepted`, Codex project `trust_level`. Written under the client's own lock, keeping unrelated keys. Never for a home folder or a filesystem root.
+- Exact-path client trust: Claude `hasTrustDialogAccepted`, Codex project `trust_level`. Written under the client's own lock, keeping unrelated keys. Never for a home folder, an ancestor of the OS or selected account home, or a filesystem root.
 - AgentQ's own hook trust: the hash comes from the client's own hook listing; a computed hash is only a fallback. Foreign hooks are never trusted. `--dangerously-bypass-hook-trust` is used only for an AgentQ-owned isolated home.
+
+`Repair { workspace, hooks, journal }` grants preparation only; both flags default to false. A write requires the caller's existing ownership journal. A caller sharing an installation journal holds its lifecycle lock; the CLI and onboarding do so. Claude uses its literal `.claude.json.lock` directory (or legacy `.config.json.lock`), including the native 10-second mtime staleness rule and preserves foreign JSON fields, file permissions, symlink targets and the native custom-OAuth config selection. Codex uses `config/batchWrite` with the user-layer revision, under its native configuration lock. Journaled native values restore only when the current value still matches; changed values remain conflicts.
+
+On Windows, Codex hooks use a bare executable path when safe, or a PowerShell encoded command when the path needs quoting. Onboarding migrates only an exact unchanged journal-owned hook value and preserves foreign hooks.
+
+Codex hook hashes come only from `hooks/list`. Trust writes require an exact registered command and an ownership-journal receipt for that hook source and event; a command suffix alone grants no authority. An explicitly disabled hook stays disabled. Onboarding requests only owned hook trust. Passive profile/status/service reads compare native configuration with unchanged journal-owned hook bytes and the recorded native hash, without starting the client; unknown, changed or untrusted evidence carries a next step. Explicit preflight and repair use `hooks/list`. Explicit repair also records an unchanged native trust grant for an owned hook when needed for passive inspection; restoring that receipt changes nothing.
 
 Each repair is journaled before the write, verified by reading back, and restored by uninstall (§ 9). Login, account choice, model, permissions and provider are outside repair. Login belongs to the explicit owner-started flow of [#286](https://github.com/taskqorg/agentq/issues/286).
 
 ### No silent wait
 
 - The child gets no prompt path: no terminal on stdin unless the launch owns one, a non-interactive Git credential guard, and approvals that follow `Policy`. A request that needs an answer reaches the caller as a typed step, never a hidden wait.
-- The child environment drops inherited auth and session variables that do not belong to its account; secrets go in `Launch.env`, never in argv.
+- The child environment drops inherited auth and session variables that do not belong to its account; secrets go in `Launch.env`, never in argv. Session variables for all registered runtimes are removed. With an explicitly selected account home, inherited Anthropic, OpenAI and Google API/OAuth environment credentials are removed before explicit caller values are applied. Default-account authentication remains native. Git uses `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and `SSH_ASKPASS_REQUIRE=never`.
 - A run reads `starting` until native proof of a session: a session ID, or the first native record. Then it reads `started`. A native refusal ends it with its `launch_refusal` cause. `starting` and its age stay visible, and the caller may cancel through identity-safe stop.
 - After input is written, nothing resubmits it. Inactivity after start is the stall signal of [#287](https://github.com/taskqorg/agentq/issues/287).
 
@@ -696,6 +711,8 @@ callers can select the full source.
 History lifecycle events are descriptive only; existing terminal/identity parsers remain the sole turn-completion authority.
 
 ## JSON command
+
+`agentq agent preflight [--repair]` reads one JSON request from stdin: `client`, absolute `root` and `log`, optional `home`, `store`, `command` array, string-valued `env`, `model`, `mcp`, `instructions`, abstract `policy`, and `readiness` (`continue` or `strict`). It prints ordered `readiness.checks` and `allowed`, exiting 1 when blocked. `--repair` authorizes exact-path workspace and owned hook trust through the installation's ownership journal; it never signs in. The existing native-argument `agent turn` JSON interface requires its default policy; abstract turn policies use `Runtime::launch`.
 
 `agentq agent turn` reads one JSON request on stdin, runs the turn with `agent::run` (or `Turn` without a store) and prints one JSON report. It uses the same `Spec`, `Report` and optimization code as the library. A request error prints `Error:`/`Next:` and exits 1; a failed turn is a report and exits 0.
 

@@ -15,6 +15,8 @@ pub struct Edit {
     pub key: Vec<String>,
     pub value: Value,
     pub append: bool,
+    /// An exact owned hook value that may be migrated to `value`.
+    pub previous: Option<Value>,
     pub routing: Option<String>,
     pub agent: String,
     pub instruction: bool,
@@ -128,7 +130,7 @@ fn hook_state(values: impl Iterator<Item = bool>) -> &'static str {
     match values.iter().filter(|v| **v).count() { 0 => "absent", n if n == values.len() => "registered", _ => "partial" }
 }
 fn edit(agent: &str, file: PathBuf, key: &[&str], value: Value, append: bool) -> Edit {
-    Edit { file, key:key.iter().map(|k| k.to_string()).collect(), value, append, routing:None, agent:agent.into(), instruction:false }
+    Edit { file, key:key.iter().map(|k| k.to_string()).collect(), value, append, previous:None, routing:None, agent:agent.into(), instruction:false }
 }
 fn hook_command(exe: &Path, agent: &str, event: &str) -> Value { json!({"type":"command","command":format!("\"{}\" hook {agent} {event}",exe.display()),"timeout":5}) }
 #[cfg(test)]
@@ -138,9 +140,9 @@ fn no_hook(_: &str) -> Hook { Hook::None }
 fn no_inspection(_: &[Option<String>], _: &[Option<Value>], _: &[bool]) -> ProfileState { ProfileState { hooks:"unsupported",plugin:"unsupported",adapter:"",overrides:None } }
 
 fn check(state: &'static str, detail: &str) -> Check { Check {state,detail:detail.into()} }
-fn probe(exe: &Path, args: &[&str], home: Option<&Path>, home_var: &str, budget: u64) -> Result<Output,crate::process::Failure> {
-    let mut c=Command::new(exe); c.args(args); if let Some(home)=home {c.env(home_var,home);} crate::quiet(&mut c);
-    crate::process::output("agent.ready",&mut c,Duration::from_secs(budget))
+fn probe(mut c: Command, args: &[&str], budget: u64) -> Result<Output,crate::process::Failure> {
+    c.args(args); crate::quiet(&mut c);
+    crate::process::output("agent.ready", &mut c, Duration::from_secs(budget))
 }
 
 pub fn claude_json() -> PathBuf {claude::claude_json()}
@@ -232,7 +234,7 @@ pub(crate) fn native_home(client: Client) -> Option<PathBuf> {(builtin(client).o
 pub(crate) fn native_executable(client: Client,path: &OsStr) -> Res<PathBuf> {(builtin(client).ops.executable)(path)}
 pub(crate) fn native_session(client: Client) -> String {(builtin(client).ops.new_session)()}
 pub(crate) fn native_args(spec: &Spec) -> Vec<OsString> {(builtin(spec.client).ops.args)(spec)}
-pub(crate) fn session_vars() -> Vec<&'static str> {ENTRIES.into_iter().filter_map(|e|e.builtin.map(|a|a.ops.session_var)).collect()}
+pub(crate) fn session_vars() -> Vec<&'static str> {ENTRIES.into_iter().filter_map(|e|e.builtin).flat_map(|a|a.ops.session_vars.iter().copied()).collect()}
 pub(crate) use codex::codex_native;
 
 pub fn legacy_provider(agent: &str,root: &Path) -> Result<Provider,String> {
@@ -323,3 +325,36 @@ pub(crate) use codex::parsing::auth_rejected as codex_auth_rejected;
 pub(crate) fn history_protocol(format:&str)->Option<&'static Protocol> {
     native_entries().filter_map(|e|e.builtin).map(|a|a.ops.protocol).find(|p|p.history_formats.contains(&format))
 }
+
+/// Restore only an unchanged, journal-owned native preparation value; native CAS holds the client's config lock.
+pub fn restore_preparation(entry: &Value, dry: bool) -> Res<()> {
+    let adapter=entry["agent"].as_str().and_then(self::entry).and_then(|e|e.builtin).ok_or("preparation runtime unknown")?;
+    adapter.ops.restore_preparation.ok_or("preparation restore unsupported")?(entry,dry)
+}
+
+/// Inspect or explicitly prepare only the registered runtime's native hook trust.
+pub fn hook_trust(agent: &str, home: &Path, journal: Option<&Path>, repair: bool) -> Option<LaunchCheck> {
+    let adapter=entry(agent)?.builtin?;
+    if adapter.ops.hook_status.is_none() {return None;}
+    let root=match std::env::current_dir() {Ok(root)=>root,Err(_)=>return Some(LaunchCheck::new("evidence","degraded",Some("hooks-unknown"),"Working directory unavailable","select an existing working directory"))};
+    let mut launch=Launch::new(root,std::env::temp_dir().join("unused-hooks.log"),"","agentq");launch.home=Some(home.into());
+    let repair=Repair {workspace:false,hooks:repair,journal:journal.map(Path::to_path_buf)};
+    Some((adapter.ops.preparation)(&launch,&repair).1)
+}
+
+fn secret_name(name:&str)->bool {
+    let name=name.to_ascii_uppercase();
+    name.bytes().all(|b|b.is_ascii_alphanumeric() || b"_.-".contains(&b)) && ["API_KEY","TOKEN","SECRET","PASSWORD","CREDENTIAL"].iter().any(|s|name==*s || name.ends_with(&format!("_{s}")) || name.ends_with(&format!(".{s}")))
+}
+fn validate_arguments(args:&[OsString])->Res<()> {
+    if args.iter().filter_map(|s|s.to_str()).any(|a|a.split_once('=').is_some_and(|(k,v)|!v.is_empty() && secret_name(k)) || ["--api-key","--token","--password","--secret"].contains(&a)) {return Err("secret-in-argv".into());}
+    Ok(())
+}
+pub(crate) fn validate_native_args(client:Client,args:&[OsString])->Res<()> {(builtin(client).ops.validate)(args,&[],&Policy::default())}
+
+pub(crate) fn auth_vars()->Vec<&'static str> {ENTRIES.into_iter().filter_map(|e|e.builtin).flat_map(|a|a.ops.auth_vars.iter().copied()).collect()}
+
+pub(super) use codex::{codex_read_command,exchange,credential_snapshot};
+
+/// Passive profile/service inspection never starts a native process.
+pub fn hook_status(agent:&str,home:&Path,journal:Option<&Path>)->Option<LaunchCheck> {Some((entry(agent)?.builtin?.ops.hook_status?)(home,journal))}

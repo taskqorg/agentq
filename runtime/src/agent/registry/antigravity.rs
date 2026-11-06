@@ -9,7 +9,7 @@ use super::*;
 use super::super::super::limits::{window,unknown,reset,https,token_text,oauth_account};
 
 static ADAPTER: Adapter = Adapter {client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "",
-        capabilities: &["history", "turn", "resume", "title", "account-limits"] } , ops: NativeOps {catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"ANTIGRAVITY_HOME",alternate_home_var:Some("ANTIGRAVITY_APP_DATA_DIR"),session_var:"ANTIGRAVITY_CONVERSATION_ID",home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, protected, refusal, transcript, background_transcript, link, session_link } };
+        capabilities: &["history", "turn", "resume", "title", "account-limits"] } , ops: NativeOps {catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"ANTIGRAVITY_HOME",alternate_home_var:Some("ANTIGRAVITY_APP_DATA_DIR"),session_vars:&["ANTIGRAVITY_CONVERSATION_ID"],auth_vars:&["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, preparation, restore_preparation:None, sandbox:None,hook_status:None, limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
 
 pub(super) const ENTRY: Entry = Entry { name:"antigravity", aliases:&["agy"], order:4, profile_order:4, worker_order:2, onboard:true,
     profile:Profile {kind:"antigravity",label:"Antigravity",aliases:&["agy"],operations:&["hooks"]},
@@ -41,7 +41,7 @@ fn mapped(l: &Launch) -> Res<Vec<OsString>> {
 fn extras(_: &Policy) -> Vec<OsString> { vec![] }
 fn env(l: &Launch, spec: &mut Spec) { spec.env.extend(l.settings_env.iter().map(|(k,v)| (k.into(),v.into()))); }
 fn settings(_: &Launch, _: &mut Spec) {}
-fn login(_: &Path, _: Option<&Path>) -> Check {check("unknown","no login status command")}
+fn login(_: Command,_:bool) -> Check {check("unknown","no login status command")}
 fn protected(home: PathBuf) -> Vec<PathBuf> { let mut v=vec![home.clone()]; if let Some(p)=home.parent() {v.push(p.join("config"));} v }
 fn refusal(_: &str) -> Option<Cause> { None }
 fn transcript(_: &str, _: Option<&Path>) -> Option<PathBuf> { None }
@@ -526,3 +526,12 @@ fn events(text:&str)->Vec<Value> {text.lines().filter_map(|s|serde_json::from_st
     }
 
 }
+
+fn preparation(_: &Launch, _: &Repair) -> (LaunchCheck, LaunchCheck) {
+    (LaunchCheck::new("workspace","unknown",Some("workspace-trust-unknown"),"No native trust probe","check native workspace trust"),
+     LaunchCheck::new("evidence","degraded",Some("hooks-unknown"),"No native hook trust probe","check AgentQ hooks"))
+}
+
+fn limits_for(l:&Launch,now:i64)->Vec<Window> {super::super::super::limits::account(Client::Antigravity,preflight::home(&ADAPTER,l).as_deref(),None,now)}
+
+fn validate(args:&[OsString],_:&[(String,String)],_:&Policy)->Res<()> {validate_arguments(args)}

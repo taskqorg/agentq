@@ -12,7 +12,7 @@ use super::super::super::native::plain_id;
 use super::super::super::limits::{window,unknown};
 
 static ADAPTER: Adapter = Adapter {client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt", models: &[], minimum: "0.162.0",
-        capabilities: &["history", "turn", "resume", "quota-snapshot", "account-limits", "catalogue", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env", "mcp-config", "instructions-file", "turn-parts", "turn-deltas"] } , ops: NativeOps {catalogue:catalogue,background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:app_queue,app_command:app::app_server_command, protocol:&PROTOCOL, home_var:"CODEX_HOME",alternate_home_var:None,session_var:"CODEX_THREAD_ID",home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, protected, refusal, transcript, background_transcript, link, session_link } };
+        capabilities: &["history", "turn", "resume", "quota-snapshot", "account-limits", "catalogue", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env", "mcp-config", "instructions-file", "turn-parts", "turn-deltas"] } , ops: NativeOps {catalogue:catalogue,background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:app_queue,app_command:app::app_server_command, protocol:&PROTOCOL, home_var:"CODEX_HOME",alternate_home_var:None,session_vars:&["CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED"],auth_vars:&["OPENAI_API_KEY", "CODEX_API_KEY"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, preparation, restore_preparation:Some(restore_preparation), sandbox:Some(sandbox),hook_status:Some(hook_status), limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
 
 pub(super) const ENTRY: Entry = Entry { name:"codex", aliases:&[], order:0, profile_order:0, worker_order:1, onboard:true,
     profile:Profile {kind:"codex",label:"Codex",aliases:&["codex-cli", "codex-desktop"],operations:&["hooks"]},
@@ -85,9 +85,10 @@ fn extras(p: &Policy) -> Vec<OsString> {
 
 fn env(l: &Launch, spec: &mut Spec) { spec.env.extend(l.settings_env.iter().map(|(k,v)| (k.into(),v.into()))); }
 fn settings(_: &Launch, _: &mut Spec) {}
-fn login(exe: &Path, home: Option<&Path>) -> Check {
-    let status = |args: &[&str]| probe(exe,args,home,"CODEX_HOME",10).map(|o| format!("{}{}",String::from_utf8_lossy(&o.stdout),String::from_utf8_lossy(&o.stderr)));
-    match status(&["-c", "forced_login_method=\"chatgpt\"", "login", "status"]) {
+fn login(mut command: Command,subscription:bool) -> Check {
+    if subscription {command.args(["-c","forced_login_method=\"chatgpt\""]);}
+    let status = |args: &[&str]| match probe(command,args,10) {Ok(o)|Err(crate::process::Failure::Exit(o))=>Ok(format!("{}{}",String::from_utf8_lossy(&o.stdout),String::from_utf8_lossy(&o.stderr))),Err(e)=>Err(e)};
+    match status(&["login", "status"]) {
                 Ok(out) => {
                     let plain: String = out.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
                     if plain.contains("loggedinusingchatgpt") { check("ok", "subscription") }
@@ -109,10 +110,26 @@ fn link(_: &Run) -> Result<String,native::Absence> { Err((Cause("no-session-url"
 fn session_link(_: &NativeSpec, _: Option<&str>) -> Result<String,native::Absence> { Err((Cause("no-session-url"),None)) }
 fn files(root: &Path) -> Vec<PathBuf> { vec![root.join("config.toml"),root.join("hooks.json"),root.join("AGENTS.md")] }
 fn setup(root: &Path, _: &Path, exe: &Path) -> Vec<Edit> {
-    ["SessionStart","Stop"].into_iter().map(|event| edit("codex",root.join("hooks.json"),&["hooks",event],json!({"hooks":[hook_command(exe,"codex",event)]}),true)).collect()
+    ["SessionStart","Stop"].into_iter().map(|event| {
+        let mut handler=hook_command(exe,"codex",event);
+        if cfg!(windows) {handler["command"]=json!(windows_hook_command(exe,event));}
+        let mut want=edit("codex",root.join("hooks.json"),&["hooks",event],json!({"hooks":[handler]}),true);
+        if cfg!(windows) {want.previous=Some(json!({"hooks":[hook_command(exe,"codex",event)]}));}
+        want
+    }).collect()
 }
+
+fn windows_hook_command(exe:&Path,event:&str)->String {
+    let path=exe.to_string_lossy().replace('\\',"/");
+    if path.chars().all(|c|c.is_ascii_alphanumeric() || "_.:/~-".contains(c)) {return format!("{path} hook codex {event}");}
+    // Codex's Windows hook parser rejects quoted command tokens; encode the path for PowerShell instead.
+    let script=format!("& '{}' hook codex {event}; exit $LASTEXITCODE",path.replace('\'',"''"));
+    let bytes:Vec<_>=script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    format!("powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",b64(&bytes))
+}
+
 fn inspect(texts: &[Option<String>], docs: &[Option<Value>], unread: &[bool]) -> ProfileState {
-    ProfileState { hooks:docs[1].as_ref().map_or("unknown",|d|grouped_hooks(d,"codex",&["SessionStart","Stop"])),plugin:"unsupported",adapter:"hook",
+    ProfileState { hooks:docs[1].as_ref().map_or("unknown",|d|hook_state(["SessionStart","Stop"].iter().map(|event|d["hooks"][*event].as_array().into_iter().flatten().flat_map(|g|g["hooks"].as_array().into_iter().flatten()).any(|h|h["command"].as_str().is_some_and(|c|c.ends_with(&format!(" hook codex {event}")) || c.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")))))),plugin:"unsupported",adapter:"hook",
         overrides:(!unread[0]).then(||texts[0].as_deref().unwrap_or("").lines().filter(|l|l.trim_start().starts_with("[profiles.")).count()) }
 }
 fn hook(event: &str) -> Hook { match event {"Stop"=>Hook::Stop {model:false},"SessionStart"=>Hook::SessionStart,_=>Hook::None} }
@@ -375,9 +392,13 @@ pub(crate) fn codex_windows(r: &Value, id: Option<String>, now: u64) -> Vec<Wind
 fn codex_read<T>(home: Option<&Path>, executable: Option<&Path>, read: impl FnOnce(&mut app::AppServer, &mut app::AppSession, Instant)->Res<T>) -> Res<T> {
     let root=std::env::current_dir().map_err(|_|"working directory unavailable")?;
     let spec=Spec {client:Client::Codex,root,session:"-".into(),resume:false,args:vec![],env:vec![],home:home.map(Path::to_path_buf)};
-    let log=std::env::temp_dir().join(format!("agentq-read-{}.log",crate::incident::uuid()));
     let exe=match executable {Some(path)=>super::codex_native(path.to_path_buf())?,None=>adapter::runtime("codex").ok_or("runtime missing")?.executable(None)?};
-    let mut server=app::AppServer::spawn(app::app_server_command(Command::new(exe),&spec)?,&log,&Process::default())?;
+    codex_read_command(&spec,Command::new(exe),read)
+}
+
+pub(crate) fn codex_read_command<T>(spec:&Spec,command:Command,read:impl FnOnce(&mut app::AppServer,&mut app::AppSession,Instant)->Res<T>)->Res<T> {
+    let log=std::env::temp_dir().join(format!("agentq-read-{}.log",crate::incident::uuid()));
+    let mut server=app::AppServer::spawn(app::app_server_command(command,spec)?,&log,&Process::default())?;
     let result=(|| {
         let until=Instant::now()+Duration::from_secs(30);
         let mut session=app::AppSession::new(&spec)?;
@@ -390,7 +411,7 @@ fn codex_read<T>(home: Option<&Path>, executable: Option<&Path>, read: impl FnOn
     let result=result?; stopped?; Ok(result)
 }
 
-fn exchange(server: &mut app::AppServer, session: &mut app::AppSession, request: Value, until: Instant) -> Res<Value> {
+pub(crate) fn exchange(server: &mut app::AppServer, session: &mut app::AppSession, request: Value, until: Instant) -> Res<Value> {
     server.send(&request, until)?;
     loop {
         let m=server.receive(until)?.ok_or("native read deadline")?;
@@ -409,7 +430,7 @@ pub(crate) fn codex_identity(account: &Value) -> Option<String> {
     ["email","chatgptAccountId"].into_iter().find_map(|key|account[key].as_str().filter(|s|!s.is_empty()).map(String::from))
 }
 
-fn credential_snapshot(path: &Path) -> Res<Option<Vec<u8>>> {
+pub(crate) fn credential_snapshot(path: &Path) -> Res<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(bytes)=>Ok(Some(bytes)),
         Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(None),
@@ -602,4 +623,272 @@ fn rollout_report(rollout:Option<&Path>,r:&mut Report) {
                 r.calls = calls;
             }
         }
+}
+
+fn preparation(l: &Launch, repair: &Repair) -> (LaunchCheck, LaunchCheck) {
+    let scoped=Repair {journal:repair.journal.clone().or_else(||l.install.as_ref().map(|p|p.join("data/owned.json"))),..repair.clone()};
+    let repair=&scoped;
+    let unknown=|error:String| (
+        LaunchCheck::new("workspace",if error=="workspace-trust-forbidden" {"blocked"} else {"unknown"},Some(if error=="workspace-trust-forbidden" {"workspace-trust-forbidden"} else {"workspace-trust-unknown"}),error.clone(),"check native project trust"),
+        LaunchCheck::new("evidence","degraded",Some("hooks-unknown"),error,"run AgentQ preparation explicitly"));
+    let root=match if repair.workspace {preflight::safe_root(&l.root,preflight::home(&ADAPTER,l).as_deref())} else {l.root.canonicalize().map_err(|_|"workspace-missing".into())} {Ok(root)=>root,Err(e)=>return unknown(e)};
+    let root_key=root.to_string_lossy();
+    let root_key=root_key.strip_prefix(r"\\?\").filter(|p|!p.starts_with("UNC\\")).unwrap_or(&root_key).to_string();
+    let home=match preflight::home(&ADAPTER,l) {Some(home)=>home,None=>return unknown("account home unknown".into())};
+    preflight::rpc(&ADAPTER,l,|rpc| {
+        let mut config=rpc("config/read",json!({"includeLayers":true}))?;
+        let before=effective_trust(&config["config"],&root,&l.root);
+        let mut repaired=false;
+        if !before && repair.workspace {
+            let key=["projects",root_key.as_str(),"trust_level"];
+            write_trust(rpc,&config,&home,&root,repair,&key,json!("trusted"))?;
+            config=rpc("config/read",json!({"includeLayers":true}))?;
+            repaired=true;
+        }
+        let trusted=effective_trust(&config["config"],&root,&l.root);
+        let workspace=LaunchCheck::new("workspace",if trusted {if repaired {"repaired"} else {"ok"}} else {"blocked"},(!trusted).then_some("workspace-untrusted"),"Exact native project trust checked","request exact-path trust preparation");
+        let evidence=(|| {
+            let listing=rpc("hooks/list",json!({"cwds":[root]}))?;
+            let mut found=0;let mut trusted=0;let mut covered=std::collections::BTreeSet::new();let mut expected=vec![];
+            let registered=std::fs::read(home.join("hooks.json")).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok()).ok_or("AgentQ hooks not registered")?;
+            let mut changed=false;
+            for event in ["SessionStart","Stop"] {
+                for group in registered["hooks"][event].as_array().into_iter().flatten() {
+                    for handler in group["hooks"].as_array().into_iter().flatten() {
+                        let Some(command)=handler["command"].as_str().filter(|c|c.ends_with(&format!(" hook codex {event}")) || owned_hook(repair,&home.join("hooks.json"),event,c)) else {continue};
+                        // Match only a registered AgentQ command from this exact hooks.json, never foreign hooks.
+                        for row in listing["data"].as_array().into_iter().flatten().flat_map(|d|d["hooks"].as_array().into_iter().flatten()) {
+                            let Some(key)=row["key"].as_str() else {continue};
+                            let fields:Vec<_>=key.rsplitn(4,':').collect();
+                            if fields.len()!=4 || normal_path(Path::new(fields[3]))!=normal_path(&home.join("hooks.json")) || fields[2]!=if event=="SessionStart" {"session_start"} else {"stop"} {continue;}
+                            if row["command"]!=command {continue;}
+                            found+=1;covered.insert(event);expected.push((key.to_string(),command.to_string()));
+                            if row["trustStatus"]=="trusted" && row["enabled"]!=false {
+                                if repair.hooks && owned_hook(repair,&home.join("hooks.json"),event,command) {
+                                    let hash=row["currentHash"].as_str().filter(|h|!h.is_empty()).ok_or("native hook hash missing")?;
+                                    write_trust(rpc,&config,&home,&root,repair,&["hooks","state",key,"trusted_hash"],json!(hash))?;
+                                }
+                                trusted+=1;continue;
+                            }
+                            if !repair.hooks || row["enabled"]==false {continue;}
+                            if !owned_hook(repair,&home.join("hooks.json"),event,command) {return Err("AgentQ hook ownership is not journaled".into());}
+                            let hash=row["currentHash"].as_str().filter(|h|!h.is_empty()).ok_or("native hook hash missing")?;
+                            let path=["hooks","state",key,"trusted_hash"];
+                            write_trust(rpc,&config,&home,&root,repair,&path,json!(hash))?;
+                            changed=true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                let listing=rpc("hooks/list",json!({"cwds":[root]}))?;
+                trusted=expected.iter().filter(|(key,command)|listing["data"].as_array().into_iter().flatten().flat_map(|d|d["hooks"].as_array().into_iter().flatten())
+                    .any(|row|row["key"]==key.as_str() && row["command"]==command.as_str() && row["trustStatus"]=="trusted" && row["enabled"]!=false)).count();
+            }
+            if covered.len()==2 && trusted==found {Ok::<_,String>(LaunchCheck::new("evidence",if changed {"repaired"} else {"ok"},None,"AgentQ hooks registered and natively trusted",""))}
+            else {Err("AgentQ hooks untrusted, disabled or missing".into())}
+        })().unwrap_or_else(|e|LaunchCheck::new("evidence","degraded",Some("hooks-untrusted"),e,"run agentq agent preflight --repair"));
+        Ok((workspace,evidence))
+    }).unwrap_or_else(unknown)
+}
+
+fn user_layer<'a>(config: &'a Value, file: &Path) -> Res<&'a Value> {
+    config["layers"].as_array().into_iter().flatten().find(|l| l["name"]["type"]=="user" && l["name"]["file"].as_str().is_some_and(|f|normal_path(Path::new(f))==normal_path(file))).ok_or("native user config layer missing".into())
+}
+fn key_path(key: &[&str]) -> String {key.iter().map(|s|serde_json::to_string(s).expect("string")).collect::<Vec<_>>().join(".")}
+fn value_at<'a>(config: &'a Value,key: &[&str]) -> &'a Value {key.iter().fold(config,|v,k|&v[*k])}
+fn write_trust(rpc: &mut dyn FnMut(&'static str,Value)->Res<Value>, config:&Value,home:&Path,root:&Path,repair:&Repair,key:&[&str],after:Value)->Res<()> {
+    let file=home.join("config.toml");
+    // Refresh before each edit: the previous edit changes the native revision.
+    let fresh=rpc("config/read",json!({"includeLayers":true}))?;
+    let layer=user_layer(&fresh,&file)?;
+    let before=value_at(&layer["config"],key);
+    if before==&after {
+        // Record native trust already granted by the owner, without changing it on restore.
+        if key.starts_with(&["hooks","state"]) {
+            let recorded=repair.journal.as_ref().and_then(|p|std::fs::read(p).ok()).and_then(|b|serde_json::from_slice::<Vec<Value>>(&b).ok()).is_some_and(|entries|entries.iter().rev().any(|entry|entry["kind"]=="native-config" && entry["file"]==json!(file) && entry["key"]==json!(key) && entry["after"]==after));
+            if !recorded {preflight::native_journal(repair,&file,root,key,before,&after)?;}
+        }
+        return Ok(());
+    }
+    let _=config;
+    preflight::native_journal(repair,&file,root,key,before,&after)?;
+    rpc("config/batchWrite",json!({"filePath":file,"expectedVersion":layer["version"],"edits":[{"keyPath":key_path(key),"value":after,"mergeStrategy":"replace"}],"reloadUserConfig":true}))?;
+    let read=rpc("config/read",json!({"includeLayers":true}))?;
+    if value_at(&user_layer(&read,&file)?["config"],key)!=&after {return Err("native-trust-readback-failed".into());}
+    Ok(())
+}
+
+fn restore_preparation(entry: &Value,dry: bool)->Res<()> {
+    let file=Path::new(entry["file"].as_str().ok_or("invalid preparation file")?);
+    let home=file.parent().ok_or("invalid preparation home")?;
+    let root=Path::new(entry["root"].as_str().ok_or("invalid preparation root")?);
+    let key=entry["key"].as_array().ok_or("invalid preparation key")?.iter().map(|v|v.as_str().ok_or("invalid preparation key")).collect::<Result<Vec<_>,_>>()?;
+    let mut launch=Launch::new(root,std::env::temp_dir().join("unused-preparation.log"),"","agentq");launch.home=Some(home.into());
+    preflight::rpc(&ADAPTER,&launch,|rpc| {
+        let config=rpc("config/read",json!({"includeLayers":true}))?;let layer=user_layer(&config,file)?;
+        let current=value_at(&layer["config"],&key);
+        if current==&entry["before"] {return Ok(());}
+        if current!=&entry["after"] {return Err("preparation value changed; kept".into());}
+        if !dry {
+            rpc("config/batchWrite",json!({"filePath":file,"expectedVersion":layer["version"],"edits":[{"keyPath":key_path(&key),"value":entry["before"],"mergeStrategy":"replace"}]}))?;
+            let read=rpc("config/read",json!({"includeLayers":true}))?;
+            if value_at(&user_layer(&read,file)?["config"],&key)!=&entry["before"] {return Err("trust restore readback failed".into());}
+        }
+        Ok(())
+    })
+}
+
+fn normal_path(path: &Path) -> PathBuf {path.canonicalize().unwrap_or_else(|_|path.parent().and_then(|p|p.canonicalize().ok()).map(|p|p.join(path.file_name().unwrap_or_default())).unwrap_or_else(||path.into()))}
+fn owned_hook(repair: &Repair,file:&Path,event:&str,command:&str)->bool {
+    repair.journal.as_ref().and_then(|j|std::fs::read(j).ok()).and_then(|b|serde_json::from_slice::<Vec<Value>>(&b).ok()).is_some_and(|entries|entries.iter().any(|e| {
+        if !(e["agent"]=="codex" || e["agent"].is_null()) || !e["file"].as_str().is_some_and(|f|normal_path(Path::new(f))==normal_path(file)) {return false;}
+        let Some(keys)=e["key"].as_array().and_then(|k|k.iter().map(Value::as_str).collect::<Option<Vec<_>>>()) else {return false};
+        let target=["hooks",event];if !target.starts_with(&keys) {return false;}
+        let mut after=&e["after"];for key in &target[keys.len()..] {after=&after[*key];}
+        let groups:Vec<_>=if e["kind"]=="append" && keys.len()==target.len() {vec![after]} else if e["kind"]=="set" {after.as_array().into_iter().flatten().collect()} else {vec![]};
+        groups.iter().any(|g|g["hooks"].as_array().is_some_and(|hooks|hooks.iter().any(|h|h["type"]=="command" && h["command"]==command)))
+    }))
+}
+
+fn limits_for(l:&Launch,now:i64)->Vec<Window> {
+    let Some(home)=preflight::home(&ADAPTER,l).filter(|h|h.is_dir()) else {return super::super::super::limits::unknown("account-home-missing")};
+    let path=home.join("auth.json");let before=match credential_snapshot(&path) {Ok(v)=>v,Err(_)=>return super::super::super::limits::unknown("credential-unreadable")};
+    let response=preflight::rpc(&ADAPTER,l,|rpc|rpc("account/rateLimits/read",json!({})));
+    if credential_snapshot(&path).ok().as_ref()!=Some(&before) {return super::super::super::limits::unknown("credential-changed");}
+    response.ok().and_then(|v|super::super::super::limits::reported(Client::Codex,&json!({"result":v}),now.max(0) as u64)).unwrap_or_else(||super::super::super::limits::unknown("native-account-read-failed"))
+}
+
+fn validate(args:&[OsString],_:&[(String,String)],_:&Policy)->Res<()> {
+    if args.iter().any(|a|a=="--dangerously-bypass-hook-trust") {return Err("hook-trust-bypass-refused".into());}
+    validate_arguments(args)
+}
+
+fn hook_status(home:&Path,journal:Option<&Path>)->LaunchCheck {
+    let checked=(|| {
+        let config:Value=toml::from_str(&std::fs::read_to_string(home.join("config.toml")).map_err(|_|"native config unreadable")?).map_err(|_|"native config invalid")?;
+        let hooks:Value=serde_json::from_slice(&std::fs::read(home.join("hooks.json")).map_err(|_|"hook config unreadable")?).map_err(|_|"hook config invalid")?;
+        let receipts:Vec<Value>=serde_json::from_slice(&std::fs::read(journal.ok_or("hook ownership unavailable")?).map_err(|_|"hook ownership unreadable")?).map_err(|_|"hook ownership invalid")?;
+        let repair=Repair {journal:journal.map(Path::to_path_buf),..Repair::default()};
+        let source=home.join("hooks.json");let mut covered=std::collections::BTreeSet::new();
+        for (event,native_event) in [("SessionStart","session_start"),("Stop","stop")] {
+            for (group_index,group) in hooks["hooks"][event].as_array().into_iter().flatten().enumerate() {
+                // The recorded native hash is valid only while the entire owned hook group is unchanged.
+                if !receipts.iter().any(|entry|owned_group(entry,&source,event,group)) {continue;}
+                for (handler_index,handler) in group["hooks"].as_array().into_iter().flatten().enumerate() {
+                    let Some(command)=handler["command"].as_str().filter(|c|owned_hook(&repair,&source,event,c)) else {continue};
+                    let receipt=receipts.iter().rev().find(|r|r["kind"]=="native-config" && r["file"].as_str().is_some_and(|p|normal_path(Path::new(p))==normal_path(&home.join("config.toml"))) && {
+                        let key=&r["key"];if key[0]!="hooks" || key[1]!="state" || key[3]!="trusted_hash" {false} else {key[2].as_str().is_some_and(|key| {
+                            let fields:Vec<_>=key.rsplitn(4,':').collect();fields.len()==4 && fields[0]==handler_index.to_string() && fields[1]==group_index.to_string() && fields[2]==native_event && normal_path(Path::new(fields[3]))==normal_path(&source)
+                        })}
+                    }).ok_or("native hook trust receipt missing or hook moved")?;
+                    let key=receipt["key"][2].as_str().ok_or("native hook trust key invalid")?;
+                    let state=&config["hooks"]["state"][key];
+                    if state["enabled"]==false || state["trusted_hash"]!=receipt["after"] || !receipt["after"].as_str().is_some_and(|h|!h.is_empty()) {return Err("AgentQ hook untrusted or disabled");}
+                    let _=command;covered.insert(event);
+                }
+            }
+        }
+        if covered.len()!=2 {return Err("AgentQ owned hooks missing or changed");}Ok(())
+    })();
+    match checked {Ok(())=>LaunchCheck::new("evidence","ok",None,"Owned hook bytes and local native trust match the native hash receipt; no client was started",""),Err(e)=>LaunchCheck::new("evidence","degraded",Some("hooks-untrusted"),e,"run agentq agent preflight --repair")}
+}
+
+fn owned_group(entry:&Value,file:&Path,event:&str,group:&Value)->bool {
+    if !(entry["agent"]=="codex" || entry["agent"].is_null()) || !entry["file"].as_str().is_some_and(|p|normal_path(Path::new(p))==normal_path(file)) {return false;}
+    let Some(keys)=entry["key"].as_array().and_then(|k|k.iter().map(Value::as_str).collect::<Option<Vec<_>>>()) else {return false};
+    let target=["hooks",event];if !target.starts_with(&keys) {return false;}
+    let mut after=&entry["after"];for key in &target[keys.len()..] {after=&after[*key];}
+    entry["kind"]=="append" && keys.len()==2 && after==group || entry["kind"]=="set" && after.as_array().is_some_and(|a|a.contains(group))
+}
+
+fn sandbox(l:&Launch)->LaunchCheck {
+    let unknown=|detail:String|LaunchCheck::new("permissions","unknown",Some("sandbox-unverified"),detail,"qualify native sandbox availability");
+    // Elevated Windows setup changes host accounts/ACLs; preflight never performs that setup.
+    if cfg!(windows) && !l.policy.unelevated {return unknown("Native elevated sandbox setup is not a read-only probe; select unelevated or qualify it explicitly".into());}
+    let result=(|| {
+        let mut command=preflight::command(&ADAPTER,l)?;
+        // Probe platform startup with no writes or model call; policy mapping is checked separately.
+        command.args(["sandbox","-P",":read-only","--include-managed-config","-C"]).arg(&l.root);
+        if l.policy.unelevated {command.args(["-c","windows.sandbox=unelevated"]);}
+        if cfg!(windows) {command.args(["--","cmd.exe","/d","/c","exit 0"]);}
+        else if cfg!(target_os="macos") {command.env_remove("CODEX_SANDBOX");command.args(["--","/usr/bin/printenv","CODEX_SANDBOX"]);}
+        else {command.args(["--","/usr/bin/true"]);}
+        super::super::super::capture::inherit_caller(&mut command);
+        crate::quiet(&mut command);command.stdin(std::process::Stdio::null());
+        command.output().map_err(|e|e.to_string())
+    })();
+    match result {
+        Ok(output) if output.status.success() && (!cfg!(target_os="macos") || String::from_utf8_lossy(&output.stdout).trim()=="seatbelt")=>LaunchCheck::new("permissions","ok",None,"Native sandbox started a no-model probe",""),
+        Ok(output)=>LaunchCheck::new("permissions","blocked",Some("sandbox-unavailable"),format!("Native sandbox probe refused ({}): {}",output.status,String::from_utf8_lossy(&output.stderr).trim()),"repair native sandbox availability or select a supported policy"),
+        Err(error)=>unknown(error),
+    }
+}
+
+fn project_key(path:&Path)->String {
+    let key=path.to_string_lossy();key.strip_prefix(r"\\?\UNC\").map(|p|format!(r"\\{p}")).unwrap_or_else(||key.strip_prefix(r"\\?\").unwrap_or(&key).into())
+}
+fn project<'a>(config:&'a Value,path:&Path)->Option<&'a Value> {
+    let key=project_key(path);let projects=config["projects"].as_object()?;
+    projects.get(&key).or_else(||cfg!(windows).then(||projects.iter().filter(|(k,_)|k.eq_ignore_ascii_case(&key)).min_by_key(|(k,_)|*k).map(|(_,v)|v)).flatten())
+}
+// Codex prefers a cwd entry, even without a trust value, then the validated main repository root.
+fn effective_trust(config:&Value,canonical:&Path,original:&Path)->bool {
+    for path in [Some(canonical),Some(original),repository(canonical).as_deref()] .into_iter().flatten() {
+        if let Some(project)=project(config,path) {return project["trust_level"]=="trusted";}
+    }
+    false
+}
+fn git_metadata(path:&Path)->Option<String> {
+    let metadata=std::fs::symlink_metadata(path).ok()?;
+    // This is Codex's native metadata format limit, not an AgentQ resource bound.
+    if !metadata.is_file() || metadata.is_symlink() || metadata.len()>64*1024 {return None;}
+    std::fs::read_to_string(path).ok()
+}
+fn git_pointer(path:&Path)->Option<PathBuf> {Some(path.parent()?.join(git_metadata(path)?.trim().strip_prefix("gitdir:")?.trim()))}
+fn repository(root:&Path)->Option<PathBuf> {
+    let checkout=root.ancestors().find(|p| {let git=p.join(".git");git.is_file() || git.is_dir() && git.join("HEAD").exists()})?;
+    let dot=checkout.join(".git");if dot.is_dir() {return Some(checkout.into());}
+    let git=git_pointer(&dot)?.canonicalize().ok()?;
+    if !git.is_dir() || git.parent()?.file_name()?!="worktrees" {return None;}
+    let common=git.parent()?.parent()?;
+    let registered=git.join(git_metadata(&git.join("gitdir"))?.trim());
+    let linked=git.join(git_metadata(&git.join("commondir"))?.trim()).canonicalize().ok()?;
+    if registered.file_name()?!=".git" || registered.parent()?.canonicalize().ok()?.as_path()!=checkout || linked!=common {return None;}
+    let main=common.parent()?;let main_dot=main.join(".git");
+    let main_git=if main_dot.is_dir() {main_dot} else {git_pointer(&main_dot)?};
+    (main_git.canonicalize().ok()?.as_path()==common).then(||main.into())
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    #[test]
+    fn cwd_project_overrides_repository_trust_and_worktrees_require_reverse_registration() {
+        let root=crate::scratch("codex-trust-parents").canonicalize().unwrap();let project=root.join("project");let sub=project.join("sub");std::fs::create_dir_all(&sub).unwrap();std::fs::create_dir(project.join(".git")).unwrap();std::fs::write(project.join(".git/HEAD"),"ref: refs/heads/main\n").unwrap();
+        let mut config=json!({"projects":{project_key(&project):{"trust_level":"trusted"}}});
+        assert!(effective_trust(&config,&sub,&sub));config["projects"][project_key(&sub)]=json!({});assert!(!effective_trust(&config,&sub,&sub));
+        let worktree=root.join("worktree");std::fs::create_dir_all(&worktree).unwrap();let admin=project.join(".git/worktrees/fixture");std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(worktree.join(".git"),format!("gitdir: {}\n",admin.display())).unwrap();std::fs::write(admin.join("commondir"),"../..\n").unwrap();std::fs::write(admin.join("gitdir"),format!("{}\n",worktree.join(".git").display())).unwrap();
+        assert!(effective_trust(&config,&worktree,&worktree));std::fs::write(admin.join("gitdir"),format!("{}\n",sub.join(".git").display())).unwrap();assert!(!effective_trust(&config,&worktree,&worktree));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn passive_trust_requires_unchanged_owned_hook_bytes_and_recorded_native_hash() {
+        let root=crate::scratch("codex-passive-trust");let source=root.join("hooks.json");let file=root.join("config.toml");let journal=root.join("owned.json");
+        let wants=setup(&root,Path::new("unused"),Path::new("agentq"));let mut hooks=json!({"hooks":{}});let mut receipts=vec![];let mut config=String::new();
+        for (index,event) in ["SessionStart","Stop"].into_iter().enumerate() {
+            hooks["hooks"][event]=json!([wants[index].value.clone()]);receipts.push(json!({"file":source,"kind":"append","key":["hooks",event],"after":wants[index].value,"agent":"codex"}));
+            let key=format!("{}:{}:0:0",source.display(),if index==0 {"session_start"} else {"stop"});
+            receipts.push(json!({"file":file,"kind":"native-config","key":["hooks","state",key,"trusted_hash"],"before":null,"after":"sha256:fixture","agent":"codex"}));
+            config.push_str(&format!("[hooks.state.{}]\ntrusted_hash = \"sha256:fixture\"\n",json!(key)));
+        }
+        let mut superseded=receipts[1].clone();superseded["after"]=json!("sha256:old");receipts.insert(0,superseded);
+        std::fs::write(&source,hooks.to_string()).unwrap();std::fs::write(&journal,json!(receipts).to_string()).unwrap();std::fs::write(&file,&config).unwrap();
+        assert_eq!(hook_status(&root,Some(&journal)).state,"ok");
+        hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"]=json!(17);std::fs::write(&source,hooks.to_string()).unwrap();assert_eq!(hook_status(&root,Some(&journal)).state,"degraded");
+        hooks["hooks"]["Stop"][0]=wants[1].value.clone();std::fs::write(&source,hooks.to_string()).unwrap();std::fs::write(&file,config.replace("trusted_hash =","enabled = false\ntrusted_hash =")).unwrap();assert_eq!(hook_status(&root,Some(&journal)).state,"degraded");
+        std::fs::write(&file,format!("{config}\nnot valid TOML")).unwrap();assert_eq!(hook_status(&root,Some(&journal)).state,"degraded");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

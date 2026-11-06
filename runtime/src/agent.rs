@@ -23,7 +23,7 @@ pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
-pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
@@ -195,9 +195,22 @@ pub(crate) fn command(mut base: Command, spec: &Spec) -> Command {
     environment(base, spec)
 }
 
+/// A worker must not inherit another account's authentication or an interactive credential prompt.
+fn clean_environment(command: &mut Command, account_bound: bool) {
+    for var in registry::session_vars() {command.env_remove(var);}
+    if account_bound {
+        let explicit:Vec<_>=command.get_envs().filter_map(|(k,v)|v.map(|_|k.to_os_string())).collect();
+        for var in registry::auth_vars() {if !explicit.iter().any(|k|k==var) {command.env_remove(var);}}
+    }
+    for (key,value) in [("GIT_ASKPASS",""),("SSH_ASKPASS",""),("GIT_TERMINAL_PROMPT","0"),("GCM_INTERACTIVE","never"),("SSH_ASKPASS_REQUIRE","never")] {
+        if !command.get_envs().any(|(k,_)|k==key) {command.env(key,value);}
+    }
+    if !command.get_envs().any(|(k,_)|k=="GIT_SSH_COMMAND") && std::env::var_os("GIT_SSH_COMMAND").is_none() {command.env("GIT_SSH_COMMAND","ssh -oBatchMode=yes");}
+}
+
 fn environment(mut base: Command, spec: &Spec) -> Command {
     base.current_dir(&spec.root);
-    for var in registry::session_vars() {base.env_remove(var);}
+    clean_environment(&mut base, spec.home.is_some() || spec.env.iter().any(|(k,_)|k==spec.client.home_var()));
     base.envs(spec.env.iter().map(|(k, v)| (k, v)));
     if let Some(home) = &spec.home { base.env(spec.client.home_var(), home); }
     crate::quiet(&mut base);
@@ -253,6 +266,7 @@ fn reap(pid: u32) -> Option<Option<i32>> {
 
 /// One running turn: the client process with stdout and stderr appended to the caller's log.
 pub struct Turn {
+    readiness: Option<Readiness>,
     client: Client,
     /// The caller cancelled the run.
     cancelled: bool,
@@ -317,11 +331,13 @@ impl Turn {
         } else {
             drop(stdin);
         }
-        Ok(Turn { client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
+        Ok(Turn { readiness: None, client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
             ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), extension, receipt, sampler, terminal: None })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }
+
+    pub(crate) fn prepared(mut self, readiness: Readiness) -> Self {self.readiness=Some(readiness);self}
 
     /// Private recovery value of a running turn (docs/spec/RUNTIME.md § Turn recovery and process setup).
     pub(crate) fn checkpoint(&self) -> Result<Value, adapter::Cause> {
@@ -348,7 +364,7 @@ impl Turn {
         let flag = |k: &str| saved[k].as_bool().ok_or_else(invalid);
         let resumed = match &saved["resumed"] { Value::Null => None, v => Some(v.as_str().filter(|s| native::plain_id(s)).ok_or_else(invalid)?.to_string()) };
         let age = Duration::from_millis(unix_ms().saturating_sub(started_ms).max(0) as u64);
-        Ok(Turn { client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(),
+        Ok(Turn { readiness: None, client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(),
             start, pos: start, ended: false, stopping: false, timed_out: flag("timed_out")?, started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
             started_ms, exit: None, home: spec_home(spec), resumed, extension: Box::new(StdioTurn), receipt: None, sampler: None, terminal: None })
     }
@@ -463,6 +479,7 @@ impl Turn {
         let rollout=session.as_deref().and_then(|session|registry::native_transcript(self.client,session,self.home.as_deref()));
         let mut r = Report::read(self.client, text, &events, rollout.as_deref());
         r.session = session;
+        r.readiness = self.readiness.clone();
         r.duration_us = self.started.elapsed().as_micros() as u64;
         r.started_ms = self.started_ms;
         r.exit = if self.exit_unknown { None } else { self.exit };
@@ -472,6 +489,9 @@ impl Turn {
             None => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("recovered") },
         };
         (protocol(self.client).rollout_report)(rollout.as_deref(),&mut r);
+        if r.outcome=="unknown" {
+            if let Some(cause)=adapter::runtime(self.client.code()).and_then(|a|a.launch_refusal(text)) {(r.outcome,r.error)=("refused",cause.0);}
+        }
         if self.timed_out { (r.outcome, r.error) = ("cancelled", "timeout"); }
         else if self.cancelled { (r.outcome, r.error) = ("cancelled", "interrupted"); }
         else if r.outcome == "unknown" && r.exit.is_some_and(|c| c != 0) && r.error == "no-end" { (r.outcome, r.error) = ("failed", "exit"); }
@@ -504,8 +524,8 @@ pub struct Context<'a> {
 
 /// Start, wait and report one turn, then append its `agent.turn` observation to `store`. A failed append is kept in
 /// `Report::recorded` and never changes the turn's result (R30).
-pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store) -> Res<Report> {
-    let mut turn = Turn::start(base, spec, log, text, &Process::default())?;
+pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness) -> Res<Report> {
+    let mut turn = Turn::start(base, spec, log, text, &Process::default())?.prepared(readiness);
     turn.wait(deadline)?;
     let mut r = turn.report();
     r.recorded = turn.snapshot(ctx).and_then(|f| f.append(store));
@@ -571,6 +591,8 @@ fn percent(v: f64) -> Option<u64> { (v.is_finite() && v >= 0.0).then(|| v.round(
 /// What one turn did, read from its log.
 #[derive(Clone, Debug)]
 pub struct Report {
+    /// Ordered launch evidence; absent for log-only classification.
+    pub readiness: Option<Readiness>,
     pub session: Option<String>,
     pub usage: Usage,
     pub limit: Snapshot,
@@ -634,6 +656,7 @@ impl Report {
             "limit_used_percent": num("limit_used_percent", self.limit.used_percent, limit_why),
             "limit_resets_at": num("limit_resets_at", self.limit.resets_at, limit_why),
         });
+        if let Some(readiness)=&self.readiness {v["counts"]=readiness.metadata();}
         unknown.insert("trace".into(), json!("not-traced"));
         unknown.insert("span".into(), json!("not-traced"));
         let text = |v: &mut Value, unknown: &mut serde_json::Map<String, Value>, k: &str, s: Option<&str>, why: &str| {
@@ -654,6 +677,19 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_prompt_defaults_preserve_explicit_helpers() {
+        let mut command=Command::new("unused");
+        clean_environment(&mut command,false);
+        assert!(command.get_envs().any(|(k,v)|k=="GIT_ASKPASS" && v==Some(OsStr::new(""))));
+        if std::env::var_os("GIT_SSH_COMMAND").is_none() {assert!(command.get_envs().any(|(k,v)|k=="GIT_SSH_COMMAND" && v==Some(OsStr::new("ssh -oBatchMode=yes"))));}
+        command.env("GIT_ASKPASS","explicit-helper").env("GIT_SSH_COMMAND","explicit-ssh");
+        clean_environment(&mut command,false);
+        assert!(command.get_envs().any(|(k,v)|k=="GIT_ASKPASS" && v==Some(OsStr::new("explicit-helper"))));
+        assert!(command.get_envs().any(|(k,v)|k=="GIT_SSH_COMMAND" && v==Some(OsStr::new("explicit-ssh"))));
+    }
+
 
     // #192 A1: service PATH misses user installs; native CLI and legacy homes must both remain usable.
     #[test]
@@ -878,7 +914,7 @@ use registry::claude_settings;
 fn protocol(client:Client)->&'static registry::Protocol {registry::protocol(client)}
 
 impl Report {
-    fn empty()->Self {Report {session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,text:None,exit:None,started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
+    fn empty()->Self {Report {readiness:None,session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,text:None,exit:None,started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
 }
 
 #[cfg(test)]

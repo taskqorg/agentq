@@ -10,6 +10,12 @@
 - Add `History::with_native_session_alias` for caller-validated copied Claude jobs. The alias is explicit and checkpointed; records with any other session ID still fail, as do source replacement and prefix changes. Aliased events retain caller session and expose the original native session. No alias is inferred from filenames.
 - Native start-limit, terminal, call/usage and history parsers now live behind per-runtime protocol callbacks; shared report assembly interprets no native record types. No native flags, limits, admission policy or execution behavior change.
 
+- Add ordered `Runtime::preflight`, `Readiness`, `ReadinessMode` and explicit journaled `Repair` for worker launches. Launch and resume refuse known blockers before input; unknown checks continue by default and remain visible. Account probes use the selected command, home and environment.
+- Add account-bound `ready_for`, `catalogue_for` and `account_limits_for` probes; existing probe methods stay available.
+- Add exact Claude workspace trust and native Codex project/hook trust preparation, with ownership checks, client locks, native revisions and guarded uninstall. Hooks remain optional evidence.
+- Reports and checkpoints retain local readiness; turn telemetry keeps only fixed preflight counters. Observations expose `phase` and `starting_ms` without changing poll states.
+- `Launch`, `Report`, `Observation` and installation `Edit` gain fields; consumers constructing them literally must add these fields. `Launch::new` keeps its signature. Protected-host authority and no-replay recovery remain unchanged.
+
 ## 0.13.3
 
 - Pin CoreQ v0.23.4.
