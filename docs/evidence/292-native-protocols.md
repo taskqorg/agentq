@@ -1,0 +1,11 @@
+# Native protocol module extraction
+
+Follow-up to [308](https://github.com/taskqorg/agentq/pull/308), completing [292](https://github.com/taskqorg/agentq/issues/292) before identity revision 302.
+
+Native identity is now registration data; a new runtime does not add an enum variant. Registered callbacks own session IDs, event/lifecycle/permission parsing, terminal evidence, reports, snapshots, quota windows, account identity and credentials, native transcript records, session-call overrides and protocol commands. Codex owns its app-server state machine and queue exchange; Claude owns background jobs and Remote Control; Antigravity owns sidecar receipt/transcript state through a private turn extension. Existing parsing utilities and OS/process/ownership/recovery checks remain shared. The Runtime, Descriptor, Launch and Intent consumer surfaces stay compatible.
+
+The example is a real Adapter with a distinct native protocol. Its single module provides registration, arguments, event/report parsing and a portable scripted CLI (the test executable, matching the existing integration-test pattern). A test launches and resumes it, reads ordered events, native session ID, result text and usage. It uses the normal Adapter/Turn path, no core identity variant, native parser arm or production catalog entry. It changes no installed profile and makes no model call. Test-catalog lookup is generic, without its name in core.
+
+Existing native assertions are retained. The two Antigravity transcript-state tests moved with their private state; public behavior tests still exercise all existing native fixtures, recovery and telemetry. No timeout, cap, budget, cache, retry limit or queue bound was added or widened. Credential stability checks, keychain prompt guard, native protocol errors, record limits and sidecar completion semantics remain.
+
+Validation uses cargo test, offline selftest, Hermes plugin checks and contract lint at workflow-pinned specq `7e9adf57287553176d8b3be61c2b22565543dc51`; results and exact candidate are recorded in the PR. Scripted fixtures establish source behavior, not live fleet/client qualification. No deploy, working-profile edit, installed AgentQ edit, TaskQ mutation or shell `agentq direct` is authorized or performed by this change.

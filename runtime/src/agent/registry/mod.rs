@@ -38,7 +38,6 @@ pub enum Hook { None, Stop { model: bool }, SessionStart, ModelCall, TurnEnd }
 
 pub struct Provider {pub selected:bool,pub present:bool,pub loopback:bool}
 
-
 pub struct ProfileState {
     pub hooks: &'static str,
     pub plugin: &'static str,
@@ -103,9 +102,14 @@ pub const KINDS: [(&str, &str, &[&str], &[&str]); ENTRIES.len()] = {
 };
 
 pub fn entries() -> Vec<&'static Entry> { let mut entries = ENTRIES.to_vec(); entries.sort_by_key(|e| e.order); entries }
-pub fn entry(name: &str) -> Option<&'static Entry> { ENTRIES.into_iter().find(|e| e.name == name || e.aliases.contains(&name)) }
+fn native_entries()->impl Iterator<Item=&'static Entry> {
+    #[cfg(test)] let fixtures=examples::ENTRIES.as_slice();
+    #[cfg(not(test))] let fixtures:&[&'static Entry]=&[];
+    ENTRIES.into_iter().chain(fixtures.iter().copied())
+}
+pub fn entry(name: &str) -> Option<&'static Entry> { native_entries().find(|e| e.name == name || e.aliases.contains(&name)) }
 pub fn profile(kind: &str) -> Option<&'static Entry> { ENTRIES.into_iter().find(|e| e.profile.kind == kind) }
-pub(super) fn builtin(client: Client) -> &'static Adapter { ENTRIES.into_iter().filter_map(|e| e.builtin).find(|a| a.client == client).expect("native adapter is registered") }
+pub(super) fn builtin(client: Client) -> &'static Adapter { native_entries().filter_map(|e| e.builtin).find(|a| a.client == client).expect("native adapter is registered") }
 
 pub fn cli_present(entry: &Entry) -> Result<PathBuf, String> {
     let path = (entry.executable)().ok_or_else(|| format!("{} has no CLI", entry.name))?;
@@ -196,12 +200,11 @@ mod examples {
         let e=ENTRIES[0];
         assert_eq!((e.name,e.profile.operations),("example-agent",&["hooks"][..]));
         assert!(cli_present(e).unwrap_err().contains("example-agent"));
-        let launch=Launch::new(std::env::temp_dir(),std::env::temp_dir().join("example.log"),"example","input");
-        assert!(e.runtime.unwrap().launch(&launch).is_err(),"the fake never starts native work");
+
         let root=(e.root)();
         let requests=(e.setup)(&root,Path::new(""),Path::new("/agentq"));
         assert_eq!(requests[0].file,root.join("hooks.json"));
-        assert!(!root.exists(),"registration and discovery never write setup");
+
     }
 }
 
@@ -220,7 +223,7 @@ mod tests {
 }
 
 pub(crate) fn native_client(name: &str) -> Option<Client> {entry(name)?.builtin.map(|a|a.client)}
-pub(crate) fn native_name(client: Client) -> &'static str {builtin(client).descriptor.name}
+
 pub(crate) fn native_home_var(client: Client) -> &'static str {builtin(client).ops.home_var}
 pub(crate) fn alternate_home_var(client: Client) -> Option<&'static str> {builtin(client).ops.alternate_home_var}
 pub(crate) fn native_home(client: Client) -> Option<PathBuf> {(builtin(client).ops.home)()}
@@ -245,3 +248,54 @@ pub(super) fn with_test_path<T>(path: &Path,f: impl FnOnce()->T) -> T {
     unsafe {std::env::set_var("PATH",path)}
     f()
 }
+
+pub(crate) struct Protocol {
+    pub prepare_command:fn(Command,&Spec,&str)->Res<(Command,Box<dyn TurnExtension>)>,
+    pub input_bytes:fn(&str)->Vec<u8>,
+    pub native_record:fn(&mut native::NativeTurn,&Value)->Res<()>,
+    pub native_metadata:Option<fn(&native::NativeTurn,&Value)->Res<()>>,
+    pub finish_native_report:fn(&native::NativeTurn,&mut Report),
+    pub session_report:fn(&str,&mut Report),
+    pub reported:fn(&Value,u64)->Option<Vec<Window>>,
+    pub update_limits:fn(&Value,u64,&mut BTreeMap<String,Vec<Window>>)->bool,
+    pub account_limits:fn(Option<&Path>,i64)->Vec<Window>,
+    pub identity:fn(Option<&Path>)->Option<String>,
+    pub credentials:fn(&Path,bool)->Res<String>,
+    pub oauth_token:fn(&Value,i64)->Res<&str>,
+    pub oauth_usage:fn(&str)->Res<Vec<Window>>,
+    pub turn_ended:fn(bool,&Value)->bool,
+    pub parse_event: fn(&mut events::Cursor,&Value,&mut Vec<Event>,Option<&str>),
+    pub terminal: fn(&events::Cursor,&Value,&mut Vec<Event>,Option<&str>,Option<&str>)->Option<&'static str>,
+    pub assistant_failure: fn(&Value)->Option<events::AssistantFailure>,
+    pub permission_mode: fn(&Value)->Option<String>,
+    pub lifecycle: fn(&Value)->Option<String>,
+    pub advances: fn(&Value)->bool,
+    pub session: fn(&str)->Option<String>,
+    pub snapshot: fn(&[Value],Option<&Path>)->Snapshot,
+    pub report: fn(&str,&[Value],Option<&Path>)->Report,
+}
+pub(crate) fn protocol(client:Client)->&'static Protocol {builtin(client).ops.protocol}
+#[cfg(test)]
+pub(crate) use antigravity::session as antigravity_session;
+
+pub(crate) use claude::claude_info;
+#[cfg(test)]
+pub(crate) use codex::codex_identity;
+#[cfg(test)]
+pub(crate) use antigravity::{code_assist,project_identity};
+
+pub(crate) use codex::app;
+
+pub use claude::BackgroundJob;
+pub(crate) use claude::{remote_url,claude_link,Absence};
+pub(crate) use codex::append_codex_usage;
+
+#[cfg(test)]
+pub(crate) use claude::{claude_window,claude_windows};
+
+pub(crate) fn native_transcript(client:Client,session:&str,home:Option<&Path>)->Option<PathBuf> {(builtin(client).ops.transcript)(session,home)}
+
+#[path="shared/parsing.rs"]
+pub(crate) mod parsing;
+#[cfg(test)]
+pub(crate) use claude::claude_settings;

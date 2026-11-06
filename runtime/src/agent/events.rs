@@ -1,6 +1,6 @@
 //! Native records become ordered runtime-neutral events at the adapter boundary.
 use super::*;
-use std::collections::{BTreeSet,HashSet};
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum ToolKind { Shell, Mcp, Web, Other }
@@ -71,42 +71,7 @@ pub struct AssistantFailure {
     pub detail: Option<String>,
 }
 
-pub(super) fn assistant_failure(client: Client, v: &Value) -> Option<AssistantFailure> {
-    if client != Client::Claude || v["type"] != "assistant" || !(v["isApiErrorMessage"] == true || v["error"].is_string()) { return None; }
-    let code = string(&v["error"]);
-    let detail = v["message"]["content"].as_array().map(|blocks| blocks.iter()
-        .filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(""))
-        .or_else(|| string(&v["message"]["content"])).filter(|s| !s.is_empty());
-    Some(AssistantFailure { error: if code.as_deref() == Some("authentication_failed") {"auth-rejected"} else {"client-error"}, code, detail })
-}
-
-pub(super) fn permission_mode(client: Client, v: &Value) -> Option<String> {
-    (client == Client::Claude).then(|| v["permissionMode"].as_str().filter(|s| !s.is_empty()).map(String::from)).flatten()
-}
-
-pub(super) fn lifecycle(client: Client, v: &Value) -> Option<String> {
-    let name = match client {
-        Client::Claude => match v["type"].as_str()? {
-            "system" => [v["type"].as_str(), v["subtype"].as_str()].into_iter().flatten().collect::<Vec<_>>().join(" "),
-            "result" | "control_request" | "control_response" => v["type"].as_str()?.into(),
-            _ => return None,
-        },
-        Client::Codex => {
-            let p = v.get("payload").or(v.get("msg")).unwrap_or(v);
-            if matches!(p["type"].as_str(), Some("task_started" | "task_complete" | "turn_aborted")) { p["type"].as_str()?.into() }
-            else if matches!(v["type"].as_str(), Some("thread.started" | "turn.started" | "turn.completed" | "turn.failed" | "error")) { v["type"].as_str()?.into() }
-            else if matches!(v["method"].as_str(), Some("thread/started" | "turn/started" | "turn/completed" | "error")) { v["method"].as_str()?.into() }
-            else { return None; }
-        },
-        Client::Antigravity => {
-            if matches!(v["step_update"]["step_type"].as_str(), Some("system_message" | "checkpoint")) { v["step_update"]["step_type"].as_str()?.into() }
-            else if matches!(v["event"].as_str(), Some("init" | "result")) { v["event"].as_str()?.into() }
-            else { return None; }
-        },
-    };
-    let name = name.replace("task_", "turn_").replace(['_', '.', '/'], " ");
-    Some(if name == "init" {"session started".into()} else {name})
-}
+pub(super) fn permission_mode(client:Client,v:&Value)->Option<String> {(protocol(client).permission_mode)(v)}
 
 pub(super) fn log_records(client: Client, log: &str) -> Vec<LogRecord> {
     let mut cursor=Cursor{records:true,..Cursor::new(true)};
@@ -130,17 +95,8 @@ pub(super) fn log_records(client: Client, log: &str) -> Vec<LogRecord> {
 }
 
 /// Whether a record proved work advanced even when it names no typed payload.
-fn advances(client: Client, v: &Value) -> bool {
-    match client {
-        Client::Claude => false, // Text progress is emitted in block order by the cursor.
-        Client::Codex => matches!(v.get("payload").or(v.get("msg")).unwrap_or(v)["type"].as_str(),Some("message"|"reasoning"))
-            || (v["type"]=="item.completed" && completed_non_tool(&v["item"]))
-            || (v["method"]=="item/completed" && completed_non_tool(&v["params"]["item"])),
-        Client::Antigravity => v["event"]=="step_update" && matches!(v["step_update"]["step_type"].as_str(),Some("user_input"|"agent_response"|"system_message"|"checkpoint")) && v["step_update"]["state"]=="DONE",
-    }
-}
-
-fn completed_non_tool(item: &Value) -> bool {
+fn advances(client:Client,v:&Value)->bool {(protocol(client).advances)(v)}
+pub(crate) fn completed_non_tool(item: &Value) -> bool {
     matches!(item["type"].as_str(),Some("agentMessage"|"agent_message"|"userMessage"|"user_message"|"reasoning"|"plan"|"todo_list"|"contextCompaction"|"context_compaction"))
 }
 
@@ -164,22 +120,22 @@ fn native_time(s: &str) -> Option<i64> {
 pub struct Model { pub id: String, pub name: String }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-pub(super) struct Cursor {
+pub(crate) struct Cursor {
     pub deltas: bool,
     #[serde(skip)]
-    records: bool,
-    message: Option<String>,
-    window: Option<u64>,
-    used: Option<u64>,
-    last_text: Option<String>,
-    model: Option<String>,
-    seen: HashSet<String>,
+    pub(crate) records: bool,
+    pub(crate) message: Option<String>,
+    pub(crate) window: Option<u64>,
+    pub(crate) used: Option<u64>,
+    pub(crate) last_text: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) seen: HashSet<String>,
     #[serde(default)]
-    start_limit: StartLimit,
+    pub(crate) start_limit: StartLimit,
 }
 
-fn string(v: &Value) -> Option<String> { v.as_str().map(String::from) }
-fn tool_kind(kind: &str) -> ToolKind {
+pub(crate) fn string(v: &Value) -> Option<String> { v.as_str().map(String::from) }
+pub(crate) fn tool_kind(kind: &str) -> ToolKind {
     match kind { "command_execution" | "commandExecution" | "Bash" | "run_command" => ToolKind::Shell,
         "mcp_tool_call" | "mcpToolCall" => ToolKind::Mcp,
         "web_search" | "webSearch" => ToolKind::Web, _ if kind.starts_with("mcp__") => ToolKind::Mcp, _ => ToolKind::Other }
@@ -191,13 +147,13 @@ fn credential_like(text: &str) -> bool {
 }
 
 // Local audit targets only: never serialize arbitrary native tool input or patches.
-fn audit_path(value: &Value) -> Option<String> {
+pub(crate) fn audit_path(value: &Value) -> Option<String> {
     let text=value.as_str()?;
     if text.is_empty() || text.len()>512 || !text.bytes().all(|b|b.is_ascii_alphanumeric() || b"/\\._-".contains(&b)) || credential_like(text) {return None;}
     Some(text.into())
 }
 
-fn audit_command(value: &Value) -> Option<String> {
+pub(crate) fn audit_command(value: &Value) -> Option<String> {
     let text=value.as_str()?;
     if text.len()>2048 || text.chars().any(char::is_control) {return None;}
     let mut words=text.split_whitespace();
@@ -211,33 +167,18 @@ fn audit_command(value: &Value) -> Option<String> {
     } else if matches!(exe.as_str(), "cargo"|"git"|"go"|"pytest"|"python"|"python3"|"bash"|"sh"|"curl"|"wget"|"node"|"npm"|"echo"|"printf"|"env") {Some(format!("{exe} [arguments redacted]"))} else {None}
 }
 
-fn audit_files(value: &Value) -> Option<String> {
+pub(crate) fn audit_files(value: &Value) -> Option<String> {
     let paths=value.as_array()?;
     if paths.is_empty() || paths.len()>16 {return None;}
     paths.iter().map(|p|audit_path(&p["path"])).collect::<Option<Vec<_>>>().map(|p|p.join(", "))
 }
 
-fn native_timeout(input: &Value) -> Option<u64> {
+pub(crate) fn native_timeout(input: &Value) -> Option<u64> {
     ["timeout_ms","timeoutMs","TimeoutMs","timeout"].iter().find_map(|k|input[*k].as_u64())
         .or_else(||input["timeout_seconds"].as_u64()?.checked_mul(1000)).filter(|ms|*ms>0)
 }
 
 /// Terminal records of session files, which ends leaves out because a turn report never reads them as its end.
-fn session_end(client: Client, v: &Value) -> Option<&'static str> {
-    match client {
-        Client::Claude if v["type"]=="system" && v["subtype"]=="turn_duration" => Some("unknown"),
-        Client::Codex if v["type"]=="event_msg" => match v["payload"]["type"].as_str() {Some("task_complete")=>Some("ok"),Some("turn_aborted")=>Some("cancelled"),_=>None},
-        _ => None,
-    }
-}
-
-fn antigravity_detail(name: Option<&str>, input: &Value) -> Option<String> {
-    match name {
-        Some("run_command")=>audit_command(&input["CommandLine"]),
-        Some("view_file"|"write_to_file"|"replace_file_content"|"multi_replace_file_content")=>audit_path(input.get("Path").or(input.get("TargetFile")).unwrap_or(&Value::Null)),
-        _=>None,
-    }
-}
 
 impl Cursor {
     pub fn new(deltas: bool) -> Self { Self { deltas, ..Self::default() } }
@@ -250,252 +191,14 @@ impl Cursor {
             }
             let before = out.len();
             if let Some(w) = limits::reported(client, &v, (unix_ms()/1000).max(0) as u64) { out.push(Event::Quota(w)); }
-            match client {
-                Client::Claude => self.claude(&v, &mut out),
-                Client::Codex => self.codex(&v, &mut out, thread),
-                Client::Antigravity => self.antigravity(&v, &mut out),
-            }
-            let terminal=if client==Client::Codex && v["method"]=="turn/completed" && (thread.is_none() || thread==v["params"]["threadId"].as_str() && turn.is_some_and(|t|v["params"]["turn"]["id"].as_str()==Some(t))) {
-                let outcome=match v["params"]["turn"]["status"].as_str() {Some("completed")=>Some("ok"),Some("failed")=>Some("failed"),Some("interrupted")=>Some("cancelled"),_=>None};
-                if outcome.is_none() {out.push(Event::Unsupported{reason:"native turn status unsupported"});}
-                outcome
-            } else if ends(&v) {
-                let outcome=Report::read(client,&v.to_string(),std::slice::from_ref(&v),None).outcome;
-                Some(match (self.start_limit,outcome) { (StartLimit::Reached(_),_)=>"refused",(StartLimit::Working,"refused")=>"failed",_=>outcome })
-            } else {
-                if client==Client::Antigravity && v["event"]=="result" {out.push(Event::Unsupported{reason:"native turn status unsupported"});}
-                session_end(client,&v)
-            };
+            (protocol(client).parse_event)(self,&v,&mut out,thread);
+            let terminal=(protocol(client).terminal)(self,&v,&mut out,thread,turn);
             if let Some(outcome)=terminal {out.push(Event::TurnEnd {outcome});}
             if out.len() == before { out.push(Event::Activity); }
         }
         out
     }
 
-    fn claude(&mut self, v: &Value, out: &mut Vec<Event>) {
-        if let Some(models) = v["modelUsage"].as_object() {
-            self.window = self.model.as_ref().and_then(|m|models.get(m)).and_then(|m|m["contextWindow"].as_u64());
-            out.push(Event::Context { used: self.used, window: self.window });
-        }
-        if v["type"] == "system" && v["subtype"] == "init" { out.push(Event::TurnStart); }
-        let event = &v["event"];
-        if v["type"] == "stream_event" {
-            if event["type"] == "message_start" { self.message = string(&event["message"]["id"]); }
-            if self.deltas && event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta" {
-                if let Some(delta) = string(&event["delta"]["text"]) { out.push(Event::Text { item: self.message.clone(), delta }); }
-            }
-        }
-        if v["type"] == "assistant" {
-            let message = &v["message"];
-            let model=string(&message["model"]);
-            if model != self.model {self.window=None;} self.model=model;
-            let item = string(&message["id"]);
-            if let Some(blocks) = message["content"].as_array() {
-                let text = blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("");
-                // Older checkpoints deduplicated the aggregate message, rather than each block.
-                let legacy_seen=item.as_ref().is_some_and(|id|self.seen.contains(&format!("message:{id}:{}",crate::sha256_hex(text.as_bytes()))));
-                let mut emitted=false;
-                for (index,block) in blocks.iter().enumerate() {
-                    if block["type"] == "text" {
-                        if let Some(text)=block["text"].as_str().filter(|s|!s.is_empty()) {
-                            if !legacy_seen && item.as_ref().is_none_or(|id|self.seen.insert(format!("message:{id}:{index}:{}",crate::sha256_hex(text.as_bytes())))) {
-                                out.push(Event::Message{item:item.clone(),text:text.into()});
-                                emitted=true;
-                            } else if self.records {out.push(Event::Progress);}
-                        }
-                    } else if block["type"] == "tool_use" {
-                        let id = string(&block["id"]);
-                        if id.as_ref().is_none_or(|id| self.seen.insert(format!("tool:{id}"))) {
-                            let name = string(&block["name"]); let kind = tool_kind(name.as_deref().unwrap_or(""));
-                            out.push(Event::ToolStart { id, kind, name, timeout_ms:native_timeout(&block["input"]), detail: match block["name"].as_str() {Some("Bash")=>audit_command(&block["input"]["command"]),Some("Read"|"Edit"|"Write"|"NotebookEdit"|"MultiEdit")=>audit_path(&block["input"]["file_path"]),_=>None} });
-                        }
-                    }
-                }
-                if emitted {self.last_text=Some(text);}
-            }
-            let u = &message["usage"];
-            if u.is_object() {
-                let used = u["input_tokens"].as_u64().and_then(|i| i.checked_add(u["cache_read_input_tokens"].as_u64()?).and_then(|n| n.checked_add(u["cache_creation_input_tokens"].as_u64()?)));
-                self.used = used;
-                out.push(Event::Context { used, window: self.window });
-            }
-        }
-        if v["type"] == "user" {
-            if let Some(blocks) = v["message"]["content"].as_array() {
-                for b in blocks {
-                    if b["type"] == "tool_result" {
-                        out.push(Event::ToolEnd { id: string(&b["tool_use_id"]), status: Some(if b["is_error"] == true { "failed" } else { "completed" }.into()) });
-                    } else if self.records && b["type"] == "text" && b["text"].as_str().is_some_and(|s|!s.is_empty()) {out.push(Event::Progress);}
-                }
-            }
-        }
-        if v["type"] == "result" {
-            if let Some(text) = v["result"].as_str().filter(|s|self.last_text.as_deref()!=Some(*s)) {
-                self.last_text=Some(text.into()); out.push(Event::Message {item:None,text:text.into()});
-            }
-        }
-    }
-
-    fn codex(&mut self, v: &Value, out: &mut Vec<Event>, thread: Option<&str>) {
-        let method = v["method"].as_str().unwrap_or("");
-        let p = &v["params"];
-        if v["type"] == "turn.started" || (method == "turn/started" && thread.is_none_or(|t|p["threadId"].as_str()==Some(t))) { out.push(Event::TurnStart); }
-        if self.deltas && method == "item/agentMessage/delta" {
-            if let Some(delta) = string(&p["delta"]) { out.push(Event::Text { item: string(&p["itemId"]), delta }); }
-        }
-        if method == "thread/tokenUsage/updated" && thread.is_some_and(|t|!t.is_empty() && p["threadId"].as_str()==Some(t)) {
-            out.push(Event::Context { used: p["tokenUsage"]["last"]["totalTokens"].as_u64(), window: p["tokenUsage"]["modelContextWindow"].as_u64() });
-        }
-        let payload = v.get("payload").or(v.get("msg")).unwrap_or(v);
-        if payload["type"] == "token_count" {
-            out.push(Event::Context { used: payload["info"]["last_token_usage"]["total_tokens"].as_u64(), window: payload["info"]["model_context_window"].as_u64() });
-        }
-        // A rollout call exposes only its identity, name and deadline, never its arguments or output.
-        match payload["type"].as_str() {
-            Some("function_call"|"custom_tool_call") => {
-                let input=payload["arguments"].as_str().and_then(|s|serde_json::from_str::<Value>(s).ok()).unwrap_or(Value::Null);
-                out.push(Event::ToolStart { id: string(&payload["call_id"]), kind: tool_kind(payload["name"].as_str().unwrap_or("")), name: string(&payload["name"]), detail: None, timeout_ms: native_timeout(&input) });
-            }
-            Some("function_call_output"|"custom_tool_call_output") => out.push(Event::ToolEnd { id: string(&payload["call_id"]), status: None }),
-            _ => {}
-        }
-        let kind = v["type"].as_str().unwrap_or("");
-        let start = method == "item/started" || kind == "item.started";
-        let end = method == "item/completed" || kind == "item.completed";
-        if !start && !end { return; }
-        let i = if method.is_empty() { &v["item"] } else { &p["item"] };
-        let native = i["type"].as_str().unwrap_or("");
-        let id = string(&i["id"]);
-        if matches!(native, "agentMessage" | "agent_message") {
-            if end { if let Some(text) = string(&i["text"]) { out.push(Event::Message { item: id, text }); } }
-        } else if matches!(native, "commandExecution" | "command_execution" | "mcpToolCall" | "mcp_tool_call" | "webSearch" | "web_search" | "fileChange" | "file_change" | "dynamicToolCall" | "dynamic_tool_call" | "collabAgentToolCall" | "collab_tool_call" | "imageView" | "image_view" | "imageGeneration" | "image_generation") {
-            if start { out.push(Event::ToolStart { id: id.clone(), kind: tool_kind(native), timeout_ms:native_timeout(i), name: string(&i["tool"]).or_else(|| string(&i["name"])), detail: match native {"commandExecution"|"command_execution"=>audit_command(&i["command"]),"fileChange"|"file_change"=>audit_files(&i["changes"]),_=>None} }); }
-            if end { out.push(Event::ToolEnd { id, status: string(&i["status"]) }); }
-        }
-    }
-
-    fn antigravity(&mut self, v: &Value, out: &mut Vec<Event>) {
-        if v["event"] == "init" || v["type"] == "init" { out.push(Event::TurnStart); }
-        if v["event"] == "result" {
-            if let Some(text) = string(&v["result"]["response"]) { out.push(Event::Message { item: None, text }); }
-        }
-        if v["event"] == "step_update" {
-            let s = &v["step_update"];
-            let id = s["step_index"].as_u64().map(|n| n.to_string());
-            if self.deltas { if let Some(delta) = string(&s["text_delta"]) { out.push(Event::Text { item: id.clone(), delta }); } }
-            if s["step_type"] == "tool" {
-                match s["state"].as_str() {
-                    Some("ACTIVE") => out.push(Event::ToolStart { id: id.clone(), kind: tool_kind(s["tool_name"].as_str().unwrap_or("")), timeout_ms:native_timeout(&s["tool_info"]["parameters"]), name: string(&s["tool_name"]), detail: antigravity_detail(s["tool_name"].as_str(), &s["tool_info"]["parameters"]) }),
-                    Some("DONE" | "ERROR" | "FAILED" | "CANCELLED") => out.push(Event::ToolEnd { id, status: string(&s["state"]) }),
-                    _ => out.push(Event::Unsupported { reason: "native tool state unsupported" }),
-                }
-            }
-        }
-        if v["type"] == "PLANNER_RESPONSE" && v["status"] == "DONE" {
-            if let Some(text) = string(&v["content"]) { out.push(Event::Message { item: v["step_index"].as_u64().map(|n| n.to_string()), text }); }
-        }
-        if v["type"] == "PLANNER_RESPONSE" {
-            if let Some(tools)=v["tool_calls"].as_array() {
-                for tool in tools {
-                    let id=string(&tool["id"]);
-                    if id.as_ref().is_none_or(|id|self.seen.insert(format!("tool:{id}"))) {
-                        let input=tool.get("arguments").or(tool.get("args")).unwrap_or(&Value::Null);
-                        out.push(Event::ToolStart {id,kind:tool_kind(tool["name"].as_str().unwrap_or("")),timeout_ms:native_timeout(input),name:string(&tool["name"]),detail:antigravity_detail(tool["name"].as_str(),input)});
-                    }
-                }
-            }
-        }
-        if v["type"] == "TOOL_RESPONSE" && matches!(v["status"].as_str(),Some("DONE"|"ERROR"|"CANCELLED")) {
-            out.push(Event::ToolEnd {id:string(&v["tool_call_id"]),status:string(&v["status"])});
-        }
-    }
-}
-
-/// One Bash or Monitor call; only a confirmed start makes it a job.
-struct Job { tool: String, label: String, background: bool, task: Option<String> }
-
-/// Claude background jobs the last turn left running, oldest first. Log evidence only; this grants no process or stop authority.
-pub(super) fn live_background(values: &[Value]) -> Vec<String> {
-    let mut jobs=Vec::<Job>::new();
-    let mut stops=BTreeMap::<String,(String,bool)>::new(); // stop tool-use ID -> target, failed
-    let mut ended=BTreeSet::<String>::new();
-    for v in values {
-        match v["type"].as_str() {
-            Some("system") if v["subtype"]=="init" => {jobs.clear();stops.clear();ended.clear();}
-            Some("system") if v["subtype"]=="task_notification" => {
-                if terminal_status(v["status"].as_str()) {ended.extend(["task_id","tool_use_id"].iter().filter_map(|k|string(&v[*k])));}
-            }
-            Some("queue-operation") => notifications(v["content"].as_str().unwrap_or(""),&mut ended),
-            Some("attachment") if v["attachment"]["type"]=="queued_command" => notifications(v["attachment"]["prompt"].as_str().unwrap_or(""),&mut ended),
-            Some("assistant") => for b in v["message"]["content"].as_array().into_iter().flatten().filter(|b|b["type"]=="tool_use") {
-                let Some(id)=b["id"].as_str() else {continue;};
-                let input=&b["input"];
-                match b["name"].as_str() {
-                    Some(name@("Bash"|"Monitor")) if !jobs.iter().any(|j|j.tool==id) => {
-                        let (name,background)=if name=="Bash" {("Bash",input["run_in_background"]==true)} else {("Monitor",true)};
-                        jobs.push(Job{tool:id.into(),label:name.into(),background,task:None});
-                    }
-                    Some("TaskStop"|"KillShell"|"KillBash") => {
-                        if let Some(target)=input["task_id"].as_str().or(input["shell_id"].as_str()).or(input["bash_id"].as_str()) {stops.insert(id.into(),(target.into(),false));}
-                    }
-                    _ => {}
-                }
-            },
-            Some("user") => {
-                let content=&v["message"]["content"];
-                if let Some(text)=content.as_str() {notifications(text,&mut ended);}
-                let blocks=content.as_array().map_or(&[][..],Vec::as_slice);
-                let results=blocks.iter().filter(|b|b["type"]=="tool_result").count();
-                let native=v.get("tool_use_result").or(v.get("toolUseResult")).filter(|_|results==1).unwrap_or(&Value::Null);
-                for b in blocks {
-                    if b["type"]=="text" {notifications(b["text"].as_str().unwrap_or(""),&mut ended);}
-                    if b["type"]!="tool_result" {continue;}
-                    let Some(id)=b["tool_use_id"].as_str() else {continue;};
-                    let failed=b["is_error"]==true;
-                    if let Some(stop)=stops.get_mut(id) {
-                        if failed {stop.1=true;} else {ended.insert(stop.0.clone());}
-                    } else if let Some(job)=jobs.iter_mut().find(|j|j.tool==id) {
-                        if failed {ended.insert(id.into());}
-                        else if job.task.is_none() {job.task=started_task(job.background,native,&b["content"]);}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    // A stop in flight already leaves nothing to continue; only its failed result restores the job.
-    let stopping=stops.values().filter(|(_,failed)|!failed).map(|(target,_)|target).collect::<BTreeSet<_>>();
-    let gone=|id:&String|ended.contains(id) || stopping.contains(id);
-    jobs.into_iter().filter(|j|!gone(&j.tool) && j.task.as_ref().is_some_and(|t|!gone(t))).map(|j|j.label).collect()
-}
-
-/// The native task a successful start names. Output of a foreground command is never read for one.
-fn started_task(background: bool, native: &Value, content: &Value) -> Option<String> {
-    let structured=native["backgroundTaskId"].as_str()
-        .or_else(||if background {native["taskId"].as_str().or(native["task_id"].as_str()).or(native["shellId"].as_str())} else {None})
-        .map(String::from);
-    structured.or_else(||{
-        if !background {return None;}
-        let text=match content {
-            Value::String(s)=>s.clone(),
-            Value::Array(parts)=>parts.iter().filter_map(|p|p["text"].as_str()).collect::<Vec<_>>().join(" "),
-            _=>return None,
-        };
-        let (_,rest)=["with ID: ","(task "].iter().find_map(|mark|text.split_once(mark))?;
-        Some(rest.chars().take_while(|c|c.is_ascii_alphanumeric() || matches!(c,'_'|'-')).collect())
-    }).filter(|id:&String|!id.is_empty() && id.len()<=256)
-}
-
-fn terminal_status(status: Option<&str>) -> bool {
-    matches!(status,Some("completed"|"failed"|"killed"|"stopped"|"cancelled"|"error"|"timeout"|"expired"))
-}
-
-fn notifications(text: &str, ended: &mut BTreeSet<String>) {
-    for part in text.split("<task-notification>").skip(1) {
-        let Some((body,_))=part.split_once("</task-notification>") else {continue;};
-        let field=|tag:&str|body.split_once(&format!("<{tag}>"))?.1.split_once(&format!("</{tag}>")).map(|(v,_)|v.trim().to_string());
-        if terminal_status(field("status").as_deref()) {ended.extend(field("task-id").into_iter().chain(field("tool-use-id")));}
-    }
 }
 
 #[cfg(test)]
@@ -1105,3 +808,13 @@ mod tests {
         assert!(matches!(&events[events.len()-2..],[Event::Context{used:Some(7),window:Some(200)},Event::TurnEnd{outcome:"ok"}]));
     }
 }
+
+pub(crate) fn default_terminal(client: Client,cursor: &Cursor,v: &Value) -> Option<&'static str> {
+    if !ends(v) {return None;}
+    let outcome=Report::read(client,&v.to_string(),std::slice::from_ref(v),None).outcome;
+    Some(match (cursor.start_limit,outcome) {(StartLimit::Reached(_),_)=>"refused",(StartLimit::Working,"refused")=>"failed",_=>outcome})
+}
+
+pub(super) fn assistant_failure(client:Client,v:&Value)->Option<AssistantFailure> {(protocol(client).assistant_failure)(v)}
+
+pub(super) fn lifecycle(client:Client,v:&Value)->Option<String> {(protocol(client).lifecycle)(v)}
