@@ -58,6 +58,7 @@ fn main() {
         ("external_consumer_builds_and_plans_turns", external_consumer_builds_and_plans_turns),
         ("runtime_trait_runs_every_runtime_by_descriptor", runtime_trait_runs_every_runtime_by_descriptor),
         ("cli_turn_recovers_its_running_child", cli_turn_recovers_its_running_child),
+        ("stopped_runs_have_typed_activity", stopped_runs_have_typed_activity),
         ("process_hooks_shape_the_child", process_hooks_shape_the_child),
         ("runtime_trait_exposes_native_seams", runtime_trait_exposes_native_seams),
         ("preflight_checks_order_and_journals_exact_trust", preflight_checks_order_and_journals_exact_trust),
@@ -303,6 +304,21 @@ fn fake(client: &str) {
         "inherited_auth":std::env::var_os("OPENAI_API_KEY").is_some(),"git_prompt":std::env::var("GIT_TERMINAL_PROMPT").ok(),"askpass":std::env::var("GIT_ASKPASS").ok(),"git_ssh":std::env::var("GIT_SSH_COMMAND").ok(),
         "optimization": std::env::var("AGENTQ_OPTIMIZATION").ok(), "launcher": std::env::var("AGENTQ_LAUNCHER").ok(), "trace_context": std::env::var("COREQ_TRACE_CONTEXT").ok()});
     std::fs::write(format!("fake-turn-{turn}.json"), record.to_string()).unwrap();
+    if let Ok(mode)=std::env::var("COREQ_FAKE_STOP") {
+        let row=match client {
+            "claude"=>json!({"type":"assistant","sessionId":session,"message":{"id":"last","content":[{"type":"thinking","thinking":"scrubbed"}]}}),
+            "antigravity"=>json!({"event":"step_update","conversation_id":session,"step_update":{"step_type":"agent_response","state":"ACTIVE","text_delta":"scrubbed"}}),
+            _=>json!({"type":"item.completed","item":{"id":"last","type":"agent_message","text":"scrubbed"}}),
+        };
+        if client=="codex" {emit(json!({"type":"thread.started","thread_id":session}));}
+        else if client=="claude" {emit(json!({"type":"system","subtype":"init","session_id":session}));}
+        else {emit(json!({"event":"init","conversation_id":session}));}
+        emit(row);
+        use std::io::Write;std::io::stdout().flush().unwrap();
+        std::fs::write("stop-ready","").unwrap();
+        if mode=="kill" {loop {std::thread::park();}}
+        return;
+    }
     // A gated turn runs until the test creates the gate file, so the caller can checkpoint and recover it mid-turn.
     if let Ok(gate) = std::env::var("COREQ_FAKE_GATE") { while !Path::new(&gate).exists() { std::thread::sleep(Duration::from_millis(20)); } }
     if client == "claude" {
@@ -1906,4 +1922,33 @@ fn preflight_checks_order_and_journals_exact_trust() {
     assert_eq!(seen["git_prompt"],"0");assert_eq!(seen["askpass"],"caller-helper");
     assert_eq!(seen["git_ssh"],"ssh -oBatchMode=yes -F caller-config");
     std::fs::remove_dir_all(base).unwrap();
+}
+
+// M12.19: missing native terminals and signalled/recovered processes must never disappear or imply success.
+fn stopped_runs_have_typed_activity() {
+    use agent::history::{StepKind,stop::StopCause};
+    for name in ["claude","codex","antigravity"] {
+        for mode in ["exit","kill"] {
+            let root=scratch(&format!("stop-{name}-{mode}"));
+            let r=agent::runtime(name).unwrap();
+            let l=fake_launch(name,&root,"x",&[("COREQ_FAKE_STOP",mode.as_ref())]);
+            let mut run=r.launch(&l).unwrap();wait_for(&root.join("stop-ready"));
+            if mode=="kill" {let saved=r.checkpoint(&run).unwrap();drop(run);run=r.recover(&saved,&l).unwrap();r.cancel(&mut run).unwrap();}
+            while r.poll(&mut run).unwrap()==agent::State::Running {std::thread::yield_now();}
+            let stop=r.stop_event(&mut run,u64::MAX).unwrap().unwrap();
+            if mode=="exit" {assert_eq!(stop.cause,StopCause::ExitWithoutTurnEnd);assert_eq!(stop.exit_code,Some(0));}
+            else if cfg!(unix) {assert_eq!(stop.cause,StopCause::Signal);assert!(stop.exit_code.is_none());}
+            else {assert!(matches!(stop.cause,StopCause::LostOwner|StopCause::ExitWithoutTurnEnd));}
+            assert_ne!(stop.outcome,"ok");assert!(stop.last_activity.is_some(),"{name}: {:?}",stop.activity_unknown);
+            assert_eq!(stop.step().kind,StepKind::Stop);
+            assert_eq!(r.stop_event(&mut run,u64::MAX).unwrap().unwrap().id,stop.id);
+            let _=std::fs::remove_dir_all(root);
+        }
+    }
+    let root=scratch("stop-linger");let r=agent::runtime("claude").unwrap();
+    let l=fake_launch("claude",&root,"x",&[("COREQ_FAKE_LINGER","1".as_ref())]);
+    let mut run=r.launch(&l).unwrap();wait_for(&root.join("fake-turn-1.json"));
+    let stop=loop {if let Some(s)=r.stop_event(&mut run,u64::MAX).unwrap() {break s;}std::thread::yield_now();};
+    assert_eq!(stop.cause,StopCause::TurnEndProcessLive);
+    finish(r,&mut run);assert!(r.stop_event(&mut run,u64::MAX).unwrap().is_none(),"our cleanup after native end is not lost ownership");let _=std::fs::remove_dir_all(root);
 }

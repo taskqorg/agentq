@@ -6,12 +6,12 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StepKind { Message, Thinking, Shell, FileChange, Tool, Mcp, Web, Subagent, Image, Question, Approval, Compaction, Usage, Unknown }
+pub enum StepKind { Message, Thinking, Shell, FileChange, Tool, Mcp, Web, Subagent, Image, Question, Approval, Compaction, Usage, Stop, Unknown }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn { pub id: Option<String>, pub session: String, pub unknown: Option<String> }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     pub id: String,
     pub native_id: Option<String>,
@@ -36,11 +36,15 @@ pub struct StepPage { pub steps: Vec<Step>, pub more: bool, pub pending_bytes: u
 impl History {
     /// Caller-selected source window. A record may cross the window; it is never cut or discarded.
     pub fn steps(&mut self, path: &Path, bytes: u64) -> Res<StepPage> {
+        self.steps_from(path,bytes,0)
+    }
+
+    pub(super) fn steps_from(&mut self,path:&Path,bytes:u64,start:u64)->Res<StepPage> {
         if bytes == 0 { return Err("history bytes must be positive".into()); }
         let (mut file, identity) = self.open(path)?;
-        file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(&mut file);
-        let mut consumed = 0u64;
+        let mut consumed = start;
         let bound=self.offset.saturating_add(bytes);
         let mut derived=BTreeMap::<String,Step>::new();
         let mut changed=BTreeMap::<String,Step>::new();

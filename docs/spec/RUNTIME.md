@@ -512,6 +512,24 @@ Previously retained TaskQ-shaped checkpoints and receipts are recovery-only evid
 
 The explicit legacy `ProtectedHost::new` API stays available to consumers pinned to the old protocol; the signed independent route never falls back to it. Historical qualification and consumer packets remain in [task 186](../evidence/runtime-186.md) and [task 199](../evidence/runtime-199.md); they do not qualify the independent host. Publication pins, signature/digest and adversarial checks: [independent host evidence](../evidence/runtime-241.md).
 
+## Stopped run observation
+
+`Runtime::stop_event(run, bytes)` polls through the existing runtime authority and
+returns a typed `StopEvent`, also convertible to a history `StepKind::Stop` step.
+Causes are `exit_without_turn_end`, `signal`, `lost_owner` and `turn_end_process_live`.
+An unobserved exit has null exit_code, unknown outcome and an explicit reason;
+it never becomes a failed run merely because ownership was lost.
+
+The event includes the last complete native activity in the caller-selected tail
+byte window, or a reason it cannot be read. Partial records never become activity.
+Its stable identity permits repeated delivery and recovery without duplicate display.
+Full activity output remains available by the original source byte range. No extra
+timeout or output ceiling applies. `poll` and `report` retain completion authority;
+the event does not release a permit, retry work, send messages or synthesize success.
+The same interface works after run recovery, retaining unknown exit provenance. A
+runtime-requested cleanup after native end keeps the native exit unknown and is not
+a lost-owner event. Other Runtime implementations may explicitly refuse stop observation.
+
 ## Universal step history
 
 `Runtime::history` reads live and finished sessions using the same `Turn`, `Step` and

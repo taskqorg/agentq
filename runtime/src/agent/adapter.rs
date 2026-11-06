@@ -340,6 +340,17 @@ struct Native {
 }
 
 impl Run {
+    pub(crate) fn stop_facts(&mut self) -> Res<super::history::stop::Facts> {
+        use super::history::stop::Facts;
+        Ok(match &mut self.body {
+            Body::Turn(t) => Facts {format:match t.client {Client::Codex=>"codex-exec",Client::Claude=>"claude-stream",Client::Antigravity=>"agy-stream",_=>return Err("stop history format unsupported".into())},path:t.log.clone(),start:t.start,exited:Some(t.exit.is_some()),native_end:t.ended,exit:if t.exit_unknown {None}else{t.exit},lost_owner:t.exit_unknown && !(t.ended && t.stopping)},
+            Body::Native(n) => Facts {format:match n.spec.client {Client::Codex=>"codex-rollout",Client::Claude=>"claude-native",Client::Antigravity=>"antigravity-sidecar",_=>return Err("stop history format unsupported".into())},path:n.turn.path().into(),start:0,exited:None,native_end:n.report.is_some(),exit:None,lost_owner:false},
+            Body::App(a) => {
+                let exit=if a.owned {a.transport.as_mut().map(Transport::exit).transpose()?.flatten()}else{None};
+                Facts {format:"codex-app-server",path:PathBuf::new(),start:0,exited:if a.owned {Some(exit.is_some())}else{None},native_end:a.session.report().is_some(),exit,lost_owner:a.closed.is_some() && exit.is_none()}
+            },
+        })
+    }
     fn restored(mut self, saved: &Value) -> Res<Self> {
         if let Some(value)=saved.get("readiness") {self.readiness=serde_json::from_value(value.clone()).map_err(|_|"run readiness checkpoint invalid")?;}
         if let Some(frozen)=saved.get("frozen") { self.frozen=Some(super::Frozen::restore(frozen)?); }
@@ -650,6 +661,7 @@ fn input_items(descriptor: &Descriptor, parts: &[Part]) -> Result<Value, Failure
 /// The one trait every runtime adapter implements (specq agent-runtimes § Runtime trait).
 pub trait Runtime: Send + Sync {
     fn descriptor(&self) -> &Descriptor;
+    fn stop_event(&self, _run: &mut Run, _bytes: u64) -> Res<Option<super::history::stop::StopEvent>> { Err("stop observation unsupported by this runtime".into()) }
     fn history_sessions(&self, home: Option<&Path>) -> Res<Vec<super::history::sessions::Source>> {
         super::history::sessions::list(self.descriptor().name, home)
     }
@@ -962,6 +974,9 @@ impl Adapter {
 }
 
 impl Runtime for Adapter {
+    fn stop_event(&self, run: &mut Run, bytes: u64) -> Res<Option<super::history::stop::StopEvent>> {
+        super::history::stop::observe(self, run, bytes)
+    }
     fn descriptor(&self) -> &Descriptor { &self.descriptor }
 
     fn preflight(&self, launch: &Launch, repair: &Repair) -> Readiness { preflight::check(self, launch, repair) }

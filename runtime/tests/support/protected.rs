@@ -9,7 +9,7 @@ fn digest(path:&Path)->String {
     ring::digest::digest(&ring::digest::SHA256,&std::fs::read(path).unwrap()).as_ref().iter().map(|b|format!("{b:02x}")).collect()
 }
 fn read(path:&Path)->Value {serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()}
-fn save(path:&Path,v:&Value) {std::fs::write(path,v.to_string()).unwrap();}
+fn save(path:&Path,v:&Value) {coreq::write_atomic(path,&v.to_string()).unwrap();}
 // A hang bound, not a speed claim: no scenario waits for it to pass, so it can stay well above an overloaded host's delays.
 fn until()->Instant {Instant::now()+Duration::from_secs(60)}
 
