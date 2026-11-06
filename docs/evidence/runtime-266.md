@@ -26,8 +26,21 @@ No no-replay, fencing or retained-scope code or assertion changed: an interrupte
 
 ## Retained operation
 
-No command in this task launches, cancels or reconciles through the Mac host. The retained failed operation stays in the Mac journal. Its SHA-256 is `ab4281c3aa8971a1ab965d68495364c8dcc5c9410de2dbe29f7884b2b77d96f6` at 9,862 bytes, read before the change and again before hand-in.
+No command in this task launches, cancels or reconciles through the Mac host. The retained failed operation stays in the Mac journal. Its SHA-256 is `ab4281c3aa8971a1ab965d68495364c8dcc5c9410de2dbe29f7884b2b77d96f6` at 9,862 bytes, read on the Mac before the change. The hand-in recheck is the read-only task [#272](https://github.com/taskqorg/agentq/issues/272), pinned to the Mac host, because only that host can read the journal. Until #272 reports, the current digest is unknown.
+
+## Signed adapter
+
+The new final adapter replaces digest `425c5924046338bf13167e5bf76eb827533435ed09e5f3cf336b6744d9bf2118`.
+
+- Binary: `agentq-0.0.0-dev-macos-aarch64`, 7,598,192 bytes, SHA-256 `711a6066519d95f625bbffd8531ed87658f90be993d9dafc91a1a21d111d32e3`.
+- Build: artifact `13499089022` of [release run 42213746472](https://github.com/taskqorg/agentq/actions/runs/42213746472), at merge `5535edc1b7f0b73b36ba592d69b6917c9379d832` of fix `e34f88bed0389006413aedc266bc8c0fab056660` into `ede9e465b0caa7b567f3370f19367e5fdd6b51cd`.
+- Public manifest: [adapter-macos-aarch64.json](runtime-266/adapter-macos-aarch64.json), public key `7f739abab8625718e2e5dbedf0deb5a98373260d3c22ecd20a1148f42bf6d584`.
+- Signing: [#269](https://github.com/taskqorg/agentq/issues/269) signed on the host that already holds the publication key and merged the manifest in [#271](https://github.com/taskqorg/agentq/pull/271). The key did not move and was not printed. The #269 review accepted this signature.
+
+This task rechecked the published result on Windows. A fresh download into a new empty directory has the size and digest above. `sign_adapter verify` printed `signed adapter verified` for the manifest at `0de008b13465fd68d4df008cc33c21343a019ce0`, and with a zeroed signature it refused with `protected signature invalid; authority unknown`. The downloaded binary was not executed.
+
+The binary does not contain [#265](https://github.com/taskqorg/agentq/pull/265), which main merged after the build base. `git diff ede9e46 0de008b` is empty for `runtime/src/agent/protected.rs`, `runtime/src/agent/host.rs`, `runtime/src/agent/host/`, `runtime/examples/sign_adapter.rs` and `agentq/host.rs`. A consumer that needs #265 inside the adapter needs a new build and a new signature.
 
 ## Limits
 
-These checks prove the socket mode and the stream behavior. They do not prove a native launch, a TCC grant or the signed adapter; assetq#52 A4 qualifies those.
+These checks prove the socket mode, the stream behavior and the published signature. They do not prove a native launch or a TCC grant; assetq#52 A4 qualifies those. No policy, trust manifest, permit or grant changed, so no host trusts this adapter until an operator provisions it.
