@@ -21,6 +21,7 @@ dependencies = [
  "coreq",
  "libc",
  "ring",
+ "rusqlite",
  "serde",
  "serde_json",
  "toml",

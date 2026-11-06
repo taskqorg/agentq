@@ -5,6 +5,7 @@ pub mod sessions;
 pub mod stop;
 pub mod live;
 pub mod media;
+pub mod sources;
 pub use steps::{Step, StepKind, StepPage, Turn};
 use serde_json::{Value, json};
 use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
@@ -14,7 +15,8 @@ const FORMATS: &[&str] = &["codex-exec", "codex-rollout", "codex-app-server", "c
 
 /// Adapter support is distinct from native qualification. Version and OS are caller readback.
 pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res<Value> {
-    if !FORMATS.contains(&format) { return Err("history transport unsupported".into()); }
+    if !FORMATS.contains(&format) && !sources::external(format) { return Err("history transport unsupported".into()); }
+    if let Some(spec)=sources::SPECS.iter().find(|s|s.format==format && sources::external(format)){return sources::capability(spec.name);}
     let sidecar = format == "antigravity-sidecar";
     let app = format == "codex-app-server";
     let mut features = serde_json::Map::new();
@@ -52,6 +54,9 @@ pub struct History {
     offset: u64,
     identity: Option<String>,
     prefix: String,
+    snapshot_digest:Option<String>,
+    snapshot_revision:u64,
+    snapshot_next:u64,
 }
 
 #[derive(Debug)]
@@ -65,10 +70,10 @@ pub struct Page {
 
 impl History {
     pub fn new(format: &str, source: &str, session: &str) -> Res<Self> {
-        if super::registry::history_protocol(format).is_none() { return Err("history transport unsupported".into()); }
+        if super::registry::history_protocol(format).is_none() && !sources::external(format) { return Err("history transport unsupported".into()); }
         if source.is_empty() || session.is_empty() { return Err("history source/session required".into()); }
         Ok(Self {format:format.into(), source:source.into(), session:session.into(), native_session:session.into(), native_session_alias:None, native_parent:None, offset:0,
-            identity:None, prefix:crate::sha256_hex(b"")})
+            identity:None, prefix:crate::sha256_hex(b""),snapshot_digest:None,snapshot_revision:0,snapshot_next:0})
     }
 
     /// Bind a caller-validated copied Claude job; this grants observation only.
@@ -83,7 +88,7 @@ impl History {
     pub fn checkpoint(&self) -> Value {
         let mut v=json!({"schema":1,"format":self.format,"source":self.source,"session":self.session,
             "native_session":self.native_session,"native_parent":self.native_parent,
-            "offset":self.offset,"identity":self.identity,"prefix":self.prefix});
+            "offset":self.offset,"identity":self.identity,"prefix":self.prefix,"snapshot_digest":self.snapshot_digest,"snapshot_revision":self.snapshot_revision,"snapshot_next":self.snapshot_next});
         if let Some(alias)=&self.native_session_alias {v["native_session_alias"]=json!(alias);}
         v
     }
@@ -102,8 +107,9 @@ impl History {
         h.offset = v["offset"].as_u64().ok_or("history checkpoint offset invalid")?;
         h.prefix = field("prefix")?.into();
         if h.prefix.len() != 64 || !h.prefix.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("history checkpoint prefix invalid".into()); }
-        h.identity = match &v["identity"] { Value::Null if h.offset == 0 => None,
+        h.identity = match &v["identity"] { Value::Null if h.offset == 0 || sources::external(&h.format) => None,
             Value::String(s) if !s.is_empty() => Some(s.clone()), _ => return Err("history checkpoint identity invalid".into()) };
+        h.snapshot_digest=v["snapshot_digest"].as_str().map(String::from);h.snapshot_revision=v["snapshot_revision"].as_u64().unwrap_or(0);h.snapshot_next=v["snapshot_next"].as_u64().unwrap_or(0);
         Ok(h)
     }
 
@@ -179,6 +185,7 @@ impl History {
         let mut file = File::open(path).map_err(|e| format!("history unavailable: {e}"))?;
         if !file.metadata().map_err(|e| e.to_string())?.is_file() { return Err("history not a regular file".into()); }
         let identity = native::file_id(&file)?;
+        if sources::external(&self.format){return Ok((file,identity));}
         if self.identity.as_ref().is_some_and(|id| *id != identity) { return Err("history replaced".into()); }
         if native::digest_prefix(&mut file, self.offset)? != self.prefix { return Err("history truncated or rewritten".into()); }
         if self.offset > 0 {

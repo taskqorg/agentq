@@ -147,10 +147,10 @@ fn visit(catalog:&mut MediaCatalog,value:&Value,step:&Step,cwd:Option<&Path>,poi
         Some(name) if super::super::registry::codex_image_kind(name).is_some()=>Some(MediaKind::Image),
         Some("document")=>Some(MediaKind::Document),Some("video"|"input_video")=>Some(MediaKind::Video),Some("audio"|"input_audio")=>Some(MediaKind::Audio),_=>None,
     };
-    let mime=value["source"]["media_type"].as_str().or(value["mime_type"].as_str()).or(value["mime"].as_str()).or(value["file"]["type"].as_str());
+    let mime=value["mimeType"].as_str().or(value["source"]["media_type"].as_str()).or(value["mime_type"].as_str()).or(value["mime"].as_str()).or(value["file"]["type"].as_str());
     let kind=kind.or_else(||mime.filter(|_|tool || native=="file" || pointer.starts_with("/media/")).and_then(|m|if m.starts_with("image/"){Some(MediaKind::Image)}else if m=="application/pdf"{Some(MediaKind::Document)}else{None}));
     let name=value["name"].as_str().or(value["title"].as_str()).or(value["filename"].as_str());
-    let encoded=value["source"]["data"].as_str().filter(|_|value["source"]["type"]=="base64").or(value["file"]["base64"].as_str());
+    let encoded=value["data"].as_str().filter(|_|value["type"]=="image").or(value["source"]["data"].as_str().filter(|_|value["source"]["type"]=="base64")).or(value["file"]["base64"].as_str());
     let url=value["image_url"].as_str().or(value["image_url"]["url"].as_str()).or(value["url"].as_str()).or(value["source"]["url"].as_str()).or(value["uri"].as_str());
     let path=value["path"].as_str().or(value["file_path"].as_str()).or(value["filePath"].as_str()).or(value["savedPath"].as_str()).or(value["saved_path"].as_str()).or(value["source"]["path"].as_str()).or(value["Path"].as_str()).or(value["AbsolutePath"].as_str());
     if let Some(encoded)=encoded.filter(|_|kind.is_some() || tool) {

@@ -27,6 +27,7 @@ impl Session {
         checkpoint["resolved"]=json!({"runtime":self.runtime,"source":self.resolved,"parent":self.parent,"parent_step":self.parent_step,"children":self.children});
         checkpoint
     }
+    pub fn source_bytes(&self,key:&str,start:u64,length:u64)->Res<Vec<u8>> {super::sources::source_bytes(&self.history,&self.path,key,start,length)}
     pub fn read_bytes(&self, start:u64, length:u64)->Res<Vec<u8>> {self.history.read_bytes(&self.path,start,length)}
     /// Explicitly adopt and acquire terminal resume authority; source IDs resolve inside the adapter.
     pub fn resume_command(&self, launch:&super::super::Launch, native:&[super::super::NativeProcess])->Res<super::super::ResumeCommand> {
@@ -77,6 +78,7 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
 }
 
 fn discover(runtime:&str, home:Option<&Path>) -> Res<Vec<Source>> {
+    if let Some(spec)=super::sources::get(runtime).filter(|s|super::sources::external(s.format)){return super::sources::list(spec.name,home);}
     let client=client(runtime)?;
     if !matches!(runtime,"codex"|"claude"|"antigravity") {return Err("history-discovery-unsupported; pass an explicit source".into());}
     let home=home.map(Path::to_path_buf).or_else(||super::super::base_home(client)).ok_or("history home unknown")?;
@@ -95,6 +97,7 @@ pub fn list(runtime:&str,home:Option<&Path>)->Res<Vec<Source>> {
 }
 
 fn link_parents(runtime:&str,sources:&mut [Source])->Res<()> {
+    if super::sources::get(runtime).is_some_and(|s|super::sources::external(s.format)){return Ok(());}
     let mut parents=std::collections::BTreeMap::<PathBuf,Vec<usize>>::new();
     for (index,child) in sources.iter().enumerate() {
         let Some(parent)=&child.parent else{continue};
@@ -119,12 +122,12 @@ fn link_parents(runtime:&str,sources:&mut [Source])->Res<()> {
 }
 
 pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>, saved:Option<&Value>) -> Res<Session> {
-    client(runtime)?;
+    if super::sources::get(runtime).is_none(){return Err("history runtime unsupported".into());}
     if let Some(saved)=saved.filter(|s|s["resolved"].is_object()) {
         let requested_source=source;
         let resolved=&saved["resolved"];
         let source:Source=serde_json::from_value(resolved["source"].clone()).map_err(|_|"history checkpoint source invalid")?;
-        if resolved["runtime"]!=runtime || ![source.id.as_str(),source.session.as_str()].contains(&session) || source.id!=crate::sha256_hex(source.path.to_string_lossy().as_bytes()) {
+        if resolved["runtime"]!=runtime || ![source.id.as_str(),source.session.as_str()].contains(&session) || source.id!=super::sources::source_id(runtime,&source.path,&source.session) {
             return Err("history checkpoint binding differs".into());
         }
         if requested_source.is_some_and(|p|p!=source.path) || !source.path.is_absolute() {return Err("history checkpoint source invalid".into());}
@@ -136,7 +139,9 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
     }
     let sources=if source.is_some(){vec![]}else{discover(runtime,home)?};
     let source=if let Some(path)=source {
-        let found=identify(runtime,path)?.ok_or("history session identity unavailable")?;
+        let found=if super::sources::get(runtime).is_some_and(|s|super::sources::external(s.format)) {
+            super::sources::identify(runtime,path)?.into_iter().find(|s|s.session==session || s.id==session).ok_or("history session identity unavailable")?
+        }else{identify(runtime,path)?.ok_or("history session identity unavailable")?};
         if found.session!=session && found.native_session!=session && found.id!=session {return Err("history native session differs".into());}found
     } else {
         let matches:Vec<_>=sources.iter().filter(|s|s.id==session || s.session==session).cloned().collect();
@@ -195,6 +200,9 @@ pub fn request(request:&str)->Res<Value> {
     }
     if v["action"]=="live" {
         return serde_json::to_value(reader.live_data(path("statusline")?)?).map_err(|e|e.to_string());
+    }
+    if v["action"]=="source_bytes" {
+        return Ok(json!({"bytes":reader.source_bytes(v["key"].as_str().ok_or("history source key required")?,v["start"].as_u64().ok_or("history start required")?,v["length"].as_u64().ok_or("history length required")?)?,"checkpoint":reader.checkpoint()}));
     }
     if v["action"]=="bytes" {
         let start=v["start"].as_u64().ok_or("history start required")?;

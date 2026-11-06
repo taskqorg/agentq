@@ -145,6 +145,7 @@ fn call_json(call:&super::super::Call)->Value {
 
 impl super::sessions::Session {
     pub fn live_data(&self,feed:Option<&Path>)->Res<LiveData> {
+        if super::sources::external(&self.history.format){return self.source_live(feed);}
         let (mut file,identity)=self.history.open(&self.path)?;
         file.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;
         let mut raw=String::new();file.read_to_string(&mut raw).map_err(|e|format!("history unavailable: {e}"))?;
@@ -186,6 +187,12 @@ impl super::sessions::Session {
                 context=Context::default();context.source="native-compaction".into();
             }
         }
+        let cost=rows.iter().rev().find(|v|v["type"]=="result").and_then(native_cost);
+        assemble(&self.history,steps,context,windows,calls.iter().map(call_json).collect(),cost)
+    }
+}
+
+fn assemble(history:&History,steps:Vec<Step>,context:Context,windows:Vec<super::super::Window>,calls:Vec<Value>,cost:Option<f64>)->Res<LiveData> {
         let plan=steps.iter().rev().find(|s|s.kind==StepKind::Plan).map(|s|s.data.clone()).unwrap_or(Value::Null);
         let todos=steps.iter().rev().find(|s|s.kind==StepKind::Todo).map(|s|s.data.clone()).unwrap_or(Value::Null);
         let mut files=BTreeMap::<(Option<String>,String),Vec<Value>>::new();
@@ -206,24 +213,40 @@ impl super::sessions::Session {
         for (turn,changes) in rollups {
             let Some(last)=steps.iter().rev().find(|s|s.kind==StepKind::FileChange && s.turn.id==turn) else{continue};
             let data=json!({"turn":last.turn,"changes":changes});
-            let mut rollup=last.clone();rollup.id=crate::sha256_hex(json!([self.history.source,self.history.session,"file-rollup",turn]).to_string().as_bytes());
+            let mut rollup=last.clone();rollup.id=crate::sha256_hex(json!([history.source,history.session,"file-rollup",turn]).to_string().as_bytes());
             rollup.native_id=None;rollup.kind=StepKind::FileRollup;rollup.data=data.clone();
             rollup.origins=steps.iter().filter(|s|s.kind==StepKind::FileChange && s.turn.id==turn).flat_map(|s|s.origins.clone()).collect();
             file_steps.push(rollup);files.push(data);
         }
-        let cost=rows.iter().rev().find(|v|v["type"]=="result").and_then(native_cost);
         let mut unknown=BTreeMap::new();
         if let Some(reason)=calls.iter().find_map(|c|c.accounting_unknown){unknown.insert("usage".into(),reason.into());}
         if cost.is_none(){unknown.insert("cost_usd".into(),"native turn cost not reported".into());}
         if plan.is_null(){unknown.insert("plan".into(),"native plan not reported".into());}
         if todos.is_null(){unknown.insert("todos".into(),"native todos not reported".into());}
         if files.is_empty(){unknown.insert("files".into(),"no native file changes observed".into());}
-        let calls:Vec<_>=calls.iter().map(call_json).collect();
         let mut events=vec![LiveEvent::Context(context.clone()),LiveEvent::Windows(windows.clone())];
         events.extend(calls.iter().cloned().map(LiveEvent::ModelCall));
         if !plan.is_null(){events.push(LiveEvent::Plan(plan.clone()));}if !todos.is_null(){events.push(LiveEvent::Todos(todos.clone()));}
         events.extend(files.iter().cloned().map(LiveEvent::FileRollup));
         Ok(LiveData {context,windows,calls,plan,todos,files,cost_usd:cost,cost_source:cost.map(|_|"native-reported".into()),unknown,events,file_steps})
+}
+impl super::sessions::Session {
+    fn source_live(&self,feed:Option<&Path>)->Res<LiveData> {
+        if feed.is_some(){return Err("statusline feed unsupported by this history source".into());}
+        let mut history=self.history.clone();history.offset=0;
+        let steps=history.steps(&self.path,u64::MAX)?.steps;
+        let calls:Vec<_>=steps.iter().filter(|s|s.kind==StepKind::Usage && s.data["aggregate"]!=true && !matches!(s.data["scope"].as_str(),Some("turn"|"session"|"model"))).map(|s|s.data.clone()).collect();
+        let cost=if calls.is_empty(){None}else{calls.iter().try_fold(0.0,|n,c|Some(n+native_cost(c)?)).filter(|n|n.is_finite())};
+        let aggregate:Vec<_>=steps.iter().filter(|s|s.kind==StepKind::Usage && s.data["aggregate"]==true && matches!(s.data["scope"].as_str(),Some("session"|"model"))).collect();
+        let cost=cost.or_else(||if aggregate.is_empty(){None}else{aggregate.iter().try_fold(0.0,|n,s|Some(n+native_cost(&s.data)?)).filter(|n|n.is_finite())});
+        let mut context=Context::default();
+        if let Some(last)=calls.last(){
+            context.used=last["input"].as_u64().and_then(|n|n.checked_add(last["cache_read"].as_u64()?)).and_then(|n|n.checked_add(last["cache_write"].as_u64()?));
+            context.model=last["model"].as_str().map(String::from);context.source="native-call-input-estimate".into();context.time=last["time"].clone();
+            if context.used.is_some(){context.unknown.remove("used");}if context.model.is_some(){context.unknown.remove("model");}if !context.time.is_null(){context.unknown.remove("time");}
+        }
+        let windows=vec![super::super::Window {window:None,used:None,resets_at:None,event_id:None,exhausted:None,rejected:None,unknown:Some("native limit windows not reported by source".into())}];
+        assemble(&self.history,steps,context,windows,calls,cost)
     }
 }
 
