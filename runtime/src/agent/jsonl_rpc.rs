@@ -55,7 +55,7 @@ impl Session {
                 if v["success"]!=true {return Err(format!("RPC get_state refused: {}",v["error"]));}
                 s.session=v["data"]["sessionFile"].as_str().filter(|s|!s.is_empty()).ok_or("RPC native session file missing")?.into();
                 if resume.is_some_and(|old|old!=s.session) {return Err("RPC resumed session differs".into());}
-                if v["data"]["isStreaming"]!=false || v["data"]["isCompacting"]!=false || v["data"]["pendingMessageCount"].as_u64().is_some_and(|n|n!=0) {
+                if v["data"]["isStreaming"]!=false || v["data"]["isCompacting"]!=false || v["data"]["pendingMessageCount"].as_u64()!=Some(0) {
                     return Err("RPC session not proven idle; input not submitted".into());
                 }
                 s.pending.push(Event::Metadata{kind:"session".into(),data:v["data"].clone()});break;
@@ -72,8 +72,9 @@ impl Session {
         self.server.send_until(&fields,self.deadline)?;Ok(fields["id"].clone())
     }
     fn observe(&mut self,v:Value)->Res<()> {
-        if v["type"].as_str().is_none() {return Err("RPC record type missing".into());}
+        if self.report.is_some() {return self.log(&json!({"type":"rpc-after-settlement","message":v}));}
         self.log(&v)?;
+        if v["type"].as_str().is_none() {return Err("RPC record type missing".into());}
         if v["type"]=="response" && v["success"]==false && self.prompt.as_ref()==v.get("id") {
             let mut r=Report::empty();r.session=Some(self.session.clone());r.outcome="failed";r.error="client-error";r.detail=v["error"].as_str().map(String::from);self.report=Some(r);
         }
@@ -155,5 +156,44 @@ fn normalize(v:&Value)->super::history::Normalized {
         Some("tool_execution_start"|"tool_execution_update"|"tool_execution_end")=>("tool","tool",v["toolCallId"].clone(),vec![v.clone()],"none"),
         Some("agent_start"|"agent_end"|"agent_settled"|"auto_retry_start"|"auto_retry_end"|"auto_compaction_start"|"auto_compaction_end")=>("system","lifecycle",Value::Null,vec![v.clone()],"none"),
         _=>("unknown","unknown",Value::Null,vec![],"unsupported-source-shape"),
+    }
+}
+
+#[cfg(test)] mod tests {
+    use super::*;
+    fn open(pending:&str)->(PathBuf,Res<Session>) {
+        let root=crate::scratch("rpc-boundary");
+        let mut command=Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact","agent::adapter::registry::tests::structured_server","--nocapture","--"])
+            .env("AGENTQ_STRUCTURED_FIXTURE","rpc").env("AGENTQ_RPC_PENDING_COUNT",pending);
+        let mut launch=Launch::new(&root,root.join("native.jsonl"),"wait","fixtureq");launch.deadline=Some(Instant::now()+Duration::from_secs(20));
+        let result=Session::open(command,&Config{args:&[],home_var:"FIXTURE_HOME",resume_arg:"--session"},&launch,None);
+        (root,result)
+    }
+    // Unknown queued work cannot authorize another input; this exercises the real get_state/prompt boundary.
+    #[test] fn pending_queue_requires_explicit_native_zero() {
+        for value in ["missing","null","\"unknown\"","false","-1","0.5","1","{}"] {
+            let (root,result)=open(value);
+            assert!(result.err().unwrap().contains("not proven idle"),"{value}");
+            assert!(!root.join("submitted.marker").exists(),"prompt was submitted for {value}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    // One pump can receive several settlements: only the first owns messages, progress and accounting.
+    #[test] fn first_native_settlement_freezes_turn_and_calls() {
+        let (root,result)=open("0");let mut session=result.unwrap();
+        session.observe(json!({"type":"agent_start"})).unwrap();
+        session.observe(json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first"}],"stopReason":"stop","usage":{"input":2,"output":1}}})).unwrap();
+        session.observe(json!({"type":"agent_settled"})).unwrap();
+        let first=session.report().unwrap();let count=session.pending.len();
+        for record in [json!({"type":"agent_start"}),json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"later"}],"stopReason":"error","usage":{"input":99,"output":1}}}),json!({"type":"agent_settled"}),json!({"type":"response","id":session.prompt,"success":false,"error":"late refusal"})] {
+            session.observe(record).unwrap();
+        }
+        let later=session.report().unwrap();
+        assert_eq!((later.outcome,later.text,later.usage.input,later.calls.len()),(first.outcome,first.text,first.usage.input,first.calls.len()));
+        assert_eq!((session.messages.len(),session.pending.len()),(1,count));
+        let raw=std::fs::read_to_string(&session.path).unwrap();assert!(raw.contains("later") && raw.contains("rpc-after-settlement"));
+        assert!(matches!(later.termination,ProcessTermination::Unknown{..}),"a native turn settlement is not process termination");
+        drop(session);std::fs::remove_dir_all(root).unwrap();
     }
 }

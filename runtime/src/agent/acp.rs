@@ -462,15 +462,15 @@ pub(super) fn normalize(v:&Value)->super::history::Normalized {
 }
 pub(super) static PROTOCOL: registry::Protocol=registry::Protocol {
     stream_history:"acp",native_history:"acp",
-    ends:|v|v["terminal"]==true,start_limit:|_|None,read_calls:|_|(vec![],None,false),final_text:|events|read_report("",events,None).text,
+    ends:|_|false,start_limit:|_|None,read_calls:|_|(vec![],None,false),final_text:|events|read_report("",events,None).text,
     history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},history_formats:&["acp"],
     history_session:|_,v,_|v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str()).map(String::from),history_normalize:|_,v|normalize(v),history_validity:|v|json!({"status":if validate(&v["message"]).is_ok(){"valid"}else{"invalid"}}),
     prepare_command:|_,_,_|Err("ACP requires the structured launch path".into()),input_bytes:|_|vec![],
     native_record:|_,_|Err("native transcript polling unsupported".into()),native_metadata:None,finish_native_report:|_,_|{},session_report:|_,_|{},
     reported:|_,_|None,update_limits:|_,_,_|false,account_limits:|_,_,_|limits::unknown("account-limits unsupported"),identity:|_|None,
     credentials:|_,_|Err("oauth-unavailable".into()),oauth_token:|_,_|Err("oauth-unavailable".into()),oauth_usage:|_|Err("oauth-unavailable".into()),
-    turn_ended:|ended,v|ended || v["terminal"]==true,parse_event:|_,v,out,_|out.extend(record_events(v)),
-    terminal:|_,v,_,_,_|(v["terminal"]==true).then(||outcome(&v["message"]).0),assistant_failure:|_|None,permission_mode:|_|None,lifecycle:|_|None,advances:|_|false,
+    turn_ended:|ended,_|ended,parse_event:|cursor,v,out,_|out.extend(cursor.acp.record_events(v)),
+    terminal:|_,_,_,_,_|None,assistant_failure:|_|None,permission_mode:|_|None,lifecycle:|_|None,advances:|_|false,
     session:|text|text.lines().filter_map(|l|serde_json::from_str::<Value>(l).ok()).find_map(|v|v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str()).map(String::from)),
     snapshot:|_,_|Snapshot{unknown:Some("not-reported"),..Snapshot::default()},report:read_report,
 };

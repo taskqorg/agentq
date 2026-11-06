@@ -244,6 +244,27 @@ mod tests {
         validate().unwrap();
     }
 
+    // An isolated candidate must not inherit the enclosing native account or session; caller overrides still win.
+    #[test] fn candidate_environment_isolates_native_auth_and_sessions() {
+        let root=crate::scratch("candidate-environment");
+        for (name,key) in [("grok","XAI_API_KEY"),("opencode","OPENCODE_API_KEY"),("opencode2","AZURE_OPENAI_API_KEY"),("omp","OMP_AUTH_BROKER_TOKEN"),("pi","ANTHROPIC_OAUTH_TOKEN")] {
+            let adapter=entry(name).unwrap().builtin.unwrap();
+            let mut launch=Launch::new(&root,root.join("unused.jsonl"),"input","fixtureq");launch.command=vec!["fixture-cli".into()];
+            for home in [true,false] {
+                launch.home=home.then(||root.clone());
+                launch.env=if home {vec![]}else{vec![(adapter.ops.home_var.into(),root.clone().into_os_string())]};
+                let command=super::super::preflight::command(adapter,&launch).unwrap();
+                for var in [key,"XAI_API_KEY","PI_SESSION_ID","PI_SESSION_FILE","PI_CODING_AGENT_SESSION_DIR"] {
+                    assert!(command.get_envs().any(|(k,v)|k==var && v.is_none()),"{name}: inherited {var}");
+                }
+                for var in [key,"PI_SESSION_ID"] {launch.env.push((var.into(),"fixture-explicit".into()));}
+                let command=super::super::preflight::command(adapter,&launch).unwrap();
+                for var in [key,"PI_SESSION_ID"] {assert!(command.get_envs().any(|(k,v)|k==var && v==Some(std::ffi::OsStr::new("fixture-explicit"))),"{name}: explicit {var}");}
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn structured_candidates_share_launch_resume_cancel_events_and_history() {
         let root=crate::scratch("structured-candidates");
@@ -325,8 +346,15 @@ mod tests {
                 emit(json!({"jsonrpc":"2.0","id":v["id"],"result":result}));
             }else{
                 match method {
-                    Some("get_state")=>emit(json!({"type":"response","id":v["id"],"command":"get_state","success":true,"data":{"sessionFile":std::env::current_dir().unwrap().join("session with spaces.jsonl"),"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}})),
+                    Some("get_state")=>{
+                        let mut state=json!({"sessionFile":std::env::current_dir().unwrap().join("session with spaces.jsonl"),"isStreaming":false,"isCompacting":false,"pendingMessageCount":0});
+                        if let Ok(value)=std::env::var("AGENTQ_RPC_PENDING_COUNT") {
+                            if value=="missing" {state.as_object_mut().unwrap().remove("pendingMessageCount");}else{state["pendingMessageCount"]=serde_json::from_str(&value).unwrap();}
+                        }
+                        emit(json!({"type":"response","id":v["id"],"command":"get_state","success":true,"data":state}));
+                    },
                     Some("prompt")=>{
+                        if std::env::var_os("AGENTQ_RPC_PENDING_COUNT").is_some() {std::fs::write("submitted.marker",b"submitted").unwrap();}
                         emit(json!({"type":"response","id":v["id"],"command":"prompt","success":true}));emit(json!({"type":"agent_start"}));
                         if v["message"]=="eof"{return;}
                         if v["message"]=="wait"{emit(json!({"type":"agent_end"}));continue;}
@@ -488,6 +516,35 @@ pub(super) fn validate_arguments(args:&[OsString])->Res<()> {
     Ok(())
 }
 pub(crate) fn validate_native_args(client:Client,args:&[OsString])->Res<()> {(builtin(client).ops.validate)(args,&[],&Policy::default())}
+
+// Provider auth inventory: Pi env-api-keys.ts; OMP v17.0.5 environment-variables.md; OpenCode v1.18.31 provider.ts.
+const STRUCTURED_AUTH_VARS:&[&str]=&[
+    "AICORE_SERVICE_KEY","AIMLAPI_API_KEY","AI_GATEWAY_API_KEY","ALIBABA_CODING_PLAN_API_KEY",
+    "ANTHROPIC_API_KEY","ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CUSTOM_HEADERS","ANTHROPIC_FOUNDRY_API_KEY","ANTHROPIC_IDENTITY_TOKEN_FILE","ANTHROPIC_OAUTH_TOKEN",
+    "ANT_LING_API_KEY","AWS_ACCESS_KEY_ID","AWS_BEARER_TOKEN_BEDROCK","AWS_CONFIG_FILE",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN","AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE","AWS_CONTAINER_CREDENTIALS_FULL_URI","AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_DEFAULT_PROFILE","AWS_PROFILE","AWS_ROLE_ARN","AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN","AWS_SHARED_CREDENTIALS_FILE","AWS_WEB_IDENTITY_TOKEN_FILE","AZURE_OPENAI_API_KEY",
+    "BASETEN_API_KEY","CEREBRAS_API_KEY","CF_AIG_TOKEN","CLAUDE_CODE_CLIENT_CERT",
+    "CLAUDE_CODE_CLIENT_KEY","CLOUDFLARE_AI_GATEWAY_API_KEY","CLOUDFLARE_API_KEY","CLOUDFLARE_API_TOKEN",
+    "COPILOT_GITHUB_TOKEN","CURSOR_ACCESS_TOKEN","DEEPSEEK_API_KEY","FIREPASS_API_KEY",
+    "FIREWORKS_API_KEY","GEMINI_API_KEY","GITLAB_TOKEN","GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS","GOOGLE_CLOUD_API_KEY","GROQ_API_KEY","HF_TOKEN",
+    "HUGGINGFACE_HUB_TOKEN","KILO_API_KEY","KIMI_API_KEY","LITELLM_API_KEY",
+    "LLAMA_CPP_API_KEY","LM_STUDIO_API_KEY","META_API_KEY","MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY","MINIMAX_CODE_API_KEY","MINIMAX_CODE_CN_API_KEY","MISTRAL_API_KEY",
+    "MOONSHOT_API_KEY","NANO_GPT_API_KEY","NOVITA_API_KEY","NVIDIA_API_KEY",
+    "OLLAMA_API_KEY","OLLAMA_CLOUD_API_KEY","OMP_AUTH_BROKER_TOKEN","OMP_AUTH_BROKER_URL",
+    "OPENAI_API_KEY","OPENAI_CODEX_OAUTH_TOKEN","OPENCODE_API_KEY","OPENROUTER_API_KEY",
+    "QIANFAN_API_KEY","QWEN_OAUTH_TOKEN","QWEN_PORTAL_API_KEY","QWEN_TOKEN_PLAN_API_KEY",
+    "QWEN_TOKEN_PLAN_CN_API_KEY","RADIUS_API_KEY","SNOWFLAKE_CORTEX_PAT","SNOWFLAKE_CORTEX_TOKEN",
+    "SYNTHETIC_API_KEY","TOGETHER_API_KEY","TYPESAFE_API_KEY","UMANS_AI_CODING_PLAN_API_KEY",
+    "VENICE_API_KEY","VLLM_API_KEY","WAFER_SERVERLESS_API_KEY","XAI_API_KEY",
+    "XAI_OAUTH_TOKEN","XIAOMI_API_KEY","XIAOMI_TOKEN_PLAN_AMS_API_KEY","XIAOMI_TOKEN_PLAN_CN_API_KEY",
+    "XIAOMI_TOKEN_PLAN_SGP_API_KEY","ZAI_API_KEY","ZAI_CODING_CN_API_KEY","ZENMUX_API_KEY",
+    "ZHIPU_API_KEY",
+];
 
 pub(crate) fn auth_vars()->Vec<&'static str> {ENTRIES.into_iter().filter_map(|e|e.builtin).flat_map(|a|a.ops.auth_vars.iter().copied()).collect()}
 
