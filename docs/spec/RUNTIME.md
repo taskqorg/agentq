@@ -945,14 +945,14 @@ SQL table/key, physical file identity/hash and byte-range references. Reconstruc
 rows are labeled as projections, never original file bytes. `source_bytes` reads only
 these native source parts. Snapshot changes produce a new monotonic generation; every page exposes that generation, and the first page of a changed snapshot carries `reset: true` so clients replace the previous view before applying its steps. Stable native row keys keep step identities across rewrites. Cursor revisions remain monotonic;
 client-selected page bytes choose the next rows, including a complete crossing row.
-Unknown native records remain unknown with exact source access; no record cap applies.
+Unknown native records remain unknown with exact source access; no record cap applies. Every session-bearing record, including recognized nested envelopes and metadata companions, must match the selected native session before any snapshot page is published. Companion bytes participate in the manifest, identity and generation. Identical-byte physical file replacement resets the view.
 
 SQLite native DB/WAL bytes are opened only as files for reading, copied into a private
-temporary directory, checked again for concurrent changes, and queried there. Native
+temporary directory, checked again for concurrent content or file-identity changes, and queried there. WAL header/frame salts, checksums and complete framing are validated before SQLite can ignore a damaged tail; an invalid committed WAL refuses with an explicit error, never a successful stale projection. A stable raw WAL-index header, when present, binds the committed frame count/checksum and permits excluding a previous generation's physical tail. The private query copy uses only that validated committed prefix; native DB/WAL/index bytes remain unchanged and bound in the source manifest. Native
 -shm files are neither opened for writes nor created. A changing source refuses rather
 than retrying or claiming a consistent snapshot. Temporary query files are removed
 when the read ends. No native checkpoint, vacuum, migration or schema change occurs.
-Derived SQL rows are session-scoped, but raw DB/WAL source parts can contain other
+Derived SQL rows are session-scoped, but raw DB/WAL/index source parts can contain other
 sessions. This local reader grants no archive or sharing authority over those bytes;
 a selected session alone never authorizes sending its entire database off-host.
 
@@ -991,10 +991,10 @@ Native Mac qualification never claims native Windows or WSL qualification.
 
 Source-specific companions: Cline <id>.messages.json; Kiro <uuid>.jsonl beside its
 metadata; Grok chat_history.jsonl beside summary.json; Rovo session_context.json;
-Kimi agents/*/wire.jsonl beneath session_*; OpenCode session/message/part JSON stores
+Kimi agents/*/wire.jsonl beneath session_* with state.json agent identity/parent lineage; OpenCode session/message/part JSON stores
 or session/message/part SQLite tables; OpenCode 2 session_v2/session_message tables;
 ZCode its separate db.sqlite. OMP/Pi/OpenClaw message envelopes retain tool results,
-thinking and compactions. Gemini thoughts/toolCalls, Copilot data envelopes, Devin
+thinking and compactions. Kiro toolUseId joins call/result revisions, and OpenCode file parts preserve MIME-appropriate media kinds. Gemini thoughts/toolCalls, Copilot data envelopes, Devin
 ATIF observations, and OpenAI/Anthropic block variants retain their native fields.
 
 History-only native accounting retains reported token buckets and cost per message; absent buckets stay unknown. Session/model aggregates never become extra model calls. Snapshot pages preserve native parent-session fields independently of message chains. Devin also resolves its native APPDATA location on Windows; Pi/OMP overrides accept the native sessions root.

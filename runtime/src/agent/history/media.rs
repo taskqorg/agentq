@@ -194,9 +194,28 @@ fn visit(catalog:&mut MediaCatalog,value:&Value,step:&Step,cwd:Option<&Path>,poi
     }
 }
 
+fn visit_step(catalog:&mut MediaCatalog,record:&Value,step:&Step,cwd:Option<&Path>) {
+    let p=record.get("payload").or(record.get("params")).unwrap_or(record);let item=p.get("item").unwrap_or(p);
+    let content=record["message"]["content"].as_array().or_else(||item["content"].as_array());
+    if let Some(blocks)=content {
+        if let Some(block)=blocks.get(step.part) {
+            visit(catalog,block,step,cwd,&format!("/content/{}",step.part),false);
+            if block["type"]=="tool_result" {visit(catalog,&record["toolUseResult"],step,cwd,"/toolUseResult",true);}
+        }
+    }else{visit(catalog,record,step,cwd,"",false);}
+}
+
 impl super::sessions::Session {
     pub fn media(&self)->Res<MediaCatalog> {
         let mut history=self.history.clone();history.offset=0;history.prefix=crate::sha256_hex(b"");
+        if super::sources::external(&history.format) {
+            let mut catalog=MediaCatalog {items:Vec::new(),backing:BTreeMap::new()};let mut cwd=None::<PathBuf>;
+            for (step,normalized) in super::sources::media_steps(&history,&self.path)? {
+                if let Some(path)=step.source["record"]["cwd"].as_str().filter(|s|Path::new(s).is_absolute()){cwd=Some(path.into());}
+                if step.kind!=StepKind::Metadata{visit_step(&mut catalog,&normalized,&step,cwd.as_deref());}
+            }
+            return Ok(catalog);
+        }
         let steps=history.steps(&self.path,u64::MAX)?.steps;
         let mut catalog=MediaCatalog {items:Vec::new(),backing:BTreeMap::new()};let mut physical=BTreeMap::new();let mut cwd=None::<PathBuf>;
         for step in &steps {
@@ -217,16 +236,8 @@ impl super::sessions::Session {
             let p=v.get("payload").or(v.get("params")).unwrap_or(&v);
             if let Some(path)=v["cwd"].as_str().or(p["cwd"].as_str()).filter(|s|Path::new(s).is_absolute()){cwd=Some(path.into());}
             let event=history.event(&v,raw,start)?;
-            let item=p.get("item").unwrap_or(p);
-            let content=if self.history.format.starts_with("claude-"){v["message"]["content"].as_array()}else{item["content"].as_array()};
             for step in super::steps::decode(&self.history.format,&event,&v) {
-                if step.kind==StepKind::Metadata {continue;}
-                if let Some(blocks)=content {
-                    if let Some(block)=blocks.get(step.part) {
-                        visit(&mut catalog,block,&step,cwd.as_deref(),&format!("/content/{}",step.part),false);
-                        if block["type"]=="tool_result" {visit(&mut catalog,&v["toolUseResult"],&step,cwd.as_deref(),"/toolUseResult",true);}
-                    }
-                }else{visit(&mut catalog,&v,&step,cwd.as_deref(),"",false);}
+                if step.kind!=StepKind::Metadata {visit_step(&mut catalog,&v,&step,cwd.as_deref());}
             }
         }
         if self.history.format.starts_with("codex-") && super::super::native::plain_id(&self.history.native_session) {
