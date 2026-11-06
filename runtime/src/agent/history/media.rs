@@ -137,9 +137,14 @@ fn visit(catalog:&mut MediaCatalog,value:&Value,step:&Step,cwd:Option<&Path>,poi
     if let Some(rows)=value.as_array(){for (i,row) in rows.iter().enumerate(){visit(catalog,row,step,cwd,&format!("{pointer}/{i}"),tool);}return;}
     let Some(object)=value.as_object() else{return};
     let native=value["type"].as_str().unwrap_or_default();
+    if matches!(native,"text"|"input_text"|"output_text"|"thinking"|"reasoning")
+        || tool && (matches!(native,"message"|"assistant"|"user"|"system") || value["role"].is_string()) {return;}
+    let sidecar=pointer.is_empty() && step.source["format"]=="antigravity-sidecar" && value["step_index"].is_number()
+        && matches!(native,"GENERIC"|"PLANNER_RESPONSE"|"TOOL_RESPONSE");
     let tool=tool || matches!(native,"tool_use"|"server_tool_use"|"tool_result"|"function_call"|"custom_tool_call"|"function_call_output"|"custom_tool_call_output"|"FileChange"|"file_change");
     let kind=match value["type"].as_str() {
-        Some("image"|"Image"|"input_image"|"image_url"|"local_image"|"localImage"|"LocalImage"|"ImageView"|"imageView"|"image_view"|"imageGeneration"|"image_generation")=>Some(MediaKind::Image),
+        Some("image"|"Image"|"input_image"|"image_url"|"local_image"|"localImage"|"LocalImage")=>Some(MediaKind::Image),
+        Some(name) if super::super::registry::codex_image_kind(name).is_some()=>Some(MediaKind::Image),
         Some("document")=>Some(MediaKind::Document),Some("video"|"input_video")=>Some(MediaKind::Video),Some("audio"|"input_audio")=>Some(MediaKind::Audio),_=>None,
     };
     let mime=value["source"]["media_type"].as_str().or(value["mime_type"].as_str()).or(value["mime"].as_str()).or(value["file"]["type"].as_str());
@@ -161,7 +166,7 @@ fn visit(catalog:&mut MediaCatalog,value:&Value,step:&Step,cwd:Option<&Path>,poi
     }else if let Some(path)=path.filter(|_|kind.is_some() || tool) {
         let decoded=serde_json::from_str::<String>(path).ok();let path=Path::new(decoded.as_deref().unwrap_or(path));
         let path=if path.is_absolute(){Some(path.to_path_buf())}else{cwd.map(|cwd|cwd.join(path))};
-        let generated=value.get("savedPath").or(value.get("saved_path")).is_some() || value["type"]=="imageGeneration";
+        let generated=value.get("savedPath").or(value.get("saved_path")).is_some() || super::super::registry::codex_image_kind(native)==Some(true);
         catalog.add(json!({"kind":if generated{"generated"}else{"path"},"path":path}),kind,mime,name,None,kind.is_some(),step,pointer);
     }else if kind.is_some() && !catalog.items.iter().any(|m|m.step==step.id) {
         catalog.add(json!({"kind":"unreported"}),kind,mime,name,None,true,step,pointer);
@@ -181,7 +186,7 @@ fn visit(catalog:&mut MediaCatalog,value:&Value,step:&Step,cwd:Option<&Path>,poi
             "message"=>matches!(native,"user"|"assistant"),
             "content"=>pointer=="/message" || matches!(native,"user"|"assistant"|"message"|"tool_result") || tool,
             "toolUseResult"=>native=="user" && value["message"]["content"].as_array().is_some_and(|a|a.iter().any(|b|b["type"]=="tool_result")),
-            "tool_calls"|"media"=>value["step_index"].is_number(),
+            "tool_calls"|"media"=>sidecar,
             "input"|"arguments"|"args"|"output"|"result"|"files"|"images"|"artifacts"|"text"=>tool,
             _=>false,
         };
