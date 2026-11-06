@@ -42,8 +42,8 @@ impl SessionStore {
                 if row["schema"]!="agentq-owner/1" || !row["runtime"].is_string() || !row["root"].is_string() || !(row["home"].is_null() || row["home"].is_string()) {return Err("session-owner-unknown: pending binding unreadable".into());}
                 if ["runtime","root","home"].iter().any(|k|row[*k]!=expected[*k]) {continue;}
                 scope(&row,spec)?;
-                let controller=process(&row["controller"])?.ok_or("session-owner-unknown: pending controller missing")?;
-                if controller.live()? || process(&row["native"])?.map(|n|n.live()).transpose()?.unwrap_or(false) {
+                let _pending=lock(&pending.with_extension("lock")).map_err(|e|format!("session-owner-unknown: pending admission: {e}"))?;
+                if process(&row["native"])?.map(|n|n.live()).transpose()?.unwrap_or(false) {
                     return Err("session-owner-unknown: pending native session must be bound before adoption".into());
                 }
             }
