@@ -495,6 +495,71 @@ Previously retained TaskQ-shaped checkpoints and receipts are recovery-only evid
 
 The explicit legacy `ProtectedHost::new` API stays available to consumers pinned to the old protocol; the signed independent route never falls back to it. Historical qualification and consumer packets remain in [task 186](../evidence/runtime-186.md) and [task 199](../evidence/runtime-199.md); they do not qualify the independent host. Publication pins, signature/digest and adversarial checks: [independent host evidence](../evidence/runtime-241.md).
 
+## Universal step history
+
+`Runtime::history` reads live and finished sessions using the same `Turn`, `Step` and
+`StepKind` data. Kinds are message, thinking, shell, file_change, tool, mcp, web,
+subagent, image, question, approval, compaction, usage and unknown. Each step keeps
+its raw record, source byte range and digest; normalization happens at read time.
+Nothing writes a native transcript or stores a second canonical history.
+
+Native item/call IDs determine stable step IDs within a source/session. Revisions
+carry the source offset and are self-contained: command, cwd, kind and completed
+output survive later result records. Output deltas accumulate into output; clients
+upsert by ID and accept the greatest revision. Derivation replays raw source at read
+time, including before a recovered page boundary; no second history or cache is stored.
+A page coalesces updates per ID and orders them by the last source revision; `origins`
+retains every contributing record's exact range and hash for raw reads.
+Claude replay/metadata records stay raw unknown steps and never replay embedded tools.
+Records without a native identity retain their physical identity. Parent call,
+turn and session IDs are projected only when native data reports them.
+Shell data contains command, cwd, exit_code, duration, output, stdout, stderr and
+interrupted; absent fields are null with a per-field reason. Claude stdout and
+stderr stay separate. Unknown records are steps with exact raw bytes.
+
+`History::steps(path, bytes)` consumes complete JSONL records up to the caller's
+chosen byte window, including a complete record crossing that window. No record
+size ceiling is imposed. A partial last record waits; validation failures leave
+the checkpoint unchanged. `read_bytes(path, start, length)` returns the exact source
+range after the same identity/prefix checks. Clients choose display/output sizes.
+Legacy `poll` and `poll_before` keep their existing paging contract below.
+
+`agentq agent history` accepts JSON on stdin: runtime, session, optional home or
+source, checkpoint, and bytes. It returns JSON steps, more, pending_bytes and the
+next checkpoint. A source is selected inside the adapter; callers never parse paths.
+`Runtime::history_sessions` discovers session IDs and sources read-only, including
+Claude subagent files. A Claude subagent is identified by agentId, distinct from its
+parent sessionId; discovery exposes its parent session. Opening the child resolves
+the parent native call ID from that parent's transcript, when reported, without
+reading other sessions' content. Message-chain parentUuid is not
+a task-parent link. Spawn results and native SubAgentActivity project child session IDs.
+Claude child IDs are scoped by their parent session. Each discovered source also has
+an opaque `id`; pass it to `Runtime::history` when a native ID has multiple physical
+copies or locations. Parent/child links use these IDs when resolved. Clients never
+choose or parse native paths to disambiguate sources.
+`Runtime::history_resume` returns terminal argv from caller-supplied process evidence;
+running or unknown state refuses. This is an advisory command description: verified
+second-writer fencing belongs to the launch/preflight work in #287, not this reader.
+This API never launches that command.
+`Session::resume_command` resolves source handles to native argv and explicitly refuses
+unsupported native subagent terminal resume. Descriptor argv accepts native IDs only.
+
+Codex app-server `item/commandExecution/outputDelta` is supported as observed deltas;
+they do not prove completion. Claude and Antigravity live console deltas are unsupported
+without native proof; their emitted completed output remains readable.
+Codex code-mode `exec` is a composite tool step, because its JavaScript can call
+several tools or compute arguments. It retains the complete code and console output;
+native CommandExecution child records become shell steps when emitted. Native shell
+fields absent from code-mode results remain null with reasons; reading JavaScript
+text never claims a shell command executed. Native token_usage_record projects its
+per-request usage and ID, separately from cumulative thread/turn totals.
+Codex completed item PascalCase variants and Claude thinking, toolUseResult and
+attachment records are mapped. Fork metadata inside a rollout is provenance, not a
+new session receipt; session_binding keeps its existing native/caller values and a
+separate provenance flag identifies inherited metadata. The first metadata record
+binds the source. Foreign event
+thread IDs still refuse. Antigravity retains its transport limitations below.
+
 ## Worker capabilities and bounded history
 
 `agent::history` is the shared read-only observation API for TaskQ and other callers.

@@ -1,5 +1,8 @@
 //! Read-only, bounded native history (agentq.md §12; RUNTIME.md history wire contract).
 use super::{Res, native};
+mod steps;
+pub mod sessions;
+pub use steps::{Step, StepKind, StepPage, Turn};
 use serde_json::{Value, json};
 use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
 
@@ -30,6 +33,7 @@ pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res
     Ok(json!({"schema":1,"format":format,"native_version":native_version,"os":os,"features":features,
         "native":{"status":"untested","reason":"history API not qualified on a native version/OS tuple"},
         "evidence":["runtime/tests/history.rs","runtime/tests/agent.rs"],
+        "live_output":{"status":if app {"supported"}else{"unsupported"},"reason":if app {"item/commandExecution/outputDelta"}else{"no native live console delta proof"}},
         "limits":{"page_bytes":BUDGET,"record_bytes":BUDGET,"page_events":128}}))
 }
 
@@ -39,6 +43,8 @@ pub struct History {
     format: String,
     source: String,
     session: String,
+    native_session: String,
+    native_parent: Option<String>,
     offset: u64,
     identity: Option<String>,
     prefix: String,
@@ -57,12 +63,13 @@ impl History {
     pub fn new(format: &str, source: &str, session: &str) -> Res<Self> {
         if !FORMATS.contains(&format) { return Err("history transport unsupported".into()); }
         if source.is_empty() || session.is_empty() { return Err("history source/session required".into()); }
-        Ok(Self {format:format.into(), source:source.into(), session:session.into(), offset:0,
+        Ok(Self {format:format.into(), source:source.into(), session:session.into(), native_session:session.into(), native_parent:None, offset:0,
             identity:None, prefix:crate::sha256_hex(b"")})
     }
 
     pub fn checkpoint(&self) -> Value {
         json!({"schema":1,"format":self.format,"source":self.source,"session":self.session,
+            "native_session":self.native_session,"native_parent":self.native_parent,
             "offset":self.offset,"identity":self.identity,"prefix":self.prefix})
     }
 
@@ -70,6 +77,8 @@ impl History {
         if v["schema"] != 1 { return Err("history checkpoint schema invalid".into()); }
         let field = |k: &str| v[k].as_str().ok_or_else(|| format!("history checkpoint {k} invalid"));
         let mut h = Self::new(field("format")?, field("source")?, field("session")?)?;
+        if let Some(native)=v.get("native_session") {h.native_session=native.as_str().filter(|s|!s.is_empty()).ok_or("history checkpoint native session invalid")?.into();}
+        h.native_parent=match &v["native_parent"] {Value::Null=>None,Value::String(s) if !s.is_empty()=>Some(s.clone()),_=>return Err("history checkpoint native parent invalid".into())};
         h.offset = v["offset"].as_u64().ok_or("history checkpoint offset invalid")?;
         h.prefix = field("prefix")?.into();
         if h.prefix.len() != 64 || !h.prefix.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("history checkpoint prefix invalid".into()); }
@@ -163,15 +172,16 @@ impl History {
         let client = if self.format.starts_with("codex-") {super::Client::Codex}
             else if self.format.starts_with("claude-") {super::Client::Claude} else {super::Client::Antigravity};
         let session = super::session_of(client, raw);
-        let native_session = session.as_deref().or_else(|| match self.format.as_str() {
+        let native_session = if self.format.starts_with("claude-") && v["agentId"].is_string() {v["agentId"].as_str()}else{session.as_deref().or_else(|| match self.format.as_str() {
             "claude-native" | "claude-stream" => v["sessionId"].as_str().or(v["session_id"].as_str()),
             "agy-stream" => v["step_update"]["conversation_id"].as_str(),
             "codex-rollout" if v["type"] == "session_meta" => v["payload"]["id"].as_str(),
             "codex-rollout" => v["payload"]["thread_id"].as_str(),
             "codex-app-server" => v["params"]["threadId"].as_str().or(v["params"]["thread"]["id"].as_str()),
             _ => None,
-        });
-        if native_session.is_some_and(|s| s != self.session) { return Err("history native session differs".into()); }
+        })};
+        if !(self.format == "codex-rollout" && v["type"] == "session_meta" && offset > 0) && native_session.is_some_and(|s| s != self.native_session) { return Err("history native session differs".into()); }
+        if self.native_parent.as_ref().is_some_and(|parent|v["sessionId"].as_str().is_some_and(|id|id!=parent)){return Err("history native parent differs".into());}
         let (author, kind, item, blocks, limited) = normalize(&self.format, v);
         let validity = match self.format.as_str() {
             "claude-native" | "claude-stream" if v["type"].as_str().is_some_and(|s| !s.is_empty()) => json!({"status":"valid","reason":null}),
@@ -184,7 +194,7 @@ impl History {
             .or_else(|| v.get("emittedAtMs"))
             .or_else(|| if self.format == "antigravity-sidecar" {v.get("created_at")}else{None})
             .cloned().unwrap_or(Value::Null);
-        Ok(json!({"id":id,"source":self.source,"session":self.session,"session_binding":if native_session.is_some(){"native"}else{"caller"},"format":self.format,
+        Ok(json!({"id":id,"source":self.source,"session":self.session,"session_binding":if self.format == "codex-rollout" && v["type"] == "session_meta" && offset > 0 {"caller"}else if native_session.is_some(){"native"}else{"caller"},"provenance":self.format == "codex-rollout" && v["type"] == "session_meta" && offset > 0,"format":self.format,
             "order":offset,"start":offset,"end":offset+raw.len() as u64,"sha256":hash,"raw":raw,
             "validity":validity,"assistant_failure":super::events::assistant_failure(client,v),
             "lifecycle":super::events::lifecycle(client,v),"permission_mode":super::events::permission_mode(client,v),
@@ -232,11 +242,11 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
             let i = p.get("item").unwrap_or(p);
             item = i.get("id").or_else(||i.get("call_id")).cloned().unwrap_or(Value::Null);
             match i["type"].as_str() {
-                Some("message" | "agent_message" | "agentMessage" | "userMessage" | "UserMessage") => {
+                Some("message" | "agent_message" | "AgentMessage" | "agentMessage" | "userMessage" | "UserMessage") => {
                     author = match i["role"].as_str() {Some("user")=>"user",Some("assistant")=>"assistant",_ if i["type"]=="userMessage" || i["type"]=="UserMessage"=>"user",_ if i["type"]!="message"=>"assistant",_=>"unknown"};
                     kind="message"; blocks=i["content"].as_array().cloned().unwrap_or_else(||text(&i["text"])); limited="none";
                 }
-                Some("command_execution" | "commandExecution" | "function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output" | "mcp_tool_call" | "mcpToolCall" | "dynamicToolCall") => {author="tool";kind="tool";blocks.push(i.clone());limited="none";}
+                Some("command_execution" | "commandExecution" | "CommandExecution" | "function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output" | "mcp_tool_call" | "mcpToolCall" | "McpToolCall" | "dynamicToolCall") => {author="tool";kind="tool";blocks.push(i.clone());limited="none";}
                 _ => {
                     if matches!(v["type"].as_str(),Some("thread.started"|"turn.started"|"turn.completed"|"turn.failed"|"error"))
                         || matches!(p["type"].as_str(),Some("task_started"|"task_complete"|"turn_aborted"|"token_count"))
@@ -295,8 +305,8 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
 fn block(format: &str, v: Value) -> Value {
     let kind = v["type"].as_str().unwrap_or_default();
     match kind {
-        "text" | "input_text" | "output_text" => json!({"type":"text","text":v["text"],"native":v}),
-        "image" | "input_image" | "image_url" => json!({"type":"image","native":v}),
+        "text" | "Text" | "input_text" | "output_text" => json!({"type":"text","text":v["text"],"native":v}),
+        "image" | "Image" | "input_image" | "image_url" | "local_image" | "LocalImage" => json!({"type":"image","native":v}),
         "document" | "attachment" | "file" | "input_file" => json!({"type":"attachment","native":v}),
         "tool_use" | "function_call" | "custom_tool_call" => json!({"type":"tool_call",
             "id":v.get("call_id").or_else(||v.get("id")),"name":v["name"],
@@ -304,9 +314,9 @@ fn block(format: &str, v: Value) -> Value {
         "tool_result" | "function_call_output" | "custom_tool_call_output" => json!({"type":"tool_result",
             "id":v.get("tool_use_id").or_else(||v.get("call_id")),
             "output":v.get("content").or_else(||v.get("output")),"native":v}),
-        "command_execution" | "commandExecution" => json!({"type":"tool_result","id":v["id"],
+        "command_execution" | "commandExecution" | "CommandExecution" => json!({"type":"tool_result","id":v["id"],
             "name":"shell","input":v["command"],"output":v.get("aggregated_output").or_else(||v.get("aggregatedOutput")),"native":v}),
-        "mcp_tool_call" | "mcpToolCall" | "dynamicToolCall" | "TOOL_RESPONSE" => json!({"type":"tool_result","native":v}),
+        "mcp_tool_call" | "mcpToolCall" | "McpToolCall" | "dynamicToolCall" | "TOOL_RESPONSE" => json!({"type":"tool_result","native":v}),
         _ if format == "antigravity-sidecar" && v.get("type").is_none()
             && v.get("args").is_some() && v["name"].as_str().is_some() => {
             json!({"type":"tool_call","id":v.get("id"),"name":v["name"],"input":v["args"],"native":v})

@@ -1,0 +1,169 @@
+//! Native locations stay behind the runtime boundary; discovery never launches a client.
+use super::*;
+use std::{path::PathBuf, io::{BufRead, BufReader}};
+use serde::Serialize;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Source { pub id:String, pub native_session:String, pub session: String, pub path: PathBuf, pub format: String, pub parent: Option<String>, pub parent_step: Option<String> }
+
+pub struct Session { history: History, path: PathBuf, runtime:String, parent: Option<String>, parent_step: Option<String>, children:std::collections::BTreeMap<String,String> }
+impl Session {
+    pub fn steps(&mut self, bytes: u64) -> Res<StepPage> {
+        let mut page=self.history.steps(&self.path,bytes)?;
+        for step in &mut page.steps {
+            if step.parent.is_none(){step.parent=self.parent_step.clone();step.parent_session=self.parent.clone();}
+            if let Some(child)=step.data["session"].as_str() {
+                if let Some(id)=self.children.get(child) {step.data["session"]=json!(id);}
+                else if self.runtime=="claude" && step.kind==StepKind::Subagent {
+                    step.data["session"]=json!(format!("{}/agent/{child}",self.history.native_parent.as_deref().unwrap_or(&self.history.native_session)));
+                }
+            }
+        }
+        Ok(page)
+    }
+    pub fn checkpoint(&self) -> Value {self.history.checkpoint()}
+    pub fn read_bytes(&self, start:u64, length:u64)->Res<Vec<u8>> {self.history.read_bytes(&self.path,start,length)}
+    /// Advisory argv, never launch authority. Source IDs resolve inside the adapter.
+    pub fn resume_command(&self, process:super::super::State)->Res<Vec<String>> {
+        if self.history.native_parent.is_some() || self.runtime=="claude" && self.history.session!=self.history.native_session {return Err("native subagent terminal resume unsupported".into());}
+        resume(&self.runtime,&self.history.native_session,process)
+    }
+}
+
+fn client(runtime: &str) -> Res<super::super::Client> {
+    match runtime {"codex"=>Ok(super::super::Client::Codex),"claude"=>Ok(super::super::Client::Claude),"antigravity"=>Ok(super::super::Client::Antigravity),_=>Err("history runtime unsupported".into())}
+}
+
+fn walk(root:&Path, out:&mut Vec<PathBuf>) -> Res<()> {
+    if !root.exists() {return Ok(());}
+    for entry in std::fs::read_dir(root).map_err(|e|format!("history discovery: {e}"))? {
+        let entry=entry.map_err(|e|e.to_string())?;
+        let ty=entry.file_type().map_err(|e|e.to_string())?;
+        if ty.is_dir() {walk(&entry.path(),out)?;}
+        else if ty.is_file() && entry.path().extension().is_some_and(|e|e=="jsonl") {out.push(entry.path());}
+    }
+    Ok(())
+}
+
+fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
+    let format = match runtime {"codex"=>"codex-rollout","claude"=>"claude-native",_=>"antigravity-sidecar"};
+    let mut reader=BufReader::new(File::open(path).map_err(|e|format!("history discovery: {e}"))?);
+    let mut row=String::new();
+    loop {
+        row.clear();
+        if reader.read_line(&mut row).map_err(|e|e.to_string())?==0 {return Ok(None);}
+        if !row.ends_with('\n') {return Ok(None);}
+        let v:Value=serde_json::from_str(&row).map_err(|e|format!("history discovery invalid JSON: {e}"))?;
+        let id=match runtime {
+            "codex" if v["type"]=="session_meta"=>v["payload"]["id"].as_str(),
+            "claude"=>v["agentId"].as_str().or(v["sessionId"].as_str()).or(v["session_id"].as_str()),
+            "antigravity"=>path.parent().and_then(Path::parent).and_then(Path::parent).and_then(Path::file_name).and_then(|s|s.to_str()),
+            _=>None,
+        };
+        if let Some(id)=id {
+            return Ok(Some(Source {id:crate::sha256_hex(path.to_string_lossy().as_bytes()),native_session:id.into(),session:if runtime=="claude" && v["agentId"].is_string() {format!("{}/agent/{id}",v["sessionId"].as_str().unwrap_or("unreported"))}else{id.into()},path:path.into(),format:format.into(),parent:if runtime=="claude" && v["agentId"].is_string() {v["sessionId"].as_str().map(String::from)}else{v["payload"]["forked_from_id"].as_str().or(v.pointer("/payload/source/subagent/thread_spawn/parent_thread_id").and_then(Value::as_str)).map(String::from)},parent_step:None}));
+        }
+    }
+}
+
+fn discover(runtime:&str, home:Option<&Path>) -> Res<Vec<Source>> {
+    let client=client(runtime)?;
+    let home=home.map(Path::to_path_buf).or_else(||super::super::base_home(client)).ok_or("history home unknown")?;
+    let root=home.join(match runtime {"codex"=>"sessions","claude"=>"projects",_=>"brain"});
+    let mut paths=Vec::new();walk(&root,&mut paths)?;paths.sort();
+    let mut sources=Vec::new();
+    for path in paths {
+        if runtime=="antigravity" && path.file_name().is_none_or(|n|n!="transcript.jsonl") {continue;}
+        if let Some(source)=identify(runtime,&path)? {sources.push(source);}
+    }
+    Ok(sources)
+}
+
+pub fn list(runtime:&str,home:Option<&Path>)->Res<Vec<Source>> {
+    discover(runtime,home)
+}
+
+fn link_parents(runtime:&str,sources:&mut [Source])->Res<()> {
+    let mut parents=std::collections::BTreeMap::<PathBuf,Vec<usize>>::new();
+    for (index,child) in sources.iter().enumerate() {
+        let Some(parent)=&child.parent else{continue};
+        if let Some(source)=sources.iter().find(|s|&s.session==parent && (runtime!="claude" || child.path.starts_with(s.path.with_extension("")))) {
+            parents.entry(source.path.clone()).or_default().push(index);
+        }
+    }
+    for (path,children) in parents {
+        for row in BufReader::new(File::open(path).map_err(|e|e.to_string())?).split(b'\n') {
+            let row=row.map_err(|e|e.to_string())?;
+            let Ok(record)=serde_json::from_slice::<Value>(&row) else{continue};
+            let p=record.get("payload").unwrap_or(&record);let item=p.get("item").unwrap_or(p);
+            let result=super::steps::structured(&item["output"]);
+            let agent=record["toolUseResult"]["agentId"].as_str().or(item["agent_thread_id"].as_str()).or(result["agent_id"].as_str());
+            let Some(agent)=agent else{continue};
+            let call=record["message"]["content"].as_array().and_then(|b|b.iter().find(|b|b["type"]=="tool_result")).and_then(|b|b["tool_use_id"].as_str())
+                .or(item["call_id"].as_str()).or_else(||(item["type"]=="SubAgentActivity").then(||item["id"].as_str()).flatten());
+            if let Some(call)=call {for index in &children {if sources[*index].native_session==agent {sources[*index].parent_step=Some(call.into());}}}
+        }
+    }
+    Ok(())
+}
+
+pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>, saved:Option<&Value>) -> Res<Session> {
+    client(runtime)?;
+    let sources=if source.is_some(){vec![]}else{discover(runtime,home)?};
+    let source=if let Some(path)=source {
+        let found=identify(runtime,path)?.ok_or("history session identity unavailable")?;
+        if found.session!=session && found.native_session!=session && found.id!=session {return Err("history native session differs".into());}found
+    } else {
+        let matches:Vec<_>=sources.iter().filter(|s|s.id==session || s.session==session).cloned().collect();
+        if matches.len()!=1 {return Err(if matches.is_empty(){"history session not found"}else{"history session has multiple sources; pass a source id from history_sessions"}.into());}
+        let selected=matches.into_iter().next().unwrap();
+        let mut family=vec![selected];
+        if let Some(parent)=&family[0].parent {
+            if let Some(source)=sources.iter().find(|s|&s.session==parent && (runtime!="claude" || family[0].path.starts_with(s.path.with_extension("")))) {family.push(source.clone());}
+            link_parents(runtime,&mut family)?;
+        }
+        family.remove(0)
+    };
+    let label=source.path.to_str().ok_or("history source path invalid UTF-8")?;
+    let mut history=if let Some(saved)=saved {
+        let h=History::recover(saved)?;
+        if h.source!=label || h.session!=source.session || h.native_session!=source.native_session || h.format!=source.format {return Err("history checkpoint binding differs".into());}h
+    }else{History::new(&source.format,label,&source.session)?};
+    history.native_session=source.native_session.clone();history.native_parent=if runtime=="claude" && source.parent.is_some(){source.parent.clone()}else{None};
+    let children=sources.iter().filter(|s|s.parent.as_ref()==Some(&source.native_session) && (runtime!="claude" || s.path.starts_with(source.path.with_extension(""))))
+        .map(|s|(s.native_session.clone(),s.id.clone())).collect();
+    let parent=source.parent.as_ref().and_then(|parent|sources.iter().find(|s|&s.session==parent && (runtime!="claude" || source.path.starts_with(s.path.with_extension(""))))).map(|s|s.id.clone()).or(source.parent);
+    Ok(Session {history,path:source.path,runtime:runtime.into(),parent,parent_step:source.parent_step,children})
+}
+
+pub fn resume(runtime:&str, session:&str, state:super::super::State)->Res<Vec<String>> {
+    if !matches!(state,super::super::State::Finished|super::super::State::Failed) {return Err("resume description requires caller-reported finished state; verified writer fencing belongs to #287".into());}
+    if session.is_empty() || session.starts_with('-') {return Err("history session invalid".into());}
+    Ok(match runtime {
+        "codex"=>vec!["codex".into(),"resume".into(),session.into()],
+        "claude"=>vec!["claude".into(),"--resume".into(),session.into()],
+        "antigravity"=>vec!["agy".into(),"--conversation".into(),session.into()],
+        _=>return Err("history resume unsupported".into()),
+    })
+}
+
+pub fn request(request:&str)->Res<Value> {
+    let v:Value=serde_json::from_str(request).map_err(|e|format!("history request: {e}"))?;
+    let path=|key:&str|->Res<Option<&Path>> {match &v[key] {
+        Value::Null=>Ok(None),Value::String(s) if Path::new(s).is_absolute()=>Ok(Some(Path::new(s))),
+        _=>Err(format!("history {key} requires an absolute path or null")),
+    }};
+    let runtime=v["runtime"].as_str().ok_or("history runtime required")?;
+    let rt=super::super::runtime(runtime).ok_or("history runtime unsupported")?;
+    let home=path("home")?;
+    if v["action"]=="list" {return serde_json::to_value(rt.history_sessions(home)?).map_err(|e|e.to_string());}
+    let session=v["session"].as_str().ok_or("history session required")?;
+    let mut reader=rt.history(session,home,path("source")?,v.get("checkpoint").filter(|v|!v.is_null()))?;
+    if v["action"]=="bytes" {
+        let start=v["start"].as_u64().ok_or("history start required")?;
+        let length=v["length"].as_u64().ok_or("history length required")?;
+        return Ok(json!({"start":start,"bytes":reader.read_bytes(start,length)?,"checkpoint":reader.checkpoint()}));
+    }
+    let bytes=v["bytes"].as_u64().ok_or("history bytes required; caller chooses the page window")?;
+    serde_json::to_value(reader.steps(bytes)?).map_err(|e|e.to_string())
+}
