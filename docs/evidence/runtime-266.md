@@ -42,14 +42,16 @@ No command in this task launches, cancels or reconciles through the Mac host. Th
 
 The new final adapter replaces digest `425c5924046338bf13167e5bf76eb827533435ed09e5f3cf336b6744d9bf2118`.
 
-- Binary: `agentq-0.0.0-dev-macos-aarch64`, 7,598,192 bytes, SHA-256 `711a6066519d95f625bbffd8531ed87658f90be993d9dafc91a1a21d111d32e3`.
-- Build: artifact `13499089022` of [release run 42213746472](https://github.com/taskqorg/agentq/actions/runs/42213746472), at merge `5535edc1b7f0b73b36ba592d69b6917c9379d832` of fix `e34f88bed0389006413aedc266bc8c0fab056660` into `ede9e465b0caa7b567f3370f19367e5fdd6b51cd`.
+- Binary: `agentq-0.0.0-dev-macos-aarch64`, 7,675,376 bytes, SHA-256 `a1cbb7b88959532f2be28ea8d696c4cc1ae17b7c97205d6549f7156164c82a58`.
+- Build: artifact `13509232169` of [release run 42231396039](https://github.com/taskqorg/agentq/actions/runs/42231396039), at merge `1c46de5b12d7bcd3a1ce1ffbcbef962090778031` of fix `9695626559ee335cce3ac6fac2f2bbcf10a47e8e` into `b5431b118c68494bdd8c8075715cc74c5b6485df`. It contains both fixes above, [#265](https://github.com/taskqorg/agentq/pull/265) and [#270](https://github.com/taskqorg/agentq/pull/270).
 - Public manifest: [adapter-macos-aarch64.json](runtime-266/adapter-macos-aarch64.json), public key `7f739abab8625718e2e5dbedf0deb5a98373260d3c22ecd20a1148f42bf6d584`.
-- Signing: [#269](https://github.com/taskqorg/agentq/issues/269) signed on the host that already holds the publication key and merged the manifest in [#271](https://github.com/taskqorg/agentq/pull/271). The key did not move and was not printed. The #269 review accepted this signature.
+- Signing: [#273](https://github.com/taskqorg/agentq/issues/273) signed on the host that already holds the publication key and merged the manifest in [#276](https://github.com/taskqorg/agentq/pull/276). The key did not move and was not printed. The #273 review accepted this signature.
 
-This task rechecked the published result on Windows. A fresh download into a new empty directory has the size and digest above. `sign_adapter verify` printed `signed adapter verified` for the manifest at `0de008b13465fd68d4df008cc33c21343a019ce0`, and with a zeroed signature it refused with `protected signature invalid; authority unknown`. The downloaded binary was not executed.
+This task rechecked the published result on macOS. A fresh download into a new empty directory has the size and digest above. `sign_adapter verify` printed `signed adapter verified` for the manifest at `4b16e1c39e2a23c05e3e2010dbd69815abfcd8b3`, and with a zeroed signature it refused with `protected signature invalid; authority unknown`. The downloaded binary was not executed.
 
-The binary does not contain [#265](https://github.com/taskqorg/agentq/pull/265), which main merged after the build base. `git diff ede9e46 0de008b` is empty for `runtime/src/agent/protected.rs`, `runtime/src/agent/host.rs`, `runtime/src/agent/host/`, `runtime/examples/sign_adapter.rs` and `agentq/host.rs`. A consumer that needs #265 inside the adapter needs a new build and a new signature.
+The candidate, with `origin/main` merged, differs from the build merge only in `docs/`, so the signed binary matches its source.
+
+The earlier digest `711a6066519d95f625bbffd8531ed87658f90be993d9dafc91a1a21d111d32e3`, signed in [#269](https://github.com/taskqorg/agentq/issues/269), lacks the stderr fix and is superseded.
 
 ## Limits
 
