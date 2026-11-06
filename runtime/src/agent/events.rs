@@ -54,7 +54,59 @@ impl RecordTime {
 
 /// One source record of a log, in source order. Native parsing stays behind this envelope.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
-pub struct LogRecord { pub line: usize, pub time: RecordTime, pub events: Vec<Event> }
+pub struct LogRecord {
+    pub line: usize,
+    pub time: RecordTime,
+    pub events: Vec<Event>,
+    pub assistant_failure: Option<AssistantFailure>,
+    pub lifecycle: Option<String>,
+    pub permission_mode: Option<String>,
+}
+
+/// Private local error evidence, never telemetry or native completion authority.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct AssistantFailure {
+    pub code: Option<String>,
+    pub error: &'static str,
+    pub detail: Option<String>,
+}
+
+pub(super) fn assistant_failure(client: Client, v: &Value) -> Option<AssistantFailure> {
+    if client != Client::Claude || v["type"] != "assistant" || !(v["isApiErrorMessage"] == true || v["error"].is_string()) { return None; }
+    let code = string(&v["error"]);
+    let detail = v["message"]["content"].as_array().map(|blocks| blocks.iter()
+        .filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(""))
+        .or_else(|| string(&v["message"]["content"])).filter(|s| !s.is_empty());
+    Some(AssistantFailure { error: if code.as_deref() == Some("authentication_failed") {"auth-rejected"} else {"client-error"}, code, detail })
+}
+
+pub(super) fn permission_mode(client: Client, v: &Value) -> Option<String> {
+    (client == Client::Claude).then(|| v["permissionMode"].as_str().filter(|s| !s.is_empty()).map(String::from)).flatten()
+}
+
+pub(super) fn lifecycle(client: Client, v: &Value) -> Option<String> {
+    let name = match client {
+        Client::Claude => match v["type"].as_str()? {
+            "system" => [v["type"].as_str(), v["subtype"].as_str()].into_iter().flatten().collect::<Vec<_>>().join(" "),
+            "result" | "control_request" | "control_response" => v["type"].as_str()?.into(),
+            _ => return None,
+        },
+        Client::Codex => {
+            let p = v.get("payload").or(v.get("msg")).unwrap_or(v);
+            if matches!(p["type"].as_str(), Some("task_started" | "task_complete" | "turn_aborted")) { p["type"].as_str()?.into() }
+            else if matches!(v["type"].as_str(), Some("thread.started" | "turn.started" | "turn.completed" | "turn.failed" | "error")) { v["type"].as_str()?.into() }
+            else if matches!(v["method"].as_str(), Some("thread/started" | "turn/started" | "turn/completed" | "error")) { v["method"].as_str()?.into() }
+            else { return None; }
+        },
+        Client::Antigravity => {
+            if matches!(v["step_update"]["step_type"].as_str(), Some("system_message" | "checkpoint")) { v["step_update"]["step_type"].as_str()?.into() }
+            else if matches!(v["event"].as_str(), Some("init" | "result")) { v["event"].as_str()?.into() }
+            else { return None; }
+        },
+    };
+    let name = name.replace("task_", "turn_").replace(['_', '.', '/'], " ");
+    Some(if name == "init" {"session started".into()} else {name})
+}
 
 pub(super) fn log_records(client: Client, log: &str) -> Vec<LogRecord> {
     let mut cursor=Cursor{records:true,..Cursor::new(true)};
@@ -63,13 +115,14 @@ pub(super) fn log_records(client: Client, log: &str) -> Vec<LogRecord> {
         match serde_json::from_str::<Value>(text) {
             Ok(v) if v.is_object() => {
                 let (time,advanced)=(RecordTime::read(&v),advances(client,&v));
+                let (assistant_failure, lifecycle, permission_mode) = (assistant_failure(client, &v), lifecycle(client, &v), permission_mode(client, &v));
                 let mut events=cursor.read(client,vec![v]);
                 if advanced && !events.iter().any(|e|matches!(e,Event::Message{..}|Event::ToolEnd{..}|Event::TurnEnd{..})) {
                     events.retain(|e|*e!=Event::Activity);
                     events.push(Event::Progress);
                 }
-                out.push(LogRecord{line,time,events});
-            }            Err(_) if text.trim_start().starts_with('{') => out.push(LogRecord{line,time:RecordTime::Malformed,events:vec![Event::Unsupported{reason:"native record invalid"}]}),
+                out.push(LogRecord{line,time,events,assistant_failure,lifecycle,permission_mode});
+            }            Err(_) if text.trim_start().starts_with('{') => out.push(LogRecord{line,time:RecordTime::Malformed,assistant_failure:None,lifecycle:None,permission_mode:None,events:vec![Event::Unsupported{reason:"native record invalid"}]}),
             _ => {}
         }
     }

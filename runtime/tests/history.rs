@@ -458,3 +458,122 @@ fn history_backward_byte_limits_and_partial_tail() {
     }
     fs::remove_file(path).unwrap();
 }
+
+// #277 A2/R13: failed assistant replies must not look like success or lose auth/detail at the public boundary.
+#[test]
+fn migration_assistant_failure_keeps_auth_and_detail() {
+    let agent = agentq_runtime::agent::runtime("claude").unwrap();
+    let ok = json!({"type":"assistant","message":{"content":[{"type":"text","text":"Login expired; please run /login"}]}});
+    let success = serde_json::to_value(agent.log_records(&ok.to_string())).unwrap();
+    for (code, class) in [(Some("authentication_failed"), "auth-rejected"), (Some("api_error"), "client-error"), (None, "client-error")] {
+        let mut failed = ok.clone();
+        failed["isApiErrorMessage"] = json!(true);
+        if let Some(code) = code { failed["error"] = json!(code); }
+        let records = serde_json::to_value(agent.log_records(&failed.to_string())).unwrap();
+        assert_ne!(records, success, "A2: failure must remain distinct from successful prose");
+        let expected = json!({"code":code,"error":class,"detail":"Login expired; please run /login"});
+        assert_eq!(records[0]["assistant_failure"], expected);
+        for format in ["claude-native", "claude-stream"] {
+            assert_eq!(observe(format, failed.clone())["assistant_failure"], expected);
+            assert!(observe(format, ok.clone())["assistant_failure"].is_null());
+        }
+        let report = agent.classify(&failed.to_string());
+        assert_eq!((report.outcome, report.error, report.detail.as_deref()), ("failed", class, Some("Login expired; please run /login")));
+        let failed_result = format!("{failed}\n{}", json!({"type":"result","is_error":true}));
+        let report = agent.classify(&failed_result);
+        assert_eq!((report.outcome, report.error, report.detail.as_deref()), ("failed", class, Some("Login expired; please run /login")), "the final error result must retain its assistant cause");
+        let later_success = format!("{failed}\n{}", json!({"type":"result","is_error":false}));
+        assert_eq!(agent.classify(&later_success).outcome, "ok", "an earlier failed request cannot poison a later result");
+    }
+    let code_only = json!({"type":"assistant","error":"authentication_failed","message":{"content":[]}});
+    assert_eq!(agent.classify(&code_only.to_string()).error, "auth-rejected");
+    assert!(agent.classify(&code_only.to_string()).detail.is_none());
+    let no_error = json!({"type":"result","is_error":false});
+    let error = json!({"type":"result","is_error":true});
+    for boundary in [ok.clone(), no_error, error.clone(), json!({"type":"system","subtype":"init"}), json!({"type":"system","subtype":"turn_duration"})] {
+        assert_eq!(agent.classify(&format!("{code_only}\n{boundary}\n{error}")).error, "client-error", "a later result must not inherit a different request/turn's cause");
+    }
+    assert!(!agent.log_events(&code_only.to_string()).iter().any(|e| matches!(e, agentq_runtime::agent::Event::TurnEnd{..})), "an API failure does not prove native completion");
+    for content in [json!("first\nsecond"), json!([{"type":"text","text":"first\n"},{"type":"tool_use","name":"Read","input":{"file_path":"invented"}},{"type":"text","text":"second"}])] {
+        let row = json!({"type":"assistant","isApiErrorMessage":true,"message":{"content":content}});
+        assert_eq!(observe("claude-native", row.clone())["assistant_failure"]["detail"], "first\nsecond");
+        assert_eq!(agent.classify(&row.to_string()).detail.as_deref(), Some("first\nsecond"));
+    }
+    let spoof = json!({"type":"user","error":"authentication_failed","isApiErrorMessage":true,"message":{"content":"invented"}});
+    assert!(observe("claude-native", spoof.clone())["assistant_failure"].is_null());
+    assert_eq!(agent.classify(&spoof.to_string()).outcome, "unknown");
+    assert_eq!(agent.classify(&ok.to_string()).outcome, "unknown", "successful prose alone is no turn completion");
+}
+
+// #277 A3/A4/R9: lifecycle display and resume validation must need no raw/native fields or invented grants.
+#[test]
+fn migration_lifecycle_and_saved_permission_are_projected() {
+    for (format, row, label) in [
+        ("codex-rollout", json!({"type":"event_msg","payload":{"type":"task_started"}}), Some("turn started")),
+        ("codex-rollout", json!({"type":"event_msg","payload":{"type":"task_complete"}}), Some("turn complete")),
+        ("codex-exec", json!({"type":"turn.started"}), Some("turn started")),
+        ("codex-exec", json!({"type":"turn.completed"}), Some("turn completed")),
+        ("codex-app-server", json!({"method":"thread/started"}), Some("thread started")),
+        ("codex-app-server", json!({"method":"turn/completed"}), Some("turn completed")),
+        ("claude-native", json!({"type":"system","subtype":"compact_boundary"}), Some("system compact boundary")),
+        ("agy-stream", json!({"event":"init"}), Some("session started")),
+        ("claude-stream", json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}), None),
+        ("codex-rollout", json!({"type":"event_msg","payload":{"type":"token_count"}}), None),
+        ("codex-app-server", json!({"method":"account/rateLimits/updated"}), None),
+    ] {
+        let runtime = agentq_runtime::agent::runtime(if format.starts_with("codex-") {"codex"} else if format.starts_with("claude-") {"claude"} else {"antigravity"}).unwrap();
+        assert_eq!(observe(format, row.clone())["lifecycle"], json!(label), "{format}: {row}");
+        let records = serde_json::to_value(runtime.log_records(&row.to_string())).unwrap();
+        assert_eq!(records[0]["lifecycle"], json!(label));
+    }
+    for mode in [json!("dontAsk"), json!("bypassPermissions"), json!("default"), json!("acceptEdits"), json!("plan"), json!("auto"), json!("future"), Value::Null, json!(false), json!("")] {
+        let expected = mode.as_str().filter(|s| !s.is_empty());
+        let row = json!({"type":"user","permissionMode":mode,"message":{"content":"invented input"}});
+        for format in ["claude-native", "claude-stream"] {
+            let record = observe(format, row.clone());
+            assert_eq!(record["permission_mode"], json!(expected));
+            // Caller holds an accepted baseline. Only an exact observed match permits its resume check.
+            assert_eq!(record["permission_mode"].as_str() == Some("dontAsk"), expected == Some("dontAsk"));
+        }
+        let records = serde_json::to_value(agentq_runtime::agent::runtime("claude").unwrap().log_records(&row.to_string())).unwrap();
+        assert_eq!(records[0]["permission_mode"], json!(expected));
+    }
+    assert!(observe("claude-native", json!({"type":"user","message":{"content":"invented"}}))["permission_mode"].is_null());
+    assert!(observe("codex-exec", json!({"type":"user","permissionMode":"dontAsk"}))["permission_mode"].is_null());
+}
+
+// #277 A1/R12: exact input and duplicate identities survive partial writes/restart; rewrites refuse without replay.
+#[test]
+fn migration_exact_input_and_identity_survive_restart() {
+    for (format, row) in [
+        ("claude-native", json!({"type":"user","uuid":"input-1","message":{"content":"exact\n```rs\n<&>\n```  "},"permissionMode":"dontAsk"})),
+        ("codex-rollout", json!({"type":"response_item","payload":{"id":"input-1","type":"message","role":"user","content":[{"type":"input_text","text":"exact\n```rs\n<&>\n```  "}]}})),
+    ] {
+        let path = std::env::temp_dir().join(format!("agentq-277-input-{}-{format}.jsonl", std::process::id()));
+        let raw = format!("{row}\n");
+        fs::write(&path, &raw).unwrap();
+        let mut history = History::new(format, "input-source", "session").unwrap();
+        let first = history.poll(&path).unwrap().events.remove(0);
+        assert_eq!(first["blocks"][0]["text"], "exact\n```rs\n<&>\n```  ");
+        assert_eq!(first["item_id"], "input-1");
+        assert_eq!(first["start"], 0);
+        assert_eq!(first["end"], raw.len());
+        assert_eq!(History::new(format, "input-source", "session").unwrap().poll(&path).unwrap().events[0], first);
+        let split = raw.len() / 2;
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&raw.as_bytes()[..split]).unwrap();
+        let mut restarted = History::recover(&history.checkpoint()).unwrap();
+        let partial = restarted.poll(&path).unwrap();
+        assert!(partial.events.is_empty()); assert!(partial.more);
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&raw.as_bytes()[split..]).unwrap();
+        let second = restarted.poll(&path).unwrap().events.remove(0);
+        assert_eq!(first["blocks"], second["blocks"]);
+        assert_eq!(first["sha256"], second["sha256"]);
+        assert_ne!(first["id"], second["id"], "physical duplicate remains observable");
+        assert_eq!(first["item_id"], second["item_id"]);
+        let saved = restarted.checkpoint();
+        assert!(History::recover(&saved).unwrap().poll(&path).unwrap().events.is_empty());
+        let mut rewrite = fs::read(&path).unwrap(); rewrite[2] = b'X'; fs::write(&path, &rewrite).unwrap();
+        assert!(restarted.poll(&path).is_err()); assert_eq!(restarted.checkpoint(), saved);
+        fs::remove_file(path).unwrap();
+    }
+}

@@ -18,7 +18,7 @@ mod adapter;
 mod capture;
 mod events;
 mod limits;
-pub use events::{Event, LogRecord, Model, RecordTime, TimeFault, ToolKind};
+pub use events::{AssistantFailure, Event, LogRecord, Model, RecordTime, TimeFault, ToolKind};
 pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
@@ -1120,7 +1120,7 @@ pub struct Report {
     /// Telemetry outcome code and error code.
     pub outcome: &'static str,
     pub error: &'static str,
-    /// The native reason of error `auth-rejected` or `model-capacity`.
+    /// The native reason of error `auth-rejected`, `model-capacity` or a Claude assistant failure.
     pub detail: Option<String>,
     pub text: Option<String>,
     pub exit: Option<i32>,
@@ -1137,13 +1137,21 @@ impl Report {
     /// Classify the turn's log text.
     pub(crate) fn read(client: Client, text: &str, events: &[Value], rollout: Option<&Path>) -> Report {
         let reached = limit_reached(events);
-        let end = if client == Client::Antigravity {
-            events.iter().rev().find(|v| v["event"] == "result" || matches!(v["type"].as_str(), Some("PLANNER_RESPONSE" | "TOOL_RESPONSE" | "turn.failed" | "turn.cancelled"))).filter(|v| ends(v))
-        } else { events.iter().rev().find(|v| ends(v)) };
+        let end_index = if client == Client::Antigravity {
+            events.iter().rposition(|v| v["event"] == "result" || matches!(v["type"].as_str(), Some("PLANNER_RESPONSE" | "TOOL_RESPONSE" | "turn.failed" | "turn.cancelled"))).filter(|i| ends(&events[*i]))
+        } else { events.iter().rposition(|v| ends(v) || events::assistant_failure(client,v).is_some()) };
+        let end = end_index.map(|i| &events[i]);
+        let failure = end.and_then(|v| events::assistant_failure(client,v)).or_else(|| {
+            if client != Client::Claude || !end.is_some_and(|v| v["type"] == "result" && v["is_error"] == true) { return None; }
+            events[..end_index?].iter().rev()
+                .take_while(|v| !ends(v) && !(v["type"] == "system" && matches!(v["subtype"].as_str(), Some("init" | "turn_duration"))))
+                .find(|v| v["type"] == "assistant").and_then(|v| events::assistant_failure(client,v))
+        });
         let (mut detail, auth, capacity) = (None, auth_rejected(text), transient_failure(events));
         let (outcome, error) = if reached.is_some() { ("refused", "usage-limit") }
             else if let Some(a) = auth { detail = Some(a.to_string()); ("failed", "auth-rejected") }
             else if capacity.is_some() { detail = capacity; ("failed", "model-capacity") }
+            else if let Some(failure) = failure { detail = failure.detail; ("failed", failure.error) }
             else {
                 match end {
                     Some(v) if v["event"] == "result" && matches!(v["result"]["status"].as_str(), Some("CANCELED" | "INTERRUPTED")) => ("cancelled", "turn-cancelled"),

@@ -181,6 +181,8 @@ impl History {
             .cloned().unwrap_or(Value::Null);
         Ok(json!({"id":id,"source":self.source,"session":self.session,"session_binding":if native_session.is_some(){"native"}else{"caller"},"format":self.format,
             "order":offset,"start":offset,"end":offset+raw.len() as u64,"sha256":hash,"raw":raw,
+            "assistant_failure":super::events::assistant_failure(client,v),
+            "lifecycle":super::events::lifecycle(client,v),"permission_mode":super::events::permission_mode(client,v),
             "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited}))
     }
 }
