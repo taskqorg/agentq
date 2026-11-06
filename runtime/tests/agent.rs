@@ -88,6 +88,10 @@ fn automatic_codex_turns_select_transport() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(codex.report(&run).unwrap().text.as_deref(), Some("final answer"));
+    // #255 A3: exercise the owned AppSession -> progress -> typed event boundary.
+    let events=codex.progress(&mut run).unwrap();
+    let contexts:Vec<_>=events.iter().filter_map(|e|if let agent::Event::Context{used,window}=e {Some((*used,*window))}else{None}).collect();
+    assert_eq!(contexts,vec![(Some(12),Some(100)),(None,None)],"foreign updates neither replace nor stale context");
 }
 
 fn fake_quota_http() {
@@ -134,10 +138,17 @@ fn catalogue_and_account_reads_need_no_turn() {
     let old=std::env::var_os("PATH").unwrap_or_default();
     let path=std::env::join_paths(std::iter::once(root.clone()).chain(std::env::split_paths(&old))).unwrap();
     // SAFETY: the custom harness is serial; the read session is closed before restoring the environment.
-    unsafe {std::env::set_var("PATH",path);std::env::set_var("COREQ_FAKE_AGENT","codex");std::env::set_var("COREQ_FAKE_APP_SERVER","1");std::env::set_var("COREQ_FAKE_CATALOGUE_PAGES","1");}
+    unsafe {std::env::set_var("PATH",&path);std::env::set_var("COREQ_FAKE_AGENT","codex");std::env::set_var("COREQ_FAKE_APP_SERVER","1");std::env::set_var("COREQ_FAKE_CATALOGUE_PAGES","1");}
     let cwd=std::env::current_dir().unwrap();std::env::set_current_dir(&root).unwrap();
     let runtime=agent::runtime("codex").unwrap();
-    let models=runtime.catalogue(Some(&root)).unwrap();
+    // #255 A4: caller-configured executable is not named codex and is absent from PATH.
+    let configured=root.join(if cfg!(windows) {"configured-runtime.exe"} else {"configured-runtime"});
+    std::fs::rename(&bin,&configured).unwrap();
+    let empty=root.join("empty-path"); std::fs::create_dir_all(&empty).unwrap();
+    unsafe {std::env::set_var("PATH", &empty);}
+    let models=runtime.catalogue_with_executable(Some(&root), Some(&configured)).unwrap();
+    std::fs::copy(&configured,&bin).unwrap();
+    unsafe {std::env::set_var("PATH", &path);}
     assert_eq!(models.iter().map(|m|m.id.as_str()).collect::<Vec<_>>(),["fixture-model-1","fixture-model-2"]);
     let windows=runtime.account_limits(Some(&root),1800000000);
     assert_eq!(windows.len(),2);assert_eq!(windows[1].used,Some(0.9));
@@ -322,6 +333,9 @@ fn fake_app_server() {
                     std::fs::write("app-turn-count",turn.to_string()).unwrap();
                 }
                 println!("{}",json!({"id":id,"result":{"turn":{"id":format!("turn-{turn}")}}}));
+                for (thread,usage) in [("native-thread",json!({"last":{"totalTokens":12},"modelContextWindow":100})),("foreign-thread",json!({"last":{"totalTokens":999},"modelContextWindow":999})),("foreign-thread",json!({})),("native-thread",json!({}))] {
+                    println!("{}",json!({"method":"thread/tokenUsage/updated","params":{"threadId":thread,"turnId":format!("turn-{turn}"),"tokenUsage":usage}}));
+                }
                 println!("{}",json!({"id":999,"method":"item/tool/call","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"tool":"caller-tool","arguments":{"private":"tool input"}}}));
                 println!("{}",json!({"method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"draft","delta":"private draft"}}));
             },
