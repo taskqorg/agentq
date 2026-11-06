@@ -545,11 +545,6 @@ impl Turn {
             if spec.resume { base.arg(&spec.session); }
             base.arg(text);
             base = environment(base, spec);
-            let off = base.get_envs().find(|(k,_)| *k == crate::optimization::ENV)
-                .map_or_else(|| std::env::var_os(crate::optimization::ENV), |(_,v)| v.map(OsString::from));
-            if off.is_some_and(|v| v == "off") {
-                return Err("antigravity agentapi cannot propagate optimization off to an existing server; use agy".into());
-            }
             let session = spec.resume.then(|| spec.session.clone());
             AntigravityTranscript::baseline(home.as_deref(), session)?
         } else {

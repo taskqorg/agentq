@@ -15,28 +15,27 @@ struct Req {
 
 const CURL: Req = Req { name: "curl", program: "curl", args: &["--version"], min: "7.55.1", pick: |_| Some("7.55.1"),
     fix: "install curl 7.55.1 or newer from the OS package manager" };
+#[cfg(test)]
 const TAR: Req = Req { name: "tar", program: "tar", args: &["--version"], min: "bsdtar 3.3.2 or GNU tar 1.29",
     pick: |v| if v.contains("bsdtar") { Some("3.3.2") } else if v.contains("GNU tar") { Some("1.29") } else { None },
     fix: "install bsdtar (libarchive) 3.3.2 or GNU tar 1.29 or newer from the OS package manager" };
 const POWERSHELL: Req = Req { name: "powershell", program: "powershell", args: &["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"],
     min: "5.1", pick: |_| Some("5.1"), fix: "install Windows PowerShell 5.1 (Windows Management Framework 5.1)" };
-const PYTHON_FIX: &str = "install Python 3.11-3.13 with venv, or set AGENTQ_PYTHON to one";
 
 const OS: &[&str] = if cfg!(target_os = "macos") {
-    &["launchctl", "ps", "lsof", "id", "hostname", "stty", "sandbox-exec"]
+    &["launchctl", "ps", "id", "hostname", "stty", "sandbox-exec"]
 } else if cfg!(windows) {
-    &["schtasks", "taskkill", "netstat", "hostname", "whoami", "icacls"]
+    &["schtasks", "taskkill", "hostname", "whoami", "icacls"]
 } else {
     &["systemctl", "ps", "id", "hostname", "stty"]
 };
 
 /// Every requirement as `doctor` lines: (requirement met, line).
 pub fn check() -> Vec<(bool, String)> {
-    let mut lines = vec![versioned(&CURL, Path::new(CURL.program)), versioned(&TAR, Path::new(TAR.program))];
+    let mut lines = vec![versioned(&CURL, Path::new(CURL.program))];
     if cfg!(windows) {
         lines.push(versioned(&POWERSHELL, Path::new(POWERSHELL.program)));
     }
-    lines.push(python());
     lines.push(present(OS));
     let store = if cfg!(target_os = "macos") { Some("security") } else if cfg!(target_os = "linux") { Some("secret-tool") } else { None };
     if let Some(s) = store {
@@ -66,28 +65,6 @@ fn versioned(r: &Req, program: &Path) -> (bool, String) {
 }
 
 /// The finder's Python (§ 3), else the version of the first candidate that answers.
-fn python() -> (bool, String) {
-    if coreq::update::target() == "macos-x86_64" {
-        return (true, "host tool python: not needed (no headroom wheels for macOS x64)".into());
-    }
-    let version = |c: &[String]| {
-        let o = coreq::quiet(crate::engines::py(c).arg("--version")).output().ok().filter(|o| o.status.success())?;
-        version_in(&format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
-    };
-    match crate::engines::python() {
-        Ok(c) => match version(&c) {
-            Some(v) => (true, format!("host tool python: {v} ok ({}; 3.11-3.13 with venv)", c.join(" "))),
-            None => (false, format!("host tool python: {} passed the probe but reports no version; {PYTHON_FIX}", c.join(" "))),
-        },
-        Err(e) => match crate::engines::python_candidates().iter().find_map(|c| version(c).map(|v| (v, c.join(" ")))) {
-            Some((v, c)) if at_least(&v, "3.11") && !at_least(&v, "3.14") => (false, format!("host tool python: {v} ({c}) lacks venv or ensurepip, need 3.11-3.13 with venv; {PYTHON_FIX}")),
-            Some((v, c)) => (false, format!("host tool python: {v} ({c}) outside 3.11-3.13; {PYTHON_FIX}")),
-            None => (false, format!("host tool python: not found, need 3.11-3.13 with venv; {PYTHON_FIX} ({e})")),
-        },
-    }
-}
-
-/// OS components: presence on PATH only, their versions follow the OS release.
 fn present(tools: &[&str]) -> (bool, String) {
     let missing: Vec<&str> = tools.iter().copied().filter(|t| find(t).is_none()).collect();
     if missing.is_empty() {

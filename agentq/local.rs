@@ -111,6 +111,7 @@ fn insert(db: &Connection, kind: &str, id: &str, v: &Value) -> Result<bool, Stri
     .map_err(|e| e.to_string())?;
     Ok(true)
 }
+#[cfg(test)]
 fn counts(db: &Connection) -> Result<serde_json::Map<String, Value>, String> {
     let mut q = db
         .prepare("SELECT day,count(*) FROM events WHERE kind='stats' GROUP BY day")
@@ -169,7 +170,7 @@ fn maintain(db: &mut Connection, now: u64, bytes: usize) -> Result<(), String> {
         }
         let mut journal = raw_meta(&tx, "journal")?
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .filter(crate::compression::journal_valid);
+            .filter(crate::local::journal_valid);
         for (seq, kind, day, at) in rows {
             tx.execute("DELETE FROM events WHERE seq=?1", [seq])
                 .map_err(|e| e.to_string())?;
@@ -192,8 +193,9 @@ fn maintain(db: &mut Connection, now: u64, bytes: usize) -> Result<(), String> {
 }
 
 /// Called with the lifecycle lock held. A record and its coverage commit in one transaction.
+#[cfg(test)]
 pub fn save_locked(data: &Path, r: &Value, failed: bool) -> Result<(), String> {
-    crate::compression::validate_record(r)?;
+    crate::local::validate_record(r)?;
     if r.to_string().len() > RECORD_MAX {
         return Err("local telemetry record exceeds 64 KiB".into());
     }
@@ -203,7 +205,7 @@ pub fn save_locked(data: &Path, r: &Value, failed: bool) -> Result<(), String> {
     let at = r["time"].as_u64().ok_or("missing time")?;
     let held = counts(&tx)?;
     let journal = raw_meta(&tx, "journal")?.map(String::into_bytes);
-    let mut j = crate::compression::coverage(
+    let mut j = crate::local::coverage(
         if failed {
             Some(b"")
         } else {
@@ -234,6 +236,7 @@ pub fn save_locked(data: &Path, r: &Value, failed: bool) -> Result<(), String> {
     checkpoint(&db)
 }
 
+#[cfg(test)]
 pub fn snapshot(data: &Path) -> Result<Value, String> {
     if !data.join("telemetry.sqlite3").exists() {
         return Err("stats unknown: no stats file".into());
@@ -301,7 +304,7 @@ pub fn trace(data: &Path, v: Value) -> Result<(), String> {
     if bytes + v.to_string().len() as i64 > crate::profile::TRACE_DAY_BYTES as i64 {
         return Err("trace day bound reached".into());
     }
-    insert(&db, "trace", &crate::mcp::new_id(), &v)?;
+    insert(&db, "trace", &crate::resource::new_id(), &v)?;
     checkpoint(&db)
 }
 
@@ -329,7 +332,7 @@ pub fn sample(
     let v = json!({"time":at,"op":op,"duration_ms":duration_ms,"class":class});
     maintain(&mut db, crate::now(), v.to_string().len())?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
-    insert(&tx, "export", &crate::mcp::new_id(), &v)?;
+    insert(&tx, "export", &crate::resource::new_id(), &v)?;
     tx.execute("DELETE FROM events WHERE kind='export' AND json_extract(payload,'$.op')=?1 AND seq NOT IN (SELECT seq FROM events WHERE kind='export' AND json_extract(payload,'$.op')=?1 ORDER BY time DESC,seq DESC LIMIT 256)",[op]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     checkpoint(&db)
@@ -423,7 +426,7 @@ pub fn export(data: &Path) -> Result<Value, String> {
     let tx = db.transaction().map_err(|e| e.to_string())?;
     let journal = raw_meta(&tx, "journal")?
         .map(|s| serde_json::from_str::<Value>(&s).unwrap_or(json!("unreadable")));
-    if !crate::compression::failed(data).is_empty() {
+    if !crate::local::failed(data).is_empty() {
         errors.insert("stats".into(), json!("stats write failed"));
     }
     Ok(
@@ -475,7 +478,7 @@ pub fn check_store(data: &Path) -> Result<u64, String> {
     let count: i64 = db
         .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    if !crate::compression::failed(data).is_empty() {
+    if !crate::local::failed(data).is_empty() {
         return Err("stats write failed".into());
     }
     Ok(count.max(0) as u64)
@@ -483,7 +486,7 @@ pub fn check_store(data: &Path) -> Result<u64, String> {
 
 pub fn selftest() -> bool {
     let data =
-        std::env::temp_dir().join(format!("agentq-sqlite-selftest-{}", crate::mcp::new_id()));
+        std::env::temp_dir().join(format!("agentq-sqlite-selftest-{}", crate::resource::new_id()));
     let result = (|| -> Result<(), String> {
         trace(
             &data,
@@ -510,7 +513,7 @@ pub fn selftest() -> bool {
 pub fn seed(data: &Path, kind: &str, rows: &[Value], journal: Option<&Value>) {
     let db = open(data).unwrap();
     for r in rows {
-        insert(&db, kind, &crate::mcp::new_id(), r).unwrap();
+        insert(&db, kind, &crate::resource::new_id(), r).unwrap();
     }
     if let Some(j) = journal {
         set(&db, "journal", j).unwrap();
@@ -525,7 +528,7 @@ mod tests {
     }
     #[test]
     fn idempotent_retry_conflict_and_failed_transaction() {
-        let d = std::env::temp_dir().join(format!("agentq-sqlite-{}", crate::mcp::new_id()));
+        let d = std::env::temp_dir().join(format!("agentq-sqlite-{}", crate::resource::new_id()));
         let mut db = open(&d).unwrap();
         checkpoint(&db).unwrap();
         assert!(insert(&db, "stats", "invented-id", &record(1)).unwrap());
@@ -543,10 +546,10 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
     fn dir() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("agentq-store-{}", crate::mcp::new_id()))
+        std::env::temp_dir().join(format!("agentq-store-{}", crate::resource::new_id()))
     }
     fn valid(at: u64) -> Value {
-        json!({"schema":1,"event_id":crate::mcp::new_id().replace('-',""),"time":at,"agent":"hermes","adapter":"hook","tool":"terminal","runner":null,
+        json!({"schema":1,"event_id":crate::resource::new_id().replace('-',""),"time":at,"agent":"hermes","adapter":"hook","tool":"terminal","runner":null,
             "engine":"none","outcome":"passed","reason":"short","bytes_in":10,"bytes_out":10,"est_tokens_in":3,"est_tokens_out":3,"duration_ms":1,
             "ref":null,"session":null,"turn":null,"tool_call":null})
     }
@@ -718,4 +721,105 @@ mod tests {
         assert!(crate::telemetry::entries(&crate::telemetry::queue(&d)).is_empty());
         std::fs::remove_dir_all(d).unwrap();
     }
+}
+
+// Retained historical compression metadata remains readable; no optimizer runs here.
+pub const FAILED: &str = "coverage.failed";
+
+/// Failure markers held in `data`.
+pub fn failed(data: &Path) -> Vec<std::path::PathBuf> {
+    let es = std::fs::read_dir(data).into_iter().flatten().flatten();
+    es.filter(|e| e.file_name().to_string_lossy().starts_with(FAILED)).map(|e| e.path()).collect()
+}
+
+#[cfg(test)]
+pub(crate) fn coverage(journal: Option<&[u8]>, held: bool, lines: &serde_json::Map<String, Value>, at: u64, reset: u64) -> Value {
+    let fresh = |since: u64, resets: Vec<u64>| json!({"schema":1,"since":since,"resets":resets,"gaps":[],"counts":lines});
+    // A reset proves only the next second on: an earlier call in its own second may already be lost.
+    match journal {
+        None if !held => fresh(at, vec![]),
+        None => fresh(reset + 1, vec![reset]),
+        Some(b) => match serde_json::from_slice::<Value>(b) {
+            Ok(v) if journal_valid(&v) => v,
+            _ => fresh(reset + 1, vec![reset]),
+        },
+    }
+}
+
+/// The whole journal shape, as the producer writes it; anything else proves no coverage.
+pub fn journal_valid(v: &Value) -> bool {
+    v["schema"] == 1
+        && v["since"].is_u64()
+        && v["resets"]
+            .as_array()
+            .is_some_and(|a| a.iter().all(Value::is_u64))
+        && v["gaps"].as_array().is_some_and(|a| {
+            a.iter().all(|g| {
+                g.as_array().is_some_and(|p| p.len() == 2)
+                    && g[0].as_u64().zip(g[1].as_u64()).is_some_and(|(x, y)| x < y)
+            })
+        })
+        && v["counts"]
+            .as_object()
+            .is_some_and(|m| m.iter().all(|(k, n)| stats_date(&format!("{k}.jsonl")).is_some() && n.is_u64()))
+}
+
+#[cfg(test)]
+pub(crate) fn validate_record(v: &Value) -> Result<(), String> {
+    v["agent"].as_str().ok_or("stats unknown: missing agent")?;
+    v["engine"]
+        .as_str()
+        .filter(|e| ["none", "rtk", "headroom"].contains(e))
+        .ok_or("stats unknown: invalid engine")?;
+    v["outcome"]
+        .as_str()
+        .filter(|o| ["compressed", "passed", "failed"].contains(o))
+        .ok_or("stats unknown: invalid outcome")?;
+    if v["schema"] != 1 {
+        return Err("stats unknown: unsupported schema".into());
+    }
+    if !v["event_id"]
+        .as_str()
+        .is_some_and(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        || ["time", "duration_ms"]
+            .iter()
+            .any(|k| v[k].as_u64().is_none())
+        || ["bytes_in", "bytes_out", "est_tokens_in", "est_tokens_out"]
+            .iter()
+            .any(|k| {
+                v.get(k).is_none()
+                    || (v[k].as_u64().is_none()
+                        && !(v["adapter"] == "run"
+                            && v[k].is_null()
+                            && v["outcome"] != "compressed"))
+            })
+        || !v["adapter"]
+            .as_str()
+            .is_some_and(|s| ["run", "hook", "provider"].contains(&s))
+        || v["tool"].as_str().is_none()
+        || !v["reason"]
+            .as_str()
+            .and_then(crate::accounting::outcome_of)
+            .is_some_and(|o| v["outcome"] == o)
+        || ["runner", "ref", "session", "turn", "tool_call"]
+            .iter()
+            .any(|k| v.get(k).is_none() || (!v[k].is_null() && !v[k].is_string()))
+        || (v["adapter"] == "run" && v["exit_code"].as_i64().is_none())
+    {
+        return Err("stats unknown: malformed record shape".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn stats_date(name: &str) -> Option<&str> {
+    let d = name.strip_suffix(".jsonl")?;
+    (d.len() == 10
+        && d.bytes().enumerate().all(|(i, b)| {
+            if i == 4 || i == 7 {
+                b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        }))
+    .then_some(d)
 }

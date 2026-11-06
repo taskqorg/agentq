@@ -47,7 +47,7 @@ fn seed(data: &Path) -> Result<PathBuf, String> {
 fn queue_snapshot(data: &Path, now: u64) -> Result<(Value, PathBuf), String> {
     let status = data.parent().and_then(|i| read(&i.join("status.json")));
     let payload = crate::snapshot::project(&crate::telemetry::installation(data), crate::telemetry::runtime(), status.as_ref(), read(&data.join("resource.json")).as_ref(), now);
-    let id = crate::mcp::new_id().replace('-', "");
+    let id = crate::resource::new_id().replace('-', "");
     let rec = enroll::stamp(&dir(data), SCHEMA, &id, now, payload)?;
     let q = queue(data);
     std::fs::create_dir_all(&q).map_err(|e| format!("{}: {e}", q.display()))?;
@@ -516,7 +516,7 @@ mod tests {
     fn desktop(data: &Path) -> Vec<profiles::Client> {
         let root = data.parent().unwrap().join("desktop");
         std::fs::create_dir_all(&root).unwrap();
-        vec![profiles::Client { kind: "claude-desktop-chat", agent: "claude-desktop", files: vec![root.join("claude_desktop_config.json")], root }]
+        vec![profiles::Client { kind: "claude-code", agent: "claude", files: vec![root.join("settings.json"), root.join(".claude.json")], root }]
     }
 
     /// Queues one operation of `generation` whose payload is the AgentQ request `kind` with `changes`, authorized for
@@ -687,7 +687,7 @@ mod tests {
         let clients = desktop(&d);
         let file = clients[0].files[0].clone();
         let id = profiles::status_with(&clients, &d, w.now)["profiles"][0]["id"].clone();
-        let mcp = json!([{"profile": id, "field": "mcp", "value": "registered"}]);
+        let mcp = json!([{"profile": id, "field": "hooks", "value": "registered"}]);
         let mut s = Sender { snapshot_at: u64::MAX / 2, clients: Some(clients.clone()), ..Sender::default() };
 
         queue_op(&mut w, "d0000000000000000000000000000001", "plan", 1, mcp.clone(), None);
@@ -703,7 +703,7 @@ mod tests {
         let posted = w.results["d0000000000000000000000000000002"].clone();
         let r = &posted["result"];
         assert_eq!((r["operation"].clone(), r["outcome"].as_str(), r["plan"].clone()), (op["operation"].clone(), Some("applied"), plan["digest"].clone()), "{r}");
-        assert_eq!(posted["readback"][0]["mcp"], "registered");
+        assert_eq!(posted["readback"][0]["hooks"], "registered");
         assert_eq!(posted["readback"][0]["verification"]["state"], "unknown", "configured, not verified");
         assert!(!posted.to_string().contains(&d.display().to_string()), "no path in the result");
         assert!(status(&d)["configure"]["error"].as_str().unwrap().starts_with("no reply"));
@@ -738,7 +738,7 @@ mod tests {
         let clients = desktop(&d);
         let file = clients[0].files[0].clone();
         let id = profiles::status_with(&clients, &d, 1000)["profiles"][0]["id"].clone();
-        let mcp = json!([{"profile": id, "field": "mcp", "value": "registered"}]);
+        let mcp = json!([{"profile": id, "field": "hooks", "value": "registered"}]);
         let mut s = Sender { snapshot_at: u64::MAX / 2, clients: Some(clients), ..Sender::default() };
 
         // observation-only grant: nothing pulled
@@ -758,7 +758,7 @@ mod tests {
         w.ops[0]["expires_at"] = json!(w.now);
         w.ops[0]["digest"] = json!(enroll::digest(&late["payload"]));
         queue_op(&mut w, "e0000000000000000000000000000003", "plan", g, mcp.clone(), None);
-        w.ops[1]["payload"]["changes"][0]["field"] = json!("hooks");
+        w.ops[1]["payload"]["changes"][0]["field"] = json!("model");
         queue_op(&mut w, "e0000000000000000000000000000004", "plan", g - 1, mcp.clone(), None);
         queue_op(&mut w, "e0000000000000000000000000000005", "plan", g, json!([{"profile": id, "field": "model", "value": "x"}]), None);
         pass_with(&d, w.now, &mut s, &mut w);
@@ -790,7 +790,7 @@ mod tests {
         let clients = desktop(&d);
         let file = clients[0].files[0].clone();
         let id = profiles::status_with(&clients, &d, w.now)["profiles"][0]["id"].clone();
-        let mcp = json!([{"profile": id, "field": "mcp", "value": "registered"}]);
+        let mcp = json!([{"profile": id, "field": "hooks", "value": "registered"}]);
         let mut s = Sender { snapshot_at: u64::MAX / 2, clients: Some(clients), ..Sender::default() };
         // the last queued operation's payload claims `edit`, under a digest DashQ computed for it
         let claim = |w: &mut Dash, edit: &dyn Fn(&mut Value)| {

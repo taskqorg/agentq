@@ -6,15 +6,14 @@ Section references and P/M rule IDs below refer to [agentq.md](../../agentq.md).
 
 ## Installation and service layout
 
-- Install: `~/.local/share/agentq`, Windows `%LOCALAPPDATA%\agentq`: `releases/<ver>/agentq`, `current`, `previous`, launcher `<install>/agentq`, `engines/`, `data/` (§ 8), `status.json`.
+- Install: `~/.local/share/agentq`, Windows `%LOCALAPPDATA%\agentq`: `releases/<ver>/agentq`, `current`, `previous`, launcher `<install>/agentq`, `data/` (§ 8), `status.json`.
 - Onboarding and `service install` make the stable launcher available as `agentq` for the installing OS user; `agentq setup-path` repairs it without changing integrations or restarting services. Uninstall removes only this launcher's registration ([procedure](SERVICE.md#command-registration)).
 - Release CI on a `v*` tag from `main` builds `agentq-<ver>-<os>-<arch>` for macOS arm64/x64, Windows x64, Linux x64/arm64 (static musl), plus `SHA256SUMS` and `latest.json`. Each binary and `SHA256SUMS` carry a GitHub build provenance attestation (`gh attestation verify <file> --repo taskqorg/agentq`).
-- A checked Headroom venv is immutable; a failed version probe reports unavailable and never deletes it. Headroom checks, installation and proxy workers use one OpenBLAS/OMP thread.
-- The unit (coreq project `host`: `com.agentq.host`, `AgentQ-host`, `agentq-host.service`) runs `<install>/agentq service run` in `<install>`. It owns the loopback ports, headroom workers, OTLP intake, the queue sender, update checks and `status.json`.
+- The unit (coreq project `host`: `com.agentq.host`, `AgentQ-host`, `agentq-host.service`) runs `<install>/agentq service run` in `<install>`. It owns the queue sender, update checks and `status.json`.
 - A `service run` process is one whose command line runs a binary under `<install>/releases/`; the Windows launcher is not counted. [Windows processes](SERVICE.md#windows-service-processes).
 - Install and update use CoreQ `prepare_install` then `activate_install`; update first checks the sha256 and candidate selftest. The lifecycle lock covers checks, pruning, staging and activation. Durable originals restore a failed or interrupted activation before another install, update or service start ([detail](SERVICE.md#update-and-worker-swap)).
-- Update: hourly; each update keeps only `current` and `previous`; a dashq release notice may trigger an early check. A pin change runs at most two headroom workers. A service run restarts into a new `current` only with no open proxied connection, at most 15 min after the change ([detail](SERVICE.md#update-and-worker-swap)).
-- `status.json` lives at `<install>/status.json`, written every 30 s; `service status` treats it as unknown after 90 s. It adds per-agent routing and intent, MCP, hooks, engines, queue, `model_backlog`, newest incident and per-profile `configuration`, without paths or file text ([fields](SERVICE.md#status-file-fields)).
+- Update: hourly; each update keeps only `current` and `previous`; a dashq release notice may trigger an early check. A service run restarts into a new `current` without a proxy drain ([detail](SERVICE.md#update-and-worker-swap)).
+- `status.json` lives at `<install>/status.json`, written every 30 s; `service status` treats it as unknown after 90 s. It adds record hooks, queue, `model_backlog`, newest incident and per-profile `configuration`, without paths or file text ([fields](SERVICE.md#status-file-fields)).
 
 ## Command registration
 
@@ -37,38 +36,32 @@ Section references and P/M rule IDs below refer to [agentq.md](../../agentq.md).
 - Update takes the version from CoreQ's check, downloads into `releases/<ver>.tmp/`, checks the sha256 and runs the candidate's `selftest` before preparation. Each failure leaves the active files unchanged and returns the error.
 - Before activation, `data/install-recovery/` retains synced originals of `current`, `previous` and both platform launchers, including absence and permissions. A durable `ready` record commits that backup before any active file changes. An activation error restores and reads back those originals; an interrupted activation is restored before the next install, update or service start selects a release. Failed restoration reports uncertainty and retains the record for retry. Read-only commands, hooks and plain agent turns do not recover (M1.2, M1.3, M12.3).
 - Successful activation removes the `ready` record durably before discarding the backup. A later check may prune an unactivated candidate only after recovery. A second install of the same version with different bytes, or an older binary over a newer `current`, refuses and keeps the active files.
-- An engine pin change starts a new headroom worker on a new port, routes new connections to it, keeps open ones on the old worker, retires the old one after 15 min plus 30 s grace, then kills its process tree with an incident; at most two workers.
-- A service run whose `current` names another release (its own hourly check or a CLI `agentq update`) restarts into it: it exits 75 on the first pass with no open proxied connection, at most 15 min after it saw the change, and the unit starts the new `current`.
-- While connections stay open it logs the deferral and its count to the service log, once per change of reason; an unknown count defers like an open one.
+- A service run whose `current` names another release (its own hourly check or a CLI `agentq update`) restarts into it: it exits 75 on the next service pass and the unit starts the new `current`. Startup runs the journal-owned retirement migration before senders or configuration reconciliation. Foreign edits remain conflicts; unreadable ownership means unknown.
 - A service run not started by the launcher from `releases/<ver>/` never restarts itself.
 
 ## Status file fields
 
 `<install>/status.json` holds the coreq keys (`host`, `version`, `pid`, `at`, `project`, `error`, `update`), published as [tests/fixtures/status.json](../../tests/fixtures/status.json) and as release asset `status.json` with the release version; a test keeps the fixture equal to the written keys. It adds:
 
-- `agents`: per agent with a config root its `routing` (routed, direct, bypassed, unknown) and `reason`, `intended` and `intended_reason`.
-- `intended` is `routed` for an agent with shipped routing, onboarded (an owned edit under its root) and not `agentq direct`; else `direct`. `intended_reason` is `onboarded`, `routing not shipped`, `` `agentq direct` `` or `not onboarded`.
-- Intent is `unknown`, never direct, when `owned.json` (not a list of entries with a `file`) or `config.json` (not an object whose `direct` lists names) is unreadable or of another shape. Claude Code and Hermes are intended direct until their routing ships.
-- `mcp`, `hooks`, `engines` (per engine its pin and `ready` or `unavailable`), queue `{pending, oldest_age, last_delivery, dropped}`, `model_backlog` ([telemetry](TELEMETRY.md#claude-transcript-reading)), newest incident.
-- `configuration` (CONFIGURATION A2, `agentq/profiles.rs`): per existing client root its kind, opaque `id`, `revision` (keyed hash of its files, owned journal entries, port and preference), routing, MCP, hooks, plugin, optimization, effective adapter/state, `owned`, read-only project `overrides` count (Codex `[profiles.*]`, Claude Code `.claude.json` projects with MCP servers or env; null when unknown or unsupported), `conflicts` and `incomplete` codes; no paths or file text.
+- `legacy_route`: `absent`, `problem` (`legacy_agentq_route` or `legacy_agentq_provider_missing`, next `agentq direct`), or `unknown` (`unreadable_config`). `retirement` reports startup cleanup as `retired`, `conflict`, or `unknown` (`retirement_failed`); neither field proves a native turn.
+- Record hooks, queue `{pending, oldest_age, last_delivery, dropped}`, `model_backlog` ([telemetry](TELEMETRY.md#claude-transcript-reading)) and per-profile configuration.
+- `configuration` (CONFIGURATION A2, `agentq/profiles.rs`): per existing client root its kind, opaque `id`, `revision` (keyed hash of its files, owned journal entries and lifecycle intent), hooks, plugin, effective adapter/state, `owned`, read-only project `overrides` count (Codex `[profiles.*]`, Claude Code `.claude.json` projects with MCP servers or env; null when unknown or unsupported), `conflicts` and `incomplete` codes; no paths or file text.
 
 ## Host tools
 
-agentq runs these external tools on a host ([specq host requirements](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md#host-requirements)). The managed engines RTK and headroom are pinned, installed and checked under agentq.md § 3, not here.
+agentq runs these external tools on a host ([specq host requirements](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md#host-requirements)). No optimization engine or Python runtime is required.
 
 | Tool | Minimum | Needed by | Platforms |
 |---|---|---|---|
-| `curl` | 7.55.1 | update and engine downloads, Langfuse export, DashQ enrollment and delivery | all |
-| `tar` | bsdtar 3.3.2 or GNU tar 1.29 | RTK unpack; Windows bsdtar also reads the RTK zip | all |
-| Python | 3.11, below 3.14, with `venv` and `ensurepip` | headroom venv, `check compression` | all except macOS x64 (no headroom wheels) |
+| `curl` | 7.55.1 | release downloads, Langfuse export, DashQ enrollment and delivery | all |
 | Windows PowerShell | 5.1 | process inventory, service registration check, user PATH | Windows |
-| OS components | supplied by the OS release | service unit, process inventory, connection count, host name, hidden key input and protected native launch | macOS `launchctl ps lsof id hostname stty sandbox-exec`; Linux `systemctl ps id hostname stty`; Windows `schtasks taskkill netstat hostname whoami icacls` |
+| OS components | supplied by the OS release | service unit, process inventory, connection count, host name, hidden key input and protected native launch | macOS `launchctl ps id hostname stty sandbox-exec`; Linux `systemctl ps id hostname stty`; Windows `schtasks taskkill hostname whoami icacls` |
 | `security`, `secret-tool` (optional) | none | Langfuse key storage; when absent, the `data/langfuse` file | macOS, Linux |
 
 ## Host requirement notes
 
-- Minimums: curl 7.55.1 and bsdtar 3.3.2 are the copies Windows 10 1803 ships; every flag agentq and coreq pass is older (newest: curl `--proto`, 7.20.2). GNU tar 1.29 detects gzip on extraction. The Python range is the headroom pin's; `check compression` alone accepts 3.9+.
-- Not host requirements: Codex, Claude Code and Hermes run agentq, not the reverse; their configuration compatibility is agentq.md § 4, and `check compression` records their exact versions. Commands passed to `agentq run` belong to the user.
+- Minimums: curl 7.55.1 and bsdtar 3.3.2 are the copies Windows 10 1803 ships; every flag agentq and coreq pass is older (newest: curl `--proto`, 7.20.2). GNU tar 1.29 detects gzip on extraction.
+- Native record integrations use the clients from agentq.md §4. Worker launches require the selected runtime CLI and its native login/version readiness (§12); no compression checker or command wrapper remains.
 - `gh` is not called: incident delivery (agentq.md § 7) is not wired into this binary yet and adds its row when it is.
 - The optional protected host uses macOS `launchctl bootstrap`, `kickstart`, `print` and `bootout`, `sandbox-exec -p`, native process/image identity, peer credentials, `KERN_BOOTTIME`, sandbox queries and resource-coalition accounting. Missing or unsupported native evidence refuses input and retains occupancy; Windows signature verification provides no containment.
 - Wrapper exceptions: the run adapter keeps native stderr unchanged, so its RTK failures stay stats outcome `failed`; the Python finder probes candidates and its error names every candidate tried; a read of the optional key store falls back to the file without a log line, while a failed write is logged. coreq's own calls (update, enrollment, service unit) follow coreq.

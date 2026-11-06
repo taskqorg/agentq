@@ -477,7 +477,7 @@ Preparation is non-launching and authenticates the actual parent PID/creation/bo
 
 One launchd generation, sealed input, kernel coalition accounting, durable descendant certificate and acknowledged exact-generation cleanup retain the existing lifetime guarantees. Root/frontend/caller exit, EOF, cancellation and terminal model events never prove descendants or external tool effects ended. Unknown cleanup retains occupancy. The caller alone releases its original permit after both host completion and its external effects finish. Recovery never launches or resends input.
 
-Native stdio uses the existing bounded transport. Only the scope listeners are non-blocking; each accepted stream blocks under its deadlines ([task 266](../evidence/runtime-266.md)). The run's private `AppSession` still owns thread/turn correlation, interruption, checkpoints and its one idempotent `agent.turn` and `agent.call` records. Server requests and native account/model/permission parameters remain caller-owned. The adapter preserves the host's model/account and approved outer boundary; caller protocol parameters cannot widen it. Optimization intent travels only as child `AGENTQ_OPTIMIZATION`; the host prepares native `off` env/header and launcher marking. `optimization` reports configuration, never actual compression or enforcement.
+Native stdio uses the existing bounded transport. Only the scope listeners are non-blocking; each accepted stream blocks under its deadlines ([task 266](../evidence/runtime-266.md)). The run's private `AppSession` still owns thread/turn correlation, interruption, checkpoints and its one idempotent `agent.turn` and `agent.call` records. Server requests and native account/model/permission parameters remain caller-owned. The adapter preserves the host's model/account and approved outer boundary; caller protocol parameters cannot widen it. Optimization intent is a compatible no-op (`off`, `optimization_retired`); no optimization environment/header is injected. Launcher attribution remains.
 
 Previously retained TaskQ-shaped checkpoints and receipts are recovery-only evidence, never a launch format for the independent host. Operator-authenticated import retains their exact bytes and operation identities; reconciliation records independent cleanup evidence separately. It does not invoke TaskQ or replace an old adapter identity with the new one. Missing original proof remains unknown and occupied; a copied receipt alone provides no authority. One durable bootout fence and one durable cancellation fence share an operation-wide native-incarnation binding, never request or receipt bytes: a reformatted request or another signed snapshot, older or newer, shares the fence and never repeats a stop. Either action's existing journal record binds both actions; conflicting records refuse without rewriting them. A snapshot carrying original cleanup intent consumes the fence, and a changed incarnation refuses.
 
@@ -636,25 +636,7 @@ The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `start
 
 ## Optimization intent
 
-`optimization::prepare(intent, product, spec, install)` resolves the effective state and adapts the child; `observe` resolves only. Both read and never write. The JSON command selects `optimization::install_root()` (agentq.md § 5 layout); library callers pass an installation or `None` for no installation; the client home is the account home, else the last child `env` home override, else the client's own home. An inherited `AGENTQ_OPTIMIZATION=off` is observed as `off` and carried into every Codex launch mode.
-
-| Order | Condition | Effective | Reason |
-|---|---|---|---|
-| 1 | Explicit or inherited `off` | `off` | `launch_off` |
-| 2 | No `<install>/data` | `off` | `not_installed` |
-| 3 | `data/integration.json` or `data/config.json` unreadable or invalid under the shared lifecycle/config validators | `unknown` | `unreadable_state` |
-| 4 | Host disabled or the client's profile disabled (agentq.md § 4) | `off` | `integration_disabled` |
-| 5 | `compression.enabled` false | `off` | `host_off` |
-| 6 | `compression.agents.<client>` false | `off` | `agent_off` |
-| 7 | No client home known | `unknown` | `no_client_home` |
-| 8 | Codex `config.toml` top-level `model_provider = "agentq"` (inline comments allowed), Claude `settings.json` has a compression hook command, Antigravity `hooks.json` (`<home>/hooks.json` or `<home>/../config/hooks.json`) has an enabled named group with a `PreToolUse` command calling `hook antigravity PreToolUse` | `on` | `configured` |
-| 9 | Client configuration unreadable | `unknown` | `unreadable_client_config` |
-| 10 | Otherwise | `off` | `not_attached` |
-
-- `inherit` and `on` resolve the same way: `on` records the caller's request and never enables a switch, an integration or a disabled profile.
-- Explicit or inherited `off` adds child env `AGENTQ_OPTIMIZATION=off`. Claude and Antigravity hooks, `agentq run` and `agentq compress` inherit it and pass through with reason `disabled`. For a Codex home routed through agentq it also adds `-c model_providers.agentq.http_headers.x-agentq-optimization="off"` to CLI, app queue and app-server commands; the loopback provider passes `off` to the compressor, and replayed bytes of earlier calls stay unchanged (agentq.md § 3).
-- Every launch adds `AGENTQ_LAUNCHER=<product>` unless `TASKQ_TASK` or `AGENTQ_LAUNCHER` is already set, so agentq queues no second `agentq.model` count (agentq.md M6.9).
-- Effective `on` is the configuration at launch. Actual compression is proven only by the session's `agentq.compress` records.
+`Intent::{Inherit, Off, On}` remains source-compatible for pinned consumers, including TaskQ, PilotQ and Pipe. Every intent is a no-op and reports `off` with reason `optimization_retired`. It reads no optimizer state and adds no child environment or provider-header overrides. The launcher attribution marker remains independent of optimization.
 
 ## Adoption and rollback
 
@@ -697,11 +679,11 @@ Source-fixture provenance, adapter conclusions and remaining native gaps:
 
 ## Runtime operation and adoption
 
-- It derives from CoreQ v0.18.0 `agent` with its contract tests; TaskQ's argument order and parsers stay unchanged inside the adapters, and Antigravity adds headless `agy` stream-json plus sidecar `new-conversation` / `send-message` and `transcript.jsonl` step observation. Sidecar launch-off is rejected before submission because an existing server does not inherit child environment.
+- It derives from CoreQ v0.18.0 `agent` with its contract tests; TaskQ's argument order and parsers stay unchanged inside the adapters, and Antigravity adds headless `agy` stream-json plus sidecar `new-conversation` / `send-message` and `transcript.jsonl` step observation. Optimization intent is a no-op for existing sidecar servers too.
 - `observe(run)` returns one runtime-neutral observation: progress state, native session, and the session URL or its named absence cause with the native evidence text.
 - Claude reads only its own native records (transcript `bridge_status`, background job state, debug log); it never launches or rewrites anything for it, and an unreadable record reads `evidence-unreadable`. Causes and sources: [RUNTIME.md](RUNTIME.md#session-observation).
 - Read-only worker capability and bounded transcript/event observation uses `agent::history`; source identity, raw content, ordering, limits and per-transport support are defined in [RUNTIME.md](RUNTIME.md#worker-capabilities-and-bounded-history). It grants no submission, replay, stop or cleanup authority.
 - Native `agy` lookup appends `~/.local/bin` through `user_bin_path` when PATH lacks it, before falling back to `agentapi`. Explicit `ANTIGRAVITY_HOME` / `ANTIGRAVITY_APP_DATA_DIR` wins; otherwise use `~/.gemini/antigravity-cli` when present, then the legacy `~/.gemini/antigravity`.
 - Worker benchmark runs, viewer data and live scratch workspaces stay outside the repository (`--output`, default `<OS temp>/agentq-benchmarks`); live fixtures pass `--dangerously-skip-permissions` to headless agy turns only.
-- Effective `on` means configured at launch, not verified (P2); the session's `agentq.compress` records prove actual compression. Resolution order, reasons, JSON contract, worker benchmark methodology (`scripts/benchmark-workers.py`, `scripts/benchmark-viewer.html`) and fake-client traces: [RUNTIME.md](RUNTIME.md) and [COMPRESSION-BENCHMARK.md](COMPRESSION-BENCHMARK.md).
+- Every optimization intent reports `off`, reason `optimization_retired`, with no environment or provider override. Historical benchmark evidence remains historical; it does not qualify a current optimizer.
 - During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime revision through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](RUNTIME.md#adoption-and-rollback)).

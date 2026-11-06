@@ -1,10 +1,8 @@
 # agentq
 
-agentq installs, routes and observes context optimization for Codex, Claude Code and Hermes on one host. Its reusable Codex/Claude worker runtime also runs without an optimizer installation. One static binary per OS; no Node, npm or toolchain on the host. Decisions: [agentq.md](agentq.md). Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md).
+agentq installs native record hooks, observes agents on one host and provides a reusable worker runtime. One static binary; no optimizer, proxy or Python engine. Decisions: [agentq.md](agentq.md).
 
 ## Install through an agent
-
-Paste into a supported agent:
 
 > Install agentq from https://github.com/taskqorg/agentq. Read INSTALL.md, run onboarding, and report what works and what still needs setup.
 
@@ -32,108 +30,23 @@ For an existing installation, update AgentQ and repair its command registration:
 
 A foreign Unix file or link at `~/.local/bin/agentq` is preserved and reported as a conflict. Uninstall removes this installation's command registration; the shared Unix PATH block stays for other tools. Registration applies to one user account; each account and each native Windows/WSL environment has its own installation.
 
-## Upgrade to the current names
-
-Version 0.9.0 uses `agentq` for the MCP server, Codex provider, instruction markers and Hermes plugin. There is one current namespace; no retired-name aliases are registered.
-
-Existing Codex conversations bound to the retired provider are intentionally not migrated. Their history remains on disk, but start new Codex chats. New conversations use the current namespace and continue to work after temporary disable/enable.
-
 ## Commands
 
-- `agentq agent turn` runs one Codex/Claude turn from JSON stdin and returns a JSON report. No optimizer service is required. Library and request format: [runtime contract](docs/spec/RUNTIME.md).
+- `agentq onboard` discovers profiles without writes; `onboard --yes [agent..]` installs record hooks and the service.
+- `agentq status [--json]` separates integration configuration, runtime evidence and service health. `doctor` is read-only.
+- `agentq disable [agent] --dry-run`, then `disable [agent]`, detaches owned integrations. `enable [agent]` restores saved supported record fields. Only enable clears disable intent; foreign edits remain conflicts.
+- `agentq direct [agent..]` repairs journal-owned legacy routing. Saved Codex chats retain the exact direct OpenAI definition under provider ID `agentq`; history and native login stay unchanged.
+- `agentq langfuse` reads optional export keys from hidden stdin; `telemetry status|verify|export` inspects delivery or exports retained metadata.
+- `agentq profile [--json]` ranks retained operation measurements.
+- `agentq update [--check]`, `selftest`, `service status` check the installation.
+- `agentq uninstall --dry-run`, then `uninstall`, restores unchanged owned edits and removes the service/install.
 
-- `agentq compress <agent>` reads one tool-result JSON object (`adapter`, `tool`, `text`) and returns `text` and a recovery `ref`. Unqualified hook/provider recipes pass unchanged. `agentq stats [--json]` shows local call outcomes and bytes; missing or corrupt records are unknown.
-- `agentq profile [--json]` ranks compression and export operations by time, failure rate and variance against their budgets over the last 7 days; operations without readable samples, and proxy requests, read unknown. `agentq profile trace on [<minutes>]|off` records per-step traces for at most 60 minutes.
-- `agentq onboard` finds ready agents; writes nothing. `agentq onboard --yes [codex|claude|hermes..]` applies config edits, installs the service and prints what to verify by a real turn.
-- `agentq langfuse` reads the Langfuse host and keys from hidden stdin into protected storage. `agentq telemetry status|verify` shows the queue and checks delivery.
-- `agentq service status`, `agentq update [--check]`, `agentq selftest` check the install.
-- `agentq setup-path` repairs the current user's command registration.
-- `agentq doctor` reads installation, host tools with their minimum versions, service, routing intent, engines and local telemetry health. A missing or old host tool fails with its found version, minimum and fix. Intentional detach is distinct from drift; runtime verification remains separate.
-- `agentq uninstall --dry-run`, then `agentq uninstall`, restores owned edits and removes the service and install folder.
+Cleanup runs at service start; an update alone does not clean a stopped service or disabled host. Use `agentq direct` for explicit routing cleanup. Service startup removes unchanged journal-owned optimizer registrations and updates an owned Hermes plugin to record-only. Foreign changes remain reported conflicts. A selected loopback or missing Codex provider is a problem with next step `agentq direct`; unowned dead routes and unresolved conflicts exit nonzero with manual edits. Reload clients normally; never kill active work to clear pending status.
 
-Releases: [taskqorg/agentq releases](https://github.com/taskqorg/agentq/releases), one `agentq-<ver>-<os>-<arch>` binary per platform plus `SHA256SUMS`. Check a download with `sha256sum -c SHA256SUMS --ignore-missing`; trace it to the workflow run that built it with `gh attestation verify <file> --repo taskqorg/agentq`.
+## Run agent turns
 
-## Temporarily disable optimization or integrations
+`agentq agent turn` runs a native Codex, Claude or Antigravity turn from JSON stdin. Rust callers use `agentq-runtime`; plain turns need no installation or service. Optimization intent remains a compatible no-op for pinned consumers. [Runtime contract](docs/spec/RUNTIME.md).
 
-Use AgentQ 0.9.0 or later for the current namespace. The supported commands preserve resume of Codex conversations created through the current AgentQ provider. Run commands on the host whose installation you want to control; Mac, Windows, FRA and WSL have separate state.
+Local recording needs no Langfuse or server connection. Missing evidence remains unknown. [Optimization retirement and measurements](docs/spec/OPTIMIZATION-RETIRED.md).
 
-Start with status:
-
-```sh
-agentq --version
-agentq status
-agentq status --json                 # machine-readable details
-```
-
-Choose the mode:
-
-| Goal | Turn off | Restore |
-|---|---|---|
-| Pause compression for the host; keep integrations connected | `agentq optimization off` | `agentq optimization on` |
-| Pause compression for one agent | `agentq optimization off claude` | `agentq optimization on claude` |
-| Detach every owned integration on this host | `agentq disable` | `agentq enable` |
-| Detach one agent's integration | `agentq disable codex` | `agentq enable codex` |
-
-Compression switches apply to new results immediately, without a client restart. The host pause takes precedence over individual preferences: `optimization on` preserves individually paused agents. To resume Claude after both pauses, run both `agentq optimization on` and `agentq optimization on claude`.
-
-For a full detach, preview the affected registrations and shared profiles first:
-
-```sh
-agentq disable --dry-run             # preview the whole installation
-agentq disable                      # detach owned integrations
-agentq status                       # inspect configuration and pending work
-agentq enable                       # restore the saved setup
-agentq status
-
-agentq disable codex --dry-run       # preview one agent instead
-agentq disable codex
-agentq enable codex
-```
-
-Targets are `codex`, `claude`, `hermes` and `claude-desktop`. `claude-desktop` means Desktop Chat and supports integration detach only. Codex CLI/Desktop share a profile; Claude Code CLI/Desktop Code share another. Workers using the same installation and profile switch together. There is no per-worker switch.
-
-Read status as separate observations:
-
-- `integration: on|off|mixed|unknown` describes owned configuration. `on` alone does not prove that a running client loaded it.
-- `optimization: on|off|mixed|unknown` summarizes effective compression; per-profile preferences and reasons explain a host pause or disabled integration.
-- Service state describes the background process separately. A service can remain running during detach to preserve active work and original recovery.
-- `pending_reload` means a client may still have cached settings. Reload or close that client normally. `pending_drain`, or unknown dependencies, means safe transport shutdown is not yet proved. Repeat `disable` after clients finish; never kill workers to clear the status. After `enable`, open or reload affected clients normally and check status again.
-
-Full detach keeps the installation, engines, local data, originals, credentials, grants and queued observations under their existing retention limits. Enable restores the saved supported registrations, prior Direct state and independent compression preferences. Later foreign edits remain conflicts. Repeating a command preserves the first recovery baseline. Only `enable` clears disable intent; onboarding, configure and service activation cannot reconnect a disabled integration. Local status and enable work with the service stopped.
-
-Codex stores its provider ID in each conversation. The current provider ID is `agentq`. Disable, Direct and uninstall retain a marked direct OpenAI definition under that same ID, without an AgentQ URL, hook, MCP or service dependency. Existing conversations created with this namespace can therefore resume; enable restores the owned loopback definition only when its direct definition is unchanged.
-
-If `agentq` is not on PATH, use the installed launcher. On macOS/Linux: `"$HOME/.local/share/agentq/agentq" status`. In Windows PowerShell: `& "$env:LOCALAPPDATA\agentq\agentq.exe" status`. Replace `status` with the desired command and arguments.
-
-Claude auto mode compresses successful Bash output through PostToolUse without changing native commands or permissions; failures remain native. Older PreToolUse-only profiles need explicit hook configuration; enable preserves their saved registrations. `direct` is a routing-only emergency bypass and does not pause Claude's hook.
-
-Qualification: Mac Codex/Claude CLI controls and isolated Linux systemd lifecycle/retention have native evidence. Desktop, native Mac/Windows reboot/logon and Codex originally routed service-baseline restoration are tracked separately; an unrun check remains unknown. See the [qualification record](docs/spec/INTEGRATION-CONTROL-PLAN.md#implementation-candidate-and-remaining-qualification) and [control contract](agentq.md#temporary-controls).
-
-## Run agent turns from other products
-
-`agentq-runtime` (folder `runtime/`) runs Codex and Claude worker turns for TaskQ, PilotQ and other products; a plain turn needs no optimizer installation. Rust callers pin the tag `runtime-v<version>`; other callers send one JSON request to `agentq agent turn` on stdin. Each launch states optimization `inherit`, `off` or `on` and gets the effective state back. Contract: [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md).
-
-## Check installed client compression
-
-With Python 3.9+, cargo, the installed client and its usual login:
-
-```sh
-agentq check compression both
-agentq check compression codex --fixture pytest
-# Or: codex / claude. --codex PATH / --claude PATH select a specific version.
-# The source checker remains scripts/check-client-compression.py.
-```
-
-This opt-in live check uses the current client settings and paid model access. It creates a temporary dependency-free crate (180 passing tests and one intentional failure), asks each real CLI to run ordinary `cargo test` once, and checks session-correlated compression stats, a model-visible recovery reference and complete original recovery. It never asks the client to invoke `agentq run` manually or changes routing, hooks, credentials or services.
-
-For a read-only Codex CLI, use `--fixture pytest` with real pytest on PATH. The same 180 passing tests and one failure run without pytest cache writes. The checker never installs dependencies or changes sandbox policy. When code-mode tool calls are absent from CLI stdout, it reads only that session's native local transcript; missing evidence stays unknown.
-
-Exit 0: both integrations proved compression. Exit 1: failed or unproved; `report.json` distinguishes `fail` (native tool ran without compression proof) from `unknown` (missing prerequisite, client did not run, timeout or unreadable stats). The managed Headroom Python is reused when present. Windows can locate Codex's embedded CLI; this does not qualify the Desktop UI. Private logs and fixture stay in the printed directory. `--output DIR` selects it; each client has a 120 s deadline (`--timeout 30..300`). A green `selftest`, healthy service or proxy traffic alone cannot pass this check. Ordinary CI runs only the verdict checks, never paid clients.
-
-## Local telemetry
-
-Collection needs no Langfuse/server connection. Compression events, bounded profiling and existing producer events live in installation-local SQLite/WAL. `agentq stats --records` exports compression metadata for qualification; `agentq telemetry export` emits versioned JSONL for analysis. `agentq profile --json` ranks retained durations and failures. Local completeness and missing native usage remain unknown; byte reduction is not billed-token savings. See [transition](docs/spec/TELEMETRY-QUALIFICATION.md#agentq-sqlite-transition).
-
-Shared rules: [specq](https://github.com/taskqorg/specq).
-
-Compression qualification: [benchmark and native-client checks](docs/spec/COMPRESSION-BENCHMARK.md).
+Releases: [taskqorg/agentq](https://github.com/taskqorg/agentq/releases), one binary per platform plus `SHA256SUMS`; provenance: `gh attestation verify <file> --repo taskqorg/agentq`. Shared rules: [specq](https://github.com/taskqorg/specq).

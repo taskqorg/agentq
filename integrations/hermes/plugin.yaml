@@ -1,8 +1,7 @@
 name: agentq
 version: 1.2.0
-description: Compress qualified terminal results through AgentQ, retain originals and report model calls.
+description: Record native model calls and session completion.
 kind: standalone
 provides_hooks:
-  - transform_tool_result
   - post_api_request
   - on_session_end

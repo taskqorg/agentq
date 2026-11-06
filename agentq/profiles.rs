@@ -3,7 +3,7 @@
 //!
 //! Per profile `verification` comes from `executor::verification` (CONFIGURATION "Host executor").
 
-use crate::{onboard, resource, routing};
+use crate::{onboard, resource};
 use ring::hmac;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 pub const SCHEMA: u64 = 1;
 /// Kind, display label, client aliases that share its configuration root, supported operations (A1).
 pub const KINDS: [(&str, &str, &[&str], &[&str]); 5] = [
-    ("codex", "Codex", &["codex-cli", "codex-desktop"], &["routing", "optimization", "mcp", "hooks"]),
-    ("claude-code", "Claude Code", &["claude-code-cli", "claude-desktop-code"], &["routing", "optimization", "mcp", "hooks"]),
-    ("claude-desktop-chat", "Claude Desktop Chat", &["claude-desktop-chat"], &["mcp"]),
-    ("hermes", "Hermes", &["hermes"], &["optimization", "mcp", "plugin"]),
-    ("antigravity", "Antigravity", &["agy"], &["optimization", "hooks"]),
+    ("codex", "Codex", &["codex-cli", "codex-desktop"], &["hooks"]),
+    ("claude-code", "Claude Code", &["claude-code-cli", "claude-desktop-code"], &["hooks"]),
+    ("claude-desktop-chat", "Claude Desktop Chat", &["claude-desktop-chat"], &[]),
+    ("hermes", "Hermes", &["hermes"], &["plugin"]),
+    ("antigravity", "Antigravity", &["agy"], &["hooks"]),
 ];
 
 /// One configuration root and the files whose bytes make its revision.
@@ -54,6 +54,41 @@ pub fn clients() -> Vec<Client> {
     clients
 }
 
+pub struct Provider {pub selected:bool,pub present:bool,pub loopback:bool}
+
+pub fn codex_provider(root: &Path) -> Result<Provider,String> {
+    let text = match std::fs::read_to_string(root.join("config.toml")) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Provider {selected:false,present:false,loopback:false}),
+        Err(_) => return Err("unreadable_config".into()),
+    };
+    let mut section = "";
+    let (mut selected, mut loopback, mut present) = (false, false, false);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') { section = line.split('#').next().unwrap_or("").trim();
+            present |= section == "[model_providers.agentq]"; continue; }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let value = value.trim().trim_matches(['"', '\'']).split(['"', '\'']).next().unwrap_or("");
+        if section.is_empty() && key.trim() == "model_provider" { selected = value == "agentq"; }
+        if section == "[model_providers.agentq]" && key.trim() == "base_url" {
+            let host = value.split_once("://").map(|(_, s)| s.split('/').next().unwrap_or(""));
+            loopback = host.is_some_and(|s| s == "localhost" || s.starts_with("localhost:") || s.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback()) || s.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback()));
+        }
+    }
+    Ok(Provider {selected,present,loopback})
+}
+
+/// Read-only evidence of a selected legacy provider; no endpoint or credential is exported.
+pub fn legacy_route(clients: &[Client]) -> Value {
+    let Some(c)=clients.iter().find(|c|c.agent=="codex") else {return json!({"state":"absent"})};
+    match codex_provider(&c.root) {
+        Err(_)=>json!({"state":"unknown","reason":"unreadable_config"}),
+        Ok(p) if p.selected && (!p.present || p.loopback)=>json!({"state":"problem","reason":if p.present {"legacy_agentq_route"} else {"legacy_agentq_provider_missing"},"next":"agentq direct"}),
+        Ok(_)=>json!({"state":"absent"}),
+    }
+}
+
 fn sign(key: &hmac::Key, parts: &[&[u8]]) -> String {
     let mut s = hmac::Context::with_key(key);
     for p in parts {
@@ -61,11 +96,6 @@ fn sign(key: &hmac::Key, parts: &[&[u8]]) -> String {
         s.update(p);
     }
     resource::hex(s.sign().as_ref())[..16].to_string()
-}
-
-fn compression(data: &Path) -> Value {
-    let c = std::fs::read_to_string(data.join("config.json")).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).unwrap_or_default();
-    c["compression"].clone()
 }
 
 /// status.json `configuration`: every client whose configuration root exists.
@@ -96,8 +126,7 @@ fn status_using(clients: &[Client], data: &Path, now: u64, key: &hmac::Key) -> V
             p
         })
         .collect();
-    let c = compression(data);
-    let defaults = json!({"enabled": c["enabled"].as_bool().unwrap_or(true), "min_bytes": c["min_bytes"].as_u64().unwrap_or(2048), "stats": c["stats"].as_str().unwrap_or("queue")});
+    let defaults = json!({});
     let revs: Vec<&[u8]> = profiles.iter().filter_map(|p| p["revision"].as_str()).map(str::as_bytes).collect();
     json!({"schema": SCHEMA, "at": now, "revision": sign(key, &revs), "defaults": defaults, "profiles": profiles})
 }
@@ -107,7 +136,7 @@ fn hooked(doc: &Value, agent: &str, events: &[&str]) -> Vec<bool> {
     let hooks = &doc[if agent == "antigravity" { "agentq" } else { "hooks" }];
     events.iter().map(|e| (agent != "antigravity" || hooks["enabled"] != false) && hooks[e].as_array().into_iter().flatten()
         .filter(|m| agent != "antigravity" || m["matcher"].as_str().is_none_or(|m| matches!(m, "" | "*" | "run_command")))
-        .flat_map(|m| m["hooks"].as_array().into_iter().flatten())
+        .flat_map(|m| if agent == "antigravity" && *e == "Stop" { vec![m] } else { m["hooks"].as_array().into_iter().flatten().collect() })
         .any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(&format!(" hook {agent} {e}"))))).collect()
 }
 
@@ -131,11 +160,8 @@ pub fn profile(c: &Client, data: &Path, journal: &Path, key: &hmac::Key) -> Valu
     let integration = crate::control::observation(data, c, &data.parent().unwrap_or(data).join(format!("agentq{}", std::env::consts::EXE_SUFFIX)));
     let settings = crate::control::config(data);
     if settings.is_err() || integration["desired"] == "unknown" { incomplete.push("unreadable_control"); }
-    let direct = settings.as_ref().ok().is_some_and(|v| v["direct"].as_array().is_some_and(|a| a.iter().any(|a| a == c.agent)));
-    let mut parts: Vec<Vec<u8>> = vec![c.kind.into(), compression(data)["agents"][c.agent].to_string().into(),
-        compression(data)["enabled"].to_string().into(), direct.to_string().into(),
-        json!({"desired": integration["desired"], "phase": integration["phase"], "generation": integration["generation"]}).to_string().into(),
-        routing::port(data, c.agent).unwrap_or(0).to_le_bytes().into()];
+    let mut parts: Vec<Vec<u8>> = vec![c.kind.into(),
+        json!({"desired": integration["desired"], "phase": integration["phase"], "generation": integration["generation"]}).to_string().into()];
     let mut unreadable = vec![];
     let texts: Vec<Option<String>> = c
         .files
@@ -176,92 +202,37 @@ pub fn profile(c: &Client, data: &Path, journal: &Path, key: &hmac::Key) -> Valu
     if c.files.iter().enumerate().any(|(i, f)| f.extension().is_some_and(|e| e == "json") && docs[i].is_none() && !unread(i)) {
         conflicts.push("unparseable_config");
     }
-    let present = |b: bool| if b { "registered" } else { "absent" };
-    let compress = compression(data);
-    let optimization = if settings.is_err() { "unknown" } else if compress["enabled"] == false || compress["agents"][c.agent] == false { "disabled" } else { "enabled" };
-    let route = || routing::state(c.agent, &c.root, routing::port(data, c.agent)).0;
-    let auto = c.kind == "claude-code" && json_doc(0).is_some_and(|d| d["permissions"]["defaultMode"] == "auto");
-    // A1: project overrides are reported read-only, as a count only; None where unknown or the client has none
     let mut overrides = None;
-    let (routing, mcp, hooks, plugin, adapter, effective) = match c.kind {
+    let (hooks, plugin, adapter) = match c.kind {
         "codex" => {
-            let toml = texts[0].clone().unwrap_or_default();
-            if toml.lines().take_while(|l| !l.trim_start().starts_with('[')).any(|l| l.split('=').next().is_some_and(|k| k.trim() == "model_provider") && !l.contains("\"agentq\"")) {
-                conflicts.push("foreign_provider");
-            }
-            let r = route();
-            if !unread(0) {
-                overrides = Some(toml.lines().filter(|l| l.trim_start().starts_with("[profiles.")).count());
-            }
-            let h = json_doc(1).map(|d| hooked(&d, "codex", &["SessionStart", "Stop"]));
-            let mcp = if unread(0) { "unknown" } else { present(toml.lines().any(|l| l.trim() == "[mcp_servers.agentq]")) };
-            let eff = match r {
-                "routed" => "configured",
-                "direct" | "bypassed" => "bypassed",
-                _ => "unknown",
-            };
-            (r, mcp, h.as_deref().map_or("unknown", hooks_state), "unsupported", "provider", eff)
+            if legacy_route(std::slice::from_ref(c))["state"] == "problem" { conflicts.push("legacy_agentq_route"); }
+            overrides = (!unread(0)).then(|| texts[0].as_deref().unwrap_or("").lines().filter(|l| l.trim_start().starts_with("[profiles.")).count());
+            (json_doc(1).map(|d| hooked(&d, "codex", &["SessionStart", "Stop"])).as_deref().map_or("unknown", hooks_state), "unsupported", "hook")
         }
         "claude-code" => {
-            let r = route();
-            let h = json_doc(0).map(|d| hooked(&d, "claude", if auto { &["SessionStart", "PreToolUse", "PostToolUse"] } else { &["SessionStart", "PreToolUse"] }));
-            let mcp = json_doc(1).map_or("unknown", |d| present(d["mcpServers"]["agentq"].is_object()));
             let set = |v: &Value| v.as_object().is_some_and(|o| !o.is_empty()) || v.as_array().is_some_and(|a| !a.is_empty());
             overrides = json_doc(1).map(|d| d["projects"].as_object().into_iter().flatten().filter(|(_, p)| ["mcpServers", "env", "enabledMcpjsonServers"].iter().any(|k| set(&p[*k]))).count());
-            let eff = match &h {
-                Some(h) if h[if auto { 2 } else { 1 }] => "configured",
-                Some(_) => "missing",
-                None => "unknown",
-            };
-            (r, mcp, h.as_deref().map_or("unknown", hooks_state), "unsupported", "hook", eff)
+            (json_doc(0).map(|d| hooked(&d, "claude", &["SessionStart", "Stop"])).as_deref().map_or("unknown", hooks_state), "unsupported", "hook")
         }
-        "antigravity" => {
-            let h = json_doc(0).map(|d| hooked(&d, "antigravity", &["PreToolUse"]));
-            let hooks = h.as_deref().map_or("unknown", hooks_state);
-            let eff = match hooks { "registered" => "configured", "absent" => "missing", _ => "unknown" };
-            ("unsupported", "unsupported", hooks, "unsupported", "hook", eff)
-        }
-        "claude-desktop-chat" => {
-            let mcp = json_doc(0).map_or("unknown", |d| present(d["mcpServers"]["agentq"].is_object()));
-            ("unsupported", mcp, "unsupported", "unsupported", "", "unsupported")
-        }
+        "antigravity" => (json_doc(0).map(|d| hooked(&d, "antigravity", &["Stop"])).as_deref().map_or("unknown", hooks_state), "unsupported", "hook"),
+        "claude-desktop-chat" => ("unsupported", "unsupported", ""),
         _ => {
-            let yaml = texts[0].clone().unwrap_or_default();
-            let (mcp, plugin) = if unread(0) {
-                ("unknown", "unknown")
-            } else {
-                (present(yaml_block(&yaml, "mcp_servers").iter().any(|l| l.trim_start().starts_with("agentq:"))), if yaml_block(&yaml, "plugins").iter().any(|l| l.contains("agentq")) { "enabled" } else { "absent" })
-            };
-            let eff = match plugin {
-                "enabled" => "configured",
-                "absent" => "missing",
-                _ => "unknown",
-            };
-            ("unsupported", mcp, "unsupported", plugin, "plugin", eff)
+            let plugin = if unread(0) { "unknown" } else if yaml_block(texts[0].as_deref().unwrap_or(""), "plugins").iter().any(|l| l.contains("agentq")) { "enabled" } else { "absent" };
+            ("unsupported", plugin, "plugin")
         }
     };
-    if routing == "bypassed" && !conflicts.contains(&"foreign_provider") {
-        conflicts.push("foreign_provider");
-    }
-    let effective = if effective == "unsupported" { effective } else if optimization == "unknown" || integration["desired"] == "unknown" { "unknown" }
-        else if optimization == "disabled" || integration["desired"] == "disabled" { "disabled" } else { effective };
-    let preference = if settings.is_err() { "unknown" } else if compress["agents"][c.agent] == false { "disabled" } else { "enabled" };
-    let reason = if settings.is_err() || integration["desired"] == "unknown" { "unreadable_control" }
-        else if integration["desired"] == "disabled" { "integration_disabled" }
-        else if compress["enabled"] == false { "host_pause" } else if preference == "disabled" { "agent_pause" }
-        else if effective == "bypassed" { "direct" } else if effective == "missing" { "adapter_missing" } else { effective };
+    let effective = if integration["desired"] == "unknown" { "unknown" }
+        else if integration["desired"] == "disabled" { "disabled" }
+        else if hooks == "registered" || plugin == "enabled" { "configured" }
+        else if hooks == "unknown" || plugin == "unknown" { "unknown" }
+        else if adapter.is_empty() { "unsupported" } else { "missing" };
     let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-    let mut projection = json!({
+    let projection = json!({
         "kind": c.kind,
         "id": sign(key, &[b"profile", c.kind.as_bytes(), c.root.display().to_string().as_bytes()]),
         "revision": sign(key, &refs),
-        "routing": routing,
-        "mcp": mcp,
         "hooks": hooks,
         "plugin": plugin,
-        "optimization": optimization,
-        "optimization_preference": preference,
-        "optimization_reason": reason,
         "integration": integration,
         "effective": {"adapter": (!adapter.is_empty()).then_some(adapter), "state": effective},
         "owned": !owned.is_empty(),
@@ -269,7 +240,6 @@ pub fn profile(c: &Client, data: &Path, journal: &Path, key: &hmac::Key) -> Valu
         "conflicts": conflicts,
         "incomplete": incomplete,
     });
-    if c.kind == "claude-code" && json_doc(0).is_some() { projection["effective"]["event"] = (if auto { "PostToolUse" } else { "PreToolUse" }).into(); }
     projection
 }
 
@@ -307,33 +277,21 @@ mod tests {
         let exe = d.join("agentq");
         onboard::apply(&onboard::wants("codex", &codex.root, Path::new("unused.json"), &exe), &journal).unwrap();
         let p = profile(&codex, &data, &journal, &key);
-        assert_eq!((p["mcp"].as_str(), p["hooks"].as_str(), p["routing"].as_str(), p["owned"].as_bool()), (Some("registered"), Some("registered"), Some("direct"), Some(true)));
-        assert_eq!(p["effective"], json!({"adapter": "provider", "state": "bypassed"}), "Direct bypasses provider optimization");
-        assert_eq!((p["plugin"].as_str(), p["overrides"].as_u64()), (Some("unsupported"), Some(0)));
-        let again = profile(&codex, &data, &journal, &key);
-        assert_eq!((again["id"].clone(), again["revision"].clone()), (p["id"].clone(), p["revision"].clone()));
-
+        assert_eq!(p["hooks"], "registered");
+        assert_eq!(p["effective"], json!({"adapter":"hook","state":"configured"}));
+        for field in ["routing", "mcp", "optimization"] { assert!(p.get(field).is_none()); }
         let toml = codex.root.join("config.toml");
-        let text = std::fs::read_to_string(&toml).unwrap();
-        std::fs::write(&toml, format!("model_provider = \"other\"\n{text}")).unwrap();
+        std::fs::write(&toml, "model_provider = \"other\"\n[profiles.work]\n").unwrap();
         let edited = profile(&codex, &data, &journal, &key);
-        assert_ne!(edited["revision"], p["revision"], "an external edit changes the revision");
+        assert_ne!(edited["revision"], p["revision"]);
         assert_eq!(edited["id"], p["id"]);
-        assert_eq!(edited["conflicts"], json!(["foreign_provider"]));
-        std::fs::write(&toml, format!("{text}\n[profiles.work]\nmodel_provider = \"other\"\n")).unwrap();
-        assert_eq!(profile(&codex, &data, &journal, &key)["overrides"], 1, "a codex profile section is an override");
-        std::fs::write(&toml, format!("model_provider = \"other\"\n{text}")).unwrap();
-
-        std::fs::write(&data.join("config.json"), r#"{"compression": {"agents": {"codex": false}}}"#).unwrap();
-        let off = profile(&codex, &data, &journal, &key);
-        assert_eq!((off["optimization"].as_str(), off["effective"]["state"].as_str()), (Some("disabled"), Some("disabled")));
-        assert_ne!(off["revision"], edited["revision"], "the preference is a relevant setting");
-
+        assert_eq!(edited["conflicts"], json!([]), "native providers are outside record-hook ownership");
+        assert_eq!(edited["overrides"], 1);
         let claude = client(&d, "claude-code");
         std::fs::write(&claude.files[0], "{not json").unwrap();
         std::fs::create_dir_all(&claude.files[1]).unwrap();
         let c = profile(&claude, &data, &journal, &key);
-        assert_eq!((c["hooks"].as_str(), c["mcp"].as_str(), c["owned"].as_bool()), (Some("unknown"), Some("unknown"), Some(false)));
+        assert_eq!((c["hooks"].as_str(), c["owned"].as_bool()), (Some("unknown"), Some(false)));
         assert_eq!((c["conflicts"].clone(), c["incomplete"].clone()), (json!(["unparseable_config"]), json!(["unreadable_config"])));
         assert_eq!(c["effective"], json!({"adapter": "hook", "state": "unknown"}));
         assert!(c["overrides"].is_null(), "an unreadable .claude.json leaves overrides unknown");
@@ -347,14 +305,30 @@ mod tests {
         let hermes = client(&d, "hermes");
         std::fs::write(&hermes.files[0], "mcp_servers:\n  agentq:\n    command: x\nplugins:\n  enabled:\n    - agentq\n").unwrap();
         let h = profile(&hermes, &data, &journal, &key);
-        assert_eq!((h["mcp"].as_str(), h["plugin"].as_str(), h["routing"].as_str(), h["effective"]["state"].as_str()), (Some("registered"), Some("enabled"), Some("unsupported"), Some("configured")));
+        assert_eq!((h["plugin"].as_str(), h["effective"]["state"].as_str()), (Some("enabled"), Some("configured")));
 
         let chat = client(&d, "claude-desktop-chat");
         let ch = profile(&chat, &data, &journal, &key);
-        assert_eq!((ch["mcp"].as_str(), ch["hooks"].as_str(), ch["effective"]["adapter"].is_null(), ch["overrides"].is_null()), (Some("absent"), Some("unsupported"), true, true));
+        assert_eq!((ch["hooks"].as_str(), ch["effective"]["adapter"].is_null(), ch["overrides"].is_null()), (Some("unsupported"), true, true));
 
         let text = [p, edited, c, h, ch].iter().map(Value::to_string).collect::<String>();
         assert!(!text.contains(&d.display().to_string()) && !text.contains("agentq-profiles"), "no path in {text}");
         let _ = std::fs::remove_dir_all(d);
     }
+    #[test]
+    fn legacy_route_problem_is_readonly_and_not_release_health() {
+        let root = std::env::temp_dir().join(format!("agentq-route-problem-{}", crate::resource::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let clients = vec![Client {kind:"codex",agent:"codex",root:root.clone(),files:vec![root.join("config.toml")]}];
+        for url in ["http://127.0.0.1:1234/v1", "http://localhost:1234/v1", "http://[::1]:1234/v1"] {
+            std::fs::write(root.join("config.toml"), format!("model_provider = 'agentq' # selected\n[model_providers.agentq]\nbase_url = \"{url}\"\n")).unwrap();
+            assert_eq!(legacy_route(&clients), json!({"state":"problem","reason":"legacy_agentq_route","next":"agentq direct"}));
+        }
+        std::fs::write(root.join("config.toml"), format!("model_provider = \"agentq\"\n{}", onboard::CODEX_DIRECT_PROVIDER)).unwrap();
+        assert_eq!(legacy_route(&clients)["state"], "absent");
+        std::fs::write(root.join("config.toml"), b"\xff").unwrap();
+        assert_eq!(legacy_route(&clients)["state"], "unknown");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

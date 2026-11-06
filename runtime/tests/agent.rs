@@ -700,7 +700,7 @@ fn settings_env_reaches_the_session() {
     finish(claude, &mut run);
     let turn = record(&root, 1);
     let settings = settings_of(&turn["args"]);
-    assert_eq!(settings["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child", "AGENTQ_OPTIMIZATION": "off"}), "the optimizer's own values win");
+    assert_eq!(settings["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child"}), "launcher attribution survives without optimizer injection");
     assert_eq!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"], "rules");
     assert_eq!(turn["extra"], Value::Null, "settings values stay out of the child environment");
 
@@ -710,7 +710,7 @@ fn settings_env_reaches_the_session() {
     bg.settings_env = vec![("FAKE_EXTRA".into(), "settings".into())];
     claude.launch(&bg).unwrap();
     let launched: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
-    assert_eq!(settings_of(&launched["args"])["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child", "AGENTQ_OPTIMIZATION": "off"}), "off reaches the daemon's session");
+    assert_eq!(settings_of(&launched["args"])["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child"}), "retired intent adds no daemon settings");
     bg.settings_env.clear();
     claude.launch(&bg).unwrap();
     let plain: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
@@ -777,11 +777,11 @@ fn settings_env_off_precedes_state_read() {
             if invalid { std::fs::write(install.join("data/config.json"), "not JSON").unwrap(); }
             let mut run = runtime.launch(&l).unwrap();
             finish(runtime, &mut run);
-            assert_eq!((run.optimization().effective, run.optimization().reason), ("off", "launch_off"), "{name} invalid={invalid}");
+            assert_eq!((run.optimization().effective, run.optimization().reason), ("off", "optimization_retired"), "{name} invalid={invalid}");
             let turn = record(&root, 1);
-            assert_eq!(turn["optimization"], "off");
+            assert_eq!(turn["optimization"], if name == "claude" { "on" } else { "off" }, "caller environment stays unchanged");
             if name == "claude" { assert_eq!(settings_of(&turn["args"])["env"]["AGENTQ_OPTIMIZATION"], "off"); }
-            else { assert!(turn["args"].as_array().unwrap().iter().any(|a| a == "model_providers.agentq.http_headers.x-agentq-optimization=\"off\"")); }
+            else { assert!(!turn["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization")))); }
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1227,10 +1227,10 @@ fn json_turns_run_plain_without_the_optimizer() {
             "context": {"product": "fixtureq", "version": "1.0.0", "project": "other", "task": null, "route": "manager", "account": "default"}});
         let first = agentq_runtime::cli::turn(&request.to_string(), Some(&install)).unwrap();
         assert_eq!((first["outcome"].as_str(), first["text"].as_str(), first["recorded"].as_str()), (Some("ok"), Some("turn 1"), Some("ok")));
-        let expected = if intent == "off" { json!({"intent": "off", "effective": "off", "reason": "launch_off"}) } else { json!({"intent": "inherit", "effective": "off", "reason": "not_installed"}) };
+        let expected = if intent == "off" { json!({"intent": "off", "effective": "off", "reason": "optimization_retired"}) } else { json!({"intent": "inherit", "effective": "off", "reason": "optimization_retired"}) };
         assert_eq!(first["optimization"], expected);
         let seen = record(&dir, 1);
-        assert_eq!((seen["optimization"].as_str(), seen["launcher"].as_str()), (if intent == "off" { Some("off") } else { None }, Some("fixtureq")));
+        assert_eq!((seen["optimization"].as_str(), seen["launcher"].as_str()), (None, Some("fixtureq")));
         // Recovery path: the next turn resumes the native session the report named.
         request["resume"] = json!(true);
         request["session"] = first["session"].clone();
@@ -1585,16 +1585,16 @@ fn off_reaches_codex_queue_and_app_server() {
     q.mode = agent::Mode::Queue { transcript: path };
     q.optimization = Intent::Off;
     let run = agent::runtime("codex").unwrap().resume("native-thread", &q).unwrap();
-    assert_eq!(run.optimization().reason, "launch_off");
+    assert_eq!(run.optimization().reason, "optimization_retired");
     let queue = control(&root);
-    assert!(queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue lost launch off: {queue}");
+    assert!(!queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue lost launch off: {queue}");
     let mut l = fake_launch("codex", &root, "owned request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref()), ("CODEX_HOME", root.as_os_str())]);
     l.log = root.join("private.log");
     l.optimization = Intent::Off;
     l.deltas = true;
     let mut run = agent::runtime("codex").unwrap().launch(&l).unwrap();
     let args = serde_json::from_str::<Value>(&std::fs::read_to_string(root.join("app-transport.json")).unwrap()).unwrap()["args"].clone();
-    assert!(args[0] == "app-server" && args.as_array().unwrap().iter().any(|s| s.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "app-server lost launch off: {args}");
+    assert!(args[0] == "app-server" && !args.as_array().unwrap().iter().any(|s| s.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "app-server lost launch off: {args}");
     agent::runtime("codex").unwrap().cancel(&mut run).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1617,7 +1617,9 @@ fn antigravity_wrapped_submission_keeps_prompt_and_tail() {
     let r = ag.report(&run).unwrap();
     assert_eq!((r.outcome,r.text.as_deref()),("ok",Some("wrapper answer")));
     l.env.push(("AGENTQ_OPTIMIZATION".into(),"off".into()));
-    assert!(ag.launch(&l).is_err(),"submission env cannot suppress existing server hooks");
+    let mut run = ag.launch(&l).unwrap();
+    assert_eq!(run.optimization().reason, "optimization_retired");
+    ag.cancel(&mut run).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1725,10 +1727,10 @@ fn runtime_trait_exposes_native_seams() {
     assert_eq!(codex.session_transcript("t-2",Some(&home)),None);
     assert_eq!(claude.session_transcript(session,Some(&home)),None);
 
-    // prepare: `off` reaches the child environment of the caller's spec.
+    // prepare: retired intent leaves the native child unchanged and keeps launcher attribution.
     let mut off=spec.clone();
     assert_eq!(claude.prepare(Intent::Off,"fixtureq",&mut off,None).intent,Intent::Off);
-    assert!(off.env.iter().any(|(k,v)|k=="AGENTQ_OPTIMIZATION"&&v=="off"));
+    assert!(!off.env.iter().any(|(k,_)|k=="AGENTQ_OPTIMIZATION"));
     assert!(off.env.iter().any(|(k,v)|k=="AGENTQ_LAUNCHER"&&v=="fixtureq"));
 
     // background (Claude only): launch, list, validate and stop one job.

@@ -6,14 +6,10 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Operation, p95 budget in ms (none: the sample includes work agentq does not own), failure budget.
-const OPS: [(&str, Option<u64>, f64); 5] = [
-    ("compress.run", None, 0.01),
-    ("compress.hook", Some(1000), 0.01),
-    ("compress.provider", Some(1000), 0.01),
+const OPS: [(&str, Option<u64>, f64); 2] = [
     ("export.langfuse", Some(10_000), 0.05),
     ("export.dashq", Some(10_000), 0.05),
 ];
-const PROXY: &str = "headroom proxy serves model requests; agentq records none";
 const WINDOW: u64 = 7 * 86400;
 /// Export samples retained per operation.
 pub(crate) const KEEP: usize = 256;
@@ -178,7 +174,6 @@ fn steps(data: &Path, cutoff: u64, now: u64) -> Result<Map<String, Value>, Strin
 /// `agentq profile`: every named operation over the last 7 days, worst first; unknown last with its reason.
 pub fn report(data: &Path, now: u64) -> Value {
     let cutoff = now.saturating_sub(WINDOW);
-    let compress = crate::compression::records(data, cutoff);
     let export = export_state(data);
     let (steps, trace_unknown) = match steps(data, cutoff, now) {
         Ok(s) => (s, None),
@@ -187,15 +182,8 @@ pub fn report(data: &Path, now: u64) -> Value {
     let mut known = vec![];
     let mut unknowns = vec![];
     for (op, p95, fail) in OPS {
-        let samples: Result<Vec<_>, String> = if let Some(adapter) = op.strip_prefix("compress.") {
-            compress.as_ref().map_err(Clone::clone).map(|r| {
-                r.iter().filter(|v| v["adapter"] == adapter && v["time"].as_u64().is_some_and(|t| t <= now))
-                    .map(|v| (v["duration_ms"].as_u64().unwrap_or(0), (v["outcome"] == "failed").then(|| v["reason"].as_str().unwrap_or("error").to_string())))
-                    .collect()
-            })
-        } else {
-            export.as_ref().map_err(Clone::clone).and_then(|m| m.get(op).map_or(Ok(vec![]), |s| export_samples(s, cutoff, now)))
-        };
+        let samples: Result<Vec<_>, String> = export.as_ref().map_err(Clone::clone)
+            .and_then(|m| m.get(op).map_or(Ok(vec![]), |s| export_samples(s, cutoff, now)));
         match samples {
             Ok(s) if s.is_empty() => unknowns.push(unknown(op, "no samples in window")),
             Ok(s) => {
@@ -208,7 +196,6 @@ pub fn report(data: &Path, now: u64) -> Value {
             Err(e) => unknowns.push(unknown(op, &e)),
         }
     }
-    unknowns.push(unknown("proxy.request", PROXY));
     profile::rank(&mut known, |k| k.1);
     let known: Vec<Value> = known.into_iter().map(|k| k.0).chain(unknowns).collect();
     let mut trace = trace_state(data, now);
@@ -259,7 +246,7 @@ mod tests {
     use super::*;
 
     fn dir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("agentq-profile-{}", crate::mcp::new_id()));
+        let d = std::env::temp_dir().join(format!("agentq-profile-{}", crate::resource::new_id()));
         std::fs::create_dir_all(d.join("queue")).unwrap();
         d
     }
@@ -274,11 +261,9 @@ mod tests {
         let d = dir();
         let r = report(&d, crate::now());
         let ops = r["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 6);
+        assert_eq!(ops.len(), 2);
         assert!(ops.iter().all(|o| o["state"] == "unknown" && o["reason"].as_str().is_some_and(|s| !s.is_empty()) && o.get("calls").is_none()));
-        assert!(op(&r, "compress.run")["reason"].as_str().unwrap().contains("no stats file"));
         assert_eq!(op(&r, "export.langfuse")["reason"], "no samples in window");
-        assert_eq!(op(&r, "proxy.request")["reason"], PROXY);
         assert_eq!(r["trace"]["state"], "off");
         assert!(lines(&r).iter().skip(1).all(|l| l.contains(": unknown: ")));
         std::fs::remove_dir_all(d).unwrap();
@@ -286,92 +271,6 @@ mod tests {
 
     /// § 6 Profiling: samples -> ranked report (failures, time, instability) -> corrupt record or state keeps only its
     /// own operations unknown; the trace switch is bounded and leaves other config keys.
-    #[test]
-    fn ranked_report_and_corrupt_records() {
-        let d = dir();
-        let now = crate::now();
-        let sample = |op: &str, at: u64, ms_: u64, class: Option<&str>| json!({"time": at, "op": op, "duration_ms": ms_, "class": class});
-        let mut exports: Vec<Value> = [100u64, 120, 110, 90].iter().enumerate()
-            .map(|(i, ms_)| sample("export.dashq", now - 10, *ms_, (i == 0).then_some("no_reply"))).collect();
-        exports.extend((0..KEEP - 1).map(|_| sample("export.langfuse", now - 5, 50, None)));
-        exports.push(sample("export.langfuse", now - WINDOW - 1, 1, Some("auth")));
-        crate::local::seed(&d, "export", &exports, None);
-        let rec = |adapter: &str, ms_: u64, outcome: &str, reason: &str| {
-            let mut r = json!({"schema":1,"event_id":crate::mcp::new_id().replace('-',""),"time":now - 1,"agent":"claude","adapter":adapter,"tool":"shell","runner":null,"engine":"none",
-                "outcome":outcome,"reason":reason,"bytes_in":10,"bytes_out":10,"est_tokens_in":3,"est_tokens_out":3,"duration_ms":ms_,"ref":null,"session":null,"turn":null,"tool_call":null});
-            if adapter == "run" {
-                r["exit_code"] = json!(0);
-            }
-            r
-        };
-        let records = [rec("hook", 2500, "passed", "short"), rec("hook", 2400, "passed", "json"), rec("run", 10, "passed", "not_qualified"), rec("run", 5000, "failed", "timeout")];
-        crate::local::seed(&d, "stats", &records, None);
-        let r = report(&d, now);
-        let names: Vec<&str> = r["operations"].as_array().unwrap().iter().map(|o| o["op"].as_str().unwrap()).collect();
-        // run: 50 % failed of a 1 % budget; dashq: 25 % of 5 %; hook: p95 2500 of 1000 ms; langfuse within budget
-        assert_eq!(&names[..4], ["compress.run", "export.dashq", "compress.hook", "export.langfuse"]);
-        let run = op(&r, "compress.run");
-        assert_eq!((run["calls"].as_u64(), run["failed"].as_u64(), run["classes"]["timeout"].as_u64()), (Some(2), Some(1), Some(1)));
-        assert_eq!(run["budget"]["p95_ms"], Value::Null);
-        assert!(run["over"].as_array().unwrap().contains(&json!("failures")));
-        let hook = op(&r, "compress.hook");
-        assert_eq!((hook["p50_ms"].as_u64(), hook["p95_ms"].as_u64(), hook["max_ms"].as_u64()), (Some(2400), Some(2500), Some(2500)));
-        assert_eq!(hook["over"], json!(["time"]));
-        let lf = op(&r, "export.langfuse");
-        assert_eq!((lf["calls"].as_u64(), lf["failed"].as_u64(), lf["cv"].as_f64()), (Some(KEEP as u64 - 1), Some(0), Some(0.0)));
-        assert_eq!(lf["over"], json!([]));
-        assert_eq!(op(&r, "compress.provider")["state"], "unknown");
-        let text = lines(&r).join("\n");
-        assert!(text.contains("compress.hook: 2 calls, 0.0% failed, p50 2400 ms, p95 2500 ms, max 2500 ms") && text.contains("over budget: time"), "{text}");
-        assert!(!text.contains("claude") && !text.contains("shell"));
-
-        // a corrupt stats record: all compress.* unknown, exports still measured
-        crate::local::seed(&d, "stats", &[json!({"time": now - 1})], None);
-        let r = report(&d, now);
-        for o in ["compress.run", "compress.hook", "compress.provider"] {
-            assert_eq!(op(&r, o)["state"], "unknown");
-            assert!(op(&r, o)["reason"].as_str().unwrap().contains("stats unknown"));
-        }
-        assert_eq!(op(&r, "export.langfuse")["state"], "measured");
-        let db = rusqlite::Connection::open(d.join("telemetry.sqlite3")).unwrap();
-        db.execute("DELETE FROM events WHERE kind='stats' AND json_extract(payload,'$.agent') IS NULL", []).unwrap();
-        drop(db);
-        // a corrupt export sample: only that operation unknown, the other export and compression measured
-        crate::local::seed(&d, "export", &[json!({"time": now - 1, "op": "export.langfuse", "duration_ms": "x", "class": null})], None);
-        let r = report(&d, now);
-        assert!(op(&r, "export.langfuse")["reason"].as_str().unwrap().contains("malformed sample"));
-        assert_eq!(op(&r, "export.dashq")["state"], "measured");
-        assert_eq!(op(&r, "compress.hook")["state"], "measured");
-        // unreadable rows: every export unknown
-        let db = rusqlite::Connection::open(d.join("telemetry.sqlite3")).unwrap();
-        db.execute("UPDATE events SET payload='{' WHERE kind='export'", []).unwrap();
-        drop(db);
-        let r = report(&d, now);
-        for o in ["export.langfuse", "export.dashq"] {
-            assert!(op(&r, o)["reason"].as_str().unwrap().contains("telemetry event"), "{o}");
-        }
-
-        // trace switch: bounded, keeps other config, steps join the report; off stops writing
-        std::fs::write(d.join("config.json"), r#"{"ports":{"codex":1}}"#).unwrap();
-        trace(&d, "compress.run", "native", Duration::from_millis(7), None);
-        assert!(crate::local::traces(&d).unwrap().is_empty());
-        assert!(trace_minutes(Some("61")).is_err() && trace_minutes(Some("0")).is_err());
-        let t = set_trace(&d, Some(trace_minutes(None).unwrap()), now).unwrap();
-        assert_eq!(t, json!({"state": "on", "until": now + TRACE_DEFAULT * 60}));
-        trace(&d, "compress.run", "native", Duration::from_millis(7), None);
-        trace(&d, "compress.run", "filter", Duration::from_millis(9), Some("timeout"));
-        let step = op(&report(&d, crate::now()), "compress.run")["steps"].clone();
-        assert_eq!(step, json!([{"step": "filter", "calls": 1, "failed": 1, "p95_ms": 9}, {"step": "native", "calls": 1, "failed": 0, "p95_ms": 7}]));
-        assert_eq!(set_trace(&d, None, now).unwrap()["state"], "off");
-        let c: Value = serde_json::from_str(&std::fs::read_to_string(d.join("config.json")).unwrap()).unwrap();
-        assert_eq!(c, json!({"ports": {"codex": 1}}));
-        crate::local::seed(&d, "trace", &[json!({"time": now, "op": "compress.run", "step": "native", "duration_ms": "x"})], None);
-        assert!(report(&d, now)["trace"]["unknown"].as_str().unwrap().contains("malformed"));
-        std::fs::remove_dir_all(d).unwrap();
-    }
-
-    /// § 6 Profiling: a corrupt config, export state or trace store reads unknown with its reason, never trace off or
-    /// no samples; an unknown switch writes no trace.
     #[test]
     fn corrupt_switch_state_and_traces_are_unknown() {
         let d = dir();

@@ -7,8 +7,6 @@ use serde_json::{Map, Value, json};
 pub const SCHEMA: u64 = 1;
 /// `status.json` is unknown after 90 s (agentq.md § 5).
 const STALE: u64 = 90;
-const ROUTING: [&str; 4] = ["routed", "direct", "bypassed", "unknown"];
-const ENGINES: [&str; 2] = ["rtk", "headroom"];
 /// Resource reasons that pass as written; any other probe error becomes `probe failed`, so no probe path or OS text
 /// crosses.
 const REASONS: [&str; 5] = ["warmup", "counter reset", "wsl1 mirrors the Windows host", "no sampler on this OS", "no local filesystem"];
@@ -33,18 +31,6 @@ pub fn project(installation: &str, runtime: &str, status: Option<&Value>, resour
         _ => json!({"state": "running"}),
     };
     let s = status.cloned().unwrap_or(Value::Null);
-    let agents: Map<String, Value> = s["agents"].as_object().into_iter().flatten().filter(|(a, _)| crate::onboard::AGENTS.contains(&a.as_str())).map(|(a, r)| (a.clone(), json!(pick(r["routing"].as_str(), &ROUTING)))).collect();
-    let engines: Map<String, Value> = ENGINES
-        .iter()
-        .map(|e| {
-            let x = &s["engines"][e];
-            let v = match (x["state"].as_str(), x["version"].as_str()) {
-                (Some(st @ ("ready" | "unavailable")), Some(ver)) if ver.chars().all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c)) => json!({"state": st, "version": ver}),
-                _ => json!({"state": "unknown"}),
-            };
-            (e.to_string(), v)
-        })
-        .collect();
     let q = &s["queue"];
     let queue = json!({"pending": q["pending"].as_u64(), "oldest_age": q["oldest_age"].as_u64(), "last_delivery": q["last_delivery"].as_u64(), "dropped": q["dropped"].as_u64(), "send_error": q["error"].is_string()});
     json!({
@@ -56,8 +42,6 @@ pub fn project(installation: &str, runtime: &str, status: Option<&Value>, resour
         "release": crate::release::project(&s["release"], now),
         "service": service,
         "update": {"available": s["update"].as_str(), "error": s["error"].is_string()},
-        "routing": agents,
-        "engines": engines,
         "queue": queue,
         "resource": resource.map_or_else(|| json!({"unknown": "no sample yet"}), project_resource),
         "configuration": configuration(status, now),
@@ -66,16 +50,13 @@ pub fn project(installation: &str, runtime: &str, status: Option<&Value>, resour
 
 /// At most this many profiles cross; more set `truncated` and disable every write.
 const PROFILES: usize = 16;
-const FIELDS: [(&str, &[&str]); 5] = [
-    ("routing", &["routed", "direct", "bypassed", "unknown"]),
-    ("optimization", &["enabled", "disabled"]),
-    ("mcp", &["registered", "absent", "unknown"]),
+const FIELDS: [(&str, &[&str]); 2] = [
     ("hooks", &["registered", "partial", "absent", "unknown"]),
     ("plugin", &["enabled", "absent", "unknown"]),
 ];
 const EFFECTIVE: [&str; 6] = ["configured", "disabled", "bypassed", "missing", "unknown", "unsupported"];
 const ADAPTERS: [&str; 3] = ["provider", "hook", "plugin"];
-const CONFLICTS: [&str; 3] = ["foreign_provider", "unparseable_config", "integration_disabled"];
+const CONFLICTS: [&str; 5] = ["foreign_provider", "unparseable_config", "integration_disabled", "legacy_agentq_route", "legacy_agentq_provider_missing"];
 const INCOMPLETE: [&str; 2] = ["unreadable_config", "unreadable_control"];
 
 fn id16(v: &Value) -> Option<&str> {
@@ -138,10 +119,6 @@ pub fn configuration(status: Option<&Value>, now: u64) -> Value {
             out["effective"] = json!({"adapter": adapter, "state": state});
             if let Some(event) = p["effective"]["event"].as_str().filter(|e| ["PreToolUse", "PostToolUse"].contains(e)) {
                 out["effective"]["event"] = event.into();
-            }
-            if p["optimization_preference"].is_string() {
-                out["optimization_preference"] = pick(p["optimization_preference"].as_str(), &["enabled", "disabled", "unknown"]).into();
-                out["optimization_reason"] = pick(p["optimization_reason"].as_str(), &["unreadable_control", "integration_disabled", "host_pause", "agent_pause", "direct", "adapter_missing", "configured", "unsupported", "unknown"]).into();
             }
             if p["integration"].is_object() {
                 let i = &p["integration"];
@@ -265,8 +242,8 @@ mod tests {
         let p = project("inst", "macos", Some(&status()), Some(&r), 1030);
         assert_eq!((p["schema"].clone(), p["installation"].clone(), p["runtime"].clone(), p["version"].clone(), p["status_at"].clone()), (json!(1), json!("inst"), json!("macos"), json!("1.2.3"), json!(1000)));
         assert_eq!(p["service"], json!({"state": "running"}));
-        assert_eq!(p["routing"], json!({"codex": "routed", "claude": "unknown"}), "enumerated values and known agents only");
-        assert_eq!(p["engines"]["headroom"], json!({"state": "unavailable", "version": "0.40.0"}));
+        assert!(p.get("routing").is_none());
+        assert!(p.get("engines").is_none());
         assert_eq!(p["queue"], json!({"pending": 3, "oldest_age": 60, "last_delivery": 990, "dropped": 0, "send_error": true}));
         assert_eq!(p["update"], json!({"available": null, "error": true}));
         let res = &p["resource"];
@@ -302,7 +279,7 @@ mod tests {
         let old = project("inst", "macos", Some(&status()), None, 1030);
         assert_eq!(old["configuration"], json!({"state": "unknown", "reason": "older producer"}));
         let new = project("inst", "macos", Some(&with_profiles(1000, json!([codex(json!({}))]))), None, 1030);
-        for k in ["schema", "installation", "runtime", "version", "status_at", "service", "update", "routing", "engines", "queue", "resource"] {
+        for k in ["schema", "installation", "runtime", "version", "status_at", "service", "update", "queue", "resource"] {
             assert_eq!(old[k], new[k], "{k} unchanged");
         }
         let mut future = with_profiles(1000, json!([]));
@@ -327,13 +304,12 @@ mod tests {
         let p = c["profiles"].as_array().unwrap();
         assert_eq!(p.len(), 3, "an invalid id or kind does not cross");
         assert_eq!(p[0]["aliases"], json!(["codex-cli", "codex-desktop"]), "one target, every alias shown");
-        assert_eq!((p[0]["routing"].as_str(), p[0]["effective"]["state"].as_str(), p[0]["configured"].as_bool()), (Some("routed"), Some("configured"), Some(true)));
+        assert_eq!((p[0]["effective"]["state"].as_str(), p[0]["configured"].as_bool()), (Some("configured"), Some(true)));
         assert_eq!(p[0]["verification"], json!({"state": "unknown", "reason": "no_evidence"}), "configured never implies verified");
         assert_eq!(p[0]["writes"], json!({"enabled": false, "reasons": ["not_released"]}));
-        assert_eq!((p[1]["routing"].as_str(), p[1]["hooks"].as_str(), p[1]["mcp"].as_str(), p[1]["operations"].clone()), (Some("unsupported"), Some("unsupported"), Some("registered"), json!(["mcp"])));
-        assert_eq!(p[1]["unavailable"]["routing"], "unsupported_client", "unsupported is explicit, not off");
+        assert_eq!((p[1]["hooks"].as_str(), p[1]["operations"].clone()), (Some("unsupported"), json!([])));
         assert!(p[1]["effective"]["adapter"].is_null());
-        assert_eq!((p[2]["conflicts"].clone(), p[2]["incomplete"].clone(), p[2]["routing"].as_str()), (json!(["foreign_provider", "other"]), json!(["unreadable_config"]), Some("unknown")));
+        assert_eq!((p[2]["conflicts"].clone(), p[2]["incomplete"].clone(), p[2]["hooks"].as_str()), (json!(["foreign_provider", "other"]), json!(["unreadable_config"]), Some("registered")));
         assert_eq!(p[2]["writes"]["reasons"], json!(["not_released", "incomplete", "conflict"]));
         assert_eq!(p[2]["label"], "Codex", "labels come from the kind");
         assert!(p[0]["overrides"].is_null() && p[1]["overrides"].is_null(), "an unknown override count stays null");
@@ -395,7 +371,7 @@ mod tests {
         let p = project("inst", "linux", None, None, 1000);
         assert_eq!(p["service"], json!({"state": "unknown", "reason": "no status"}));
         assert_eq!(p["resource"], json!({"unknown": "no sample yet"}));
-        assert_eq!(p["engines"]["rtk"], json!({"state": "unknown"}));
+        assert!(p.get("engines").is_none());
         assert!(p["queue"]["pending"].is_null() && p["version"].is_null(), "missing is null, never zero");
         assert_eq!(project("inst", "linux", Some(&status()), None, 2000)["service"]["reason"], "stale status");
         assert_eq!(project("inst", "linux", Some(&json!({})), None, 2000)["service"]["reason"], "status without time");

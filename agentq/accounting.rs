@@ -3,7 +3,6 @@
 //! `docs/spec/accounting-fixtures.json` share it.
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 pub const SCHEMA: &str = "agentq.accounting/1";
 /// A record later than `now` by more than this has an uncertain time and never enters totals.
@@ -11,7 +10,6 @@ const SKEW: u64 = 300;
 /// Records read per query unless the input sets `cap`.
 const CAP: u64 = 100_000;
 const EVIDENCE: usize = 3;
-const RETENTION: u64 = 7 * 86400;
 /// Keys that split cohorts: provenance and recipe. A null value is its own unknown cohort, never inferred.
 const COHORT: [&str; 10] = [
     "installation",
@@ -352,85 +350,6 @@ pub fn aggregate(input: &Value) -> Result<Value, String> {
 }
 
 /// Why a readable local journal still proves no completeness.
-pub const UNPROVEN: &str = "calls that wrote no evidence are undetectable";
-
-/// Local records and coverage from one SQLite snapshot, with the existing failure-marker semantics.
-pub fn local(data: &Path, now: u64) -> Value {
-    let snapshot = match crate::local::snapshot(data) {
-        Ok(v) => v,
-        Err(e) => return json!({"installation":null,"runtime":crate::telemetry::runtime(),"observed":[],"resets":[],"unknown":if e=="stats unknown: no stats file" { "no stats recorded".to_string() } else { e },"records":[]}),
-    };
-    let records = snapshot["records"].clone();
-    let mut unknown = None;
-    let held: std::collections::HashMap<String,u64> = snapshot["held"].as_object().into_iter().flatten()
-        .filter_map(|(k,v)| v.as_u64().map(|n|(k.clone(),n))).collect();
-    let journal = (!snapshot["journal"].is_null()).then(||snapshot["journal"].clone());
-    let mut observed = vec![];
-    let mut resets = vec![];
-    if unknown.is_none() && !crate::compression::failed(data).is_empty() {
-        unknown = Some("stats write failed");
-    }
-    match journal.filter(crate::compression::journal_valid) {
-        _ if unknown.is_some() => {}
-        // Fewer lines than the producer wrote: a deleted or truncated day file. Its calls are unprovable, never zero.
-        Some(j) if j["counts"].as_object().into_iter().flatten().any(|(d, n)| held.get(d).copied().unwrap_or(0) < n.as_u64().unwrap_or(0)) => {
-            unknown = Some("stats records lost")
-        }
-        Some(j) => {
-            let mut at = j["since"].as_u64().unwrap_or(u64::MAX).max(now.saturating_sub(RETENTION));
-            let mut gaps: Vec<(u64, u64)> = j["gaps"].as_array().into_iter().flatten().filter_map(|g| g[0].as_u64().zip(g[1].as_u64())).collect();
-            gaps.sort();
-            for (a, b) in gaps.into_iter().chain([(now + 1, now + 1)]) {
-                let a = a.min(now + 1);
-                if a > at {
-                    observed.push(json!([at, a]));
-                }
-                at = at.max(b);
-            }
-            resets = j["resets"].as_array().cloned().unwrap_or_default();
-            // A call that can write neither its record nor a failure marker leaves no evidence at all, so the journal
-            // shows only what was written: lower bounds, never complete or zero.
-            unknown = Some(UNPROVEN);
-        }
-        None => unknown = Some(if snapshot["journal"].is_null() { "no coverage journal" } else { "coverage journal unreadable" }),
-    }
-    let installation = std::fs::read_to_string(data.join("installation")).ok().map(|s| s.trim().to_string());
-    json!({"installation": installation, "runtime": crate::telemetry::runtime(), "observed": observed, "resets": resets,
-        "unknown": unknown, "records": records})
-}
-
-/// Exported spans from a queue folder, an OTLP JSON body, a span array or one span. Export carries no coverage, so
-/// the source has no observed interval; a queue folder adds its `dropped` count.
-pub fn exported(path: &Path) -> Result<Value, String> {
-    fn spans(v: Value, out: &mut Vec<Value>) {
-        if let Some(rs) = v["resourceSpans"].as_array() {
-            for ss in rs.iter().flat_map(|r| r["scopeSpans"].as_array().into_iter().flatten()) {
-                out.extend(ss["spans"].as_array().into_iter().flatten().cloned());
-            }
-        } else if let Value::Array(a) = v {
-            out.extend(a);
-        } else {
-            out.push(v);
-        }
-    }
-    let parse = |p: &Path| std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!("unreadable"));
-    let mut records = vec![];
-    let mut dropped = 0;
-    if path.is_dir() {
-        for (_, p, _) in crate::telemetry::entries(path) {
-            if !p.to_string_lossy().ends_with(crate::telemetry::RECORD) {
-                spans(parse(&p), &mut records);
-            }
-        }
-        dropped = crate::telemetry::state(path)["dropped"].as_u64().unwrap_or(0);
-    } else if path.is_file() {
-        spans(parse(path), &mut records);
-    } else {
-        return Err(format!("no events at {}", path.display()));
-    }
-    Ok(json!({"installation": null, "runtime": null, "observed": [], "dropped": dropped,
-        "unknown": "exported events carry no coverage", "records": records}))
-}
 
 #[cfg(test)]
 mod tests {

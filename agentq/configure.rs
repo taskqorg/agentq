@@ -307,7 +307,7 @@ mod tests {
         other["expires_at"] = json!(1200);
         assert_eq!(plan(&other, cfg)["digest"], p["digest"]);
         let mut edited = cfg.clone();
-        edited["profiles"][0]["routing"] = json!("bypassed");
+        edited["profiles"][0]["hooks"] = json!("partial");
         assert_ne!(plan(req, &edited)["digest"], p["digest"], "an old value is reviewed");
         let shuffled: Value = serde_json::from_str(&canonical(req).to_string()).unwrap();
         assert_eq!(digest(&shuffled), digest(req));

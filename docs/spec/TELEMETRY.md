@@ -6,8 +6,7 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 
 `agentq.installation` carries `status.json` fields ([agentq.md § 5](../../agentq.md#5-install-layout-and-service)) plus:
 
-- `agentq.routing` is the `status.json` `agents` object as a JSON string: per agent with a config root its `routing` (routed, direct, bypassed, unknown), `reason`, `intended` and `intended_reason`; `{}` when none.
-- `agentq.routing_problems` lists `<agent> <routing> (<reason>)` for each agent intended routed but not routed and `<agent> intended unknown (<reason>)`, else `none`.
+- `agentq.legacy_route`: fresh safe legacy endpoint diagnosis (`absent`, `problem` with next `agentq direct`, or `unknown`). `agentq.retirement`: the service startup migration result, independent of release health.
 - `agentq.hooks` is a JSON array with one object per agent and event that has a record ([agentq.md § 1](../../agentq.md#1-commands) hook evidence): `agent`, `event`, `state` of the latest run (`ok`, `failed`, `unknown` with `reason` `unreadable success stamp` or `unreadable failure record` when its success stamp, failure record or retained last failure is unreadable), `last_ok_at` (unix seconds or null) and `last_failure` (`{at, error}`, kept after a later success; null when it never failed).
 - `agentq.hook_failures` lists `<agent> <event> (<error>)` for each hook whose latest run failed, else `none`.
 - `agentq.model_backlog`: see [Claude transcript reading](#claude-transcript-reading).
@@ -17,7 +16,7 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 ### Launched sessions and project
 
 - Launched sessions (agentq.md M6.9): the Claude `Stop` hook and the Hermes `post_api_request` hook read the launch marker from their own environment, which the client passes on. A launched session reads no transcript, writes no offset and queues no span. A hook run that skips a launched session is a successful run.
-- Codex model calls arrive at the service, which does not see the client environment. The Codex `SessionStart` hook therefore writes `data/sessions/<first 32 hex of SHA-256 of the session ID>.json` with `launched` and the project code (no path). `agentq model codex` reads the record of the response's native session. A launched record queues nothing. Records are kept 7 days after their last write; a resumed session writes its record again.
+- The retained Codex model record entry does not see the client environment. The Codex `SessionStart` hook therefore writes `data/sessions/<first 32 hex of SHA-256 of the session ID>.json` with `launched` and the project code (no path). `agentq model codex` reads the record of the response's native session. A launched record queues nothing. Records are kept 7 days after their last write; a resumed session writes its record again.
 - A Codex call without a session record reads `agentq.project_unknown` `no session start` and is queued; a call that arrives before its `SessionStart` record can be counted twice.
 - Project (M6.10): the working directory is the transcript line's `cwd` for Claude, the hook input's `cwd` for Codex `SessionStart`, and the hook process's working directory for Hermes. agentq walks from it up to the first `taskq.json`. Its `repo` gives `agentq.project` when it is `owner/name` of `[A-Za-z0-9._-]`, neither part starting with `.`, at most 64 characters.
 - `agentq.project_unknown` reasons: `no working directory`, `no known project` (no `taskq.json` up to the root, or no valid `repo` in the nearest one), `no session start` (Codex).
@@ -46,7 +45,7 @@ Binding detail of [agentq.md § 6](../../agentq.md#6-telemetry-to-langfuse). The
 
 ### Codex responses
 
-- The loopback provider ([agentq.md § 3](../../agentq.md#3-managed-engines) Codex) reads each `response.completed`, `response.incomplete` or `response.failed` event (SSE, WebSocket or a plain JSON response) it already parses. It passes only the response `id`, `model`, `usage`, `created_at` and the native session to `agentq model codex` in a background thread; the stream stays byte-identical and a failure only logs.
+- Historical `codex_provider` events retain their mapping below. The loopback producer is retired; `agentq model codex` remains a compatible record entry. Current native Codex calls are recorded by Stop from the rollout (Session records).
 - Call ID = the response `id`; `agentq.agent` `codex`, `agentq.model.source` `codex_provider`. A response without `id` keys on a hash of its entry. Start = end = `created_at` (entry time when absent).
 - Tokens keep the Claude meaning: `input_tokens` is uncached input (`usage.input_tokens` − `input_tokens_details.cached_tokens`), `cache_read_tokens` is `cached_tokens`, `output_tokens` is `usage.output_tokens` (reasoning included).
 - The Responses API reports no cache creation and no cost: `cache_creation_tokens_unknown` and `cost_unknown` are `not reported`; any other missing field reads `not in response`.
@@ -117,19 +116,4 @@ M6.11 applies the runtime records of [RUNTIME.md](RUNTIME.md#observation) to ses
 
 ## Profiling
 
-| Operation | Sample | p95 budget | Failure budget |
-|---|---|---|---|
-| `compress.run` | agentq.md § 3 stats record, adapter `run` | none: `duration_ms` includes the native command; the 3 s filter budget is enforced inline | 1 % |
-| `compress.hook`, `compress.provider` | stats record of that adapter | 1000 ms | 1 % |
-| `export.langfuse` | one per send pass that posted or failed | 10 s | 5 % |
-| `export.dashq` | one per delivery of grant-bound records (ENROLLMENT) | 10 s | 5 % |
-| `proxy.request` | none: the headroom proxy serves model requests, agentq records none | unknown | unknown |
-
-- Counters: always on. A stats record is the compression sample: outcome `failed` is a failure and its `reason` the error class.
-- An export sample is `time`, operation, `duration_ms`, `class` in SQLite kind `export`, last 256 per operation. Class is null on success, else `auth`, `http`, `timeout`, `network`, `queue` (Langfuse) or `no_reply`, `stopped`, `rejected` (DashQ).
-- Traces: `agentq profile trace on [<minutes>]` sets `profile.trace_until` in `config.json`, default 15, at most 60 minutes; `off` removes it. While on, `compress.run` writes its `native` and `filter` steps and each export its posted batches to SQLite kind `trace`: `time`, `op`, `step`, `duration_ms`, `class`.
-- Traces are kept 7 days; a day stops at 1 MiB of canonical payload. `agentq profile` reports the switch state.
-- Report: `agentq profile [--json]` over the 7 days up to the report time, later timestamps excluded: per operation its calls, failure rate and classes, p50/p95/max ms (nearest rank), mean, standard deviation and its coefficient of variation `cv`.
-- Over budget: p95 above its budget (`time`), failure rate above its budget (`failures`), `cv` above 1 (`unstable`). Rank: the largest of p95/budget, failure rate/budget and `cv`, worst first, computed by CoreQ (`profile::summarize`, `profile::rank`); unknown operations last. Trace lines add per-step calls and p95.
-- Unknown: no samples in the window, an unreadable stats record (all `compress.*` operations), an unreadable or non-object export state or `profile` value (all `export.*` operations) or a malformed sample list or sample (that operation only) reads unknown with the reason, never zero or ok; the other operations still report.
-- An unreadable `config.json` or invalid `profile.trace_until` makes the switch unknown, never off, and writes no trace; an unreadable trace directory, file or line makes the steps unknown.
+`agentq profile` ranks retained export samples; it starts no compressor or proxy. Empty or unreadable samples remain unknown. `profile trace on [<minutes>]|off` retains its existing switch (default 15, at most 60 minutes), now recording export steps only. Historical compression rows remain retained, with no new producer; profile does not rank retired operations. Local telemetry SQLite retention and export rules remain unchanged (agentq.md §8).

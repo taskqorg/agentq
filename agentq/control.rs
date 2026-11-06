@@ -1,5 +1,5 @@
 //! Local temporary controls (agentq.md §4): compression preferences and durable integration intent.
-use crate::{executor, onboard, profiles, routing};
+use crate::{executor, onboard, profiles};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -48,34 +48,9 @@ pub fn intent(data: &Path, agent: &str) -> Value {
     }
 }
 
-pub fn optimization(data: &Path, agent: Option<&str>, enabled: bool, dry: bool) -> Result<Value, String> {
-    if !data.is_absolute() { return Err("select an absolute AgentQ installation root".into()); }
-    if agent.is_some_and(|a| !onboard::AGENTS.contains(&a)) { return Err("unsupported optimization agent".into()); }
-    let _lock = if dry { None } else { Some(executor::lock(data)?) };
-    let _ = state(data)?;
-    let mut c = config(data)?;
-    let old = c["compression"].clone();
-    if c["compression"].is_null() { c["compression"] = json!({}); }
-    if let Some(a) = agent {
-        if c["compression"]["agents"].is_null() { c["compression"]["agents"] = json!({}); }
-        let agents = c["compression"]["agents"].as_object_mut().ok_or("invalid agent preferences")?;
-        if enabled { agents.shift_remove(a); } else { agents.insert(a.into(), false.into()); }
-    } else {
-        c["compression"]["enabled"] = enabled.into();
-    }
-    let blocked = disabled(data, agent.unwrap_or("unknown"))?;
-    let effective = enabled && c["compression"]["enabled"] != false && !blocked;
-    let result = json!({"scope": agent.unwrap_or("host"), "requested": if enabled { "on" } else { "off" },
-        "effective": if effective { "on" } else { "off" }, "reason": if blocked { "integration_disabled" } else if enabled && !effective { "host_pause" } else { "requested" },
-        "outcome": if dry { "planned" } else if old == c["compression"] { "unchanged" } else { "applied" }, "reload": false});
-    if !dry { save(data, "config.json", &c)?; }
-    Ok(result)
-}
-
 pub fn wants(c: &profiles::Client, data: &Path, exe: &Path) -> Vec<onboard::Want> {
     let claude = c.files.get(1).cloned().unwrap_or_default();
     let mut w = onboard::wants(c.agent, &c.root, &claude, exe);
-    w.extend(onboard::routing_wants(c.agent, &c.root, routing::port(data, c.agent).unwrap_or(0)));
     let mut entries = onboard::load(&data.join("owned.json"));
     if let Ok(s) = state(data) { entries.extend(s["profiles"][c.agent]["entries"].as_array().into_iter().flatten().cloned()); }
     w.extend(onboard::instruction_wants(c.agent, &c.root, &entries));
@@ -94,11 +69,11 @@ fn enable_wants(h: &executor::Host, c: &profiles::Client, r: &Value) -> Result<V
     record_scope(c, r, &h.data, &h.exe)?;
     let entries = r["entries"].as_array().ok_or("invalid saved entries")?;
     let current = onboard::capture(&wants(c, &h.data, &h.exe), &h.data.join("owned.json"))?;
-    if entries.iter().any(|e| onboard::detached(e) != Ok(true) && !current.iter().any(|n| n["file"] == e["file"] && n["key"] == e["key"])) {
+    if entries.iter().filter(|e| !onboard::retired_entry(e)).any(|e| onboard::detached(e) != Ok(true) && !current.iter().any(|n| n["file"] == e["file"] && n["key"] == e["key"])) {
         return Err("owned value changed".into());
     }
     let direct = r["direct"] == true || config(&h.data)?["direct"].as_array().is_some_and(|a| a.iter().any(|a| a == c.agent));
-    let fields: Vec<_> = entries.iter().filter(|e| !(direct && e["field"] == "routing")).cloned().collect();
+    let fields: Vec<_> = entries.iter().filter(|e| !onboard::retired_entry(e) && !(direct && e["field"] == "routing")).cloned().collect();
     onboard::saved_wants(wants(c, &h.data, &h.exe), &fields)
 }
 
@@ -158,7 +133,7 @@ pub fn integrations(
     }).collect();
     if dry { return Ok(json!({"outcome": "planned", "action": if enabled { "enable" } else { "disable" }, "blocked": preview.iter().any(|p| p["conflict"] == true), "host": target.is_none(), "profiles": preview})); }
     let generation = next_generation(&mut s)?;
-    let mut ports = vec![];
+    let ports = vec![];
     if enabled {
         for c in &selected {
             let r = &mut s["profiles"][c.agent];
@@ -167,12 +142,6 @@ pub fn integrations(
     }
     save(&h.data, "integration.json", &s)?;
     if enabled {
-        for c in &selected {
-            let r = &s["profiles"][c.agent];
-            if r["direct"] != true && r["entries"].as_array().is_some_and(|es| es.iter().any(|e| e["field"] == "routing")) {
-                ports.push(routing::fix_port(&h.data, c.agent)?);
-            }
-        }
         if s["service"]["registered"] == true && s["service"]["loaded"].is_null() && s["service"]["active"] != true {
             return Err("saved service activation state unavailable".into());
         }
@@ -264,20 +233,19 @@ fn inventory(listing: &str, ignore: &[u32]) -> Result<std::collections::BTreeMap
 }
 
 /// Observe dependencies and persist pending/drained state under the same lock as configuration writers.
-pub fn drain(data: &Path, dependencies: Result<std::collections::BTreeMap<String, usize>, String>, connections: Result<usize, String>) -> Result<bool, String> {
+pub fn settle(data: &Path, dependencies: Result<std::collections::BTreeMap<String, usize>, String>) -> Result<bool, String> {
     let _lock = executor::lock(data)?;
     let mut s = state(data)?;
     if s["service"]["state"] == "stopping" { return Ok(false); }
     let before = s.clone();
-    let mut safe = dependencies.as_ref().is_ok_and(|d| d.get("controllers").copied().unwrap_or(0) == 0) && connections == Ok(0);
+    let mut safe = dependencies.as_ref().is_ok_and(|d| d.get("controllers").copied().unwrap_or(0) == 0);
     for (agent, r) in s["profiles"].as_object_mut().ok_or("invalid profiles")? {
-        let routed = r["entries"].as_array().is_some_and(|es| es.iter().any(|e| e["field"] == "routing"));
         let runtime = match &dependencies {
             Ok(counts) if r["phase"] == "detached" => {
                 let a = if agent == "claude-desktop" { "claude" } else { agent.as_str() };
                 if counts.get(a).copied().unwrap_or(0) + counts.get("agentq").copied().unwrap_or(0) > 0 {
-                    if routed { "pending_drain" } else { "pending_reload" }
-                } else if routed && connections != Ok(0) { "pending_drain" } else { "drained" }
+                    "pending_reload"
+                } else { "drained" }
             }
             _ => "unknown",
         };
@@ -286,22 +254,10 @@ pub fn drain(data: &Path, dependencies: Result<std::collections::BTreeMap<String
         r["runtime_at"] = crate::now().into();
     }
     if s["host_disabled"] == true {
-        s["service"]["state"] = if safe { "ready_to_stop" } else { "pending_drain" }.into();
+        s["service"]["state"] = if safe { "ready_to_stop" } else { "pending_reload" }.into();
     }
     if s != before { save(data, "integration.json", &s)?; }
     Ok(s["host_disabled"] == true && safe)
-}
-
-/// An old port stays available until its native dependencies and connections are known to have drained.
-pub fn transport(data: &Path, agent: &str) -> bool {
-    match state(data) {
-        Ok(s) => match s["profiles"].get(agent) {
-            Some(r) => r["phase"] != "detached" || r["runtime"] != "drained",
-            None => s["host_disabled"] != true,
-        },
-        // Unknown state cannot justify taking away an existing client's provider.
-        Err(_) => true,
-    }
 }
 
 pub fn observation(data: &Path, c: &profiles::Client, exe: &Path) -> Value {
@@ -348,7 +304,7 @@ pub fn reconcile_stop(data: &Path, owner: u32, owner_alive: bool, service_alive:
     let _lock = executor::lock(data)?;
     let mut s = state(data)?;
     if s["service"]["state"] == "stopping" && s["service"]["owner"].as_u64() == Some(u64::from(owner)) {
-        s["service"]["state"] = if service_alive { "pending_drain" } else { "stopped" }.into();
+        s["service"]["state"] = if service_alive { "pending_reload" } else { "stopped" }.into();
         save(data, "integration.json", &s)?;
     }
     Ok(())
@@ -376,337 +332,62 @@ pub fn process_alive(pid: u32) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    // M4.1/M4.6/M9.2: record-hook detach/enable never changes native policy, foreign hooks or later edits.
     #[test]
-    fn compression_controls_preserve_scopes_and_reject_corruption() {
-        let d = std::env::temp_dir().join(format!("agentq-control-{}", crate::mcp::new_id()));
-        assert_eq!(optimization(&d, None, false, true).unwrap()["outcome"], "planned");
-        assert!(!d.exists(), "dry-run creates no key, lock, directory or settings");
-        optimization(&d, Some("claude"), false, false).unwrap();
-        optimization(&d, None, false, false).unwrap();
-        assert_eq!(optimization(&d, Some("codex"), true, false).unwrap()["reason"], "host_pause");
-        optimization(&d, None, true, false).unwrap();
-        let c = config(&d).unwrap();
-        assert_eq!(c["compression"]["agents"]["claude"], false);
-        assert!(c["compression"]["agents"]["codex"].is_null());
-        std::fs::write(d.join("config.json"), "broken").unwrap();
-        assert!(optimization(&d, None, true, false).is_err());
-        assert_eq!(std::fs::read_to_string(d.join("config.json")).unwrap(), "broken");
-        std::fs::write(d.join("integration.json"), "{}").unwrap();
-        assert!(disabled(&d, "codex").is_err());
-        std::fs::remove_dir_all(d).unwrap();
+    fn record_hooks_roundtrip_and_preserve_foreign_changes() {
+        let root = std::env::temp_dir().join(format!("agentq-record-controls-{}", crate::resource::new_id()));
+        let home = root.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let native = "model = \"native\"\n";
+        std::fs::write(home.join("config.toml"), native).unwrap();
+        std::fs::write(home.join("hooks.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"foreign"}]}]}}"#).unwrap();
+        let h = executor::Host { data: root.join("install/data"), exe: root.join("install/agentq"),
+            clients: vec![profiles::Client { kind:"codex", agent:"codex", root:home.clone(), files:vec![home.join("config.toml"),home.join("hooks.json")] }],
+            installation:"fixture".into(), generation:0, grant:Value::Null };
+        onboard::apply(&wants(&h.clients[0], &h.data, &h.exe), &h.data.join("owned.json")).unwrap();
+        let installed = std::fs::read_to_string(home.join("hooks.json")).unwrap();
+        let mut ready = |ports: &[u16], _: bool| { assert!(ports.is_empty()); Ok(()) };
+        assert_eq!(integrations(&h, Some("codex"), false, true, json!({}), &mut ready).unwrap()["outcome"], "planned");
+        assert_eq!(std::fs::read_to_string(home.join("hooks.json")).unwrap(), installed);
+        assert_eq!(integrations(&h, Some("codex"), false, false, json!({}), &mut ready).unwrap()["outcome"], "applied");
+        assert_eq!(disabled(&h.data,"codex"), Ok(true));
+        let detached = std::fs::read_to_string(home.join("hooks.json")).unwrap();
+        assert!(detached.contains("foreign") && !detached.contains("hook codex"));
+        assert_eq!(integrations(&h, Some("codex"), true, false, json!({}), &mut ready).unwrap()["outcome"], "applied");
+        assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), native);
+        assert_eq!(std::fs::read_to_string(home.join("hooks.json")).unwrap(), installed);
+        std::fs::write(home.join("hooks.json"), installed.replace("hook codex Stop", "later-hook")).unwrap();
+        let result = integrations(&h, Some("codex"), false, false, json!({}), &mut ready);
+        assert!(result.is_err() || result.unwrap()["outcome"] != "applied");
+        assert!(std::fs::read_to_string(home.join("hooks.json")).unwrap().contains("later-hook"));
+        std::fs::remove_dir_all(root).unwrap();
     }
-
-    // #192 A2 / M4.1, M4.6, M4.7, M9.2: native hook lifecycle preserves foreign hooks and disable intent.
     #[test]
-    fn antigravity_hook_lifecycle() {
-        let counts = inventory("123 1 /bin/agy\n124 1 /bin/agentapi\n125 1 /Applications/Antigravity.app/Contents/MacOS/Antigravity\n", &[]).unwrap();
-        assert_eq!(counts.get("antigravity"), Some(&3), "native clients must prevent a false drained state");
-        let mut h = host("antigravity", false);
-        let root = h.data.parent().unwrap().parent().unwrap().join("gemini");
-        std::fs::create_dir_all(root.join("config")).unwrap();
-        let path = root.join("config/hooks.json");
-        let foreign = json!({"enabled": true, "PreToolUse": [{"matcher": "other", "hooks": [{"command": "invented-foreign"}]}]});
-        std::fs::write(&path, json!({"foreign": foreign, "agentq": {"PreToolUse": [foreign["PreToolUse"][0].clone()]}}).to_string()).unwrap();
-        let c = profiles::Client { kind: "antigravity", agent: "antigravity", root, files: vec![path.clone()] };
-        h.clients.push(c.clone());
-        let ws = wants(&c, &h.data, &h.exe);
-        let journal = h.data.join("owned.json");
-        let lines = onboard::apply(&ws, &journal).unwrap();
-        assert!(!lines.iter().any(|l| l.starts_with("conflict:")), "{lines:?}");
-        assert!(onboard::apply(&ws, &journal).unwrap().iter().all(|l| l.starts_with("kept:")));
-        let read = || serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(read()["agentq"]["Stop"][0]["command"].as_str().unwrap().ends_with(" hook antigravity Stop"), "Stop takes a flat handler list (M6.11)");
-        let status = || profiles::status_with(&h.clients, &h.data, crate::now())["profiles"].as_array().unwrap().iter().find(|p| p["kind"] == "antigravity").unwrap().clone();
-        assert_eq!(status()["hooks"], "registered");
-        assert_eq!(status()["effective"]["state"], "configured");
-        assert_eq!(read()["agentq"]["PreToolUse"].as_array().unwrap().len(), 2);
-        assert_eq!(change(&h, Some("antigravity"), false)["outcome"], "applied");
-        assert_eq!(status()["integration"]["configuration"], "detached");
-        assert_eq!(status()["hooks"], "absent");
-        assert_eq!(read()["foreign"], foreign);
-        assert_eq!(read()["agentq"]["PreToolUse"], foreign["PreToolUse"]);
-        assert_eq!(change(&h, Some("antigravity"), true)["outcome"], "applied");
-        assert_eq!(status()["hooks"], "registered");
-        executor::hook_failed(&h.data, "antigravity", "PreToolUse", 10, "invented failure");
-        assert!(executor::hook_failures(&h.data).iter().any(|f| f.starts_with("antigravity PreToolUse")));
-        executor::stamp(&h.data, "antigravity", "PreToolUse", 11);
-        assert!(executor::hook_failures(&h.data).is_empty());
-        assert_eq!(change(&h, None, false)["outcome"], "applied");
-        assert_eq!(state(&h.data).unwrap()["profiles"].as_object().unwrap().len(), 5);
-        assert_eq!(change(&h, None, true)["outcome"], "applied");
-        let mut edited = read();
-        edited["agentq"]["PreToolUse"][1]["hooks"][0]["command"] = format!("\"{}\" hook antigravity PreToolUse --invented-edit", h.exe.display()).into();
-        std::fs::write(&path, edited.to_string()).unwrap();
-        assert_eq!(change(&h, Some("antigravity"), false)["outcome"], "partial");
-        assert_eq!(read(), edited, "a later edit is kept, never overwritten");
-        std::fs::write(&path, "{invalid").unwrap();
-        assert_eq!(status()["hooks"], "unknown");
-        let inactive = r#"{"agentq":{"enabled":false}}"#;
-        std::fs::write(&path, inactive).unwrap();
-        assert!(onboard::apply(&ws, &journal).unwrap().iter().any(|l| l.starts_with("conflict:")));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), inactive, "native disabled groups remain a conflict");
-        std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
-    }
-
-    fn host(name: &str, routed: bool) -> executor::Host {
-        let root = std::env::temp_dir().join(format!("agentq-control-{name}-{}", crate::mcp::new_id()));
-        let data = root.join("install/data");
-        std::fs::create_dir_all(&data).unwrap();
-        let c = |kind, agent, folder: &str, files: &[&str]| {
-            let r = root.join(folder);
-            std::fs::create_dir_all(&r).unwrap();
-            profiles::Client { kind, agent, root: r.clone(), files: files.iter().map(|f| r.join(f)).collect() }
-        };
-        let clients = vec![c("codex", "codex", "codex", &["config.toml", "hooks.json"]),
-            c("claude-code", "claude", "claude", &["settings.json", ".claude.json"]),
-            c("claude-desktop-chat", "claude-desktop", "desktop", &["claude_desktop_config.json"]),
-            c("hermes", "hermes", "hermes", &["config.yaml"])];
-        std::fs::write(&clients[0].files[0], "model = \"native-model\"\n").unwrap();
-        std::fs::write(&clients[1].files[0], r#"{"model":"native-model","permissions":{"defaultMode":"default"}}"#).unwrap();
-        std::fs::write(&clients[3].files[0], "model: native-model\nplugins: {}\n").unwrap();
-        save(&data, "config.json", &json!({"ports": {"codex": 41001}, "compression": {"agents": {"claude": false}},
-            "direct": if routed { vec![] } else { vec!["codex"] }})).unwrap();
-        let h = executor::Host { data, exe: root.join("install/agentq"), clients, installation: "fixture".into(), generation: 0, grant: Value::Null };
-        let mut all = vec![];
-        for c in &h.clients {
-            let mut ws = wants(c, &h.data, &h.exe);
-            if !routed && c.agent == "codex" { ws.retain(|w| w.field() != "routing"); }
-            all.extend(ws);
-        }
-        let lines = onboard::apply(&all, &h.data.join("owned.json")).unwrap();
-        assert!(!lines.iter().any(|l| l.starts_with("conflict:")), "{lines:?}");
-        let _ = profiles::status_with(&h.clients, &h.data, 1000);
-        h
-    }
-
-    fn change(h: &executor::Host, agent: Option<&str>, on: bool) -> Value {
-        integrations(h, agent, on, false, json!({"registered": false, "active": false}), &mut |_, _| Ok(())).unwrap()
-    }
-
-    #[test]
-    fn reversible_controls_preserve_native_settings_foreign_siblings_and_baseline() {
-        for routed in [false, true] {
-            let h = host("roundtrip", routed);
-            // Add foreign siblings after the old parent-shaped ownership receipts were written.
-            let path = &h.clients[1].files[1];
-            let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-            doc["mcpServers"]["foreign"] = json!({"command": "foreign-tool"});
-            std::fs::write(path, doc.to_string()).unwrap();
-            let hermes = &h.clients[3].files[0];
-            let text = std::fs::read_to_string(hermes).unwrap() + "  foreign:\n    command: foreign-tool\n";
-            std::fs::write(hermes, text).unwrap();
-            assert_eq!(change(&h, None, false)["outcome"], "applied");
-            assert!(disabled(&h.data, "unknown").unwrap());
-            let entries = state(&h.data).unwrap()["profiles"]["codex"]["entries"].clone();
-            assert_eq!(change(&h, None, false)["outcome"], "applied");
-            assert_eq!(state(&h.data).unwrap()["profiles"]["codex"]["entries"], entries);
-            assert!(onboard::load(&h.data.join("owned.json")).is_empty());
-            let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-            assert_eq!(doc["mcpServers"]["foreign"]["command"], "foreign-tool");
-            let text = std::fs::read_to_string(hermes).unwrap();
-            assert!(text.contains("mcp_servers:\n  foreign:\n"), "{text}");
-            assert!(!text.contains("agentq:"));
-            let mut prepared = false;
-            let r = integrations(&h, None, true, false, json!({}), &mut |ports, _| {
-                prepared = true;
-                assert_eq!(ports.is_empty(), !routed);
-                assert!(!std::fs::read_to_string(&h.clients[0].files[0]).unwrap().lines().any(|l| l.starts_with("model_provider =")));
-                Ok(())
-            }).unwrap();
-            assert!(prepared);
-            assert_eq!(r["outcome"], "applied", "{r}");
-            assert!(!disabled(&h.data, "unknown").unwrap());
-            assert_eq!(config(&h.data).unwrap()["compression"]["agents"]["claude"], false);
-            let text = std::fs::read_to_string(&h.clients[0].files[0]).unwrap();
-            assert_eq!(text.lines().any(|l| l.starts_with("model_provider =")), routed);
-            assert!(text.contains("native-model"));
-            let settings: Value = serde_json::from_str(&std::fs::read_to_string(&h.clients[1].files[0]).unwrap()).unwrap();
-            assert_eq!(settings["permissions"]["defaultMode"], "default");
-            assert_eq!(change(&h, None, true)["outcome"], "unchanged");
-            std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
-        }
-    }
-
-    #[test]
-    fn repeated_disable_repairs_codex_provider_removed_by_older_releases() {
-        let h = host("provider-repair", true);
-        assert_eq!(change(&h, Some("codex"), false)["outcome"], "applied");
-        let path = &h.clients[0].files[0];
-        let snapshot = state(&h.data).unwrap()["profiles"]["codex"]["entries"].clone();
-        for text in [Some("model = \"native-model\"\n"), None] {
-            if let Some(text) = text { std::fs::write(path, text).unwrap(); }
-            else { std::fs::remove_file(path).unwrap(); }
-            assert_eq!(change(&h, Some("codex"), false)["outcome"], "applied");
-            let repaired = std::fs::read_to_string(path).unwrap();
-            assert!(repaired.contains(onboard::CODEX_DIRECT_PROVIDER));
-            assert!(!repaired.contains("base_url"));
-            assert_eq!(state(&h.data).unwrap()["profiles"]["codex"]["entries"], snapshot);
-        }
-        std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn duplicate_legacy_receipts_detach_once_and_restore_canonical_fields() {
-        let h = host("duplicate-receipts", false);
-        let journal = h.data.join("owned.json");
-        let mut entries = onboard::load(&journal);
-        let duplicates: Vec<_> = entries.iter().filter(|e| e["file"] == h.clients[0].files[0].display().to_string()
-            || e["file"] == h.clients[1].files[1].display().to_string()).cloned().map(|mut e| {
-                e["orig"] = "{\"historical_context\":true}".into();
-                e
-            }).collect();
-        assert_eq!(duplicates.len(), 2);
-        entries.extend(duplicates);
-        std::fs::write(&journal, serde_json::to_string(&entries).unwrap()).unwrap();
-        let preview = integrations(&h, None, false, true, json!({}), &mut |_, _| panic!("dry-run starts no service")).unwrap();
-        assert_eq!(preview["blocked"], false, "duplicate owned receipts are not foreign edits");
-        assert_eq!(change(&h, None, false)["outcome"], "applied");
-        assert!(onboard::load(&journal).is_empty(), "all duplicate source receipts must be suspended");
-        assert_eq!(change(&h, None, true)["outcome"], "applied");
-        assert_eq!(change(&h, None, false)["outcome"], "applied");
-        let c = &h.clients[1];
-        std::fs::write(&c.files[1], r#"{"mcpServers":{"agentq":{"command":"foreign-tool"}}}"#).unwrap();
-        let foreign = std::fs::read(&c.files[1]).unwrap();
-        assert_eq!(change(&h, Some("claude"), true)["outcome"], "partial");
-        assert_eq!(std::fs::read(&c.files[1]).unwrap(), foreign);
-        std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn interrupted_detach_and_enable_reconcile_without_replacing_foreign_values() {
-        let h = host("crash", false);
-        let codex = std::fs::read(&h.clients[0].files[0]).unwrap();
-        let journal = std::fs::read(h.data.join("owned.json")).unwrap();
-        assert_eq!(change(&h, Some("claude"), false)["outcome"], "applied");
-        assert_eq!(std::fs::read(&h.clients[0].files[0]).unwrap(), codex);
-        // Crash after native detach and before forgetting active receipts.
-        std::fs::write(h.data.join("owned.json"), journal).unwrap();
+    fn old_disabled_profile_ignores_retired_scope_and_never_restores_it() {
+        let root = std::env::temp_dir().join(format!("agentq-old-disabled-{}", crate::resource::new_id()));
+        let home = root.join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        let h = executor::Host { data:root.join("install/data"),exe:root.join("install/agentq"),
+            clients:vec![profiles::Client {kind:"codex",agent:"codex",root:home.clone(),files:vec![home.join("config.toml"),home.join("hooks.json")]}],
+            installation:"fixture".into(),generation:0,grant:Value::Null };
+        onboard::apply(&wants(&h.clients[0], &h.data, &h.exe), &h.data.join("owned.json")).unwrap();
+        let mut ready = |_: &[u16], _: bool| Ok(());
+        integrations(&h, Some("codex"), false, false, json!({}), &mut ready).unwrap();
         let mut s = state(&h.data).unwrap();
-        s["profiles"]["claude"]["phase"] = "detaching".into();
-        save(&h.data, "integration.json", &s).unwrap();
-        assert_eq!(change(&h, Some("claude"), false)["outcome"], "applied");
-        let r = state(&h.data).unwrap()["profiles"]["claude"].clone();
-        let ws = onboard::saved_wants(wants(&h.clients[1], &h.data, &h.exe), r["entries"].as_array().unwrap()).unwrap();
-        // Crash after canonical reapply and before clearing disable intent.
-        s = state(&h.data).unwrap();
-        s["profiles"]["claude"]["phase"] = "enabling".into();
-        save(&h.data, "integration.json", &s).unwrap();
-        onboard::apply(&ws, &h.data.join("owned.json")).unwrap();
-        let n = onboard::load(&h.data.join("owned.json")).len();
-        assert_eq!(change(&h, Some("claude"), true)["outcome"], "applied");
-        assert_eq!(onboard::load(&h.data.join("owned.json")).len(), n);
-        change(&h, Some("claude"), false);
-        let path = &h.clients[1].files[1];
-        let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        doc["mcpServers"]["agentq"] = json!({"command": "foreign-tool"});
-        std::fs::write(path, doc.to_string()).unwrap();
-        let before = std::fs::read(path).unwrap();
-        assert_eq!(change(&h, Some("claude"), true)["outcome"], "partial");
-        assert_eq!(std::fs::read(path).unwrap(), before);
-        assert!(disabled(&h.data, "claude").unwrap());
-        std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn drain_needs_native_inventory_and_empty_connections_not_elapsed_time() {
-        let h = host("drain", true);
-        change(&h, None, false);
-        let old = inventory("123 1 /Applications/Codex.app/Contents/MacOS/Codex\n456 1 /bin/claude\n", &[]).unwrap();
-        assert!(!drain(&h.data, Ok(old), Ok(0)).unwrap());
-        assert_eq!(state(&h.data).unwrap()["profiles"]["codex"]["runtime"], "pending_drain");
-        assert!(transport(&h.data, "codex"));
-        let desktop = inventory("321 1 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n", &[]).unwrap();
-        assert!(!drain(&h.data, Ok(desktop), Ok(0)).unwrap(), "the current Codex Desktop executable is named ChatGPT and may retain its provider");
-        assert!(!drain(&h.data, Err("unsupported".into()), Ok(0)).unwrap());
-        assert!(inventory("789 1 /usr/bin/python3\n", &[]).is_err(), "Hermes can run as a generic Python process");
-        assert!(inventory("789 456 /private/engine/python\n", &[456]).is_ok(), "the service owns its proxy child");
-        let empty = inventory("1 0 /sbin/init\n", &[]).unwrap();
-        assert!(!drain(&h.data, Ok(empty.clone()), Err("unreadable".into())).unwrap());
-        assert!(drain(&h.data, Ok(empty), Ok(0)).unwrap());
-        assert!(!transport(&h.data, "codex"));
-        let mut s = state(&h.data).unwrap();
-        for phase in ["detaching", "conflict", "enabling"] {
-            s["profiles"]["codex"]["phase"] = phase.into();
-            save(&h.data, "integration.json", &s).unwrap();
-            assert!(transport(&h.data, "codex"), "an unfinished {phase} must retain the old transport");
+        for (field,key,kind,after) in [
+            ("routing",json!(["model_provider"]),"text",json!("model_provider = \"agentq\"\n")),
+            ("mcp",json!(["mcp_servers","agentq"]),"text",json!("[mcp_servers.agentq]\ncommand = \"agentq\"\n")),
+            ("hooks",json!(["hooks","PreToolUse"]),"append",json!({"hooks":[{"command":"agentq hook codex PreToolUse"}]})),
+        ] {
+            s["profiles"]["codex"]["entries"].as_array_mut().unwrap().push(json!({"file":home.join(if field=="hooks" {"hooks.json"}else{"config.toml"}),"key":key,"field":field,"kind":kind,"after":after,"agent":"codex","source":"0".repeat(64)}));
         }
-        s["service"]["state"] = "stopped".into();
         save(&h.data, "integration.json", &s).unwrap();
-        assert!(host_disabled(&h.data).unwrap(), "a stopped service does not clear intent");
-        std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
+        assert_eq!(integrations(&h,Some("codex"),false,false,json!({}),&mut ready).unwrap()["outcome"], "applied");
+        assert_eq!(integrations(&h,Some("codex"),true,false,json!({}),&mut ready).unwrap()["outcome"], "applied");
+        assert!(!home.join("config.toml").exists());
+        let hooks = std::fs::read_to_string(home.join("hooks.json")).unwrap();
+        assert!(hooks.contains("SessionStart") && hooks.contains("Stop") && !hooks.contains("PreToolUse"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn dry_run_revisions_and_scope_checks_protect_native_configuration() {
-        let h = host("revision", false);
-        let native = std::fs::read(&h.clients[0].files[0]).unwrap();
-        let journal = std::fs::read(h.data.join("owned.json")).unwrap();
-        let r = integrations(&h, None, false, true, json!({}), &mut |_, _| panic!("dry-run starts no service")).unwrap();
-        assert_eq!(r["outcome"], "planned");
-        assert!(!h.data.join("integration.json").exists());
-        assert_eq!(std::fs::read(h.data.join("owned.json")).unwrap(), journal);
-        let first = profiles::status_with(&h.clients, &h.data, 1000)["revision"].clone();
-        optimization(&h.data, None, false, false).unwrap();
-        let second = profiles::status_with(&h.clients, &h.data, 1000)["revision"].clone();
-        assert_ne!(first, second, "host policy invalidates a confirmed plan");
-        routing::set_direct(&h.data, &["codex"], false).unwrap();
-        assert_ne!(second, profiles::status_with(&h.clients, &h.data, 1000)["revision"]);
-        assert_eq!(std::fs::read(&h.clients[0].files[0]).unwrap(), native);
-        change(&h, Some("claude"), false);
-        let projection = profiles::status_with(&h.clients, &h.data, 1000);
-        let id = projection["profiles"].as_array().unwrap().iter().find(|p| p["kind"] == "claude-code").unwrap()["id"].clone();
-        let plan = crate::configure::plan(&json!({"changes": [{"profile": id, "field": "hooks", "value": "registered"}]}), &projection);
-        assert!(plan["blocked"].as_array().unwrap().contains(&json!("integration_disabled")));
-        let outside = h.data.parent().unwrap().parent().unwrap().join("outside.json");
-        std::fs::write(&outside, "leave intact").unwrap();
-        let mut s = state(&h.data).unwrap();
-        s["profiles"]["claude"]["entries"][0]["file"] = json!(outside);
-        save(&h.data, "integration.json", &s).unwrap();
-        assert!(integrations(&h, Some("claude"), true, false, json!({}), &mut |_, _| panic!("invalid scope starts no service")).is_err());
-        assert_eq!(std::fs::read_to_string(outside).unwrap(), "leave intact");
-        assert_eq!(summary(&["on", "off"]), "mixed");
-        assert_eq!(summary(&["off", "unknown"]), "unknown");
-        std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn owned_instructions_originals_and_interrupted_service_stop_survive_roundtrip() {
-        let h = host("instructions", false);
-        let path = h.clients[0].root.join("AGENTS.md");
-        let after = format!("\n\n{}\n", crate::mcp::INSTRUCTIONS);
-        std::fs::write(&path, format!("Foreign instructions.{after}")).unwrap();
-        let mut journal = onboard::load(&h.data.join("owned.json"));
-        journal.push(json!({"file": path, "key": ["instruction_block"], "kind": "text", "after": after, "before": null}));
-        save(&h.data, "owned.json", &json!(journal)).unwrap();
-        let reference_file = h.data.join("reference.txt");
-        std::fs::write(&reference_file, "original fixture bytes\n").unwrap();
-        let dir = h.data.join("originals");
-        let original = crate::mcp::call(&dir, "index_document", &json!({"path": reference_file})).unwrap();
-        let grant = h.data.join("connection");
-        std::fs::create_dir_all(&grant).unwrap();
-        std::fs::write(grant.join("fixture-grant"), "invented observation grant").unwrap();
-        assert_eq!(change(&h, Some("codex"), false)["outcome"], "applied");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Foreign instructions.");
-        assert_eq!(change(&h, Some("codex"), true)["outcome"], "applied");
-        assert!(std::fs::read_to_string(path).unwrap().contains(crate::mcp::INSTRUCTIONS));
-        change(&h, None, false);
-        let mut s = state(&h.data).unwrap();
-        s["service"]["state"] = "stopping".into();
-        s["service"]["owner"] = 12345.into();
-        save(&h.data, "integration.json", &s).unwrap();
-        reconcile_stop(&h.data, 12345, true, false, false).unwrap();
-        assert_eq!(state(&h.data).unwrap()["service"]["state"], "stopping");
-        assert!(integrations(&h, None, true, false, json!({}), &mut |_, _| Ok(())).is_err());
-        reconcile_stop(&h.data, 12345, false, false, true).unwrap();
-        assert_eq!(state(&h.data).unwrap()["service"]["state"], "stopping");
-        reconcile_stop(&h.data, 12345, false, false, false).unwrap();
-        assert_eq!(state(&h.data).unwrap()["service"]["state"], "stopped");
-        assert!(host_disabled(&h.data).unwrap());
-        let recovered = crate::mcp::call(&dir, "get_original", &json!({"ref": original["ref"]})).unwrap();
-        assert_eq!(recovered["content"], "original fixture bytes\n");
-        assert_eq!(std::fs::read_to_string(grant.join("fixture-grant")).unwrap(), "invented observation grant");
-        assert_eq!(change(&h, None, true)["outcome"], "applied");
-        std::fs::remove_dir_all(h.data.parent().unwrap().parent().unwrap()).unwrap();
-    }
 }
