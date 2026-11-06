@@ -3,7 +3,7 @@
 agentq installs, routes and observes context optimization for Codex, Claude Code, Hermes and Antigravity on one host, and owns the reusable Codex/Claude/Antigravity worker runtime that other products launch turns through (§ 12). It is one static binary and one runtime library on [coreq](https://github.com/taskqorg/coreq) with no server, relay or dashboard of its own.
 This file holds every agentq decision; its linked detail files hold binding detail.
 
-It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 3; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
+It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 4; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
 
 ## Principles
 - **P1 Never break the agent.** Any agentq failure keeps the original tool output and the client's own login, model, approvals and sandbox.
@@ -26,6 +26,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 | `agentq connection status [--json]`, `agentq disconnect`, `agentq langfuse` | Connection, projection, export and revocation state with the next action; disconnect stops sending at once and retries the revoke. Released before qualification #95. `langfuse`: standalone mode, reads Langfuse host and keys from hidden stdin into protected storage (§ 6). |
 | `agentq agent host --action <action> --request <json>` | Independent protected host prepare, launch, observe, cancel and reconcile under existing authority (§ 12); no admission service. |
 | `agentq agent turn` | Run one Codex, Claude or Antigravity turn through `agentq-runtime` from a JSON request on stdin; prints the JSON report (§ 12). Needs no service, engine, MCP server or install. |
+| `agentq agent preflight` | Check one launch request from JSON on stdin and print its readiness report; `--repair` applies only M12.16 repairs. No model call (§ 12). Target: #284. |
 | `agentq run -- <cmd> [args..]` | Run a native command through RTK when qualified, else unchanged (§ 3). Exit code and stderr preserved. |
 | `agentq compress <agent>`, `agentq stats [--json]`, `agentq stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>]` | Compression core entry, its local stats, and the read-only ACCOUNTING O1–O3 aggregate of local stats or of exported `agentq.compress` events at `<path>` (§ 3). |
 | `agentq mcp <agent>`, `agentq hook <agent> <event>`, `agentq model codex` | Stdio MCP server `agentq` (§ 2); hook handler for § 4 events, JSON on stdin and stdout (M1.2); loopback provider entry for one finished Codex model call, JSON on stdin, queues `agentq.model` (§ 6). |
@@ -166,6 +167,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - Mapped: R1 (§ 1, § 4, § 5; Desktop Chat: MCP only), R8 (§ 8, § 6; SQLite/WAL for local telemetry, other state stays files), R10 (§ 6, § 8; accounting kept, dashboard dropped from agentq, owned by dashq).
 - Changed: R2 (§ 2, § 3; built-in search replaces context-mode, tool names unchanged); R6 (§ 5; coreq release trust, HTTPS and tags, replaces signatures; no staged rollout; worker swap kept for headroom).
 - Added: R13 (§ 12; runtime library and `agentq agent turn`, optional optimization per launch).
+- Added: R14 (§ 12 M12.15–M12.17; worker preflight, bounded preparation, no silent wait).
 - Not provided: relay and GitHub App (§ 7 posts through the user's login); gateway server, serviceq panel and dashboard (dashq owns them); SuperCompress, provider selection and Headroom compression (local tools replace them, no paid key); Ed25519 recipe signing and staged rollout (coreq trust, one release repo).
 
 ## 12. Agent runtime
@@ -194,10 +196,14 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
   A finished run's records are frozen at its terminal observation: `Run::snapshot` returns them without a store lock, and later log bytes or queue delay never change them. [Detail](docs/spec/RUNTIME.md#deferred-persistence).
   Records and runtime children inherit the caller's CoreQ `project`, `task`, `attempt`, `actor` and `entry`; a missing value reads null with a reason. [Detail](docs/spec/RUNTIME.md#observation).
 - **M12.14** `agent.turn` also carries the exit code, session id, user and system CPU and peak RSS. Peak RSS is the largest sampled sum of the live processes of the tree; per-process peaks are never summed. A process the run does not own reads null with a reason.
+- **M12.15** A worker gets its input only after preflight: client, account, capacity, workspace, permissions, inputs and storage are checked, in that order, with no model call. A blocked check refuses before spawn with a named cause and next step; no tokens are spent and no work starts half ready.
+  Unknown continues by default and stays visible, because a failed probe alone must not stop work; a caller may choose strict. A failure of AgentQ's optional parts (hooks, telemetry, archive) degrades evidence, never blocks work (P1). Target: #284. [Detail](docs/spec/RUNTIME.md#worker-preflight).
+- **M12.16** Preparation fixes only what it owns, on explicit request, outside `launch`: exact-path client trust and AgentQ's own hook trust, under the client's lock and journaled. M12.6 holds for `launch` itself. It never changes login, account, model, permissions, provider, foreign hooks, or trust for a home or root folder.
+- **M12.17** A worker never silently waits for a person: the child has no interactive prompt path, and a run reads started only on native proof of a session. No proof inside the start window ends it with a named cause through identity-safe stop. Input already written is never resubmitted.
 - Binding [runtime operation, observation, native lookup, benchmarks and adoption](docs/spec/RUNTIME.md#runtime-operation-and-adoption).
 
 ## Linked detail
-- [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): product outcomes R1–R13.
+- [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): product outcomes R1–R14.
 - [docs/spec/VERIFICATION.md](docs/spec/VERIFICATION.md): minimal product acceptance and live check records.
 - [docs/spec/ACCOUNTING.md](docs/spec/ACCOUNTING.md): optimization result definitions O1–O4.
 - [docs/spec/COMPRESSION.md](docs/spec/COMPRESSION.md): engine pins, qualified lists, adapters, core entries, config, stats record and accounting coverage.
