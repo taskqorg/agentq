@@ -32,7 +32,7 @@ pub(crate) fn main() {
         return fake_ready(&file);
     }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") {
-        if matches!(std::env::args().nth(1).as_deref(),Some("--version"|"auth"|"login")) {return;}
+        if matches!(std::env::args().nth(1).as_deref(),Some("--version"|"auth"|"login")) {if client=="antigravity" && std::env::args().nth(1).as_deref()==Some("--version") {println!("agy 1.5.2");}return;}
         return fake(&client);
     }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
