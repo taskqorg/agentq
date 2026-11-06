@@ -41,7 +41,7 @@ fn main() {
     let classified=r.classify(&std::fs::read_to_string(&l.log).unwrap());
     assert_eq!((classified.outcome,classified.text.as_deref(),classified.usage.input),("ok",Some("answer"),Some(17)));
     l.input="second".into();
-    let mut resumed=r.resume("session-1",&l).unwrap();
+    let mut resumed=r.resume("session:opaque_/1",&l).unwrap();
     r.cancel(&mut resumed).unwrap();
     while r.poll(&mut resumed).unwrap()==State::Running {std::thread::yield_now();}
     let events=r.progress(&mut resumed).unwrap();
@@ -68,7 +68,7 @@ fn server() {
     let mut prompt=Value::Null;
     let emit=|v:Value| {println!("{v}");std::io::stdout().flush().unwrap();};
     let reply=|v:&Value,result:Value|emit(json!({"jsonrpc":"2.0","id":v["id"],"result":result}));
-    let update=|u:Value|emit(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":u}}));
+    let update=|u:Value|emit(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session:opaque_/1","update":u}}));
     for line in std::io::stdin().lock().lines() {
         let v:Value=serde_json::from_str(&line.unwrap()).unwrap();
         match v["method"].as_str() {
@@ -76,7 +76,7 @@ fn server() {
             Some("session/new"|"session/load")=>{
                 assert!(PathBuf::from(std::env::var_os("GEMINI_HOME").unwrap()).ends_with("account"));
                 if v["method"]=="session/load" {update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"old replay"}}));}
-                reply(&v,json!({"sessionId":"session-1"}));
+                reply(&v,json!({"sessionId":"session:opaque_/1"}));
             },
             Some("session/set_model")=>{assert_eq!(v["params"]["modelId"],"model-1");reply(&v,json!({}));},
             Some("session/set_mode")=>{assert_eq!(v["params"]["modeId"],"accept-edits");reply(&v,json!({}));},
@@ -84,7 +84,7 @@ fn server() {
                 if std::env::var_os("AGENTQ_FAKE_ACP_EOF").is_some() {return;}
                 prompt=v["id"].clone();
                 if v["params"]["prompt"][0]["text"]=="second" {continue;}
-                emit(json!({"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"sessionId":"session-1","toolCall":{"toolCallId":"tool-1","title":"Run fixture"},"options":[{"optionId":"once","kind":"allow_once","name":"Allow"}]}}));
+                emit(json!({"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"sessionId":"session:opaque_/1","toolCall":{"toolCallId":"tool-1","title":"Run fixture"},"options":[{"optionId":"once","kind":"allow_once","name":"Allow"}]}}));
             },
             Some("session/cancel")=>emit(json!({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"cancelled"}})),
             None if v["id"]=="permission-1"=>{

@@ -1017,14 +1017,15 @@ impl Adapter {
         if l.lifetime==Lifetime::StopWithOwner && (!matches!(l.mode,Mode::Turn) || !self.descriptor.has("process-lifetime")) {return Err("lifetime-unsupported: native submission scope".into());}
         let readiness = self.preflight(l, &Repair::default());
         readiness.permit(l.readiness)?;
-        if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
+        let acp=self.acp(l)?;
+        if session.is_some_and(|s| s.is_empty() || s == "-" || acp.is_none() && !native::plain_id(s)) { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let mut owner_spec=spec.clone();
         if session.is_none() && matches!(l.mode,Mode::Background) {owner_spec.session="-".into();}
         let owner=l.session_store.acquire(&owner_spec,session.is_none(),None,l.lifetime)?;
         let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process,matches!(l.mode,Mode::Turn) && self.descriptor.has("process-lifetime"))?;let l=&owned_launch;
         let command = preflight::launch_base(self,l)?;
-        if let Some(config)=self.acp(l)? {
+        if let Some(config)=acp {
             if l.mode!=Mode::Turn {return Err("mode unsupported by ACP".into());}
             let mut command=command;command.envs(spec.env.iter().cloned());
             return Ok(self.run(Body::Acp(Box::new(super::acp::Session::open(command,config,l,session)?)),0,optimization,l));
