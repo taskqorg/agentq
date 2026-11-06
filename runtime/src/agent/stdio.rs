@@ -20,6 +20,7 @@ pub(crate) struct Stdio {
     child:Child,
     input:Option<Pipe<WriteRequest>>,
     bounded:bool,
+    stopped:bool,
     #[cfg(windows)] job:Option<std::sync::Arc<windows_job::Job>>,
     events:Receiver<Res<Value>>,
 }
@@ -87,7 +88,7 @@ impl Stdio {
                 if output.send(event).is_err() || failed {break;}
             }
         });
-        Ok(Self {child,input:Some(input),events,bounded,#[cfg(windows)] job})
+        Ok(Self {child,input:Some(input),events,bounded,stopped:false,#[cfg(windows)] job})
     }
 
     pub fn id(&self)->u32 {self.child.id()}
@@ -125,13 +126,25 @@ impl Stdio {
         }
     }
 
+    /// A real child wait proves direct termination; its native numeric code remains independently optional.
+    pub(crate) fn observe_exit(&mut self,report:&mut Report)->Res<()> {
+        let status=self.child.try_wait().map_err(|e|format!("app-server wait: {e}"))?;
+        report.exit=status.filter(|_|!self.stopped).and_then(|s|s.code());
+        report.termination=if status.is_some() {ProcessTermination::Observed} else {ProcessTermination::Unknown {reason:"session-process-running"}};
+        if status.is_none() {report.process.exit_unknown="session-process-running";}
+        else if status.is_some_and(|s|s.code().is_none()) {report.process.exit_unknown="signalled";}
+        else if self.stopped {report.process.exit_unknown="post-terminal-cleanup";}
+        Ok(())
+    }
+
     pub fn poll(&mut self)->Res<Option<i32>> {self.child.try_wait().map(|s|s.map(|s|s.code().unwrap_or(-1))).map_err(|e|format!("app-server wait: {e}"))}
 
     /// Stop the owned server (and its Windows job); caller authority outside that scope stays unchanged.
     pub fn kill(&mut self)->Res<()> {
-        #[cfg(windows)] if let Some(job)=&self.job {job.kill()?;}
-        if self.poll()?.is_some() {return Ok(());}
-        self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))?;
+        let running=self.poll()?.is_none();
+        #[cfg(windows)] if let Some(job)=&self.job {job.kill()?;self.stopped|=running;}
+        if !running || self.poll()?.is_some() {return Ok(());}
+        self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))?;self.stopped=true;
         self.child.wait().map_err(|e|format!("app-server reap unconfirmed: {e}"))?;
         Ok(())
     }

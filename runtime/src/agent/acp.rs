@@ -126,7 +126,7 @@ pub(super) struct Session {
 impl Drop for Session {fn drop(&mut self) {let _=self.server.kill();}}
 
 impl Session {
-    pub fn open(mut command: Command, config: &Config, l: &Launch, resume: Option<&str>) -> Res<Self> {
+    pub fn open(mut command: Command, config: &Config, l: &Launch, resume: Option<&str>,owner:&SessionOwner) -> Res<Self> {
         validate_launch(config,l)?;
         command.args(config.args).envs(config.env.iter().copied()).envs(l.env.iter().cloned()).current_dir(&l.root);
         if l.policy.approval==Approval::Bypass {command.args(config.bypass_args);}
@@ -166,6 +166,7 @@ impl Session {
             s.session=id.into();
         }
         if s.session.is_empty() {return Err("ACP session ID missing".into());}
+        owner.bind(&s.session)?;
         s.pending.push(Event::Metadata{kind:"session".into(),data:created});
         if let Some(model)=&l.model {s.control(Control::Model(model.clone()))?;}
         if !matches!(l.policy.approval,Approval::Native|Approval::Bypass) {
@@ -283,9 +284,8 @@ impl Session {
         if self.report.is_some() {
             self.server.close_stream();self.closed=Some("terminal".into());
             if let Some(report)=&mut self.report {
-                report.exit=self.server.poll()?;
                 if let Some(sampler)=self.sampler.take() {report.process=sampler.usage();}
-                if report.exit.is_none() {report.process.exit_unknown="session-process-running";}
+                self.server.observe_exit(report)?;
             }
         }
         Ok(())

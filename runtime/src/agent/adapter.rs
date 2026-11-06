@@ -910,6 +910,7 @@ impl Adapter {
     fn read_progress(&self, run: &mut Run) -> Res<Vec<Event>> {
         let run = self.own_mut(run)?;
         let path = match &mut run.body {
+            Body::Acp(a)=>return a.progress(),
             Body::Turn(t) => { t.sync_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
@@ -932,6 +933,7 @@ impl Adapter {
     fn refresh_activity(&self,run:&mut Run)->Res<()> {
         let run=self.own_mut(run)?;
         let events=match &mut run.body {
+            Body::Acp(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].to_vec();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
             Body::Turn(t)=>{t.sync_transcript()?;let (rows,next)=activity_lines(&t.log,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Native(n) if n.attached=>{let (rows,next)=activity_lines(n.turn.path(),run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
@@ -1022,12 +1024,14 @@ impl Adapter {
         if session.is_none() && matches!(l.mode,Mode::Background) {owner_spec.session="-".into();}
         let owner=l.session_store.acquire(&owner_spec,session.is_none(),None,l.lifetime)?;
         let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process,matches!(l.mode,Mode::Turn) && self.descriptor.has("process-lifetime"))?;let l=&owned_launch;
-        let command = preflight::launch_base(self,l)?;
         if let Some(config)=acp {
             if l.mode!=Mode::Turn {return Err("mode unsupported by ACP".into());}
-            let mut command=command;command.envs(spec.env.iter().cloned());
-            return Ok(self.checked_run(&readiness, Body::Acp(Box::new(super::acp::Session::open(command,config,l,session)?)),0,optimization,l));
+            let command=preflight::command(self,l)?;
+            let session=super::acp::Session::open(command,config,l,session,&owner)?;
+            let boundary=session.boundary;
+            let mut run=self.checked_run(&readiness,Body::Acp(Box::new(session)),boundary,optimization,l);run.owner=Some(owner);return Ok(run);
         }
+        let command = preflight::launch_base(self,l)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
             job_id, job: None, attached, fault, report: None, launcher }));
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
