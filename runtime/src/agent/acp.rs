@@ -68,7 +68,9 @@ impl Session {
         }
         capture::inherit_caller(&mut command);
         if let Some(parent)=l.log.parent() {std::fs::create_dir_all(parent).map_err(|e|format!("ACP log directory: {e}"))?;}
-        let log=File::options().create(true).append(true).open(&l.log).map_err(|e|format!("ACP log: {e}"))?;
+        let mut options=File::options();options.create(true).append(true);
+        #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
+        let log=options.open(&l.log).map_err(|e|format!("ACP log: {e}"))?;
         let boundary=log.metadata().map_err(|e|format!("ACP log metadata: {e}"))?.len();
         let server=Stdio::spawn(command,&l.log.with_extension("stderr"),&l.process)?;
         let sampler=Some(capture::Sampler::start(server.id()));

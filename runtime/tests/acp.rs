@@ -16,6 +16,7 @@ fn main() {
     l.model=Some("model-1".into());
     l.policy.approval=agent::Approval::Edits;
     let mut run=r.launch(&l).unwrap();
+    #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;assert_eq!(std::fs::metadata(&l.log).unwrap().permissions().mode() & 0o777,0o600);}
     assert_eq!(r.checkpoint(&run).unwrap_err(),agent::Cause("no-checkpoint"));
     let mut seen=vec![];
     loop {
