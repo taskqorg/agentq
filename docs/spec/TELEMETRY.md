@@ -117,3 +117,11 @@ M6.11 applies the runtime records of [RUNTIME.md](RUNTIME.md#observation) to ses
 ## Profiling
 
 `agentq profile` ranks retained export samples; it starts no compressor or proxy. Empty or unreadable samples remain unknown. `profile trace on [<minutes>]|off` retains its existing switch (default 15, at most 60 minutes), now recording export steps only. Historical compression rows remain retained, with no new producer; profile does not rank retired operations. Local telemetry SQLite retention and export rules remain unchanged (agentq.md §8).
+
+## Local store
+
+The installation owns `data/telemetry.sqlite3`: bundled SQLite, application ID `0x4151544d`, schema 1, FULL durability, lifecycle writer lock and the existing two-second busy timeout. Pages stay at 28 MiB; cache spilling is off and a TRUNCATE checkpoint precedes each transaction, preserving the existing WAL below 29 MiB, SHM below 1 MiB and total database/sidecar budget of 64 MiB. Temporary storage is memory-only; no VACUUM copy. Older JSONL stays unread until uninstall. Records retain the existing 64 KiB bound and seven-day window.
+
+Events persist locally before optional delivery. A malformed queued event stays and reports an error. Resource IDs preserve same-bucket replacement. Same-ID retries are idempotent; conflicting payloads, corruption, missing coverage and pruned history remain unknown. Historical compression rows remain retained with no new producer. Export samples keep the existing latest 256 per operation. Existing service writes run retention; no second process or database is added.
+
+`agentq telemetry export` emits metadata-only `agentq.telemetry/1` JSONL with coverage/errors and retained event, sample, trace or historical stats rows. It never claims complete collection. `doctor` reads SQLite integrity; missing optional remote credentials alone do not fail local health.

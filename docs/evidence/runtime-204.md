@@ -1,5 +1,7 @@
 # Backward history paging and 16 MiB records: task 204
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../spec/OPTIMIZATION-RETIRED.md).
+
 Source: [task 204](https://github.com/taskqorg/agentq/issues/204).
 The owner goal is: "AgentQ conversation records support bounded backward paging and records up to 16 MiB, matching the taskq Workspace D4 limit, so taskq Conversations can render full history."
 

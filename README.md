@@ -1,6 +1,6 @@
 # agentq
 
-agentq installs native record hooks, observes agents on one host and provides a reusable worker runtime. One static binary; no optimizer, proxy or Python engine. Decisions: [agentq.md](agentq.md).
+AgentQ is the single worker layer for native agents: prepare, launch, observe, control, history and archive. [Contract and current support](agentq.md).
 
 ## Install through an agent
 
@@ -43,10 +43,12 @@ A foreign Unix file or link at `~/.local/bin/agentq` is preserved and reported a
 
 Cleanup runs at service start; an update alone does not clean a stopped service or disabled host. Use `agentq direct` for explicit routing cleanup. Service startup removes unchanged journal-owned optimizer registrations and updates an owned Hermes plugin to record-only. Foreign changes remain reported conflicts. A selected loopback or missing Codex provider is a problem with next step `agentq direct`; unowned dead routes and unresolved conflicts exit nonzero with manual edits. Reload clients normally; never kill active work to clear pending status.
 
-## Run agent turns
+## Use from another product
 
-`agentq agent turn` runs a native Codex, Claude or Antigravity turn from JSON stdin. Rust callers use `agentq-runtime`; plain turns need no installation or service. Optimization intent remains a compatible no-op for pinned consumers. [Runtime contract](docs/spec/RUNTIME.md).
+`agentq agent turn` runs a Codex, Claude or Antigravity turn from JSON stdin. Rust callers use `agentq-runtime` for preflight, launch/resume, policy, observation, control and history. Products keep task admission, grants and UI; native details stay in AgentQ modules. Plain turns need no onboarding or service. Preflight, remaining archive targets and unsupported operations are explicit in the [runtime contract](docs/spec/RUNTIME.md).
 
-Local recording needs no Langfuse or server connection. Missing evidence remains unknown. [Optimization retirement and measurements](docs/spec/OPTIMIZATION-RETIRED.md).
+Optional host installation adds native record hooks, local observations, updates and enrollment. Hermes has a record integration; Desktop Chat setup is unsupported. Recording needs no Langfuse connection. Missing evidence stays unknown.
+
+Shared boundaries: [runtime, history and archive](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md), [telemetry and content](https://github.com/taskqorg/specq/blob/main/engineering/profiling.md#telemetry-contract). The [retirement decision](docs/spec/OPTIMIZATION-RETIRED.md) owns optimization history and its return condition.
 
 Releases: [taskqorg/agentq](https://github.com/taskqorg/agentq/releases), one binary per platform plus `SHA256SUMS`; provenance: `gh attestation verify <file> --repo taskqorg/agentq`. Shared rules: [specq](https://github.com/taskqorg/specq).

@@ -1,5 +1,7 @@
 # Temporary disable implementation plan
 
+Historical record for the cited releases. Optimization commands, adapters and acceptance below are retired; they are not current setup or rollout instructions. Current behavior: [agentq.md](../../agentq.md); the sole parked decision and return condition: [OPTIMIZATION-RETIRED](OPTIMIZATION-RETIRED.md).
+
 Add two reversible controls to AgentQ: pause automatic compression, and detach the client integrations completely. Both support the host and individual agents. Pausing preserves the current transport and integrations; detaching restores direct client access and removes AgentQ-owned registrations.
 
 Status: implementation plan reviewed by Claude Fable, task fit PASS, quality PASS, overall APPROVE. Baseline: `6aacefcc134e50d591f977f1c8db757fe4562f5d`. The owner selected both modes. Implementation starts by amending [agentq.md](../../agentq.md) and [CONFIGURATION](CONFIGURATION.md); this plan does not amend either contract by itself. Planning did not change working profiles or authorize deployment.

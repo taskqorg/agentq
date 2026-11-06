@@ -1,5 +1,7 @@
 # Protected preparation and completion: task 199
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../spec/OPTIMIZATION-RETIRED.md).
+
 [Owner task #199](https://github.com/taskqorg/agentq/issues/199) adopts all six criteria of the [immutable AssetQ draft](https://github.com/taskqorg/assetq/blob/241371d3c1015901907e547fe6994ad3cd3d7230/docs/blockers/4-protected-lifecycle.md). M12.8 and its runtime detail were updated before implementation (P3/R13). This is an optional AgentQ API, not another resolver, scheduler, policy store or TaskQ Rust dependency. AssetQ keeps orchestration, delegated effects, current-image-tool discovery and output acceptance.
 
 ## Source and authority boundary

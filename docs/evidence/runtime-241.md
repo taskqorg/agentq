@@ -1,5 +1,7 @@
 # Independent protected host
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../spec/OPTIMIZATION-RETIRED.md).
+
 Owner request: [AgentQ #241](https://github.com/taskqorg/agentq/issues/241), acceptance A1–A4. Signing decision: [accepted answer](https://github.com/taskqorg/agentq/issues/241#issuecomment-6665555869). Applied rules: §12 M12.2, M12.3, M12.6–M12.8 and P2/P3; TaskQ R12/R13 and §7; specq Testing development/candidate policy.
 
 The native gate and scope code derive from the immutable [TaskQ source](https://github.com/taskqorg/taskq/tree/5292e63ffaeda41ca90d1b2e21b93f78fe2d3e39/src/runtime), with product-owned admission, policy, account and signing dependencies removed. This is source provenance, not a runtime dependency.

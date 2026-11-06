@@ -1,5 +1,7 @@
 # Telemetry-led compression qualification
 
+Historical record for the cited releases. Optimization commands, adapters and acceptance below are retired; they are not current setup or rollout instructions. Current behavior: [agentq.md](../../agentq.md); the sole parked decision and return condition: [OPTIMIZATION-RETIRED](OPTIMIZATION-RETIRED.md).
+
 Acceptance procedure for existing PRODUCT R1-R5/R9-R12, VERIFICATION A2/A4/A6 and ACCOUNTING O1-O4. Reuse installation-local SQLite and existing instrumentation; no second collector, service, telemetry store, optimizer, remote sink or experiment runner. Reuse `check-client-compression.py`, native exporters, `agentq.compress`, the service queue, Langfuse `Agents`, and `taskq profile export` for TaskQ-owned attempts. A procedure is not proof all platforms passed.
 
 ## Contract sources loaded

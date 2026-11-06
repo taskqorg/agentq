@@ -1,5 +1,7 @@
 # Typed history for TaskQ event migration
 
+Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../spec/OPTIMIZATION-RETIRED.md).
+
 [Task #277](https://github.com/taskqorg/agentq/issues/277) supplies the typed observations required by TaskQ #2448. Applied rules: R9/R12/R13, agentq §12 M12.3/M12.9/M12.10, P2/P3 and specq Testing's development/candidate policy. The linked runtime contract was updated before implementation. No existing guarding assertion or authority rule was weakened.
 
 ## Defect and regression protection

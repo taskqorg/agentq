@@ -1,5 +1,6 @@
 [package]
 name = "agentq"
+description = "Shared worker layer for native agents, with optional host recording"
 version = "0.0.0-dev"
 edition = "2024"
 publish = false

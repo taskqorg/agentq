@@ -1,5 +1,7 @@
 # Optimization results
 
+Historical record for the cited releases. Optimization commands, adapters and acceptance below are retired; they are not current setup or rollout instructions. Current behavior: [agentq.md](../../agentq.md); the sole parked decision and return condition: [OPTIMIZATION-RETIRED](OPTIMIZATION-RETIRED.md).
+
 Accepted under agentq.md §3/§6 and PRODUCT R9/R10. [DashQ presentation](https://github.com/taskqorg/dashq/blob/main/docs/design/optimization-results.md) consumes these definitions; design approval is not live accounting qualification.
 
 ## O1. Populations and provenance
