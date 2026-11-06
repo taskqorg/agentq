@@ -674,6 +674,7 @@ mod tests {
     #[test]
     fn operations_plan_apply_and_duplicates() {
         let d = data("ops");
+        let _cli = crate::test_support::native_clis(&d);
         let mut w = Dash { now: 1000, approve: vec![configure::CAPABILITY], ..Dash::default() };
         enroll_with(&d, "https://dash.example", &mut w).unwrap();
         assert_eq!(w.sent[0].1["capabilities"], json!([configure::CAPABILITY]), "asked for separately");
@@ -785,6 +786,7 @@ mod tests {
     #[test]
     fn operations_actor_from_authority() {
         let d = data("actor");
+        let _cli = crate::test_support::native_clis(&d);
         let mut w = Dash { now: 1000, approve: vec![configure::CAPABILITY], ..Dash::default() };
         enroll_with(&d, "https://dash.example", &mut w).unwrap();
         let clients = desktop(&d);
