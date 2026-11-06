@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) const ENTRY: Entry = Entry { name:"claude-desktop", aliases:&[], order:3, profile_order:2, worker_order:4, onboard:false,
     profile:Profile {kind:"claude-desktop-chat",label:"Claude Desktop Chat",aliases:&["claude-desktop-chat"],operations:&[]},
-    runtime:None, builtin:None,
+    runtime:None, builtin:None,unqualified:None,
     root:config_root,files,setup,inspect,hook,hook_key:"hooks",fallback,executable:cli,diagnose:no_diagnosis,provider:None,
 };
 

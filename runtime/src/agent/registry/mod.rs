@@ -61,6 +61,7 @@ pub struct Entry {
     pub onboard: bool,
     pub profile: Profile,
     pub runtime: Option<&'static dyn Runtime>,
+    pub unqualified: Option<&'static str>,
     builtin: Option<&'static Adapter>,
     pub root: fn() -> PathBuf,
     pub files: fn(&Path) -> Vec<PathBuf>,
@@ -72,6 +73,20 @@ pub struct Entry {
     pub executable: fn() -> Option<PathBuf>,
     pub diagnose: fn(&Path) -> Value,
     pub provider: Option<fn(&Path) -> Result<Provider,String>>,
+}
+
+impl Entry {
+    /// Metadata remains visible when native proof is missing; this grants no launch authority.
+    pub fn descriptor(&self)->Option<&'static Descriptor> {
+        self.runtime.map(|r|r.descriptor()).or_else(||self.builtin.map(|a|&a.descriptor))
+    }
+    pub fn qualification(&self)->Check {
+        match self.unqualified {
+            Some(reason)=>check("unqualified",reason),
+            None if self.runtime.is_some()=>check("unknown","see version and platform native evidence"),
+            None=>check("unsupported","integration only"),
+        }
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/registry.rs"));
@@ -173,6 +188,7 @@ fn validate_entries(entries: &[&Entry]) -> Result<(),String> {
     let mut profiles=std::collections::BTreeSet::new();
     let mut workers=std::collections::BTreeSet::new();
     for e in entries {
+        if e.unqualified.is_some() && (e.runtime.is_some() || e.builtin.is_none()) {return Err("unqualified entry must be hidden and retain its descriptor".into());}
         if e.name.is_empty() || e.profile.kind.is_empty() || e.profile.label.is_empty() || e.profile.aliases.is_empty() {return Err("incomplete registry entry".into());}
         if !kinds.insert(e.profile.kind) || !order.insert(e.order) || !profiles.insert(e.profile_order) {return Err("duplicate registry metadata".into());}
         for name in std::iter::once(e.name).chain(e.aliases.iter().copied()) {
@@ -216,6 +232,112 @@ mod examples {
 mod tests {
     use super::*;
     #[test]
+    fn unqualified_structured_entries_are_visible_but_never_offered() {
+        for name in ["grok","opencode","opencode2","omp","pi"] {
+            let e=entry(name).unwrap();
+            assert_eq!(e.qualification().state,"unqualified");
+            assert_eq!(e.descriptor().unwrap().name,name);
+            assert!(runtime(name).is_none());
+            assert!(!runtimes().iter().any(|r|r.descriptor().name==name));
+            assert!(native_client(name).is_none(),"native CLI seams cannot bypass qualification");
+        }
+        validate().unwrap();
+    }
+
+    #[test]
+    fn structured_candidates_share_launch_resume_cancel_events_and_history() {
+        let root=crate::scratch("structured-candidates");
+        for name in ["grok","opencode","opencode2","omp","pi"] {
+            let runtime=entry(name).unwrap().builtin.unwrap();
+            let work=root.join(name);std::fs::create_dir_all(&work).unwrap();
+            let mut l=Launch::new(&work,work.join("native.jsonl"),"first","fixtureq");
+            l.command=vec![std::env::current_exe().unwrap().into_os_string(),"--exact".into(),format!("{}::structured_server",module_path!().split_once("::").unwrap().1).into(),"--nocapture".into(),"--".into()];
+            l.env=vec![("AGENTQ_STRUCTURED_FIXTURE".into(),if runtime.ops.rpc.is_some(){"rpc"}else{"acp"}.into())];
+            l.home=Some(work.join("home"));l.deadline=Some(Instant::now()+Duration::from_secs(20));l.deltas=true;
+            let mut run=runtime.launch(&l).unwrap();
+            while runtime.poll(&mut run).unwrap()==State::Running {std::thread::yield_now();}
+            let report=runtime.report(&run).unwrap();
+            assert_eq!((report.outcome,report.text.as_deref()),("ok",Some("answer")),"{name}: {report:?}");
+            if runtime.ops.rpc.is_some() {
+                assert_eq!((report.usage.input,report.usage.calls),(Some(2),Some(1)));
+                let ctx=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};
+                assert_eq!(run.snapshot(&ctx).unwrap().events().unwrap().len(),2,"turn and observed model call");
+            }
+            let events=runtime.progress(&mut run).unwrap();
+            assert!(events.iter().any(|e|matches!(e,Event::ToolStart{..})),"{name}");
+            assert!(events.iter().any(|e|matches!(e,Event::ToolEnd{..})),"{name}");
+            let session=runtime.session_id(&run).unwrap();l.input="wait".into();
+            let mut resumed=runtime.resume(&session,&l).unwrap();
+            if runtime.ops.rpc.is_some() {
+                while !runtime.progress(&mut resumed).unwrap().iter().any(|e|matches!(e,Event::Metadata{kind,..} if kind=="agent_end")) {assert!(Instant::now()<l.deadline.unwrap());std::thread::yield_now();}
+                assert_eq!(runtime.poll(&mut resumed).unwrap(),State::Running,"agent_end is not settlement");
+            }
+            runtime.cancel(&mut resumed).unwrap();
+            while runtime.poll(&mut resumed).unwrap()==State::Running {std::thread::yield_now();}
+            assert_eq!(runtime.report(&resumed).unwrap().outcome,"cancelled","{name}");
+            let format=if runtime.ops.rpc.is_some(){"jsonl-rpc"}else{"acp"};
+            let mut history=crate::agent::history::History::new(format,"candidate",&session).unwrap();
+            let page=history.poll(&l.log).unwrap();
+            assert!(page.events.iter().any(|e|e["kind"]=="tool"),"{name}: source history keeps native tools");
+            assert!(page.events.iter().all(|e|e["raw"].is_string()));
+            if runtime.ops.rpc.is_some() {
+                l.input="eof".into();
+                let mut lost=runtime.launch(&l).unwrap();
+                while runtime.poll(&mut lost).unwrap()==State::Running {std::thread::yield_now();}
+                assert_eq!(runtime.poll(&mut lost).unwrap(),State::Unknown);
+                assert!(runtime.report(&lost).unwrap_err().contains("stream ended"));
+                l.policy.write=Scope::Project;
+                assert!(runtime.launch(&l).err().unwrap().contains("policy unsupported"));
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn structured_server() {
+        let Ok(protocol)=std::env::var("AGENTQ_STRUCTURED_FIXTURE") else {return;};
+        let emit=|v:Value|{println!("\n{v}");std::io::stdout().flush().unwrap();};
+        let update=|u:Value|emit(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"candidate-session","update":u}}));
+        let mut prompt=Value::Null;
+        for line in std::io::stdin().lock().lines() {
+            let v:Value=serde_json::from_str(&line.unwrap()).unwrap();
+            let method=if protocol=="acp"{v["method"].as_str()}else{v["type"].as_str()};
+            if protocol=="acp" {
+                let result=match method {
+                    Some("initialize")=>json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true}}),
+                    Some("session/new"|"session/load")=>json!({"sessionId":"candidate-session"}),
+                    Some("session/prompt")=>{
+                        prompt=v["id"].clone();if v["params"]["prompt"][0]["text"]=="wait"{continue;}
+                        update(json!({"sessionUpdate":"tool_call","toolCallId":"tool","kind":"execute","title":"fixture"}));
+                        update(json!({"sessionUpdate":"tool_call_update","toolCallId":"tool","status":"completed"}));
+                        update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer"}}));json!({"stopReason":"end_turn"})
+                    },
+                    Some("session/cancel")=>{emit(json!({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"cancelled"}}));continue;},
+                    _=>panic!("unexpected fixture message {v}"),
+                };
+                emit(json!({"jsonrpc":"2.0","id":v["id"],"result":result}));
+            }else{
+                match method {
+                    Some("get_state")=>emit(json!({"type":"response","id":v["id"],"command":"get_state","success":true,"data":{"sessionFile":std::env::current_dir().unwrap().join("session with spaces.jsonl"),"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}})),
+                    Some("prompt")=>{
+                        emit(json!({"type":"response","id":v["id"],"command":"prompt","success":true}));emit(json!({"type":"agent_start"}));
+                        if v["message"]=="eof"{return;}
+                        if v["message"]=="wait"{emit(json!({"type":"agent_end"}));continue;}
+                        emit(json!({"type":"tool_execution_start","toolCallId":"tool","toolName":"bash","args":{"command":"fixture"}}));
+                        emit(json!({"type":"tool_execution_end","toolCallId":"tool","toolName":"bash","result":{"content":[]},"isError":false}));
+                        emit(json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"answer"}],"stopReason":"stop","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0}}}));
+                        emit(json!({"type":"agent_end"}));emit(json!({"type":"agent_settled"}));
+                    },
+                    Some("abort")=>{
+                        emit(json!({"type":"response","id":v["id"],"command":"abort","success":true}));
+                        emit(json!({"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"aborted"}}));emit(json!({"type":"agent_end"}));emit(json!({"type":"agent_settled"}));
+                    },
+                    _=>panic!("unexpected fixture message {v}"),
+                }
+            }
+        }
+    }
+    #[test]
     fn registered_entries_have_complete_metadata() {
         validate().unwrap();
         let broken=Entry {name:"",..*ENTRIES[0]};
@@ -226,7 +348,7 @@ mod tests {
     }
 }
 
-pub(crate) fn native_client(name: &str) -> Option<Client> {entry(name)?.builtin.map(|a|a.client)}
+pub(crate) fn native_client(name: &str) -> Option<Client> {let e=entry(name)?; if e.unqualified.is_some() {return None;} e.builtin.map(|a|a.client)}
 
 pub(crate) fn native_home_var(client: Client) -> &'static str {builtin(client).ops.home_var}
 pub(crate) fn alternate_home_var(client: Client) -> Option<&'static str> {builtin(client).ops.alternate_home_var}

@@ -42,6 +42,24 @@ The existing stream and agentapi native seams remain available until ACP has sid
 
 ACP imposes no record-size, queue-size or shutdown-grace limit. EOF closes its owned server; poll and progress never wait for process exit. A terminal native turn closes stdin and uses `try_wait`; an unexited server reports null exit with `session-process-running`. An actual owned-child wait confirms direct process termination, including a signal with no numeric code; the native turn outcome stays unchanged. Transport sentinels and AgentQ cleanup codes never become numeric native report exits; legacy stop observations retain their existing representation. Dropping the run owns final process cleanup. The shared `stop_event` observation uses the same run stop identity and ACP log boundary; a native terminal with a live server reads `turn_end_process_live` without changing poll/report authority. On Windows an owned, non-breakaway Job Object binds the native server plus an already-started cmd/Node shim subtree before protocol input; startup enrollment verifies the live parent and creation relationship through held native identities before suspension or assignment, and resumes only its own suspension. A stale snapshot or unknown relationship refuses attachment without touching an unrelated process. Cancellation teardown and drop terminate that job, including native descendants; caller process flags and hooks are preserved. ACP owns a stateful stdio connection. A process checkpoint reads `no-checkpoint`; recovery never recreates that connection or resubmits its prompt. A later explicit resume uses `session/load`. The retained stateless CLI seam keeps its process-identity recovery contract.
 
+## Additional native launch registrations
+
+The catalog exposes qualification independently of protocol support. An entry with missing native proof is `unqualified`: its descriptor and reason remain inspectable, but runtime lookup and the offered runtime list do not return a launchable adapter. Installing a CLI, protocol-double checks and CI never promote it. Qualification binds the exact native version and platform and includes the common worker preflight when that implementation lands.
+
+| Runtime | Protocol and command | Minimum verified upstream release | Home | Candidate qualification |
+|---|---|---|---|---|
+| Grok | ACP, `grok agent stdio` | Unknown locally | `GROK_HOME` | Unqualified: no complete native proof |
+| OpenCode | ACP, `opencode acp` | 1.18.31 | `XDG_DATA_HOME` / native OpenCode account layout | Unqualified: native proof at or above the minimum is missing |
+| OpenCode2 | ACP, `opencode2 acp` | 2.0.14 | Native OpenCode account layout | Unqualified: no installed client or native proof |
+| OMP | ACP, `omp acp` | 17.0.5 | `PI_CODING_AGENT_DIR` | Unqualified: no installed client or native proof |
+| Pi | JSONL RPC, `pi --mode rpc` | Unknown locally | `PI_CODING_AGENT_DIR` | Unqualified: no installed client or native proof |
+
+ACP entries reuse the shared adapter. OpenCode disables unsupported questions rather than presenting a reply path the server cannot honor; OMP disables PTY tools in a headless session. Entry metadata records these differences; product code adds no runtime-name branch.
+
+Pi's native RPC uses `get_state` for its opaque session-file handle, `prompt` for one input, `abort` for cancellation and `--session` for explicit resume. `message_update`, `message_end` and `tool_execution_*` become neutral events; only `agent_settled` completes a turn; `agent_end` may precede automatic retry or compaction. Per-message native usage becomes model-call evidence; a command acknowledgement or EOF never proves completion. Native errors, unknown records and missing fields retain their meaning and raw source. Its permissive native policy cannot enforce narrower filesystem, network, tool or approval grants and refuses them before spawn.
+
+Gemini's ACP candidate should be evaluated after these registrations; this change adds no unproven launch registration for it. Hermes remains hooks and transcript observation only until a supported structured protocol is qualified. Claude Desktop Chat remains integration-only. For agents exposing only a TUI, retain read-only transcript/hooks integration; TUI scraping requires a separate owner decision and is not implemented here.
+
 ## Runtime trait
 
 M12.9/M12.10 apply the [specq agent-runtime rule](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md). The public surface is `agent::Runtime`, `agent::Descriptor`, `agent::Policy`, `agent::Launch`, `agent::Run` and the runtime-neutral `Event`, `Window`, `Report`, `Usage`, `Snapshot`, `Accounts`, `Context` and `history` types. `agent::runtimes()` lists every adapter; `agent::runtime(name)` finds one by descriptor name (alias `agy` selects `antigravity`). Callers treat names and session IDs as opaque data.

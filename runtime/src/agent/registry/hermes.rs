@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) const ENTRY: Entry = Entry { name:"hermes", aliases:&[], order:2, profile_order:3, worker_order:3, onboard:true,
     profile:Profile {kind:"hermes",label:"Hermes",aliases:&["hermes"],operations:&["plugin"]},
-    runtime:None, builtin:None,
+    runtime:None, builtin:None,unqualified:None,
     root:config_root,files,setup,inspect,hook,hook_key:"hooks",fallback,executable:cli,diagnose:no_diagnosis,provider:None,
 };
 

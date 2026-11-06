@@ -361,7 +361,7 @@ pub struct Run {
     stop_on_stall:bool,
 }
 
-enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>), Acp(Box<super::acp::Session>) }
+enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>), Acp(Box<super::acp::Session>), Rpc(Box<super::jsonl_rpc::Session>) }
 
 /// A background or queue run: an observation cursor over the native transcript, never a process owner.
 struct Native {
@@ -419,7 +419,7 @@ impl Run {
     pub fn optimization(&self) -> &Optimization { &self.optimization }
     /// The direct child process ID of a CLI turn, or the verified background job's native process.
     pub fn id(&self) -> Option<u32> {
-        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id), Body::Acp(a)=>Some(a.id()) }
+        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id), Body::Acp(a)=>Some(a.id()),Body::Rpc(a)=>Some(a.id()) }
     }
     /// The finished run's immutable records for a deferred append, without a store, lock or native call; a repeated call
     /// returns the same value with the first caller context. A run without a terminal observation reads `running`.
@@ -427,6 +427,7 @@ impl Run {
         if let Some(frozen) = &self.frozen { return Ok(frozen.clone()); }
         let frozen = match &self.body {
             Body::Acp(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
+            Body::Rpc(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
             Body::Turn(t) => t.snapshot(ctx)?,
             Body::Native(n) => n.turn.snapshot(n.report.as_ref().ok_or("running")?, ctx)?,
             // Each app-server turn records once under its native thread and turn identity.
@@ -443,6 +444,7 @@ impl Run {
         if self.recorded { return Err("run already recorded".into()); }
         let mut r = match &self.body {
             Body::Acp(a)=>a.report().ok(),
+            Body::Rpc(a)=>a.report().ok(),
             Body::Turn(t) => t.terminal_report(),
             Body::Native(n) => n.report.clone(),
             Body::App(a) => a.session.report(),
@@ -839,6 +841,7 @@ struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize, ops:
 
 struct NativeOps {
     acp: Option<&'static super::acp::Config>,
+    rpc: Option<&'static super::jsonl_rpc::Config>,
     catalogue:fn(Option<&Path>,Option<&Path>)->Res<Vec<Model>>,
     background_launch:fn(Command,&Spec,&str,Duration)->Res<Result<Output,crate::process::Failure>>,
     background_jobs:fn(Command,&Spec,bool,Duration)->Res<Vec<Value>>,
@@ -874,6 +877,23 @@ struct NativeOps {
     background_transcript: fn(&Spec, &str) -> Res<PathBuf>,
     link: fn(&Run) -> Result<String, native::Absence>,
     session_link: fn(&NativeSpec, Option<&str>) -> Result<String, native::Absence>,
+}
+
+impl NativeOps {
+    const fn structured(protocol:&'static registry::Protocol,home_var:&'static str,executable:fn(&OsStr)->Res<PathBuf>,home:fn()->Option<PathBuf>)->Self {
+        Self {acp:None,rpc:None,protocol,home_var,alternate_home_var:None,session_var:"",executable,home,new_session:||"-".into(),
+            args:|_|vec![],mapped:|_|Err("native CLI mapping unsupported; use the structured session".into()),extras:|_|vec![],environment:|_,_|{},settings:|_,_|{},
+            catalogue:|_,_|Err("catalogue unsupported".into()),login:|_,_|Check{state:"unknown",detail:"native login not qualified".into()},protected:|h|vec![h],
+            refusal:|_|None,transcript:|_,_|None,background_transcript:|_,_|Err("background unsupported".into()),link:|_|Err((Cause("no-session-url"),None)),session_link:|_,_|Err((Cause("no-session-url"),None)),
+            background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),
+            background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into())}
+    }
+    const fn acp(config:&'static super::acp::Config,executable:fn(&OsStr)->Res<PathBuf>,home:fn()->Option<PathBuf>)->Self {
+        let mut ops=Self::structured(&super::acp::PROTOCOL,config.home_var,executable,home);ops.acp=Some(config);ops
+    }
+    const fn rpc(config:&'static super::jsonl_rpc::Config,executable:fn(&OsStr)->Res<PathBuf>,home:fn()->Option<PathBuf>)->Self {
+        let mut ops=Self::structured(&super::jsonl_rpc::PROTOCOL,config.home_var,executable,home);ops.rpc=Some(config);ops
+    }
 }
 
 #[path = "registry/mod.rs"]
@@ -998,7 +1018,7 @@ impl Adapter {
             return Err(format!("settings-env unsupported by {name}"));
         }
         // App-server policy travels as thread parameters; only the Codex extras stay flags.
-        let mut args = if let Some(acp)=self.ops.acp {super::acp::validate_launch(acp,l)?;vec![]} else if !app { mapped(self.client, name, l)? } else if self.descriptor.has("app-server") { (self.ops.extras)(&l.policy) } else { vec![] };
+        let mut args = if let Some(acp)=self.ops.acp {super::acp::validate_launch(acp,l)?;vec![]} else if self.ops.rpc.is_some() {super::jsonl_rpc::validate_launch(l)?;vec![]} else if !app { mapped(self.client, name, l)? } else if self.descriptor.has("app-server") { (self.ops.extras)(&l.policy) } else { vec![] };
         args.extend(l.host_args.iter().cloned());
         let env = l.env.clone();
         let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: l.home.clone(), env };
@@ -1028,7 +1048,7 @@ impl Adapter {
         let readiness = self.preflight(l, &Repair::default());
         readiness.permit(l.readiness)?;
         let acp=self.ops.acp;
-        if session.is_some_and(|s| s.is_empty() || s == "-" || acp.is_none() && !native::plain_id(s)) { return Err("session requires a native session ID".into()); }
+        if session.is_some_and(|s| s.is_empty() || s == "-" || acp.is_none() && self.ops.rpc.is_none() && !native::plain_id(s)) { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let mut owner_spec=spec.clone();
         if session.is_none() && matches!(l.mode,Mode::Background) {owner_spec.session="-".into();}
@@ -1040,6 +1060,11 @@ impl Adapter {
             let session=super::acp::Session::open(command,config,l,session,&owner)?;
             let boundary=session.boundary;
             let mut run=self.checked_run(&readiness,Body::Acp(Box::new(session)),boundary,optimization,l);run.owner=Some(owner);return Ok(run);
+        }
+        if let Some(config)=self.ops.rpc {
+            if l.mode!=Mode::Turn {return Err("mode unsupported by JSONL RPC".into());}
+            let command=preflight::command(self,l)?;
+            return Ok(self.run(Body::Rpc(Box::new(super::jsonl_rpc::Session::open(command,config,l,session)?)),0,optimization,l));
         }
         let command = preflight::launch_base(self,l)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
@@ -1165,6 +1190,7 @@ impl Runtime for Adapter {
         let owner=self.own(run)?.owner.clone().ok_or("session-owner-required")?;
         match &mut self.own_mut(run)?.body {
             Body::Acp(a)=>a.cancel(),
+            Body::Rpc(a)=>a.cancel(),
             Body::Turn(t) => {
                 if !t.timed_out { t.cancelled = true; }
                 t.kill()?;
@@ -1195,6 +1221,7 @@ impl Runtime for Adapter {
         let run = self.own_mut(run)?;
         let s = match &mut run.body {
             Body::Acp(a)=>a.poll()?,
+            Body::Rpc(a)=>a.poll()?,
             Body::Turn(t) => {
                 // An agentapi submitter exits after its receipt while the turn continues, so the deadline applies after exit too.
                 if run.deadline.is_some_and(|d| Instant::now() >= d) && !t.timed_out {
@@ -1228,6 +1255,7 @@ impl Runtime for Adapter {
     fn report(&self, run: &Run) -> Res<Report> {
         let mut report = match &self.own(run)?.body {
             Body::Acp(a)=>a.report(),
+            Body::Rpc(a)=>a.report(),
             Body::Turn(t) if t.exit.is_some() => Ok(t.report()),
             Body::Native(n) if n.report.is_some() => Ok(n.report.clone().expect("report")),
             Body::App(a) => a.session.report().ok_or_else(|| String::from("running")),
@@ -1256,6 +1284,7 @@ impl Runtime for Adapter {
     fn session_id(&self, run: &Run) -> Option<String> {
         match &self.own(run).ok()?.body {
             Body::Acp(a)=>Some(a.session.clone()),
+            Body::Rpc(a)=>Some(a.session.clone()),
             Body::Turn(t) => session_of(self.client, &read_from(&t.log, t.start).unwrap_or_default())
                 .or_else(|| t.extension.session().map(String::from)).or_else(|| t.resumed.clone()),
             Body::Native(n) => n.attached.then(|| n.turn.session().to_string()),
@@ -1291,6 +1320,7 @@ impl Runtime for Adapter {
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause> {
         match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
             Body::Acp(a)=>Ok(a.path.clone()),
+            Body::Rpc(a)=>Ok(a.path.clone()),
             Body::Turn(t) => Ok(t.log.clone()),
             Body::Native(n) if n.attached => Ok(n.turn.path().to_path_buf()),
             Body::Native(_) => Err(Cause("transcript-unknown")),
@@ -1326,7 +1356,7 @@ impl Runtime for Adapter {
 
     fn checkpoint(&self, run: &Run) -> Result<Value, Cause> {
         let mut saved = match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
-            Body::Acp(_)=>Err(Cause("no-checkpoint")),
+            Body::Acp(_) | Body::Rpc(_)=>Err(Cause("no-checkpoint")),
             Body::Turn(t) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "turn", "turn": t.checkpoint()?})),
             Body::App(a) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "app", "app": a.session.checkpoint(), "model": a.model})),
             Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
