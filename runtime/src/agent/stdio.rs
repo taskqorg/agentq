@@ -81,6 +81,9 @@ impl Stdio {
                     Err(e)=>Err(format!("app-server read failed: {e}")),
                 };
                 let failed=event.is_err();
+                if failed {
+                    if let Err(e)=diagnostics.write_all(&line).and_then(|_|diagnostics.flush()) {let _=output.send(Err(format!("app-server raw evidence log: {e}")));break;}
+                }
                 if output.send(event).is_err() || failed {break;}
             }
         });

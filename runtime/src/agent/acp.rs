@@ -75,6 +75,33 @@ fn validate(v: &Value) -> Res<()> {
     Ok(())
 }
 
+// One checked interpretation for live input and retained readback; correlation is never a log marker.
+fn incoming(v:&Value,session:Option<&str>,prompt:Option<&Value>)->Res<bool> {
+    validate(v)?;
+    match v["method"].as_str() {
+        Some("session/update"|"session/request_permission")=>{
+            if session.is_some_and(|id|v["params"]["sessionId"].as_str()!=Some(id)) {return Err("ACP message session differs".into());}
+            if v["method"]=="session/request_permission" {
+                let permission=checked::<wire::Permission>(&v["params"])?;
+                if permission.options.is_empty() || permission.options.iter().any(|o|o.option_id.is_empty()) {return Err("ACP permission choices invalid".into());}
+            } else {
+                let params=checked::<wire::Update>(&v["params"])?;
+                let update=&v["params"]["update"];
+                match params.update.session_update.as_str() {
+                    "agent_message_chunk"|"agent_thought_chunk"|"user_message_chunk"=>{checked::<wire::Content>(&update["content"])?;},
+                    "tool_call"|"tool_call_update"=>{checked::<wire::Tool>(update)?;},
+                    _=>{},
+                }
+            }
+        },
+        None if prompt.is_some() && prompt==v.get("id")=>{
+            if v.get("error").is_none() {checked::<wire::Complete>(&v["result"])?;}
+            return Ok(true);
+        },
+        _=>{},
+    }Ok(false)
+}
+
 pub(super) struct Session {
     server: Stdio,
     pub path: PathBuf,
@@ -160,18 +187,17 @@ impl Session {
         self.write(&request)?;
         Ok(request["id"].clone())
     }
-    fn log(&mut self,v:&Value,replay:bool)->Res<()> {
-        let terminal=self.prompt.as_ref()==v.get("id") && v.get("method").is_none();
+    fn log(&mut self,v:&Value,replay:bool,terminal:bool)->Res<()> {
         writeln!(self.log,"{}",json!({"type":"acp","message":v,"replay":replay,"terminal":terminal}).to_string()).map_err(|e|format!("ACP transcript: {e}"))
     }
     fn exchange(&mut self,method:&str,params:Value,replay:bool)->Res<Value> {
         let id=self.request(method,params)?;
         loop {
             let v=self.server.wait(self.deadline)?;
-            if let Err(error)=validate(&v) {self.log(&v,replay)?;return Err(error);}
-            if v.get("id")==Some(&Value::Null) {self.log(&v,replay)?;self.pending.push(Event::Metadata{kind:"protocol-error".into(),data:v});continue;}
+            if let Err(error)=validate(&v) {self.log(&v,replay,false)?;return Err(error);}
+            if v.get("id")==Some(&Value::Null) {self.log(&v,replay,false)?;self.pending.push(Event::Metadata{kind:"protocol-error".into(),data:v});continue;}
             if v["id"]==id && v.get("method").is_none() {
-                self.log(&v,replay)?;
+                self.log(&v,replay,false)?;
                 if let Some(error)=v.get("error") {return Err(format!("ACP {method}: {error}"));}
                 result_fields(method,&v["result"])?;
                 return Ok(v["result"].clone());
@@ -200,7 +226,9 @@ impl Session {
     }
 
     fn observe(&mut self,v:Value,replay:bool)->Res<()> {
-        self.log(&v,replay)?;validate(&v)?;
+        let interpretation=incoming(&v,Some(&self.session),self.prompt.as_ref());
+        self.log(&v,replay,!replay && interpretation.as_ref()==Ok(&true))?;
+        let terminal=interpretation?;
         if v.get("id")==Some(&Value::Null) {self.pending.push(Event::Metadata{kind:"protocol-error".into(),data:v});return Ok(());}
         if replay {
             if v.get("id").is_some() && v["method"].is_string() {
@@ -211,10 +239,7 @@ impl Session {
         if let Some(method)=v["method"].as_str() {
             if v.get("id").is_some() {
                 if method=="session/request_permission" {
-                    if v["params"]["sessionId"].as_str()!=Some(self.session.as_str()) {return Err("ACP request session differs".into());}
                     let params=&v["params"];
-                    let permission=checked::<wire::Permission>(params)?;
-                    if permission.options.is_empty() || permission.options.iter().any(|o|o.option_id.is_empty()) {return Err("ACP permission choices invalid".into());}
                     let choices=params["options"].as_array().ok_or("ACP permission choices missing")?.iter().map(|o|Ok(Choice {
                         id:o["optionId"].as_str().ok_or("ACP choice ID missing")?.into(),label:o["name"].as_str().ok_or("ACP choice name missing")?.into(),kind:o["kind"].as_str().ok_or("ACP choice kind missing")?.into(),
                     })).collect::<Res<Vec<_>>>()?;
@@ -226,25 +251,17 @@ impl Session {
                 return Ok(());
             }
             if method=="session/update" {
-                if v["params"]["sessionId"].as_str()!=Some(self.session.as_str()) {return Err("ACP update session differs".into());}
-                let params=checked::<wire::Update>(&v["params"])?;
                 let update=&v["params"]["update"];
-                match params.update.session_update.as_str() {
-                    "agent_message_chunk"|"agent_thought_chunk"|"user_message_chunk"=>{checked::<wire::Content>(&update["content"])?;},
-                    "tool_call"|"tool_call_update"=>{checked::<wire::Tool>(update)?;},
-                    _=>{},
-                }
                 if update["sessionUpdate"]=="agent_message_chunk" {
                     if let Some(text)=update["content"]["text"].as_str() {self.text.push_str(text);}
                 }
                 self.pending.extend(update_events(update));
             } else {self.pending.push(Event::Metadata{kind:method.into(),data:v});}
-        } else if self.prompt.as_ref()==v.get("id") {
+        } else if terminal {
             let mut r=Report::empty();r.session=Some(self.session.clone());r.started_ms=self.started_ms;r.duration_us=self.started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
             r.text=(!self.text.is_empty()).then(||self.text.clone());
             if let Some(error)=v.get("error") {r.outcome="failed";r.error="client-error";r.detail=Some(error.to_string());}
             else {
-                checked::<wire::Complete>(&v["result"])?;
                 (r.outcome,r.error)=outcome(&v);
                 let u=&v["result"]["usage"];
                 r.usage=read_usage(u);
@@ -321,13 +338,27 @@ fn outcome(v:&Value)->(&'static str,&'static str) {
     }
 }
 
-pub(super) fn record_events(record:&Value)->Vec<Event> {
-    if record["replay"]==true {return vec![];}
-    let m=&record["message"];
-    if record["outgoing"]==true {return if m["method"]=="session/prompt" {vec![Event::TurnStart]}else{vec![]};}
-    if record["terminal"]==true {return vec![Event::TurnEnd{outcome:outcome(m).0}];}
-    if m["method"]=="session/update" {return update_events(&m["params"]["update"]);}
-    vec![Event::Metadata{kind:m["method"].as_str().unwrap_or("response").into(),data:m.clone()}]
+#[derive(Default,serde::Serialize,serde::Deserialize)]
+pub(crate) struct ReadState {prompt:Option<Value>,session:Option<String>}
+impl ReadState {
+    pub(super) fn record_events(&mut self,record:&Value)->Vec<Event> {
+        let m=&record["message"];
+        if record["outgoing"]==true {
+            if record["replay"]!=true && m["method"]=="session/prompt" && validate(m).is_ok() {
+                self.prompt=m.get("id").filter(|id|!id.is_null()).cloned();
+                self.session=m["params"]["sessionId"].as_str().map(String::from);
+                return vec![Event::TurnStart];
+            }return vec![];
+        }
+        if record["replay"]==true {return vec![];}
+        match incoming(m,self.session.as_deref(),self.prompt.as_ref()) {
+            Err(_)=>return vec![Event::Metadata{kind:"invalid".into(),data:m.clone()}],
+            Ok(true)=>{self.prompt=None;return vec![Event::TurnEnd{outcome:outcome(m).0}];},
+            Ok(false)=>{},
+        }
+        if m["method"]=="session/update" {return update_events(&m["params"]["update"]);}
+        vec![Event::Metadata{kind:if m.get("id")==Some(&Value::Null) {"protocol-error"}else{m["method"].as_str().unwrap_or("response")}.into(),data:m.clone()}]
+    }
 }
 
 pub(super) fn validate_launch(config:&Config,l:&Launch)->Res<()> {
@@ -363,15 +394,22 @@ fn read_usage(u:&Value)->Usage {
 pub(super) fn read_report(_: &str,events:&[Value],_:Option<&Path>)->Report {
     let mut r=Report::empty();
     r.session=events.iter().rev().find_map(|v|v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str()).map(String::from));
-    let start=events.iter().rposition(|v|v["outgoing"]==true && v["message"]["method"]=="session/prompt").unwrap_or(0);
-    let current=&events[start..];
-    let chunks:Vec<_>=current.iter().filter(|v|v["replay"]!=true && v["outgoing"]!=true && v["message"]["params"]["update"]["sessionUpdate"]=="agent_message_chunk")
-        .filter_map(|v|v["message"]["params"]["update"]["content"]["text"].as_str()).collect();
-    r.text=(!chunks.is_empty()).then(||chunks.concat());
-    if let Some(end)=current.iter().rev().find(|v|v["terminal"]==true && v["replay"]!=true) {
-        let m=&end["message"];(r.outcome,r.error)=outcome(m);r.usage=read_usage(&m["result"]["usage"]);
-        r.detail=m.get("error").map(Value::to_string);
-    }r
+    let mut state=ReadState::default();
+    let mut text=String::new();let mut ended=false;
+    for record in events {
+        for event in state.record_events(record) {
+            match event {
+                Event::TurnStart=>{text.clear();r=Report{session:state.session.clone(),..Report::empty()};ended=false;},
+                Event::Text{delta,..} if !ended=>text.push_str(&delta),
+                Event::TurnEnd{..} if !ended=>{
+                    let m=&record["message"];(r.outcome,r.error)=outcome(m);r.usage=read_usage(&m["result"]["usage"]);
+                    r.detail=m.get("error").map(Value::to_string);ended=true;
+                },
+                _=>{},
+            }
+        }
+    }
+    r.text=(!text.is_empty()).then_some(text);r
 }
 
 pub(super) fn normalize(v:&Value)->super::history::Normalized {
@@ -388,6 +426,25 @@ pub(super) fn normalize(v:&Value)->super::history::Normalized {
 
 #[cfg(test)] mod wire_tests {
     use super::*;
+    #[test] fn retained_terminal_requires_checked_prompt_correlation() {
+        let prompt=json!({"type":"acp","outgoing":true,"message":{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s"}}});
+        let complete=json!({"type":"acp","terminal":true,"message":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":17}}}});
+        for (field,value) in [("usage",json!({"inputTokens":"bad"})),("usage",json!({"thoughtTokens":-1})),("stopReason",json!(true))] {
+            let mut rejected=complete.clone();rejected["message"]["result"][field]=value;
+            let mut state=ReadState::default();state.record_events(&prompt);
+            assert!(!state.record_events(&rejected).iter().any(|e|matches!(e,Event::TurnEnd{..})));
+            let report=read_report("",&[prompt.clone(),rejected],None);assert_ne!(report.outcome,"ok");assert_eq!(report.usage.input,None);
+        }
+        for rejected in [complete.clone(),{let mut v=complete.clone();v["message"]["id"]=json!(99);v},{let mut v=complete.clone();v["replay"]=json!(true);v}] {
+            let mut state=ReadState::default();
+            if rejected!=complete {state.record_events(&prompt);}
+            assert!(!state.record_events(&rejected).iter().any(|e|matches!(e,Event::TurnEnd{..})),"a marker is not correlation");
+        }
+        let mut no_marker=complete.clone();no_marker["terminal"]=json!(false);
+        assert_eq!(read_report("",&[prompt.clone(),no_marker],None).outcome,"ok","checked correlation supplies authority");
+        let mut later=complete.clone();later["message"]["result"]["stopReason"]=json!("cancelled");
+        assert_eq!(read_report("",&[prompt,complete,later],None).outcome,"ok","the first checked settlement stays frozen");
+    }
     #[test] fn consumed_protocol_fields_are_checked() {
         assert!(validate(&json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}})).is_ok());
         assert!(validate(&json!({"jsonrpc":"2.0","id":null,"result":{}})).is_err());
