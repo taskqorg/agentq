@@ -6,7 +6,7 @@ fn tool(call:&Value)->Value {
     let f=call.get("function").unwrap_or(call);
     let name=first(f,&["name","tool","tool_name","function_name"]);let name=if name.is_null(){call["kind"]["tool_type"].clone()}else{name};
     let input=first(f,&["arguments","args","input","parameters"]);let input=if input.is_null(){call["kind"].clone()}else{parsed(&input)};
-    json!({"type":"tool_use","id":first(call,&["id","call_id","callID","toolCallId","tool_call_id"]),"name":name,"input":input,"server":call["server"]})
+    json!({"type":"tool_use","id":first(call,&["id","call_id","callID","toolCallId","tool_call_id","toolUseId"]),"name":name,"input":input,"server":call["server"]})
 }
 fn block(v:&Value)->Value {
     if v["type"].is_null() && v["text"].is_string(){return json!({"type":"text","text":v["text"]});}
@@ -14,7 +14,7 @@ fn block(v:&Value)->Value {
     if let Some(kind)=v["kind"].as_str() {
         let d=&v["data"];
         return match kind {"text"=>json!({"type":"text","text":d}),"json"=>json!({"type":"text","text":d.to_string()}),
-            "toolUse"=>tool(d),"toolResult"=>json!({"type":"tool_result","tool_use_id":first(d,&["id","toolUseId"]),"content":d["content"].as_array().map(|a|a.iter().map(block).collect::<Vec<_>>())}),_=>v.clone()};
+            "thinking"=>json!({"type":"thinking","thinking":d["text"]}),"toolUse"=>tool(d),"toolResult"=>json!({"type":"tool_result","tool_use_id":first(d,&["id","toolUseId"]),"content":d["content"].as_array().map(|a|a.iter().map(block).collect::<Vec<_>>())}),_=>v.clone()};
     }
     match v["type"].as_str() {
         Some("thinking"|"reasoning"|"think")=>json!({"type":"thinking","thinking":first(v,&["thinking","text","content"])}),
@@ -52,7 +52,7 @@ fn usage_step(v:&Value,u:&Value)->Value {
     for key in ["input","output","cache_read","cache_write","reasoning","cost_usd"] {if record[key].is_null(){unknown.insert(key.into(),json!("native field not reported"));}}
     record["unknown"]=json!(unknown);record
 }
-fn model(v:&Value)->Value {let m=first(v,&["model","modelAlias","modelID"]);if m.is_string(){m}else{first(&v["model"],&["modelID","id"]).as_str().map(|s|json!(s)).unwrap_or_else(||v["modelInfo"]["id"].clone())}}
+fn model(v:&Value)->Value {let m=first(v,&["model","modelAlias","modelID"]);let m=if m.is_null(){v["session_state"]["rts_model_state"]["model_info"]["model_id"].clone()}else{m};if m.is_string(){m}else{first(&v["model"],&["modelID","id"]).as_str().map(|s|json!(s)).unwrap_or_else(||v["modelInfo"]["id"].clone())}}
 fn result_record(id:Value,output:Value,v:&Value)->Value {
     let mut result=message("user",json!([{"type":"tool_result","tool_use_id":id,"content":output,"is_error":v["is_error"]==true || v["isError"]==true || v["success"]==false}]),v);
     let data=parsed(&output);if data.is_object(){result["toolUseResult"]=data;}result
@@ -110,7 +110,9 @@ pub(super) fn records(spec:&SourceSpec,original:&Value)->Vec<Value> {
         }return rows;
     }
     if matches!(ty.as_str(),"text"|"reasoning"|"thinking"|"file") && (original["message_id"].is_string() || v["messageID"].is_string()) {
-        let b=if ty=="file" {json!({"type":"image","url":v["url"],"mime":v["mime"],"name":v["filename"]})}else{block(&v)};
+        let b=if ty=="file" {
+            let kind=match v["mime"].as_str(){Some(m) if m.starts_with("image/")=>"image",Some(m) if m.starts_with("audio/")=>"audio",Some(m) if m.starts_with("video/")=>"video",_=>"document"};
+            json!({"type":kind,"url":v["url"],"mime":v["mime"],"name":v["filename"]})}else{block(&v)};
         return vec![message(v["role"].as_str().unwrap_or("assistant"),json!([b]),&v)];
     }
     if ty=="patch" {return vec![json!({"type":"FileChange","id":v["id"],"changes":v["files"].as_array().map(|a|a.iter().map(|p|if p.is_string(){json!({"path":p,"patch":v["diff"]})}else{p.clone()}).collect::<Vec<_>>()),"diff":v["diff"],"status":"completed","native":v})];}
@@ -130,7 +132,7 @@ pub(super) fn records(spec:&SourceSpec,original:&Value)->Vec<Value> {
     if role=="tool" {
         return vec![result_record(first(&m,&["tool_call_id","toolCallId","tool_use_id","id"]),first(&m,&["content","output","result"]),&m)];
     }
-    let mut content=parsed(&first(&m,&["content","parts","text"]));
+    let mut content=first(&m,&["content","parts","text"]);
     if content.is_null() && v["message"].is_string(){content=v["message"].clone();}
     if content.is_null(){content=first(&v,&["content","text"]);}
     let mut blocks=content.as_array().cloned().unwrap_or_else(||if content.is_null(){vec![]}else{vec![json!({"type":"text","text":content})]});

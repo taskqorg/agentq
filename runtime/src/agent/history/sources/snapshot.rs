@@ -3,13 +3,14 @@ use super::*;
 use std::collections::BTreeMap;
 use std::io::{BufRead,BufReader};
 use std::sync::atomic::{AtomicU64,Ordering};
-struct Part {path:PathBuf,bytes:Vec<u8>,hash:String}
+struct Part {path:PathBuf,bytes:Vec<u8>,hash:String,identity:String}
 struct Row {value:Value,file:usize,start:u64,end:u64,pointer:Value,raw:Option<String>}
 struct Snapshot {files:Vec<Part>,rows:Vec<Row>,pending_bytes:u64}
 impl Snapshot {
     fn file(&mut self,path:&Path)->Res<usize> {
-        let bytes=std::fs::read(path).map_err(|e|format!("history source unavailable: {e}"))?;
-        let index=self.files.len();self.files.push(Part {path:path.into(),hash:crate::sha256_hex(&bytes),bytes});Ok(index)
+        let mut file=File::open(path).map_err(|e|format!("history source unavailable: {e}"))?;
+        let identity=native::file_id(&file)?;let mut bytes=Vec::new();file.read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+        let index=self.files.len();self.files.push(Part {path:path.into(),hash:crate::sha256_hex(&bytes),bytes,identity});Ok(index)
     }
     fn json(&mut self,path:&Path)->Res<()> {
         let file=self.file(path)?;let bytes=&self.files[file].bytes;
@@ -34,7 +35,17 @@ impl Snapshot {
         }
         Ok(())
     }
-    fn manifest(&self)->Value {json!(self.files.iter().map(|f|json!({"key":f.hash,"path":f.path,"sha256":f.hash,"size":f.bytes.len()})).collect::<Vec<_>>())}
+    fn verify(&self)->Res<()> {
+        for part in &self.files {
+            let mut file=File::open(&part.path).map_err(|e|e.to_string())?;
+            if native::file_id(&file)?!=part.identity{return Err("history source replaced during snapshot; read again".into());}
+            let mut current=Vec::new();file.read_to_end(&mut current).map_err(|e|e.to_string())?;
+            if crate::sha256_hex(&current)!=part.hash{return Err("history source changed during snapshot; read again".into());}
+            if native::file_id(&File::open(&part.path).map_err(|e|e.to_string())?)?!=part.identity{return Err("history source replaced during snapshot; read again".into());}
+        }
+        Ok(())
+    }
+    fn manifest(&self)->Value {json!(self.files.iter().map(|f|json!({"key":f.hash,"path":f.path,"sha256":f.hash,"identity":f.identity,"size":f.bytes.len()})).collect::<Vec<_>>())}
 }
 fn database(path:&Path)->bool {path.extension().is_some_and(|e|e=="db" || e=="sqlite")}
 static NEXT:AtomicU64=AtomicU64::new(0);
@@ -42,22 +53,23 @@ struct Temp(PathBuf);
 impl Drop for Temp {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
 fn copy_database(path:&Path)->Res<(Snapshot,Temp,rusqlite::Connection)> {
     let mut snapshot=Snapshot {files:Vec::new(),rows:Vec::new(),pending_bytes:0};snapshot.file(path)?;
-    let wal=PathBuf::from(format!("{}-wal",path.display()));if wal.exists(){snapshot.file(&wal)?;}
+    let wal=PathBuf::from(format!("{}-wal",path.display()));let wal_part=if wal.exists(){Some(snapshot.file(&wal)?)}else{None};
+    let shm=PathBuf::from(format!("{}-shm",path.display()));let shm_part=if shm.exists(){Some(snapshot.file(&shm)?)}else{None};
+    snapshot.verify()?;
+    let committed=super::wal::committed(wal_part.map(|i|snapshot.files[i].bytes.as_slice()).unwrap_or(&[]),shm_part.map(|i|snapshot.files[i].bytes.as_slice()))?;
     let mut random=[0;16];ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(),&mut random).map_err(|_|"history snapshot randomness unavailable")?;
     let temp=Temp(std::env::temp_dir().join(format!("agentq-history-{}-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed),crate::sha256_hex(&random))));
     let mut builder=std::fs::DirBuilder::new();#[cfg(unix)] {use std::os::unix::fs::DirBuilderExt;builder.mode(0o700);}
     builder.create(&temp.0).map_err(|e|e.to_string())?;
     let copy=temp.0.join("source.db");
-    for (index,part) in snapshot.files.iter().enumerate() {
+    for (index,part) in snapshot.files.iter().enumerate().filter(|(index,_)|*index==0 || Some(*index)==wal_part) {
         let target=if index==0{copy.clone()}else{temp.0.join("source.db-wal")};
+        let bytes=if index==0{part.bytes.as_slice()}else{&part.bytes[..committed]};
         let mut opts=File::options();opts.create_new(true).write(true);#[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;opts.mode(0o600);}
-        use std::io::Write;opts.open(target).and_then(|mut f|f.write_all(&part.bytes)).map_err(|e|e.to_string())?;
+        use std::io::Write;opts.open(target).and_then(|mut f|f.write_all(bytes)).map_err(|e|e.to_string())?;
     }
-    for part in &snapshot.files {
-        let current=std::fs::read(&part.path).map_err(|e|e.to_string())?;
-        if crate::sha256_hex(&current)!=part.hash{return Err("history database changed during snapshot; read again".into());}
-    }
-    if wal.exists()!= (snapshot.files.len()==2){return Err("history WAL changed during snapshot; read again".into());}
+    snapshot.verify()?;
+    if wal.exists()!=wal_part.is_some() || shm.exists()!=shm_part.is_some(){return Err("history WAL/index changed during snapshot; read again".into());}
     let connection=rusqlite::Connection::open(&copy).map_err(|e|format!("history snapshot database: {e}"))?;
     connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;").map_err(|e|e.to_string())?;
     Ok((snapshot,temp,connection))
@@ -79,10 +91,18 @@ pub(super) fn identities(spec:&SourceSpec,path:&Path)->Res<Vec<(String,Option<St
         let parent=names.iter().position(|n|matches!(*n,"parent_session_id"|"parent_id"|"parentSessionId"));
         return statement.query_map([],|r|Ok((r.get::<_,String>(id)?,parent.map(|p|r.get::<_,Option<String>>(p)).transpose()?.flatten()))).map_err(|e|e.to_string())?.map(|v|v.map_err(|e|e.to_string())).collect();
     }
-    let value=if path.extension().is_some_and(|e|e=="jsonl") {
-        let mut text=String::new();let mut reader=BufReader::new(File::open(path).map_err(|e|e.to_string())?);
+    if spec.name=="kimi" {
+        if let Some(file)=super::kimi::companion(path).filter(|p|p.is_file()) {
+            let state:Value=serde_json::from_slice(&std::fs::read(file).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+            if let Some(identity)=super::kimi::identity(path,&state){return Ok(vec![identity]);}
+        }else if let Some(identity)=super::kimi::identity(path,&Value::Null){return Ok(vec![identity]);}
+    }
+    let metadata=companion(spec,path).filter(|p|p.is_file());
+    let identity_path=metadata.as_deref().unwrap_or(path);
+    let value=if identity_path.extension().is_some_and(|e|e=="jsonl") {
+        let mut text=String::new();let mut reader=BufReader::new(File::open(identity_path).map_err(|e|e.to_string())?);
         loop {text.clear();if reader.read_line(&mut text).map_err(|e|e.to_string())?==0 || !text.ends_with('\n'){break Value::Null;}if text.trim().is_empty(){continue;}break serde_json::from_str::<Value>(&text).map_err(|_|"history invalid JSON")?;}
-    }else{serde_json::from_slice::<Value>(&std::fs::read(path).map_err(|e|e.to_string())?).unwrap_or(Value::Null)};
+    }else{serde_json::from_slice::<Value>(&std::fs::read(identity_path).map_err(|e|e.to_string())?).unwrap_or(Value::Null)};
     let id=value["data"]["sessionId"].as_str().or(value["sessionId"].as_str()).or(value["session_id"].as_str()).or(value["sessionID"].as_str()).or_else(||{
         (path.extension().is_some_and(|e|e=="json") || matches!(value["type"].as_str(),Some("session"|"session_start"|"session.start"))).then(||value["id"].as_str()).flatten()
     }).map(String::from).unwrap_or_else(||fallback_id(path));
@@ -132,13 +152,15 @@ fn read(spec:&SourceSpec,path:&Path,session:&str)->Res<Snapshot> {
                 if row.pointer["table"]=="message" && row.value["id"].as_str().is_some_and(|id|finished.contains(id)){row.value["_usage_aggregate"]=json!(true);}
             }
         }
+        validate_records(spec,path,session,&snapshot)?;snapshot.verify()?;
         return Ok(snapshot);
     }
     let mut snapshot=Snapshot {files:Vec::new(),rows:Vec::new(),pending_bytes:0};snapshot.json(path)?;
-    let bytes=&snapshot.files[0].bytes;let first=if path.extension().is_some_and(|e|e=="jsonl"){bytes.split(|b|*b==b'\n').find(|line|!line.iter().all(u8::is_ascii_whitespace)).unwrap_or_default()}else{bytes};
-    if let Ok(value)=serde_json::from_slice::<Value>(first){
-        let native=value["sessionId"].as_str().or(value["session_id"].as_str()).or(value["sessionID"].as_str()).or(value["data"]["sessionId"].as_str()).or_else(||(path.extension().is_some_and(|e|e=="json") || value["type"]=="session").then(||value["id"].as_str()).flatten());
-        if native.is_some_and(|id|id!=session){return Err("history native session differs".into());}
+    let metadata=companion(spec,path).filter(|p|p.is_file());
+    if let Some(metadata)=&metadata {
+        let begin=snapshot.rows.len();snapshot.json(metadata)?;
+        for row in &mut snapshot.rows[begin..]{row.value["_session"]=json!(true);}
+        let count=snapshot.rows.len()-begin;snapshot.rows.rotate_right(count);
     }
     // Legacy OpenCode JSON separates the session, messages and parts into native directories.
     if spec.name=="opencode" && has(path,"session") {
@@ -149,13 +171,45 @@ fn read(spec:&SourceSpec,path:&Path,session:&str)->Res<Snapshot> {
             }
         }
     }
+    validate_records(spec,path,session,&snapshot)?;snapshot.verify()?;
+    if companion(spec,path).filter(|p|p.is_file())!=metadata{return Err("history companion changed during snapshot; read again".into());}
     Ok(snapshot)
 }
 
-pub(in crate::agent::history) fn steps(history:&mut History,path:&Path,bytes:u64)->Res<StepPage> {
-    let mut next=history.clone();let page=read_steps(&mut next,path,bytes)?;*history=next;Ok(page)
+fn companion(spec:&SourceSpec,path:&Path)->Option<PathBuf> {
+    match spec.name {"cline"=>super::cline::companion(path),"kiro"=>super::kiro::companion(path),"kimi"=>super::kimi::companion(path),_=>None}
 }
-fn read_steps(history:&mut History,path:&Path,bytes:u64)->Res<StepPage> {
+fn validate_record(value:&Value,session:&str)->Res<()> {
+    for key in ["sessionId","session_id","sessionID"] {
+        if let Some(id)=value[key].as_str(){if id!=session{return Err("history native session differs".into());}}
+    }
+    if value["_session"]==true || matches!(value["type"].as_str(),Some("session"|"session_start"|"session.start")) {
+        if value["id"].as_str().is_some_and(|id|id!=session){return Err("history native session differs".into());}
+    }
+    for key in ["data","message","payload","event"] {
+        if value[key].is_object(){validate_record(&value[key],session)?;}
+        else if key=="data" {if let Some(data)=value[key].as_str().and_then(|s|serde_json::from_str::<Value>(s).ok()).filter(Value::is_object){validate_record(&data,session)?;}}
+    }
+    Ok(())
+}
+fn validate_records(spec:&SourceSpec,path:&Path,session:&str,snapshot:&Snapshot)->Res<()> {
+    let expected=if spec.name=="kimi" {super::kimi::session(path).unwrap_or_else(||session.to_string())}else{session.to_string()};
+    if spec.name=="kimi" {
+        let state=snapshot.rows.iter().find(|r|r.value["agents"].is_object()).map(|r|&r.value).unwrap_or(&Value::Null);
+        if super::kimi::identity(path,state).is_some_and(|(id,_)|id!=session){return Err("history native agent differs".into());}
+    }
+    if path.extension().is_some_and(|e|e=="json") {
+        let root:Value=serde_json::from_slice(&snapshot.files[0].bytes).map_err(|e|e.to_string())?;
+        if root["id"].as_str().is_some_and(|id|id!=expected){return Err("history native session differs".into());}
+    }
+    for row in &snapshot.rows {validate_record(&row.value,&expected)?;}
+    Ok(())
+}
+
+pub(in crate::agent::history) fn steps(history:&mut History,path:&Path,bytes:u64)->Res<StepPage> {
+    let mut next=history.clone();let page=read_steps(&mut next,path,bytes,None)?;*history=next;Ok(page)
+}
+fn read_steps(history:&mut History,path:&Path,bytes:u64,mut physical:Option<&mut Vec<(Step,Value)>>)->Res<StepPage> {
     if bytes==0{return Err("history bytes must be positive".into());}
     let spec=SPECS.iter().find(|s|s.format==history.format).ok_or("history source unsupported")?;
     let snapshot=read(spec,path,&history.native_session)?;let manifest=snapshot.manifest();let hash=crate::sha256_hex(manifest.to_string().as_bytes());
@@ -176,6 +230,7 @@ fn read_steps(history:&mut History,path:&Path,bytes:u64)->Res<StepPage> {
             let mut event=event.clone();event["record_id"]=event["id"].clone();event["id"]=json!(format!("{}:{normalized_index}",event["id"].as_str().unwrap()));event["author"]=json!(normalized["type"].as_str().unwrap_or("unknown"));
             let derived=super::super::steps::contextual_steps("claude-native",&event,&normalized,&mut turn,&mut presentation);let count=derived.len();
             for mut step in derived {
+                if let Some(physical)=physical.as_deref_mut(){physical.push((step.clone(),normalized.clone()));}
                 step.revision=history.snapshot_revision+index as u64;step.part+=part_base;
                 if normalized["type"]=="usage" && matches!(normalized["scope"].as_str(),Some("session"|"model")){step.turn.id=None;step.turn.native_id=None;step.turn.unknown=Some("native session/model aggregate; no turn attribution".into());}
                 if let Some(old)=out.get(&step.id){step=super::super::steps::revise(old,step);}
@@ -185,8 +240,15 @@ fn read_steps(history:&mut History,path:&Path,bytes:u64)->Res<StepPage> {
         }
         if index as u64>=begin{consumed=consumed.saturating_add(row.raw.as_ref().map_or_else(||row.value.to_string().len(),String::len) as u64);end=index as u64+1;}
     }
+    history.identity=snapshot.files.first().map(|p|p.identity.clone());
     history.offset=end;let mut steps:Vec<_>=changed.into_values().collect();steps.sort_by_key(|s|(s.revision,s.part));
     Ok(StepPage {steps,generation:Some(history.snapshot_revision),reset,more:end<snapshot.rows.len() as u64 || snapshot.pending_bytes>0,pending_bytes:snapshot.pending_bytes,checkpoint:history.checkpoint()})
+}
+
+/// Every physical native row contributes media before logical revisions coalesce.
+pub(in crate::agent::history) fn media_steps(history:&History,path:&Path)->Res<Vec<(Step,Value)>> {
+    let mut history=history.clone();history.offset=0;let mut physical=Vec::new();
+    read_steps(&mut history,path,u64::MAX,Some(&mut physical))?;Ok(physical)
 }
 
 pub(in crate::agent::history) fn source_bytes(history:&History,path:&Path,key:&str,start:u64,length:u64)->Res<Vec<u8>> {

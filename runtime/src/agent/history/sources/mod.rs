@@ -3,6 +3,7 @@ use super::*;
 use std::path::PathBuf;
 mod decode;
 mod snapshot;
+mod wal;
 mod runtime;
 mod claude;
 mod codex;
@@ -61,7 +62,7 @@ fn roots(spec:&SourceSpec,home:Option<&Path>)->Res<Vec<PathBuf>> {
     }
     let mut roots:Vec<_>=spec.roots.iter().map(|r|if *r=="sessions" && base.file_name().is_some_and(|n|n=="sessions"){base.clone()}else{base.join(r)}).collect();
     if home.is_none() && spec.name=="openclaw"{if let Some(user)=std::env::var_os("HOME").or_else(||std::env::var_os("USERPROFILE")){roots.push(PathBuf::from(user).join(".clawdbot/agents"));}}
-    if home.is_none() && spec.name=="opencode" {if let Some(path)=std::env::var_os("OPENCODE_DB").filter(|p|Path::new(p).is_absolute()){roots.push(path.into());}}
+    if home.is_none() && matches!(spec.name,"opencode"|"opencode2") {if let Some(path)=std::env::var_os("OPENCODE_DB").filter(|p|Path::new(p).is_absolute()){roots.push(path.into());}}
     Ok(roots)
 }
 fn walk(path:&Path,spec:&SourceSpec,out:&mut Vec<PathBuf>)->Res<()> {
@@ -86,5 +87,5 @@ pub(super) fn identify(name:&str,path:&Path)->Res<Vec<super::sessions::Source>> 
     let ids=snapshot::identities(spec,path)?;
     Ok(ids.into_iter().map(|(session,parent)|super::sessions::Source {id:source_id(name,path,&session),native_session:session.clone(),session,path:path.into(),format:spec.format.into(),parent,parent_step:None}).collect())
 }
-pub(in crate::agent::history) use snapshot::{steps,source_bytes};
+pub(in crate::agent::history) use snapshot::{steps,source_bytes,media_steps};
 pub(in crate::agent) fn history_runtime(name:&str)->Option<&'static dyn super::super::Runtime> {runtime::get(name)}

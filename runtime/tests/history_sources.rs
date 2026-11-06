@@ -72,8 +72,8 @@ fn scrubbed_native_sql_projections_keep_real_record_shapes() {
     for (name,raw) in [("hermes",include_str!("fixtures/history/hermes-native.json")),("opencode",include_str!("fixtures/history/opencode-native.json"))] {
         for forbidden in ["/Users/","/home/","/private/","/var/folders/","C:\\Users\\","C:\\\\Users\\\\","Bearer "] {assert!(!raw.contains(forbidden),"private path or credential in {name}");}
         let rows:Value=serde_json::from_str(raw).unwrap();let root=root(&format!("native-{name}"));let file=root.join("projection.json");
-        write(&file,&json!({"session_id":"fixture","messages":rows["records"]}),false);
-        let mut history=agent::history::History::new(&format!("history-{name}"),"fixture","fixture").unwrap();let page=history.steps(&file,u64::MAX).unwrap();
+        let native=rows["records"][0]["id"].as_str().unwrap();write(&file,&json!({"session_id":native,"messages":rows["records"]}),false);
+        let mut history=agent::history::History::new(&format!("history-{name}"),"fixture",native).unwrap();let page=history.steps(&file,u64::MAX).unwrap();
         assert!(page.steps.iter().any(|s|s.kind==StepKind::Shell),"{name}");assert!(page.steps.iter().any(|s|s.kind==StepKind::Message),"{name}");
         assert!(page.steps.iter().all(|s|s.source["record"].is_object()));fs::remove_dir_all(root).unwrap();
     }
