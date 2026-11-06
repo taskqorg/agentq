@@ -38,7 +38,8 @@ impl AppServer {
                 let result=(&mut reader).take(8*1024*1024+1).read_line(&mut line);
                 let event=match result {
                     Ok(0)=>break,
-                    Ok(_) if line.len()>8*1024*1024 || !line.ends_with('\n')=>Err("app-server record incomplete or exceeds 8 MiB".into()),
+                    Ok(_) if line.len()>8*1024*1024=>Err("app-server record exceeds 8 MiB; native state unknown".into()),
+                    Ok(n) if !line.ends_with('\n')=>Err(format!("app-server stream ended inside a record after {n} bytes; native state unknown")),
                     Ok(_) if !line.trim_start().starts_with(['{','['])=>{
                         if let Err(e)=diagnostics.write_all(line.as_bytes()) {let _=output.send(Err(format!("app-server diagnostic log: {e}")));break;}
                         continue;

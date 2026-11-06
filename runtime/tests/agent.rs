@@ -38,6 +38,7 @@ fn main() {
         ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
+        ("app_resume_frames_stay_bounded_and_named", app_resume_frames_stay_bounded_and_named),
         ("protected_launch_refuses_tampering_and_preserves_native_transport", protected::protected_launch_refuses_tampering_and_preserves_native_transport),
         ("signed_retained_recovery_preserves_original_bytes", protected::signed_retained_recovery_preserves_original_bytes),
         ("independent_signed_host_recovers_without_taskq", protected::independent_signed_host_recovers_without_taskq),
@@ -291,6 +292,21 @@ fn fake_app_server() {
             },
             Some("thread/resume")=>{
                 assert_eq!(value["params"]["threadId"],std::fs::read_to_string("app-native-thread").unwrap());
+                // Native semantics measured in docs/research/253.md: `thread.turns` carries the history unless excluded.
+                if let Ok(frame)=std::env::var("AGENTQ_FAKE_RESUME_FRAME") {
+                    use std::io::Write;
+                    let head=json!({"id":id,"result":{"thread":{"id":"native-thread"},"model":"fixture-model","pad":""}}).to_string();
+                    let padded=|total:usize| head.replace("\"pad\":\"\"",&format!("\"pad\":\"{}\"","x".repeat(total-head.len()-1)));
+                    const LIMIT:usize=8*1024*1024;
+                    match frame.as_str() {
+                        "over"=>println!("{}",padded(LIMIT+1)),
+                        "native" if value["params"]["excludeTurns"]!=true=>println!("{}",padded(LIMIT+1)),
+                        "exact"=>println!("{}",padded(LIMIT)),
+                        "cut"=>{print!("{}",&head[..head.len()-1]);std::io::stdout().flush().unwrap();std::process::exit(0);},
+                        _=>println!("{head}"),
+                    }
+                    continue;
+                }
                 println!("{}",json!({"id":id,"result":{"thread":{"id":"native-thread"},"model":"fixture-model"}}));
             },
             Some("turn/start")=>{
@@ -361,6 +377,31 @@ fn app_transport_preserves_native_tools_drafts_and_catalogue() {
     assert!(rows.iter().filter(|v|v["id"]==999).all(|v|v["error"]["code"]==-32601));
     let metadata = records(&store).iter().map(Value::to_string).collect::<String>();
     for private in ["private draft", "private request", "invented-only", "final answer"] { assert!(!metadata.contains(private)); }
+}
+
+// #253 A2/A3: a thread/resume reply over the bound and a stream cut inside a record read as different failures before any
+// input; `excludeTurns` keeps a long native history inside the bound. Risk: both collapse into one message again, the record
+// bound drifts, or the ordinary resume starts hydrating history.
+fn app_resume_frames_stay_bounded_and_named() {
+    let codex = agent::runtime("codex").unwrap();
+    for (frame, refusal) in [("native", None), ("exact", None), ("over", Some("app-server record exceeds 8 MiB")), ("cut", Some("app-server stream ended inside a record after "))] {
+        let root = scratch(&format!("resume-frame-{frame}"));
+        std::fs::write(root.join("app-native-thread"), "native-thread").unwrap();
+        let mut l = fake_launch("codex", &root, "private request", &[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref()),("AGENTQ_FAKE_RESUME_FRAME",frame.as_ref())]);
+        l.deltas = true;
+        // The fake server still appends while a run is open, so requests are read only after it ended.
+        let requests = || -> Vec<Value> { std::fs::read_to_string(root.join("app-input.jsonl")).unwrap().lines().map(|l|serde_json::from_str(l).unwrap()).collect() };
+        match (codex.resume("native-thread", &l), refusal) {
+            (Ok(mut run), None) => assert_eq!(finish(codex, &mut run), agent::State::Finished, "{frame}"),
+            (Err(e), Some(refusal)) => {
+                let e = e.to_string();
+                assert!(e.contains(refusal), "{frame}: {e}");
+                assert!(!requests().iter().any(|v|v["method"]=="turn/start"), "{frame}: no input follows a failed open");
+            }
+            (opened, _) => panic!("{frame}: {:?}", opened.map(|_| "opened").map_err(|e| e.to_string())),
+        }
+        assert_eq!(requests().iter().find(|v|v["method"]=="thread/resume").unwrap()["params"]["excludeTurns"], true, "{frame}");
+    }
 }
 
 // #246 A1 and retained #217 protection: ordered images are submitted exactly once; invalid input never spawns.
