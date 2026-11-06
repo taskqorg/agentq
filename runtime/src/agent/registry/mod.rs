@@ -335,7 +335,7 @@ pub fn restore_preparation(entry: &Value, dry: bool) -> Res<()> {
 /// Inspect or explicitly prepare only the registered runtime's native hook trust.
 pub fn hook_trust(agent: &str, home: &Path, journal: Option<&Path>, repair: bool) -> Option<LaunchCheck> {
     let adapter=entry(agent)?.builtin?;
-    if !adapter.ops.hook_trust {return None;}
+    if adapter.ops.hook_status.is_none() {return None;}
     let root=match std::env::current_dir() {Ok(root)=>root,Err(_)=>return Some(LaunchCheck::new("evidence","degraded",Some("hooks-unknown"),"Working directory unavailable","select an existing working directory"))};
     let mut launch=Launch::new(root,std::env::temp_dir().join("unused-hooks.log"),"","agentq");launch.home=Some(home.into());
     let repair=Repair {workspace:false,hooks:repair,journal:journal.map(Path::to_path_buf)};
@@ -355,3 +355,6 @@ pub(crate) fn validate_native_args(client:Client,args:&[OsString])->Res<()> {(bu
 pub(crate) fn auth_vars()->Vec<&'static str> {ENTRIES.into_iter().filter_map(|e|e.builtin).flat_map(|a|a.ops.auth_vars.iter().copied()).collect()}
 
 pub(super) use codex::{codex_read_command,exchange,credential_snapshot};
+
+/// Passive profile/service inspection never starts a native process.
+pub fn hook_status(agent:&str,home:&Path,journal:Option<&Path>)->Option<LaunchCheck> {Some((entry(agent)?.builtin?.ops.hook_status?)(home,journal))}

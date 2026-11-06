@@ -14,6 +14,7 @@ coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.4" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 ring = "0.17"
+toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "serde"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

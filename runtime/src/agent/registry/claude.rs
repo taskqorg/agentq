@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 static ADAPTER: Adapter = Adapter {client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
         capabilities: &["history", "turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
-            "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } , ops: NativeOps {catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:background_launch,background_jobs:background_jobs,background_job:BackgroundJob::read,background_stop:background_stop,background_id:background_job_id,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"CLAUDE_CONFIG_DIR",alternate_home_var:None,session_vars:&["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SSE_PORT", "CLAUDE_JOB_DIR", "CLAUDE_PID"],auth_vars:&["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, preparation, restore_preparation:Some(restore_preparation), hook_trust:false, limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
+            "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } , ops: NativeOps {catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:background_launch,background_jobs:background_jobs,background_job:BackgroundJob::read,background_stop:background_stop,background_id:background_job_id,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"CLAUDE_CONFIG_DIR",alternate_home_var:None,session_vars:&["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SSE_PORT", "CLAUDE_JOB_DIR", "CLAUDE_PID"],auth_vars:&["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, preparation, restore_preparation:Some(restore_preparation), sandbox:None,hook_status:None, limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
 
 pub(super) const ENTRY: Entry = Entry { name:"claude", aliases:&[], order:1, profile_order:1, worker_order:0, onboard:true,
     profile:Profile {kind:"claude-code",label:"Claude Code",aliases:&["claude-code-cli", "claude-desktop-code"],operations:&["hooks"]},
@@ -81,7 +81,7 @@ fn settings(l: &Launch, spec: &mut Spec) {
             spec.args.extend(["--settings".into(), claude_settings(l.compact_hook.as_deref(), &vars).into()]);
         }
 }
-fn login(command: Command) -> Check {
+fn login(command: Command,_subscription:bool) -> Check {
     let status = |args: &[&str]| match probe(command,args,10) {Ok(o)|Err(crate::process::Failure::Exit(o))=>Ok(format!("{}{}",String::from_utf8_lossy(&o.stdout),String::from_utf8_lossy(&o.stderr))),Err(e)=>Err(e)};
     match status(&["auth", "status", "--json"]) {
                 Ok(out) => match serde_json::from_str::<Value>(out.trim()).ok().or_else(|| out.lines().find_map(|l| serde_json::from_str(l).ok())) {
@@ -673,16 +673,16 @@ fn preparation(l: &Launch, repair: &Repair) -> (LaunchCheck, LaunchCheck) {
         let home=preflight::home(&ADAPTER,l).ok_or("account home unknown")?;
         let context=preflight::spec(&ADAPTER,l);
         let name=if child_env(&context,"CLAUDE_CODE_CUSTOM_OAUTH_URL").is_some_and(|v|!v.is_empty()) {".claude-custom-oauth.json"} else {".claude.json"};
-        let file=if home.join(".config.json").exists() {home.join(".config.json")} else if context.home.is_some() || context.env.iter().any(|(k,_)|k=="CLAUDE_CONFIG_DIR") {home.join(name)} else {host_home().join(name)};
+        let file=if home.join(".config.json").exists() {home.join(".config.json")} else if context.home.is_some() || child_env(&context,"CLAUDE_CONFIG_DIR").is_some_and(|v|!v.is_empty()) {home.join(name)} else {host_home().join(name)};
         let key=root.to_string_lossy();
         let key=key.strip_prefix(r"\\?\").unwrap_or(&key).replace('\\',"/");
         let load=||->Res<(String,Value)> {let text=match std::fs::read_to_string(&file) {Ok(t)=>t,Err(e) if e.kind()==std::io::ErrorKind::NotFound && repair.workspace=>"{}".into(),Err(_)=>return Err("Claude trust config unreadable".into())};let doc:Value=serde_json::from_str(&text).map_err(|_|"Claude trust config invalid")?;if !doc.is_object() {return Err("Claude trust config invalid".into());}Ok((text,doc))};
         let (_,doc)=load()?;
-        let mut trusted=doc["projects"][&key]["hasTrustDialogAccepted"]==true;
+        let mut trusted=trusted_workspace(&doc,&root);
         let mut repaired=false;
         if !trusted && repair.workspace {
             // proper-lockfile uses a directory at this literal path; never break another client's lock.
-            let _guard=trust_lock(&file)?;
+            let guard=trust_lock(&file)?;
             let (_,mut doc)=load()?;
             if !doc["projects"].is_null() && !doc["projects"].is_object() {return Err("Claude projects config invalid".into());}
             if !doc["projects"][&key].is_null() && !doc["projects"][&key].is_object() {return Err("Claude project config invalid".into());}
@@ -691,7 +691,7 @@ fn preparation(l: &Launch, repair: &Repair) -> (LaunchCheck, LaunchCheck) {
             doc["projects"][&key]["hasTrustDialogAccepted"]=json!(true);
             let after=serde_json::to_string_pretty(&doc).map_err(|e|e.to_string())?;
             preflight::journal(repair,json!({"file":file,"key":["projects",key,"hasTrustDialogAccepted"],"kind":"trust","before":before,"after":true,"agent":"claude","created":!file.exists()}))?;
-            write_trust_config(&file,&after)?;
+            guard.verify()?;write_trust_config(&file,&after)?;guard.verify()?;
             trusted=load()?.1["projects"][&key]["hasTrustDialogAccepted"]==true;
             repaired=trusted;
         }
@@ -702,16 +702,48 @@ fn preparation(l: &Launch, repair: &Repair) -> (LaunchCheck, LaunchCheck) {
     (workspace,LaunchCheck::new("evidence",if registered {"ok"} else {"degraded"},(!registered).then_some("hooks-missing"),"Claude AgentQ hook registration checked","run AgentQ onboarding explicitly"))
 }
 
-struct TrustLock(PathBuf);
-impl Drop for TrustLock {fn drop(&mut self) {let _=std::fs::remove_dir(&self.0);}}
+// Claude 2.1.319 uses proper-lockfile defaults: stale=10s, refresh=stale/2.
+const NATIVE_LOCK_STALE:Duration=Duration::from_secs(10);
+struct TrustLock {path:PathBuf,id:String,file:File,stop:std::sync::mpsc::Sender<()>,refresh:Option<std::thread::JoinHandle<()>>}
+fn lock_directory(path:&Path)->Res<File> {
+    let mut options=File::options();options.read(true);
+    #[cfg(windows)] {use std::os::windows::fs::OpenOptionsExt;options.access_mode(0x80|0x100).custom_flags(0x02000000);}
+    options.open(path).map_err(|_|"workspace-trust-locked".into())
+}
+impl TrustLock {
+    fn verify(&self)->Res<()> {
+        if super::super::super::native::file_id(&lock_directory(&self.path)?)?!=self.id {return Err("workspace-trust-lock-compromised".into());}
+        self.file.set_times(std::fs::FileTimes::new().set_modified(SystemTime::now())).map_err(|_|"workspace-trust-lock-refresh-failed".into())
+    }
+}
+impl Drop for TrustLock {fn drop(&mut self) {
+    let _=self.stop.send(());if let Some(refresh)=self.refresh.take() {let _=refresh.join();}
+    if lock_directory(&self.path).and_then(|f|super::super::super::native::file_id(&f)).ok().as_deref()==Some(&self.id) {let _=std::fs::remove_dir(&self.path);}
+}}
 fn trust_lock(file:&Path)->Res<TrustLock> {
     let path=PathBuf::from(format!("{}.lock",file.display()));
-    std::fs::create_dir(&path).map_err(|_|"workspace-trust-locked")?;
-    Ok(TrustLock(path))
+    if let Err(error)=std::fs::create_dir(&path) {
+        if error.kind()!=std::io::ErrorKind::AlreadyExists {return Err("workspace-trust-locked".into());}
+        let metadata=std::fs::symlink_metadata(&path).map_err(|_|"workspace-trust-locked")?;
+        let modified=metadata.modified().map_err(|_|"workspace-trust-locked")?;
+        if !metadata.is_dir() || metadata.is_symlink() || SystemTime::now().duration_since(modified).unwrap_or_default()<=NATIVE_LOCK_STALE {return Err("workspace-trust-locked".into());}
+        let old=lock_directory(&path)?;let id=super::super::super::native::file_id(&old)?;
+        if std::fs::metadata(&path).ok().and_then(|m|m.modified().ok())!=Some(modified) || super::super::super::native::file_id(&lock_directory(&path)?)?!=id {return Err("workspace-trust-locked".into());}
+        drop(old);
+        std::fs::remove_dir(&path).map_err(|_|"workspace-trust-locked")?;
+        std::fs::create_dir(&path).map_err(|_|"workspace-trust-locked")?;
+    }
+    let file=lock_directory(&path)?;let id=super::super::super::native::file_id(&file)?;
+    let (stop,receive)=std::sync::mpsc::channel();let refresh_file=file.try_clone().map_err(|e|e.to_string())?;let refresh_path=path.clone();let refresh_id=id.clone();
+    let refresh=std::thread::spawn(move ||while receive.recv_timeout(NATIVE_LOCK_STALE/2)==Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+        if lock_directory(&refresh_path).and_then(|f|super::super::super::native::file_id(&f)).ok().as_deref()!=Some(&refresh_id) {break;}
+        if refresh_file.set_times(std::fs::FileTimes::new().set_modified(SystemTime::now())).is_err() {break;}
+    });
+    Ok(TrustLock {path,id,file,stop,refresh:Some(refresh)})
 }
 fn restore_preparation(entry:&Value,dry:bool)->Res<()> {
     let file=Path::new(entry["file"].as_str().ok_or("invalid preparation file")?);
-    let _guard=trust_lock(file)?;
+    let guard=trust_lock(file)?;
     let mut doc:Value=serde_json::from_slice(&std::fs::read(file).map_err(|_|"trust config unreadable")?).map_err(|_|"trust config invalid")?;
     let key=entry["key"].as_array().ok_or("invalid trust key")?.iter().map(|k|k.as_str().ok_or("invalid trust key")).collect::<Result<Vec<_>,_>>()?;
     let (last,parents)=key.split_last().ok_or("invalid trust key")?;
@@ -719,14 +751,15 @@ fn restore_preparation(entry:&Value,dry:bool)->Res<()> {
     if parent.get(*last)!=Some(&entry["after"]) {return Err("preparation value changed; kept".into());}
     if !dry {
         if entry["before"].is_null() {parent.shift_remove(*last);} else {parent.insert((*last).into(),entry["before"].clone());}
-        write_trust_config(file,&serde_json::to_string_pretty(&doc).map_err(|e|e.to_string())?)?;
+        guard.verify()?;write_trust_config(file,&serde_json::to_string_pretty(&doc).map_err(|e|e.to_string())?)?;
+        guard.verify()?;
         let read:Value=serde_json::from_slice(&std::fs::read(file).map_err(|_|"trust restore unreadable")?).map_err(|_|"trust restore invalid")?;
         if key.iter().fold(&read,|doc,key|&doc[*key])!=&entry["before"] {return Err("trust restore readback failed".into());}
     }
     Ok(())
 }
 
-fn limits_for(l:&Launch,now:i64)->Vec<Window> {super::super::super::limits::account(Client::Claude,preflight::home(&ADAPTER,l).as_deref(),now)}
+fn limits_for(l:&Launch,now:i64)->Vec<Window> {super::super::super::limits::account(Client::Claude,preflight::home(&ADAPTER,l).as_deref(),None,now)}
 
 fn validate(args:&[OsString],settings:&[(String,String)],policy:&Policy)->Res<()> {
     if settings.iter().any(|(k,v)|!v.is_empty() && secret_name(k) && !(policy.subscription && ["ANTHROPIC_API_KEY","ANTHROPIC_AUTH_TOKEN"].contains(&k.as_str()))) {return Err("secret-in-argv".into());}
@@ -748,4 +781,49 @@ fn write_trust_config(file:&Path,text:&str)->Res<()> {
     })();
     if result.is_err() {let _=std::fs::remove_file(temporary);}
     result
+}
+
+fn trust_key(root:&Path)->String {let key=root.to_string_lossy();key.strip_prefix(r"\\?\").unwrap_or(&key).replace('\\',"/")}
+
+// Claude checks its canonical repository root first, then cwd's parents up to the nearest git root.
+fn trusted_workspace(doc:&Value,root:&Path)->bool {
+    let git=root.ancestors().find(|p|p.join(".git").exists());
+    if let Some(git)=git {if let Some(main)=main_worktree(git) {if doc["projects"][trust_key(&main)]["hasTrustDialogAccepted"]==true {return true;}}}
+    for parent in root.ancestors() {
+        if doc["projects"][trust_key(parent)]["hasTrustDialogAccepted"]==true {return true;}
+        if Some(parent)==git {break;}
+    }
+    false
+}
+
+fn main_worktree(root:&Path)->Option<PathBuf> {
+    let text=std::fs::read_to_string(root.join(".git")).ok()?;
+    let gitdir=root.join(text.trim().strip_prefix("gitdir:")?.trim()).canonicalize().ok()?;
+    let common=gitdir.join(std::fs::read_to_string(gitdir.join("commondir")).ok()?.trim()).canonicalize().ok()?;
+    (common.file_name()?==".git").then(||common.parent().map(Path::to_path_buf)).flatten()
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    #[test]
+    fn inherited_project_trust_stops_at_git_root_and_uses_registered_worktrees() {
+        let root=crate::scratch("claude-trust-parents").canonicalize().unwrap();let project=root.join("project");let sub=project.join("sub");std::fs::create_dir_all(sub.join(".git")).unwrap();
+        let trusted=|path:&Path|json!({"projects":{trust_key(path):{"hasTrustDialogAccepted":true}}});
+        assert!(!trusted_workspace(&trusted(&project),&sub),"a nested repository stops ancestor trust");
+        std::fs::remove_dir(sub.join(".git")).unwrap();std::fs::create_dir_all(project.join(".git")).unwrap();
+        assert!(trusted_workspace(&trusted(&project),&sub));assert!(!trusted_workspace(&trusted(&root),&sub));
+        let worktree=root.join("worktree");std::fs::create_dir_all(&worktree).unwrap();let admin=project.join(".git/worktrees/fixture");std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(worktree.join(".git"),format!("gitdir: {}\n",admin.display())).unwrap();std::fs::write(admin.join("commondir"),"../..\n").unwrap();
+        assert!(trusted_workspace(&trusted(&project),&worktree));std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn native_stale_lock_recovers_and_live_or_replaced_locks_stay_owned() {
+        let root=crate::scratch("claude-native-lock");let file=root.join(".claude.json");let path=root.join(".claude.json.lock");
+        let guard=trust_lock(&file).unwrap();assert!(trust_lock(&file).is_err());guard.verify().unwrap();drop(guard);assert!(!path.exists());
+        std::fs::create_dir(&path).unwrap();lock_directory(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH)).unwrap();
+        let guard=trust_lock(&file).unwrap();guard.verify().unwrap();
+        std::fs::rename(&path,root.join("replaced-lock")).unwrap();std::fs::create_dir(&path).unwrap();assert!(guard.verify().is_err());drop(guard);assert!(path.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

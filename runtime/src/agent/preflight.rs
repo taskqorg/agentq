@@ -60,7 +60,6 @@ pub(super) fn command(adapter: &Adapter, l: &Launch) -> Res<Command> {
     let mut command = launch_base(adapter,l)?;
     super::super::clean_environment(&mut command, explicit_home(adapter,&spec).is_some());
     command.envs(spec.env);
-    command.env("GIT_ASKPASS","").env("SSH_ASKPASS","").env("GIT_TERMINAL_PROMPT","0").env("GCM_INTERACTIVE","never").env("SSH_ASKPASS_REQUIRE","never");
     if let Some(home) = &l.home { command.env(adapter.client.home_var(), home); }
     command.current_dir(&l.root);
     Ok(command)
@@ -99,7 +98,7 @@ pub(super) fn ready(adapter:&Adapter,l:&Launch)->Ready {
             }
         },Err(e)=>check("unknown",e),
     };
-    let login=self::command(adapter,l).map(|c|(adapter.ops.login)(c)).unwrap_or_else(|e|check("unknown",e));
+    let login=self::command(adapter,l).map(|c|(adapter.ops.login)(c,l.policy.subscription)).unwrap_or_else(|e|check("unknown",e));
     Ready {install,version,login}
 }
 
@@ -154,7 +153,11 @@ pub(super) fn check(adapter: &Adapter, l: &Launch, repair: &Repair) -> Readiness
     else {(row("workspace","unknown",Some("workspace-trust-unknown"),"Native version could not be verified","check native trust for this exact path"),row("evidence","degraded",Some("hooks-unknown"),"Native hooks could not be checked","check AgentQ hooks"))};
     checks.push(workspace);
     checks.push(match adapter.spec(l,"-".into(),false).and_then(|_|if adapter.descriptor.has("app-server") && automatic(l) {turn_thread(l).map(|_|())} else {Ok(())}) {
-        Ok(_)=>row("permissions",if l.policy.unelevated || matches!(l.policy.write,Scope::None|Scope::Project) {"unknown"} else {"ok"},(l.policy.unelevated || matches!(l.policy.write,Scope::None|Scope::Project)).then_some("sandbox-unverified"),"Policy mapped; sandbox startup is native","check native sandbox availability"),
+        Ok(_) if l.policy.unelevated || matches!(l.policy.write,Scope::None|Scope::Project)=> {
+            if ready==Some(true) {adapter.ops.sandbox.map(|probe|probe(l)).unwrap_or_else(||row("permissions","unknown",Some("sandbox-unverified"),"No native sandbox start probe","qualify native sandbox availability"))}
+            else {row("permissions","unknown",Some("sandbox-unverified"),"Native version unavailable for sandbox probe","check native sandbox availability")}
+        },
+        Ok(_)=>row("permissions","ok",None,"Policy mapped; no explicit sandbox requested",""),
         Err(e)=>row("permissions","blocked",Some("policy-unsupported"),&e,"select a supported policy"),
     });
     let inputs=(|| {
@@ -201,7 +204,7 @@ pub(super) fn journal(repair: &Repair, entry: Value) -> Res<()> {
 pub(super) fn safe_root(root: &Path, account: Option<&Path>) -> Res<PathBuf> {
     let root=root.canonicalize().map_err(|_|"workspace-missing")?;
     let home=std::env::var_os(if cfg!(windows) {"USERPROFILE"} else {"HOME"}).map(PathBuf::from).and_then(|p|p.canonicalize().ok());
-    if root.parent().is_none() || home.as_ref()==Some(&root) || account.and_then(|p|p.canonicalize().ok()).as_ref()==Some(&root) {return Err("workspace-trust-forbidden".into());}
+    if root.parent().is_none() || home.as_ref().is_some_and(|h|h.starts_with(&root)) || account.and_then(|p|p.canonicalize().ok()).is_some_and(|h|h.starts_with(&root)) {return Err("workspace-trust-forbidden".into());}
     Ok(root)
 }
 
@@ -220,3 +223,16 @@ pub(super) fn native_journal(repair: &Repair, file: &Path, root: &Path, key: &[&
     journal(repair,json!({"file":file,"root":root,"key":key,"kind":"native-config","before":before,"after":after,"agent":"codex"}))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn repair_refuses_the_account_home_and_every_ancestor() {
+        let root=crate::scratch("trust-home-ancestors");let home=root.join("account/home");let project=root.join("project");std::fs::create_dir_all(&home).unwrap();std::fs::create_dir_all(&project).unwrap();
+        assert_eq!(safe_root(&root,Some(&home)).unwrap_err(),"workspace-trust-forbidden");
+        assert_eq!(safe_root(home.parent().unwrap(),Some(&home)).unwrap_err(),"workspace-trust-forbidden");
+        assert_eq!(safe_root(&home,Some(&home)).unwrap_err(),"workspace-trust-forbidden");assert!(safe_root(&project,Some(&home)).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

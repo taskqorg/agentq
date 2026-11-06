@@ -17,6 +17,10 @@ fn main() {
     }
     if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
     if matches!(std::env::args().nth(1).as_deref(), Some("service"|"agent")) { return protected::fake_host(); }
+    if std::env::args().nth(1).as_deref()==Some("sandbox") && std::env::var("COREQ_FAKE_AGENT").as_deref()==Ok("codex") {
+        if std::env::var_os("FAKE_SANDBOX_REFUSED").is_some() {eprintln!("native sandbox unavailable");std::process::exit(1);}
+        println!("seatbelt");return;
+    }
     if let Some(file) = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].iter().find_map(|k| std::env::var_os(k)).map(|h| PathBuf::from(h).join("fake-ready.json")).filter(|f| f.is_file()) {
         return fake_ready(&file);
     }
@@ -296,7 +300,7 @@ fn fake(client: &str) {
     let record = json!({"args": args, "input": input, "home": std::env::var(home_var).ok(),
         "inherited": std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() || std::env::var("CODEX_THREAD_ID").is_ok() || std::env::var("ANTIGRAVITY_CONVERSATION_ID").is_ok(),
         "extra": std::env::var("FAKE_EXTRA").ok(),
-        "inherited_auth":std::env::var_os("OPENAI_API_KEY").is_some(),"git_prompt":std::env::var("GIT_TERMINAL_PROMPT").ok(),"askpass":std::env::var("GIT_ASKPASS").ok(),
+        "inherited_auth":std::env::var_os("OPENAI_API_KEY").is_some(),"git_prompt":std::env::var("GIT_TERMINAL_PROMPT").ok(),"askpass":std::env::var("GIT_ASKPASS").ok(),"git_ssh":std::env::var("GIT_SSH_COMMAND").ok(),
         "optimization": std::env::var("AGENTQ_OPTIMIZATION").ok(), "launcher": std::env::var("AGENTQ_LAUNCHER").ok(), "trace_context": std::env::var("COREQ_TRACE_CONTEXT").ok()});
     std::fs::write(format!("fake-turn-{turn}.json"), record.to_string()).unwrap();
     // A gated turn runs until the test creates the gate file, so the caller can checkpoint and recover it mid-turn.
@@ -1806,7 +1810,7 @@ fn ready_reads_native_login_and_minimum_version() {
     let home = std::env::temp_dir().join(format!("agentq-ready-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
     let claude_status = ["auth", "status", "--json"];
-    let codex_status = ["login", "status"];
+    let codex_status = ["-c", "forced_login_method=\"chatgpt\"", "login", "status"];
     let cases: &[(&str, &[&str], &str, &str, &str, &str)] = &[
         ("claude", &claude_status, "2.1.5 (Claude Code)", r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#, "ok", "ok"),
         ("claude", &claude_status, "2.0.9 (Claude Code)", r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}"#, "outdated", "api-key"),
@@ -1828,7 +1832,7 @@ fn ready_reads_native_login_and_minimum_version() {
 
 // M12.15/M12.16: blocked readiness never spawns work; exact trust requires explicit, journaled authority.
 fn preflight_checks_order_and_journals_exact_trust() {
-    let root=scratch("preflight");let home=root.join("account");std::fs::create_dir_all(&home).unwrap();
+    let base=scratch("preflight");let root=base.join("workspace");std::fs::create_dir_all(&root).unwrap();let home=base.join("account");std::fs::create_dir_all(&home).unwrap();
     let runtime=agent::runtime("claude").unwrap();
     std::fs::write(home.join("fake-ready.json"),json!({"version":"2.1.5","status":"{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\"}","expect":["auth","status","--json"]}).to_string()).unwrap();
     let file=home.join(".claude.json");std::fs::write(&file,r#"{"foreign":{"preserve":true},"projects":{}}"#).unwrap();
@@ -1857,6 +1861,14 @@ fn preflight_checks_order_and_journals_exact_trust() {
     let custom_config:Value=serde_json::from_slice(&std::fs::read(&custom).unwrap()).unwrap();
     assert!(custom_config["projects"].as_object().unwrap().values().any(|p|p["hasTrustDialogAccepted"]==true));
     launch.env.pop();
+    let os_home=base.join("os-home");std::fs::create_dir_all(&os_home).unwrap();
+    let saved:Vec<_>=["HOME","USERPROFILE","CLAUDE_CONFIG_DIR"].into_iter().map(|key|(key,std::env::var_os(key))).collect();
+    unsafe {std::env::set_var("HOME",&os_home);std::env::set_var("USERPROFILE",&os_home);std::env::set_var("CLAUDE_CONFIG_DIR",&home);}
+    let mut inherited=launch.clone();inherited.env.retain(|(key,_)|key!="CLAUDE_CONFIG_DIR");
+    assert_eq!(runtime.preflight(&inherited,&agent::Repair::default()).checks[3].state,"ok");
+    std::fs::write(&file,"{}").unwrap();assert_eq!(runtime.preflight(&inherited,&repair).checks[3].state,"repaired");
+    assert!(!os_home.join(".claude.json").exists(),"repair must use the inherited selected account, never another home");
+    for (key,value) in saved {unsafe {match value {Some(value)=>std::env::set_var(key,value),None=>std::env::remove_var(key)}}}
     std::fs::write(home.join("fake-ready.json"),json!({"version":"2.1.5","status":"{\"loggedIn\":false}","expect":["auth","status","--json"],"status_code":1}).to_string()).unwrap();
     assert_eq!(runtime.preflight(&launch,&agent::Repair::default()).checks[1].cause.as_deref(),Some("login-required"),"native auth status exit 1 is a known refusal, not an unknown probe");
     launch.home=Some(root.join("missing"));
@@ -1869,11 +1881,20 @@ fn preflight_checks_order_and_journals_exact_trust() {
     launch.env.push(("COREQ_FAKE_GATE".into(),root.join("gate").into()));
     let mut secret=launch.clone();secret.settings_env=vec![("ANTHROPIC_API_KEY".into(),"invented-caller-key".into())];
     assert!(runtime.launch(&secret).err().is_some_and(|e|e.starts_with("secret-in-argv")));
+    let mut sandbox=fake_launch("codex",&root,"never submitted",&[]);sandbox.policy.write=agent::Scope::Project;sandbox.policy.unelevated=cfg!(windows);
+    let codex=agent::runtime("codex").unwrap();
+    // A readable fake version enables the native no-model sandbox start probe.
+    let sandbox_home=base.join("sandbox-home");std::fs::create_dir_all(&sandbox_home).unwrap();sandbox.home=Some(sandbox_home.clone());
+    std::fs::write(sandbox_home.join("fake-ready.json"),json!({"version":"codex-cli 0.162.0","status":"Logged in using ChatGPT","expect":["login","status"]}).to_string()).unwrap();
+    assert_eq!(codex.preflight(&sandbox,&agent::Repair::default()).checks[4].state,"ok");
+    sandbox.env.push(("FAKE_SANDBOX_REFUSED".into(),"1".into()));
+    assert_eq!(codex.preflight(&sandbox,&agent::Repair::default()).checks[4].cause.as_deref(),Some("sandbox-unavailable"));
     let mut bypass=fake_launch("codex",&root,"never submitted",&[]);bypass.host_args=vec!["--dangerously-bypass-hook-trust".into()];
     assert!(agent::runtime("codex").unwrap().launch(&bypass).err().is_some_and(|e|e.starts_with("hook-trust-bypass-refused")));
     let inherited=std::env::var_os("OPENAI_API_KEY");
     unsafe {std::env::set_var("OPENAI_API_KEY","invented-parent-key");}
-    launch.env.push(("GIT_TERMINAL_PROMPT".into(),"1".into()));
+    launch.env.push(("GIT_ASKPASS".into(),"caller-helper".into()));
+    launch.env.push(("GIT_SSH_COMMAND".into(),"ssh -oBatchMode=yes -F caller-config".into()));
     let mut run=runtime.launch(&launch).unwrap();
     unsafe {if let Some(value)=inherited {std::env::set_var("OPENAI_API_KEY",value);} else {std::env::remove_var("OPENAI_API_KEY");}}
     assert_eq!(runtime.observe(&mut run).phase,"starting");
@@ -1882,6 +1903,7 @@ fn preflight_checks_order_and_journals_exact_trust() {
     std::fs::write(root.join("gate"),b"continue").unwrap();finish(runtime,&mut run);
     let seen=record(&root,1);
     assert_eq!(seen["inherited_auth"],false);
-    assert_eq!(seen["git_prompt"],"0");assert_eq!(seen["askpass"],"");
-    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(seen["git_prompt"],"0");assert_eq!(seen["askpass"],"caller-helper");
+    assert_eq!(seen["git_ssh"],"ssh -oBatchMode=yes -F caller-config");
+    std::fs::remove_dir_all(base).unwrap();
 }

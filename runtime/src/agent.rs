@@ -202,14 +202,16 @@ fn clean_environment(command: &mut Command, account_bound: bool) {
         let explicit:Vec<_>=command.get_envs().filter_map(|(k,v)|v.map(|_|k.to_os_string())).collect();
         for var in registry::auth_vars() {if !explicit.iter().any(|k|k==var) {command.env_remove(var);}}
     }
-    command.env("GIT_ASKPASS", "").env("SSH_ASKPASS", "").env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never").env("SSH_ASKPASS_REQUIRE", "never");
+    for (key,value) in [("GIT_ASKPASS",""),("SSH_ASKPASS",""),("GIT_TERMINAL_PROMPT","0"),("GCM_INTERACTIVE","never"),("SSH_ASKPASS_REQUIRE","never")] {
+        if !command.get_envs().any(|(k,_)|k==key) {command.env(key,value);}
+    }
+    if !command.get_envs().any(|(k,_)|k=="GIT_SSH_COMMAND") && std::env::var_os("GIT_SSH_COMMAND").is_none() {command.env("GIT_SSH_COMMAND","ssh -oBatchMode=yes");}
 }
 
 fn environment(mut base: Command, spec: &Spec) -> Command {
     base.current_dir(&spec.root);
     clean_environment(&mut base, spec.home.is_some() || spec.env.iter().any(|(k,_)|k==spec.client.home_var()));
     base.envs(spec.env.iter().map(|(k, v)| (k, v)));
-    base.env("GIT_ASKPASS","").env("SSH_ASKPASS","").env("GIT_TERMINAL_PROMPT","0").env("GCM_INTERACTIVE","never").env("SSH_ASKPASS_REQUIRE","never");
     if let Some(home) = &spec.home { base.env(spec.client.home_var(), home); }
     crate::quiet(&mut base);
     base
@@ -675,6 +677,19 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_prompt_defaults_preserve_explicit_helpers() {
+        let mut command=Command::new("unused");
+        clean_environment(&mut command,false);
+        assert!(command.get_envs().any(|(k,v)|k=="GIT_ASKPASS" && v==Some(OsStr::new(""))));
+        if std::env::var_os("GIT_SSH_COMMAND").is_none() {assert!(command.get_envs().any(|(k,v)|k=="GIT_SSH_COMMAND" && v==Some(OsStr::new("ssh -oBatchMode=yes"))));}
+        command.env("GIT_ASKPASS","explicit-helper").env("GIT_SSH_COMMAND","explicit-ssh");
+        clean_environment(&mut command,false);
+        assert!(command.get_envs().any(|(k,v)|k=="GIT_ASKPASS" && v==Some(OsStr::new("explicit-helper"))));
+        assert!(command.get_envs().any(|(k,v)|k=="GIT_SSH_COMMAND" && v==Some(OsStr::new("explicit-ssh"))));
+    }
+
 
     // #192 A1: service PATH misses user installs; native CLI and legacy homes must both remain usable.
     #[test]

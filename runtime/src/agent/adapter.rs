@@ -783,10 +783,11 @@ struct NativeOps {
     extras: fn(&Policy) -> Vec<OsString>,
     environment: fn(&Launch, &mut Spec),
     settings: fn(&Launch, &mut Spec),
-    login: fn(Command) -> Check,
+    login: fn(Command, bool) -> Check,
     preparation: fn(&Launch, &Repair) -> (LaunchCheck, LaunchCheck),
     restore_preparation: Option<fn(&Value, bool) -> Res<()>>,
-    hook_trust: bool,
+    sandbox:Option<fn(&Launch)->LaunchCheck>,
+    hook_status: Option<fn(&Path,Option<&Path>)->LaunchCheck>,
     limits_for: fn(&Launch, i64) -> Vec<Window>,
     validate: fn(&[OsString], &[(String,String)], &Policy) -> Res<()>,
     protected: fn(PathBuf) -> Vec<PathBuf>,
@@ -1145,7 +1146,7 @@ impl Runtime for Adapter {
     fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready {
         let root=std::env::current_dir().unwrap_or_else(|_|std::env::temp_dir());
         let mut launch=Launch::new(root,std::env::temp_dir().join("unused-ready.log"),"","agentq");
-        launch.home=home.map(Path::to_path_buf);launch.command=executable.map(|p|vec![p.as_os_str().into()]).unwrap_or_default();
+        launch.policy.subscription=self.client==Client::Codex;launch.home=home.map(Path::to_path_buf);launch.command=executable.map(|p|vec![p.as_os_str().into()]).unwrap_or_default();
         preflight::ready(self,&launch)
     }
     fn ready_for(&self, launch: &Launch) -> Ready {preflight::ready(self,launch)}

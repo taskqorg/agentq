@@ -140,7 +140,7 @@ pub fn profile(c: &Client, data: &Path, journal: &Path, key: &hmac::Key) -> Valu
         "id": sign(key, &[b"profile", c.kind.as_bytes(), c.root.display().to_string().as_bytes()]),
         "revision": sign(key, &refs),
         "hooks": hooks,
-        "hook_trust": if matches!(hooks,"registered"|"partial") {registry::hook_trust(c.agent,&c.root,Some(&data.join("owned.json")),false).map(|c|json!(c))} else {None},
+        "hook_trust": if matches!(hooks,"registered"|"partial") {registry::hook_status(c.agent,&c.root,Some(&data.join("owned.json"))).map(|c|json!(c))} else {None},
         "plugin": plugin,
         "integration": integration,
         "effective": {"adapter": (!adapter.is_empty()).then_some(adapter), "state": effective},

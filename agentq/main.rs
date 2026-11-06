@@ -1008,6 +1008,22 @@ mod tests {
         for line in lines {println!("{line}");}
         let check=agentq_runtime::agent::registry::hook_trust("codex",&home,Some(&install.join("data/owned.json")),false).unwrap();
         assert_eq!(check.state,"ok","{check:?}");
+        let journal=install.join("data/owned.json");
+        assert_eq!(agentq_runtime::agent::registry::hook_status("codex",&home,Some(&journal)).unwrap().state,"ok");
+        // An owner may have trusted the hooks before onboarding recorded their native hashes.
+        let mut receipts:Vec<Value>=serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+        receipts.retain(|entry|entry["kind"]!="native-config");
+        std::fs::write(&journal,serde_json::to_vec(&receipts).unwrap()).unwrap();
+        assert_eq!(agentq_runtime::agent::registry::hook_status("codex",&home,Some(&journal)).unwrap().state,"degraded");
+        assert_eq!(agentq_runtime::agent::registry::hook_trust("codex",&home,Some(&journal),true).unwrap().state,"ok");
+        assert_eq!(agentq_runtime::agent::registry::hook_status("codex",&home,Some(&journal)).unwrap().state,"ok");
+        let receipts:Vec<Value>=serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+        for receipt in receipts.iter().filter(|entry|entry["kind"]=="native-config") {
+            assert_eq!(receipt["before"],receipt["after"]);
+            agentq_runtime::agent::registry::restore_preparation(receipt,false).unwrap();
+        }
+        agentq_runtime::agent::registry::hook_trust("codex",&home,Some(&journal),true).unwrap();
+        assert_eq!(serde_json::from_slice::<Vec<Value>>(&std::fs::read(&journal).unwrap()).unwrap().len(),receipts.len());
     }
 
 }
