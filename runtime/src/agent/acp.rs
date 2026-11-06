@@ -29,7 +29,7 @@ mod wire {
     pub struct Initialize {pub protocol_version:u64,pub agent_info:Option<Info>,#[serde(default)] pub agent_capabilities:Capabilities}
     #[derive(Deserialize)] pub struct Info {pub version:Option<String>,pub name:Option<String>}
     #[derive(Default,Deserialize)] #[serde(rename_all="camelCase")]
-    pub struct Capabilities {#[serde(default,alias="load_session")] pub load_session:bool,#[serde(default)] pub prompt_capabilities:PromptCapabilities}
+    pub struct Capabilities {#[serde(default)] pub load_session:bool,#[serde(default,rename="load_session")] pub native_load_session:bool,#[serde(default)] pub prompt_capabilities:PromptCapabilities}
     #[derive(Default,Deserialize)] pub struct PromptCapabilities {#[serde(default)] pub image:bool}
     #[derive(Deserialize)] #[serde(rename_all="camelCase")] pub struct Session {pub session_id:Option<String>}
     #[derive(Deserialize)] pub struct Error {pub code:i64,pub message:String}
@@ -396,5 +396,6 @@ pub(super) fn normalize(v:&Value)->super::history::Normalized {
         assert!(checked::<wire::Content>(&json!({"type":"text","text":false})).is_err());
         assert!(checked::<wire::Permission>(&json!({"sessionId":"s","toolCall":{"toolCallId":5},"options":[]})).is_err());
         assert!(checked::<wire::Initialize>(&json!({"protocolVersion":1,"future":{"preserved":true}})).is_ok());
+        assert!(checked::<wire::Initialize>(&json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true,"load_session":true}})).is_ok());
     }
 }
