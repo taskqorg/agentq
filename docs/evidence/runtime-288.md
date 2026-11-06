@@ -26,6 +26,8 @@ After the fix, `cargo test --locked -p agentq-runtime --test history` passed all
 | `python tests/runtime_publication.py` | PASS: both immutable-tag and single-CoreQ-source checks. The example consumer also built in the full gate. |
 | `git diff --check` | PASS. |
 
+After the rebase on `bef051a1b07dd777f919d812f084d9d9432885d2`, with the changelog and version text added, the same gate passed on macOS ARM64: `cargo test --locked` (42 fake-client scenarios, 22 history tests), `cargo run --locked -- selftest`, the pinned contract lint and `tests/runtime_publication.py`. This precedes the protected gate repair below.
+
 No paid native turns, working-profile configuration changes, consumer adoption or host deployment were performed. Cross-platform qualification and merge-result CI remain separate observations for review (R12; TaskQ §7).
 
 ## Protected gate repair

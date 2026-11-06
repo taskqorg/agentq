@@ -1,6 +1,6 @@
 # AgentQ — internal organization package
 
-Revision: 3. Product outcomes; decisions and the requirement map live in [agentq.md](../../agentq.md) § 11. [Acceptance](VERIFICATION.md).
+Revision: 4. Product outcomes; decisions and the requirement map live in [agentq.md](../../agentq.md) § 11. [Acceptance](VERIFICATION.md).
 
 ## Purpose
 
@@ -23,6 +23,7 @@ AgentQ also owns the reusable Codex/Claude/Antigravity worker runtime that TaskQ
 - **R11 — Simple development/deploy.** One codebase and repeatable build/test/release workflow; small unavoidable OS adapters. Prefer ready upstream components, platform facilities and prebuilt artifacts; users do not compile or assemble toolchains. Added code/dependency/service/step requires a real benefit. Preserve effective features and reliability; no speculative framework. New runtime starts from an empty codebase, not inherited legacy implementation.
 - **R12 — Spec-driven agents.** AI manager assigns bounded tasks against an approved spec revision. Independent acceptance verifies integrated outcomes before authorized merge/deploy. Behavior changes require discussion/evidence, approved spec amendment, then implementation. Minimum meaningful product scenarios plus targeted high-risk checks; no test-count/coverage quota or function-by-function duplication.
 - **R13 — Reusable agent runtime.** Products run Codex, Claude and Antigravity worker turns through one AgentQ runtime library and a thin JSON command for non-Rust callers, without installing the optimizer service, Headroom, RTK or MCP. Preserve CLI, Antigravity conversation, background, app and app-server modes, Remote Control, session recovery, native tools, private drafts, the model catalogue, accounts, permissions and exactly one attributable usage observation per turn. Each launch states optimization intent `inherit`, `off` or `on` and sees the effective state with a reason; host disable wins, a launch never edits global configuration, and an absent or failed optimizer keeps native output. Benchmark all supported worker runtimes across optimization modes (`off` vs `on`) and task categories, retaining dated/versioned benchmark runs and an interactive viewer for historical comparison. CoreQ keeps generic primitives; its frozen agent module stays compatible until every consumer adopts the runtime. Distinguish owned headless CLI execution from sidecar submission; preserve prompt, terminal boundaries and unknown usage through wrappers. A sidecar cannot claim launch-off without propagation to its existing server.
+- **R14 — Reliable worker start.** Before a worker gets its task, the runtime checks everything that worker needs and repairs only what it owns. A worker starts ready, or it refuses before spending tokens, with the exact cause and next step. Nothing makes a worker silently wait for a person. Our optional observation parts never stop work. Unverified readiness stays visible, never reported as ready.
 
 ## Evidence and limits
 

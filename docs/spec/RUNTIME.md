@@ -226,6 +226,59 @@ A consumer service that re-executes itself reattaches its live CLI turn children
 - `spawned(&Child)` runs after spawn and before any input is written, for example to assign a Windows Job Object through the child handle. An error kills and reaps the child and fails the launch with that error.
 - Background, queue, job list and stop launchers are bounded exchanges owned and reaped by `coreq::process`; they get only `quiet` and no caller hooks, because the native background job they start is not their child.
 
+## Worker preflight
+
+Binding detail of M12.15–M12.17 and PRODUCT R14. Target of [#284](https://github.com/taskqorg/agentq/issues/284); until it ships, callers keep today's `ready` and `quota` reads.
+
+`Runtime::preflight(&Launch, Repair)` returns one `Readiness`: a list of checks in the order below, each with state, cause, native detail and next step. `launch` and `resume` run it first, without repair. `agentq agent preflight` exposes it to non-Rust callers. Resume also verifies the session's account, home and runtime against the saved run.
+
+| Order | Check | Passes when | Blocked cause |
+|---|---|---|---|
+| 1 | Client | Executable resolves and version meets the descriptor `minimum` | `client-missing`, `client-outdated` |
+| 2 | Account | The requested home exists and belongs to this account; native login status reads ok. There is never a fallback to another account | `account-home-missing`, `login-required` |
+| 3 | Capacity | `quota` picks an account, or the caller set no accounts | `quota-exhausted`, with the hold end |
+| 4 | Workspace | Root is an existing folder; writable when `Policy` needs writes; native client trust covers the exact path | `workspace-missing`, `workspace-unwritable`, `workspace-untrusted` |
+| 5 | Permissions | Every `Policy` part maps to this runtime; the native sandbox starts on this host when one is required | `policy <part> unsupported by <name>`, `sandbox-unavailable` |
+| 6 | Inputs | Model is in the catalogue when the catalogue is readable; MCP config, instructions and images are readable | `model-unavailable`, `input-invalid` |
+| 7 | Storage | Caller log path and CoreQ store are writable | `storage-unavailable` |
+| 8 | Evidence | AgentQ hooks are registered and trusted; telemetry store and archive shipper are reachable. Optional: this check only ever reads `degraded` | none |
+
+### Check states
+
+| State | Meaning | Launch |
+|---|---|---|
+| `ok` | Verified by a native read in this preflight | Continues |
+| `repaired` | Failed, then fixed by an M12.16 repair and verified again | Continues |
+| `degraded` | Work is possible; some evidence or optional behavior is lost | Continues; visible in the report |
+| `unknown` | The check could not read an answer, for example a probe timeout or a client with no status command | Continues by default; refuses when the caller set `Launch.readiness` to `strict` |
+| `blocked` | The worker cannot do this work | Refuses before spawn |
+
+A `Readiness` is part of the run's report, and its states and cause codes join `agent.turn` as metadata. Native detail stays local (M6.2). `ok` is never inferred from a missing check.
+
+### Cost
+
+Preflight makes no model call and costs no tokens. It adds no new timeout, cache or budget: each check runs once per launch, and native probes keep their existing limits (`--version` 5 s, login 10 s). A probe that ends without an answer reads `unknown`. A check is read-only unless `Repair` allows it. Limits and caches join only when telemetry shows a real problem.
+
+### Repair
+
+`Repair` lists what the caller authorizes; the default is none. Allowed repairs:
+
+- Exact-path client trust: Claude `hasTrustDialogAccepted`, Codex project `trust_level`. Written under the client's own lock, keeping unrelated keys. Never for a home folder or a filesystem root.
+- AgentQ's own hook trust: the hash comes from the client's own hook listing; a computed hash is only a fallback. Foreign hooks are never trusted. `--dangerously-bypass-hook-trust` is used only for an AgentQ-owned isolated home.
+
+Each repair is journaled before the write, verified by reading back, and restored by uninstall (§ 9). Login, account choice, model, permissions and provider are outside repair. Login belongs to the explicit owner-started flow of [#286](https://github.com/taskqorg/agentq/issues/286).
+
+### No silent wait
+
+- The child gets no prompt path: no terminal on stdin unless the launch owns one, a non-interactive Git credential guard, and approvals that follow `Policy`. A request that needs an answer reaches the caller as a typed step, never a hidden wait.
+- The child environment drops inherited auth and session variables that do not belong to its account; secrets go in `Launch.env`, never in argv.
+- A run reads `starting` until native proof of a session: a session ID, or the first native record. Then it reads `started`. A native refusal ends it with its `launch_refusal` cause. `starting` and its age stay visible, and the caller may cancel through identity-safe stop.
+- After input is written, nothing resubmits it. Inactivity after start is the stall signal of [#287](https://github.com/taskqorg/agentq/issues/287).
+
+### Native evidence
+
+A fake client proves only the adapter. Each check needs one real failing case and one real passing case per runtime and OS, with client versions recorded (VERIFICATION A7). Antigravity has no login status command, so its account check reads `unknown` until a native read exists; this is reported, never `ok`.
+
 ## Session model
 
 - One native session belongs to one conversation or one task attempt.
@@ -614,7 +667,7 @@ Consumers of the runtime and CoreQ on their default branches when this page chan
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
 | AssetQ | `coreq` v0.19.2, `agentq-runtime` tag `runtime-v0.2.0` (which resolves its own `coreq` v0.18.0) | Pinned; a newer revision follows its own contract and qualification |
 
-- Runtime crate version 0.13.0; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
+- Runtime crate version 0.13.1; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. After a runtime version change merges to main and that exact source passes the `Test` workflow on Linux, macOS and Windows, `.github/workflows/runtime-tag.yml` invokes `scripts/tag_runtime.py`. The script checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - One CoreQ source: a consumer that uses CoreQ directly spells the runtime's exact CoreQ dependency, currently `coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.0" }`. Cargo treats `tag` and `rev` at the same commit as two sources, and then two `Store` types. `tests/runtime_publication.py` resolves such a consumer and refuses more than one CoreQ source.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.

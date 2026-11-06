@@ -1,5 +1,9 @@
 # Runtime changelog
 
+## 0.13.1
+
+- `History` events add `validity: {status, reason}`. Claude records with a non-empty string `type` are `valid`, including unsupported metadata such as `file-history-snapshot`. Missing or malformed discriminators are `invalid`. Other transports report `unknown`. A consumer can skip valid metadata and refuse invalid envelopes without parsing native JSON. See [task #288 evidence](../docs/evidence/runtime-288.md).
+
 ## 0.13.0
 
 - `LogRecord` and `History` events expose assistant failures, lifecycle display labels and saved Claude permission modes without consumer native parsing. `AssistantFailure` retains the native code, `auth-rejected`/`client-error` classification and local detail. Exhaustive LogRecord constructors/patterns must add the new fields or use `..`.
