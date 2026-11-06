@@ -3,7 +3,6 @@ use super::*;
 use super::stdio::Stdio;
 
 pub(super) struct Config {
-    pub minimum: &'static str,
     pub args: &'static [&'static str],
     pub env: &'static [(&'static str, &'static str)],
     pub home_var: &'static str,
@@ -15,18 +14,11 @@ pub(super) struct Config {
     pub question_prefixes: &'static [&'static str],
 }
 
-fn check_version(command:&Command,config:&Config,l:&Launch)->Res<()> {
-    if config.minimum.is_empty() && config.rejected_versions.is_empty() {return Ok(());}
-    let mut probe=Command::new(command.get_program());probe.args(command.get_args()).arg("--version").envs(config.env.iter().copied()).envs(l.env.iter().cloned()).current_dir(&l.root);
-    for (key,value) in command.get_envs() {if let Some(value)=value {probe.env(key,value);}else{probe.env_remove(key);}}
-    if let Some(home)=&l.home {probe.env(config.home_var,home);}
-    let output=if let Some(until)=l.deadline {crate::process::output("agent.version",&mut probe,until.saturating_duration_since(Instant::now())).map_err(|e|format!("ACP version probe: {e}"))?}
-        else {probe.output().map_err(|e|format!("ACP version probe: {e}"))?};
-    if !output.status.success() {return Err("ACP version probe failed; server not started".into());}
-    let text=String::from_utf8_lossy(&output.stdout);
-    let have=adapter::version_parts(&text).ok_or("ACP version unknown; server not started")?;
-    if config.rejected_versions.iter().any(|v|adapter::version_parts(v).as_ref()==Some(&have)) {return Err("ACP server version refused: workspace write defect".into());}
-    if adapter::version_parts(config.minimum).is_some_and(|need|have<need) {return Err(format!("ACP version below minimum {}; server not started",config.minimum));}Ok(())
+pub(super) fn check_version(config:&Config,client:&LaunchCheck)->Res<()> {
+    if config.rejected_versions.is_empty() {return Ok(());}
+    if client.state!="ok" {return Err("ACP version unknown; server not started".into());}
+    let have=adapter::version_parts(&client.detail).ok_or("ACP version unknown; server not started")?;
+    if config.rejected_versions.iter().any(|v|adapter::version_parts(v).as_ref()==Some(&have)) {return Err("ACP server version refused: workspace write defect".into());}Ok(())
 }
 
 // These are the protocol fields consumed below; extension fields stay in the raw value.
@@ -109,7 +101,6 @@ impl Drop for Session {fn drop(&mut self) {let _=self.server.kill();}}
 impl Session {
     pub fn open(mut command: Command, config: &Config, l: &Launch, resume: Option<&str>) -> Res<Self> {
         validate_launch(config,l)?;
-        check_version(&command,config,l)?;
         command.args(config.args).envs(config.env.iter().copied()).envs(l.env.iter().cloned()).current_dir(&l.root);
         if l.policy.approval==Approval::Bypass {command.args(config.bypass_args);}
         if let Some(home)=&l.home {
@@ -273,7 +264,7 @@ impl Session {
             }
         }
         if self.report.is_some() {
-            self.server.close_stream(self.deadline)?;self.closed=Some("terminal".into());
+            self.server.close_stream();self.closed=Some("terminal".into());
             if let Some(report)=&mut self.report {
                 report.exit=self.server.poll()?;
                 if let Some(sampler)=self.sampler.take() {report.process=sampler.usage();}

@@ -136,9 +136,8 @@ impl Accounts {
     pub fn off(&self) -> bool { self.entries().iter().all(|e| !e.enabled) }
 }
 
-/// The client's own home: `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `ANTIGRAVITY_HOME` (or `ANTIGRAVITY_APP_DATA_DIR`)
-/// of this process, else `~/.claude` / `~/.codex` / `~/.gemini/antigravity-cli` when present, else the legacy
-/// `~/.gemini/antigravity` (a Windows service has no `HOME`, so `USERPROFILE`).
+/// The client's own home: `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GEMINI_HOME`
+/// of this process, else `~/.claude` / `~/.codex` / `~/.gemini` (a Windows service has no `HOME`, so `USERPROFILE`).
 pub(crate) fn base_home(client: Client) -> Option<PathBuf> {
     registry::native_home(client)
 }
@@ -736,9 +735,9 @@ mod tests {
             let legacy = home.join(".gemini/antigravity");
             let cli = home.join(".gemini/antigravity-cli");
             std::fs::create_dir_all(&legacy).unwrap();
-            assert_eq!(base_home(Client::Antigravity), Some(legacy.clone()));
+            assert_eq!(base_home(Client::Antigravity), Some(home.join(".gemini")));
             std::fs::create_dir_all(&cli).unwrap();
-            assert_eq!(base_home(Client::Antigravity), Some(cli));
+            assert_eq!(base_home(Client::Antigravity), Some(home.join(".gemini")));
             return;
         }
         let home = crate::scratch("agy-lookup");
@@ -749,7 +748,7 @@ mod tests {
             .args(["--exact", "agent::tests::native_agy_user_bin_and_homes", "--nocapture"])
             .env("AGENTQ_TEST_AGY_HOME", "1").env("HOME", &home).env("USERPROFILE", &home)
             .env("PATH", &home).env_remove("ANTIGRAVITY_HOME").env_remove("ANTIGRAVITY_APP_DATA_DIR")
-            .env_remove("ANTIGRAVITY_AGENTAPI_EXE").status().unwrap();
+            .env_remove("ANTIGRAVITY_AGENTAPI_EXE").env_remove("GEMINI_HOME").status().unwrap();
         std::fs::remove_dir_all(home).unwrap();
         assert!(status.success());
     }

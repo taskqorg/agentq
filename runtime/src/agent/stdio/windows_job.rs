@@ -42,12 +42,16 @@ impl Frozen {
 }
 pub(super) struct Job(OwnedHandle);
 impl Job {
-    pub fn attach(child:&Child)->Res<Self> {
+    pub fn new()->Res<Self> {
         let raw=unsafe {CreateJobObjectW(std::ptr::null(),std::ptr::null())};
         if raw.is_null(){return Err(error("create"));}
         let job=Self(unsafe {OwnedHandle::from_raw_handle(raw)});
         let mut limits=Limits::default();limits.basic.flags=0x2000; // KILL_ON_JOB_CLOSE, no breakaway.
         if unsafe {SetInformationJobObject(raw,9,(&limits as *const Limits).cast(),std::mem::size_of::<Limits>() as u32)}==0 {return Err(error("limits"));}
+        Ok(job)
+    }
+    pub fn attach(&self,child:&Child)->Res<()> {
+        let raw=self.0.as_raw_handle();
         let root=Frozen::open(child.id(),0)?.ok_or("native server exited before job attachment")?;
         if root.created!=created(child.as_raw_handle())? || unsafe {GetProcessId(child.as_raw_handle())}!=root.pid {return Err("native server creation identity changed".into());}
         let mut frozen=vec![root];let mut assigned=0;
@@ -73,7 +77,7 @@ impl Job {
         }
         // Handles keep creation identities bound; dropping these guards resumes exactly our suspension.
         for member in &mut frozen {member.resume=true;}
-        drop(frozen);Ok(job)
+        drop(frozen);Ok(())
     }
     pub fn kill(&self)->Res<()> {if unsafe {TerminateJobObject(self.0.as_raw_handle(),1)}==0 {Err(error("terminate"))}else{Ok(())}}
 }
