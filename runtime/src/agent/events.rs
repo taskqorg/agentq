@@ -9,6 +9,7 @@ pub enum ToolKind { Shell, Mcp, Web, Other }
 pub enum Event {
     Text { item: Option<String>, delta: String },
     Message { item: Option<String>, text: String },
+    /// Optional local audit detail is untrusted; consumers scrub it before storage or output.
     ToolStart { id: Option<String>, kind: ToolKind, name: Option<String>, detail: Option<String> },
     ToolEnd { id: Option<String>, status: Option<String> },
     Quota(Vec<Window>),
@@ -116,7 +117,7 @@ impl Cursor {
                     let id = string(&block["id"]);
                     if id.as_ref().is_none_or(|id| self.seen.insert(format!("tool:{id}"))) {
                         let name = string(&block["name"]); let kind = tool_kind(name.as_deref().unwrap_or(""));
-                        out.push(Event::ToolStart { id, kind, name, detail: match block["name"].as_str() {Some("Bash")=>audit_command(&block["input"]["command"]),Some("Read"|"Edit"|"Write"|"MultiEdit")=>audit_path(&block["input"]["file_path"]),_=>None} });
+                        out.push(Event::ToolStart { id, kind, name, detail: match block["name"].as_str() {Some("Bash")=>audit_command(&block["input"]["command"]),Some("Read"|"Edit"|"Write"|"NotebookEdit"|"MultiEdit")=>audit_path(&block["input"]["file_path"]),_=>None} });
                     }
                 }
             }
@@ -238,6 +239,32 @@ mod tests {
         }
         assert_eq!(audit_command(&json!("curl -H 'Authorization: Bearer invented' https://example.invalid/private")),Some("curl [arguments redacted]".into()));
         assert_eq!(audit_command(&json!("echo private-inline-payload")),Some("echo [arguments redacted]".into()));
+    }
+
+    // #255 / PM note 6675881959: both transports and all named Claude file tools retain targets.
+    #[test]
+    fn audit_detail_covers_named_transports_and_missing_fields() {
+        for (kind,fields,detail) in [
+            ("commandExecution",json!({"command":"touch x"}),Some("touch x")),
+            ("fileChange",json!({"changes":[{"path":"x","diff":"private patch"},{"path":"y"}]}),Some("x, y")),
+            ("commandExecution",json!({}),None),
+            ("fileChange",json!({}),None),
+        ] {
+            for app in [false,true] {
+                let mut item=fields.clone();item["type"]=json!(if app {kind}else{if kind=="fileChange" {"file_change"}else{"command_execution"}});
+                let row=if app {json!({"method":"item/started","params":{"item":item}})}else{json!({"type":"item.started","item":item})};
+                let event=serde_json::to_value(&Cursor::default().read(Client::Codex,vec![row])[0]).unwrap();
+                assert_eq!(event["ToolStart"]["detail"].as_str(),detail,"{kind}, app={app}");
+                assert!(!event.to_string().contains("private patch"));
+            }
+        }
+        for name in ["Write","Edit","NotebookEdit"] {
+            for path in [json!("x"),Value::Null] {
+                let event=serde_json::to_value(&Cursor::default().read(Client::Claude,vec![json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":name,"input":{"file_path":path,"content":"private content"}}]}})])[0]).unwrap();
+                assert_eq!(event["ToolStart"]["detail"],path,"{name}");
+                assert!(!event.to_string().contains("private content"));
+            }
+        }
     }
 
     // #255 A3: another thread must neither replace context nor make a retained measurement stale.

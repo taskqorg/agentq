@@ -30,7 +30,7 @@ The original Codex tool-kind and neutral-event regressions remain unchanged. Pil
 
 ## Canonical checks and sandbox limitation
 
-The implementation candidate `d65aa56b3c6793e07697cebb19185293c39f4244` was rebased once on origin/main before checks. The final evidence-only amendment changes no executable code or assertions.
+The implementation candidate `d65aa56b3c6793e07697cebb19185293c39f4244` was rebased once on origin/main before checks. The first evidence-only amendment changed no executable code or assertions. A later PM coverage note added NotebookEdit to the existing file-tool mapping and expanded targeted regressions, as recorded below.
 
 - `cargo test --locked`: sandbox-blocked, not PASS. The binary tests (122), earlier integration targets and runtime unit tests (46 passed, one ignored live check) passed. The runtime contract target stopped at `lingering_process_is_stopped_after_its_turn_ends`. Its child log shows a fake-client write to the inherited native home failed with `Read-only file system` before the native terminal record. The single filtered rerun reproduced the same filesystem denial; its assertion was retained.
 - `CARGO_HOME=/tmp/agentq-255-cargo CODEX_HOME=/tmp/agentq-255-test-codex cargo test --locked -p agentq-runtime --test agent`: all 35 runtime contract cases passed with an isolated fake home, including the unchanged lingering guard, protected retained recovery/no-replay, all adapters and external consumer compatibility. This does not relabel the original full-project run as passing.
@@ -38,6 +38,12 @@ The implementation candidate `d65aa56b3c6793e07697cebb19185293c39f4244` was reba
 - `python3 /tmp/agentq-255-specq/engineering/scripts/contract_lint.py agentq.md`, checked out at the workflow pin `7e9adf57287553176d8b3be61c2b22565543dc51`: PASS, zero errors.
 
 The remaining canonical test targets and native Windows/macOS execution require CI evidence. No sandbox-blocked observation is reported as healthy (P2; R12).
+
+## Consolidated PM coverage
+
+Fresh inbox note `6675881959` consolidated held duplicate #256 into this outcome after the first push. Its explicit cases are included: Codex command and every changed path on both transports; missing detail null; Claude Write/Edit/NotebookEdit file paths; foreign context following owned context; and catalogue None preserving PATH fallback.
+
+The final `cargo test --locked -p agentq-runtime --lib agent::events::tests` run passes six tests. The two focused adapter cases pass again, including the added legacy catalogue/PATH assertion. Offline selftest passes again after the NotebookEdit mapping change. No pre-existing guarding assertion was changed. The full-project sandbox limitation above remains open; the 35-case runtime run predates only the one-arm NotebookEdit addition and these targeted assertions.
 
 ## Consumer compatibility and publication
 

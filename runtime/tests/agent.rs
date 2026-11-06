@@ -156,6 +156,8 @@ fn catalogue_and_account_reads_need_no_turn() {
     let rows:Vec<Value>=requests.lines().map(|l|serde_json::from_str(l).unwrap()).collect();
     assert_eq!(rows.iter().filter(|v|v["method"]=="initialize").count(),2,"one catalogue session, one account session");
     assert!(rows.iter().all(|v|!matches!(v["method"].as_str(),Some("thread/start"|"thread/resume"|"turn/start"))));
+    // #255 / PM note 6675881959: the legacy API still supplies None and resolves PATH.
+    assert_eq!(runtime.catalogue(Some(&root)).unwrap(),models);
     std::env::set_current_dir(cwd).unwrap();
     for (key,value) in saved {unsafe {match value {Some(value)=>std::env::set_var(key,value),None=>std::env::remove_var(key)}}}
 }
