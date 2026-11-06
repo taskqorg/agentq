@@ -86,7 +86,12 @@ fn main() {
     let mut lingering=r.launch(&linger).unwrap();
     while r.poll(&mut lingering).unwrap()==State::Running {std::thread::yield_now();}
     let report=r.report(&lingering).unwrap();assert_eq!(report.outcome,"ok");assert_eq!(report.exit,None);assert_eq!(report.process.exit_unknown,"session-process-running");
-    assert!(r.progress(&mut lingering).is_ok());drop(lingering);
+    assert!(r.progress(&mut lingering).is_ok());
+    let stop=r.stop_event(&mut lingering,u64::MAX).unwrap().unwrap();
+    assert_eq!(stop.cause,agent::history::stop::StopCause::TurnEndProcessLive);
+    assert!(stop.last_activity.is_some());
+    assert_eq!(r.stop_event(&mut lingering,u64::MAX).unwrap().unwrap().id,stop.id);
+    assert_eq!(r.report(&lingering).unwrap().outcome,"ok");drop(lingering);
     #[cfg(windows)] {
         let shim=root.join("native.cmd");std::fs::write(&shim,format!("@echo off\r\n\"{}\" %*\r\n",std::env::current_exe().unwrap().display())).unwrap();
         let mut wrapped=l.clone();wrapped.command=vec![shim.into_os_string()];wrapped.deadline=Some(Instant::now()+Duration::from_secs(20));
@@ -123,6 +128,10 @@ fn main() {
     while r.poll(&mut ended).unwrap()==State::Running {std::thread::yield_now();}
     assert_eq!(r.poll(&mut ended).unwrap(),State::Unknown);
     assert!(r.report(&ended).is_err());
+    let stop=loop {if let Some(stop)=r.stop_event(&mut ended,u64::MAX).unwrap() {break stop;}std::thread::yield_now();};
+    assert_eq!(stop.cause,agent::history::stop::StopCause::ExitWithoutTurnEnd);
+    assert_eq!(stop.exit_code,Some(0));assert_ne!(stop.outcome,"ok");
+    assert!(stop.last_activity.is_some());
     std::fs::remove_dir_all(root).unwrap();
     println!("ACP trait: launch, choices, model/mode, tools, resume replay, cancel, unknown updates, version refusal and EOF passed");
 }

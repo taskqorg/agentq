@@ -280,6 +280,10 @@ impl Session {
         Ok(if self.closed.is_some(){State::Unknown}else{State::Running})
     }
     pub fn report(&self)->Res<Report> {self.report.clone().ok_or_else(||self.closed.clone().unwrap_or_else(||"running".into()))}
+    pub fn stop_facts(&mut self,run:String)->Res<super::history::stop::Facts> {
+        let exit=self.server.poll()?;
+        Ok(super::history::stop::Facts {run,format:"acp",path:self.path.clone(),start:self.boundary,exited:Some(exit.is_some()),native_end:self.report.is_some(),exit,lost_owner:false})
+    }
     pub fn progress(&mut self)->Res<Vec<Event>> {self.pump()?;Ok(std::mem::take(&mut self.pending))}
     pub fn id(&self)->u32 {self.server.id()}
     pub fn cancel(&mut self)->Res<bool> {

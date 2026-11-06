@@ -1153,7 +1153,9 @@ fn host_args_reach_codex_turns_only() {
     policy.policy.write = agent::Scope::Project;
     assert_eq!(refused(&policy, "codex").as_deref(), Some("host-args require the native policy on codex; next: select a supported policy"));
     assert_eq!(refused(&l, "claude").as_deref(), Some("host-args unsupported by claude; next: select a supported policy"));
-    assert_eq!(refused(&l, "antigravity").as_deref(), Some("host-args unsupported by antigravity; next: select a supported policy"));
+    let mut acp = fake_launch("antigravity", &root, "x", &[]);
+    acp.host_args = l.host_args.clone();
+    assert_eq!(refused(&acp, "antigravity").as_deref(), Some("host-args unsupported by antigravity; next: select a supported policy"));
     let mut queue = l.clone();
     queue.mode = agent::Mode::Queue { transcript: root.join("t.jsonl") };
     assert_eq!(codex.resume(&thread, &queue).err().as_deref(), Some("host-args unsupported by codex; next: select a supported policy"));
@@ -1216,7 +1218,9 @@ fn settings_env_reaches_the_session() {
     let mut queue = c.clone();
     queue.mode = agent::Mode::Queue { transcript: codex_root.join("t.jsonl") };
     assert_eq!(codex.resume(&codex.session_id(&run).unwrap(), &queue).err().as_deref(), Some("settings-env unsupported by codex; next: select a supported policy"));
-    assert_eq!(agent::runtime("antigravity").unwrap().launch(&c).err().as_deref(), Some("settings-env unsupported by antigravity; next: select a supported policy"));
+    let mut acp = fake_launch("antigravity", &codex_root, "x", &[]);
+    acp.settings_env = c.settings_env.clone();
+    assert_eq!(agent::runtime("antigravity").unwrap().launch(&acp).err().as_deref(), Some("settings-env unsupported by antigravity; next: select a supported policy"));
     teardown(root);
     teardown(codex_root);
     if let Some(task) = task { unsafe { std::env::set_var("TASKQ_TASK", task); } }
@@ -2315,7 +2319,8 @@ fn preflight_checks_order_and_journals_exact_trust() {
 // M12.19: missing native terminals and signalled/recovered processes must never disappear or imply success.
 fn stopped_runs_have_typed_activity() {
     use agent::history::{StepKind,stop::StopCause};
-    for name in ["claude","codex","antigravity"] {
+    // Stateful ACP stop observations are exercised by the ACP transport regression.
+    for name in ["claude","codex"] {
         for mode in ["exit","kill"] {
             let root=scratch(&format!("stop-{name}-{mode}"));
             let r=agent::runtime(name).unwrap();
