@@ -252,6 +252,10 @@ mod tests {
 #[allow(non_upper_case_globals)]
 impl Client { pub(crate) const Codex: Self=Self("codex"); }
 
+/// Accepted native image item spellings, shared by events and history projections.
+pub(crate) fn image_kind(name:&str)->Option<bool> {
+    match name {"imageGeneration"|"image_generation"|"ImageGeneration"=>Some(true),"imageView"|"image_view"|"ImageView"=>Some(false),_=>None}
+}
 fn parse_event(cursor: &mut events::Cursor,v: &Value,out: &mut Vec<Event>,thread: Option<&str>) {
         let method = v["method"].as_str().unwrap_or("");
         let p = &v["params"];
@@ -279,8 +283,8 @@ fn parse_event(cursor: &mut events::Cursor,v: &Value,out: &mut Vec<Event>,thread
         let i = if payload["type"]=="item_completed" {&payload["item"]} else if method.is_empty() { &v["item"] } else { &p["item"] };
         let native = i["type"].as_str().unwrap_or("");
         let id = string(&i["id"]);
-        if completed && matches!(native,"imageGeneration"|"image_generation"|"ImageGeneration"|"imageView"|"image_view"|"ImageView") {
-            out.push(Event::Image {item:id.clone(),generated:matches!(native,"imageGeneration"|"image_generation"|"ImageGeneration"),saved_path:string(&i["savedPath"]).or_else(||string(&i["saved_path"])).or_else(||string(&i["path"])),native:i.clone()});
+        if let Some(generated)=image_kind(native).filter(|_|completed) {
+            out.push(Event::Image {item:id.clone(),generated,saved_path:string(&i["savedPath"]).or_else(||string(&i["saved_path"])).or_else(||string(&i["path"])),native:i.clone()});
         }
         if !start && !end { return; }
         if matches!(native, "agentMessage" | "agent_message") {
