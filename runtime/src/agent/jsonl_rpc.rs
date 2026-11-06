@@ -44,7 +44,7 @@ impl Session {
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(&l.log).map_err(|e|format!("RPC log: {e}"))?;
         let boundary=log.metadata().map_err(|e|e.to_string())?.len();
-        let server=Stdio::spawn(command,&l.log.with_extension("stderr"),&l.process)?;
+        let server=Stdio::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?;
         let sampler=Some(capture::Sampler::start(server.id()));
         let mut s=Self{server,path:l.log.clone(),boundary,log,session:String::new(),serial:0,pending:vec![],report:None,messages:vec![],deadline:l.deadline,started:Instant::now(),started_ms:unix_ms(),closed:None,sampler,active:false,prompt:None};
         let id=s.request("get_state",json!({}))?;
@@ -100,7 +100,7 @@ impl Session {
         if self.closed.is_some(){return Ok(());}
         loop {match self.server.receive(Instant::now()) {Ok(Some(v))=>self.observe(v)?,Ok(None)=>break,Err(e)=>{self.closed=Some(e);break;}}}
         if let Some(r)=&mut self.report {
-            self.server.close()?;r.exit=self.server.poll()?;
+            self.server.close_stream(self.deadline)?;r.exit=self.server.poll()?;
             if let Some(sampler)=self.sampler.take(){r.process=sampler.usage();}
             self.closed=Some("terminal".into());
         }Ok(())

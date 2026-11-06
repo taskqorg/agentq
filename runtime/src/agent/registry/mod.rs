@@ -275,11 +275,10 @@ mod tests {
             runtime.cancel(&mut resumed).unwrap();
             while runtime.poll(&mut resumed).unwrap()==State::Running {std::thread::yield_now();}
             assert_eq!(runtime.report(&resumed).unwrap().outcome,"cancelled","{name}");
-            let format=if runtime.ops.rpc.is_some(){"jsonl-rpc"}else{"acp"};
-            let mut history=crate::agent::history::History::new(format,"candidate",&session).unwrap();
-            let page=history.poll(&l.log).unwrap();
-            assert!(page.events.iter().any(|e|e["kind"]=="tool"),"{name}: source history keeps native tools");
-            assert!(page.events.iter().all(|e|e["raw"].is_string()));
+            let mut history=runtime.history(&session,None,Some(&l.log),None).unwrap();
+            let page=history.steps(std::fs::metadata(&l.log).unwrap().len()).unwrap();
+            assert!(page.steps.iter().any(|s|s.native_id.as_deref()==Some("tool")),"{name}: canonical history keeps native tools");
+            assert!(page.steps.iter().all(|s|s.source["raw"].is_string()));
             if runtime.ops.rpc.is_some() {
                 l.input="eof".into();
                 let mut lost=runtime.launch(&l).unwrap();

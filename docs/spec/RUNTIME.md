@@ -955,3 +955,5 @@ Source-fixture provenance, adapter conclusions and remaining native gaps:
 - Worker benchmark runs, viewer data and live scratch workspaces stay outside the repository (`--output`, default `<OS temp>/agentq-benchmarks`); live fixtures pass `--dangerously-skip-permissions` to headless agy turns only.
 - Every optimization intent reports `off`, reason `optimization_retired`, with no environment or provider override. Historical benchmark evidence remains historical; it does not qualify a current optimizer.
 - During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime revision through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](RUNTIME.md#adoption-and-rollback)).
+
+ACP and JSONL RPC candidates use the same unlimited stream transport and canonical history steps. Explicit-source history is available through the runtime trait; native source discovery for unqualified candidates reads unsupported rather than guessing a directory layout.
