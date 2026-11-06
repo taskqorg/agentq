@@ -328,7 +328,7 @@ impl AppSession {
             if let Some(error)=&self.failure {
                 let event=json!({"type":"turn.failed","error":error});
                 let evidence=[event.clone()];
-                if !self.worked && limit_reached(&evidence).is_some() {
+                if !self.worked && limit_reached(Client::Codex,&evidence).is_some() {
                     r.reached=Some(error["resetsAt"].as_i64().or_else(||r.limit.resets_at.and_then(|n|i64::try_from(n).ok())));
                     (r.outcome,r.error)=("refused","usage-limit");
                 } else if auth_rejected(&event.to_string()).is_some() {(r.outcome,r.error)=("failed","auth-rejected");}

@@ -1,4 +1,9 @@
-//! Claude Code registration: native worker and installation behavior.
+#[path="claude/history.rs"]
+mod history;
+#[path="claude/parsing.rs"]
+mod parsing;
+use self::parsing::*;
+// Claude Code registration: native worker and installation behavior.
 use super::super::super::events::{string,tool_kind,audit_path,audit_command,native_timeout};
 use super::*;
 use super::super::super::native::{plain_id,scope};
@@ -368,9 +373,9 @@ fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end
  let end=end_index.map(|i|&events[i]);
  if !end.is_some_and(|v|v["type"]=="result" && v["is_error"]==true) {return None;}
  events[..end_index?].iter().rev().take_while(|v|!ends(v) && !(v["type"]=="system" && matches!(v["subtype"].as_str(),Some("init"|"turn_duration")))).find(|v|v["type"]=="assistant").and_then(assistant_failure)
- }); classify_report(Client::Claude,text,events,rollout,end_index,failure,live_background(events))}
+ }); classify_report(text,events,rollout,end_index,failure,live_background(events))}
 
-static PROTOCOL: Protocol=Protocol {turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
+static PROTOCOL: Protocol=Protocol {history_provenance:|_,_,_|false,history_parent:|v|v["sessionId"].as_str().map(String::from),rollout_report:|_,_|{},history_formats:&["claude-stream","claude-native"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
 pub(crate) fn claude_info(v: &Value) -> Option<Value> {
     let mut info=if v["type"]=="rate_limit_event" {Some(&v["rate_limit_info"])}

@@ -1,5 +1,5 @@
 //! `agent.turn` and `agent.call` capture (agentq.md M12.13, M12.14; docs/spec/RUNTIME.md § Observation).
-use super::{protocol,Client, Context, Report, Res, model_code, read_calls, sum_usage};
+use super::{protocol,Client, Context, Report, Res, model_code, sum_usage};
 use crate::telemetry::{Event, Store, capture::TraceContext, shared};
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
@@ -228,26 +228,7 @@ pub(crate) fn time_ms(s: &str) -> Option<u64> {
     u64::try_from(seconds).ok()?.checked_mul(1000)?.checked_add(fraction.get(..3)?.parse().ok()?)
 }
 
-/// The model requests of a Codex rollout, each `token_count` once by its cumulative total. `last_turn` keeps only the
-/// requests after the last `task_started`.
-pub(crate) fn rollout_calls(text: &str, last_turn: bool) -> Vec<Call> {
-    let (mut events, mut model) = (Vec::<Value>::new(), None::<String>);
-    for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
-        if v["type"] == "turn_context" { model = v["payload"]["model"].as_str().map(String::from); }
-        let p = &v["payload"];
-        if v["type"] != "event_msg" { continue; }
-        if last_turn && p["type"] == "task_started" { events.clear(); }
-        if p["type"] != "token_count" || !p["info"]["total_token_usage"].is_object() { continue; }
-        let before = events.len();
-        super::native::append_codex_usage(&mut events, &p["info"]["last_token_usage"], &p["info"]["total_token_usage"], false);
-        if events.len() > before {
-            let last = events.last_mut().expect("appended");
-            last["timestamp"] = v["timestamp"].clone();
-            if let Some(m) = &model { last["model"] = json!(m); }
-        }
-    }
-    read_calls(&events).0
-}
+
 
 thread_local! {
     /// The caller of `agentq agent turn`, which runs no collector (`with_environment_caller`).
@@ -631,10 +612,10 @@ mod tests {
         let context = json!({"type": "turn_context", "payload": {"model": "gpt-5.5-codex"}});
         let no_info = json!({"type": "event_msg", "payload": {"type": "token_count", "info": null}});
         let text: String = [token(1, 1), started, context, no_info, token(2, 3), token(2, 3), token(4, 7)].iter().map(|l| format!("{l}\n")).collect();
-        let last = rollout_calls(&text, true);
+        let last = crate::agent::registry::codex_rollout_calls(&text, true);
         assert_eq!(last.iter().map(|c| c.input).collect::<Vec<_>>(), [Some(2), Some(4)]);
         assert!(last.iter().all(|c| c.model.as_deref() == Some("gpt-5.5-codex") && c.reasoning == Some(1) && !c.aggregate && c.at_ms.is_some()));
-        assert_eq!(rollout_calls(&text, false).len(), 3);
+        assert_eq!(crate::agent::registry::codex_rollout_calls(&text, false).len(), 3);
     }
 
     #[test]

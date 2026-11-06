@@ -471,16 +471,7 @@ impl Turn {
             None if self.extension.is_submission() => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("sidecar-server") },
             None => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("recovered") },
         };
-        // A Codex `exec` turn names each request only in its rollout; `turn.completed` holds the totals.
-        if let Some(text) = rollout.as_deref().and_then(|p| std::fs::read_to_string(p).ok()) {
-            let calls = capture::rollout_calls(&text, true);
-            if !calls.is_empty() {
-                let per_request = sum_usage(&calls, None, true);
-                r.usage.reasoning = per_request.reasoning;
-                r.usage.model = r.usage.model.take().or(per_request.model);
-                r.calls = calls;
-            }
-        }
+        (protocol(self.client).rollout_report)(rollout.as_deref(),&mut r);
         if self.timed_out { (r.outcome, r.error) = ("cancelled", "timeout"); }
         else if self.cancelled { (r.outcome, r.error) = ("cancelled", "interrupted"); }
         else if r.outcome == "unknown" && r.exit.is_some_and(|c| c != 0) && r.error == "no-end" { (r.outcome, r.error) = ("failed", "exit"); }
@@ -759,26 +750,26 @@ mod tests {
             r#"{"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_read_input_tokens":30,"cache_creation_input_tokens":5,"output_tokens":7}}}"#, "\n",
             r#"{"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_read_input_tokens":30,"cache_creation_input_tokens":5,"output_tokens":7}}}"#, "\n",
             r#"{"type":"assistant","message":{"id":"m2","model":"claude-opus-5-5","usage":{"input_tokens":1,"cache_read_input_tokens":40,"cache_creation_input_tokens":0,"output_tokens":3}}}"#, "\n"));
-        let u = usage(&claude);
+        let u = test_usage(Client::Claude,&claude);
         assert_eq!((u.calls, u.input, u.cache_read, u.cache_write, u.output, u.model.as_deref()), (Some(2), Some(3), Some(70), Some(5), Some(10), Some("claude-opus-5-5")));
         let codex = events(r#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":9}}"#);
-        let u = usage(&codex);
+        let u = test_usage(Client::Codex,&codex);
         assert_eq!((u.calls, u.input, u.cache_read, u.cache_write, u.output, u.model), (None, Some(20), Some(80), Some(0), Some(9), None));
         let partial = events(r#"{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":9}}"#);
-        assert_eq!((usage(&partial).input, usage(&partial).cache_read), (None, None), "a missing count is unknown, never zero");
+        assert_eq!((test_usage(Client::Codex,&partial).input, test_usage(Client::Codex,&partial).cache_read), (None, None), "a missing count is unknown, never zero");
         let ag = events(concat!(
             r#"{"response":{"newConversation":{"conversationId":"conv-1"}}}"#, "\n",
             r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","model":"gemini-3.1-pro","input_tokens":120,"cache_read_tokens":500,"cache_write_tokens":0,"output_tokens":15,"tool_calls":[{"id":"c1"}]}"#, "\n",
             r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","model":"gemini-3.1-pro","input_tokens":120,"cache_read_tokens":500,"cache_write_tokens":0,"output_tokens":15,"tool_calls":[{"id":"c1"}]}"#, "\n",
             r#"{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","model":"gemini-3.1-pro","input_tokens":80,"cache_read_tokens":600,"cache_write_tokens":0,"output_tokens":25,"content":"done"}"#, "\n"));
-        let u = usage(&ag);
+        let u = test_usage(Client::Antigravity,&ag);
         assert_eq!((u.calls, u.input, u.cache_read, u.cache_write, u.output, u.model.as_deref()), (Some(2), Some(200), Some(1100), Some(0), Some(40), Some("gemini-3.1-pro")));
         let r_ag = Report::read(Client::Antigravity, &ag.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"), &ag, None);
         assert_eq!((r_ag.outcome, r_ag.session.as_deref(), r_ag.text.as_deref()), ("ok", Some("conv-1"), Some("done")));
-        let missing = usage(&events(r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":3,"output_tokens":2}"#));
+        let missing = test_usage(Client::Antigravity,&events(r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":3,"output_tokens":2}"#));
         assert_eq!((missing.cache_read, missing.cache_write), (None, None), "P2: unreported counts stay unknown");
-        assert!(ends(&json!({"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[]})), "empty tool calls end the turn");
-        assert_eq!(usage(&[]).unknown, Some("no-usage"));
+        assert!((protocol(Client::Antigravity).ends)(&json!({"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[]})), "empty tool calls end the turn");
+        assert_eq!(test_usage(Client::Antigravity,&[]).unknown, Some("no-usage"));
     }
 
     // M12.1/P2: documented agy events must yield per-turn evidence, never cumulative result usage.
@@ -799,7 +790,7 @@ mod tests {
         let mut missing = rows.clone();
         let mut later = missing[1].clone(); later["step_update"]["usage"] = json!({"output_tokens":3});
         missing.insert(2,later);
-        let u = usage(&missing);
+        let u = test_usage(Client::Antigravity,&missing);
         assert_eq!((u.input,u.output,u.calls),(None,Some(3),None),"latest partial step stays unknown and cumulative result is ignored");
     }
 
@@ -833,11 +824,11 @@ mod tests {
         let r = Report::read(Client::Claude, limited, &events(limited), None);
         assert_eq!((r.reached, r.outcome, r.error), (Some(Some(1700000000)), "refused", "usage-limit"));
         let worked = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"usage limit\"}}\n{\"type\":\"turn.failed\",\"error\":{\"message\":\"You've hit your usage limit\"}}";
-        assert_eq!(limit_reached(&events(worked)), None, "after work started a limit is not a start refusal");
+        assert_eq!(limit_reached(Client::Codex,&events(worked)), None, "after work started a limit is not a start refusal");
         let codex = r#"{"type":"turn.failed","error":{"message":"You've hit your usage limit."}}"#;
-        assert_eq!(limit_reached(&events(codex)), Some(None));
-        assert_eq!(auth_rejected("2026 ERROR codex_core::auth: refresh token was already used"), Some("refresh token rejected"));
-        assert_eq!(auth_rejected(r#"{"type":"item.completed","item":{"text":"401 Unauthorized"}}"#), None, "worker output never matches");
+        assert_eq!(limit_reached(Client::Codex,&events(codex)), Some(None));
+        assert_eq!(registry::codex_auth_rejected("2026 ERROR codex_core::auth: refresh token was already used"), Some("refresh token rejected"));
+        assert_eq!(registry::codex_auth_rejected(r#"{"type":"item.completed","item":{"text":"401 Unauthorized"}}"#), None, "worker output never matches");
         let busy = r#"{"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model."}}"#;
         let r = Report::read(Client::Codex, busy, &events(busy), None);
         assert_eq!((r.outcome, r.error), ("failed", "model-capacity"));
@@ -889,3 +880,6 @@ fn protocol(client:Client)->&'static registry::Protocol {registry::protocol(clie
 impl Report {
     fn empty()->Self {Report {session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,text:None,exit:None,started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
 }
+
+#[cfg(test)]
+fn test_usage(client:Client,events:&[Value])->Usage {let (calls,count,known)=(protocol(client).read_calls)(events);sum_usage(&calls,count,known)}

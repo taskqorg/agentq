@@ -21,10 +21,16 @@ fn read_report(text:&str,values:&[Value],_:Option<&Path>)->Report {
     let mut r=Report::empty();r.session=session(text);
     if let Some(v)=values.iter().rev().find(|v|is_end(v)) {
         r.outcome="ok";r.error="none";r.text=v["answer"].as_str().map(String::from);
-        r.usage.input=v["input_tokens"].as_u64();r.usage.output=v["output_tokens"].as_u64();r.usage.calls=Some(1);
+        r.calls=read_calls(values).0;r.usage=sum_usage(&r.calls,Some(1),true);
     } r
 }
-static PROTOCOL: Protocol=Protocol {
+fn read_calls(values:&[Value])->(Vec<Call>,Option<u64>,bool) {
+    let Some(v)=values.iter().rev().find(|v|is_end(v)) else {return (vec![],None,false);};
+    (vec![Call {id:None,at_ms:None,input:v["input_tokens"].as_u64(),output:v["output_tokens"].as_u64(),cache_read:None,cache_write:None,reasoning:None,model:None,outcome:"ok",error:"none",aggregate:false}],Some(1),true)
+}
+static PROTOCOL: Protocol=Protocol {history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},
+    history_formats:&["example-native"],history_session:|_,_,raw|session(raw),history_normalize:|_,_|("unknown","unknown",Value::Null,vec![],"unsupported-source-shape"),history_validity:|_|json!({"status":"unknown","reason":"envelope-validation-unsupported"}),
+    ends:is_end,start_limit:|_|None,read_calls,final_text:|_|None,
     turn_ended:|ended,v|ended || is_end(v),
     parse_event:|_,v,out,_| {if let Some(text)=v["answer"].as_str() {out.push(Event::Message {item:None,text:text.into()});}},
     terminal:|_,v,_,_,_|is_end(v).then_some("ok"),assistant_failure:|_|None,permission_mode:|_|None,lifecycle:|_|None,advances:|_|false,
@@ -45,7 +51,7 @@ fn scripted_cli() {
 
 #[test]
 fn one_module_launches_resumes_and_reads_its_own_protocol() {
-    let root=home();std::fs::create_dir_all(&root).unwrap();
+    let root=std::env::temp_dir().join(format!("agentq-example-launch-{}",crate::incident::uuid()));std::fs::create_dir_all(&root).unwrap();
     let runtime=ENTRY.runtime.unwrap();
     let mut launch=Launch::new(&root,root.join("turn.log"),"first","fixtureq");
     launch.command=vec![std::env::current_exe().unwrap().into_os_string()];
@@ -54,6 +60,8 @@ fn one_module_launches_resumes_and_reads_its_own_protocol() {
     while runtime.poll(&mut run).unwrap()==State::Running {std::thread::yield_now();}
     let report=runtime.report(&run).unwrap();assert_eq!((report.outcome,report.text.as_deref(),report.usage.input),("ok",Some("first"),Some(2)));
     assert_eq!(runtime.session_id(&run).as_deref(),Some("example-session"));
+    assert_eq!(report.usage.calls,Some(report.calls.len() as u64));
+    assert_eq!(report.calls[0].input,report.usage.input);
     assert!(runtime.progress(&mut run).unwrap().iter().any(|e|matches!(e,Event::Message{text,..} if text=="first")));
     assert!(runtime.log_events(&std::fs::read_to_string(&launch.log).unwrap()).iter().any(|e|matches!(e,Event::TurnEnd {outcome:"ok"})));
     launch.input="second".into();
@@ -62,4 +70,16 @@ fn one_module_launches_resumes_and_reads_its_own_protocol() {
     assert_eq!(runtime.report(&resumed).unwrap().text.as_deref(),Some("second"));
     assert_eq!(runtime.session_id(&resumed).as_deref(),Some("example-session"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unrelated_native_shapes_are_not_interpreted() {
+    let log=concat!(r#"{"type":"assistant","apiError":"usage_limit_reached","message":{"id":"foreign","usage":{"input_tokens":99}}}"#, "\n", r#"{"type":"result","is_error":true,"result":"foreign"}"#);
+    let r=ADAPTER.classify(log);
+    assert_eq!((r.outcome,r.error,r.reached,r.text.as_deref(),r.usage.calls),("unknown","no-end",None,None,None));
+    let mut c=events::Cursor::default();
+    c.read(CLIENT,log.lines().map(|l|serde_json::from_str(l).unwrap()).collect());
+    assert!(matches!(c.start_limit,StartLimit::Pending));
+    assert!(!(PROTOCOL.turn_ended)(false,&json!({"type":"result"})));
+    assert!((PROTOCOL.history_session)("example-native",&json!({"sessionId":"foreign"}),r#"{"sessionId":"foreign"}"#).is_none());
 }

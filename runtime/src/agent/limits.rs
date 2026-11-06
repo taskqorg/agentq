@@ -256,6 +256,6 @@ pub(crate) fn keychain(service:&str,account:Option<&str>)->Res<Option<String>> {
 
 fn read_credentials(client:Client,home:&Path,explicit:bool)->Res<String> {(protocol(client).credentials)(home,explicit)}
 
-pub(super) use registry::claude_info;
+
 #[cfg(test)]
 use registry::{claude_window,claude_windows,code_assist,project_identity,codex_identity};
