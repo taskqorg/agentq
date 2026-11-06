@@ -1,0 +1,881 @@
+{
+  "agent": "opencode",
+  "records": [
+    {
+      "id": "fixture-0",
+      "project_id": "fixture-1",
+      "parent_id": null,
+      "slug": "scrubbed",
+      "directory": "/fixture",
+      "title": "scrubbed",
+      "version": "scrubbed",
+      "share_url": null,
+      "summary_additions": 0,
+      "summary_deletions": 0,
+      "summary_files": 0,
+      "summary_diffs": null,
+      "revert": null,
+      "permission": null,
+      "time_created": 0,
+      "time_updated": 0,
+      "time_compacting": null,
+      "time_archived": null,
+      "workspace_id": null,
+      "path": null,
+      "agent": null,
+      "model": null,
+      "cost": 0,
+      "tokens_input": 0,
+      "tokens_output": 0,
+      "tokens_reasoning": 0,
+      "tokens_cache_read": 0,
+      "tokens_cache_write": 0,
+      "metadata": null,
+      "_session": true
+    },
+    {
+      "id": "fixture-2",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"user\",\"time\":{\"created\":0},\"summary\":{\"title\":\"scrubbed\",\"diffs\":[]},\"agent\":\"scrubbed\",\"model\":{\"providerID\":\"scrubbed\",\"modelID\":\"scrubbed\"}}"
+    },
+    {
+      "id": "fixture-3",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-4",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"user\",\"time\":{\"created\":0},\"summary\":{\"title\":\"scrubbed\",\"diffs\":[]},\"agent\":\"scrubbed\",\"model\":{\"providerID\":\"scrubbed\",\"modelID\":\"scrubbed\"}}"
+    },
+    {
+      "id": "fixture-5",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-6",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-7",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-8",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-9",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-10",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-11",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-12",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"user\",\"time\":{\"created\":0},\"summary\":{\"title\":\"scrubbed\",\"diffs\":[]},\"agent\":\"scrubbed\",\"model\":{\"providerID\":\"scrubbed\",\"modelID\":\"scrubbed\"}}"
+    },
+    {
+      "id": "fixture-13",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-14",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-15",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"user\",\"time\":{\"created\":0},\"summary\":{\"title\":\"scrubbed\",\"diffs\":[]},\"agent\":\"scrubbed\",\"model\":{\"providerID\":\"scrubbed\",\"modelID\":\"scrubbed\"}}"
+    },
+    {
+      "id": "fixture-16",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-17",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"user\",\"time\":{\"created\":0},\"summary\":{\"title\":\"scrubbed\",\"diffs\":[]},\"agent\":\"scrubbed\",\"model\":{\"providerID\":\"scrubbed\",\"modelID\":\"scrubbed\"}}"
+    },
+    {
+      "id": "fixture-18",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-19",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-20",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"user\",\"time\":{\"created\":0},\"summary\":{\"title\":\"scrubbed\",\"diffs\":[]},\"agent\":\"scrubbed\",\"model\":{\"providerID\":\"scrubbed\",\"modelID\":\"scrubbed\"}}"
+    },
+    {
+      "id": "fixture-21",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-22",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"user\",\"time\":{\"created\":0},\"summary\":{\"title\":\"scrubbed\",\"diffs\":[]},\"agent\":\"scrubbed\",\"model\":{\"providerID\":\"scrubbed\",\"modelID\":\"scrubbed\"}}"
+    },
+    {
+      "id": "fixture-23",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"role\":\"assistant\",\"time\":{\"created\":0,\"completed\":0},\"parentID\":\"scrubbed\",\"modelID\":\"scrubbed\",\"providerID\":\"scrubbed\",\"mode\":\"scrubbed\",\"agent\":\"scrubbed\",\"path\":{\"cwd\":\"/fixture\",\"root\":\"scrubbed\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"scrubbed\"}",
+      "_usage_aggregate": true
+    },
+    {
+      "id": "fixture-24",
+      "message_id": "fixture-2",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\"}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-25",
+      "message_id": "fixture-2",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"file\",\"mime\":\"scrubbed\",\"filename\":\"scrubbed\",\"url\":\"scrubbed\",\"source\":{\"text\":{\"value\":\"scrubbed\",\"start\":0,\"end\":0},\"type\":\"file\",\"path\":\"/fixture\"}}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-26",
+      "message_id": "fixture-2",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"synthetic\":true}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-27",
+      "message_id": "fixture-2",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"synthetic\":true}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-28",
+      "message_id": "fixture-3",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-29",
+      "message_id": "fixture-3",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-30\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-31",
+      "message_id": "fixture-3",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0},\"metadata\":{\"openai\":{\"itemId\":\"fixture-32\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-33",
+      "message_id": "fixture-3",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-34",
+      "message_id": "fixture-4",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\"}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-35",
+      "message_id": "fixture-5",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-36",
+      "message_id": "fixture-5",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-37\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-38",
+      "message_id": "fixture-5",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-39\",\"tool\":\"scrubbed\",\"state\":{\"status\":\"completed\",\"input\":{\"pattern\":\"scrubbed\",\"path\":\"/fixture\",\"} }],\":\"scrubbed\"},\"output\":\"scrubbed\",\"title\":\"scrubbed\",\"metadata\":{\"count\":0,\"truncated\":false},\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-40\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-41",
+      "message_id": "fixture-5",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-42",
+      "message_id": "fixture-6",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-43",
+      "message_id": "fixture-6",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-44\",\"tool\":\"scrubbed\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"scrubbed\"},\"output\":\"scrubbed\",\"title\":\"scrubbed\",\"metadata\":{\"preview\":\"scrubbed\",\"truncated\":false},\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-45\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-46",
+      "message_id": "fixture-6",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-47",
+      "message_id": "fixture-7",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-48",
+      "message_id": "fixture-7",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-49\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-50",
+      "message_id": "fixture-7",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-51\",\"tool\":\"scrubbed\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"scrubbed\"},\"output\":\"scrubbed\",\"title\":\"scrubbed\",\"metadata\":{\"preview\":\"scrubbed\",\"truncated\":false},\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-52\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-53",
+      "message_id": "fixture-7",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-54\",\"tool\":\"scrubbed\",\"state\":{\"status\":\"completed\",\"input\":{\"filePath\":\"scrubbed\"},\"output\":\"scrubbed\",\"title\":\"scrubbed\",\"metadata\":{\"preview\":\"scrubbed\",\"truncated\":false},\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-55\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-56",
+      "message_id": "fixture-7",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-57",
+      "message_id": "fixture-8",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-58",
+      "message_id": "fixture-8",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-59\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-60",
+      "message_id": "fixture-8",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-61\",\"tool\":\"scrubbed\",\"state\":{\"status\":\"error\",\"input\":{\"url\":\"scrubbed\",\"format\":\"scrubbed\"},\"error\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-62\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-63",
+      "message_id": "fixture-8",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-64",
+      "message_id": "fixture-9",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-65",
+      "message_id": "fixture-9",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-66\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-67",
+      "message_id": "fixture-9",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-68\",\"tool\":\"scrubbed\",\"state\":{\"status\":\"error\",\"input\":{\"url\":\"scrubbed\",\"format\":\"scrubbed\"},\"error\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-69\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-70",
+      "message_id": "fixture-9",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-71",
+      "message_id": "fixture-10",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-72",
+      "message_id": "fixture-10",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-73\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-74",
+      "message_id": "fixture-10",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-75\",\"tool\":\"scrubbed\",\"state\":{\"status\":\"error\",\"input\":{\"url\":\"scrubbed\",\"format\":\"scrubbed\"},\"error\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-76\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-77",
+      "message_id": "fixture-10",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-78",
+      "message_id": "fixture-11",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-79",
+      "message_id": "fixture-11",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-80\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-81",
+      "message_id": "fixture-11",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0},\"metadata\":{\"openai\":{\"itemId\":\"fixture-82\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-83",
+      "message_id": "fixture-11",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-84",
+      "message_id": "fixture-12",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\"}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-85",
+      "message_id": "fixture-12",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"file\",\"mime\":\"scrubbed\",\"filename\":\"scrubbed\",\"url\":\"scrubbed\",\"source\":{\"text\":{\"value\":\"scrubbed\",\"start\":0,\"end\":0},\"type\":\"file\",\"path\":\"/fixture\"}}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-86",
+      "message_id": "fixture-12",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"synthetic\":true}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-87",
+      "message_id": "fixture-12",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"synthetic\":true}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-88",
+      "message_id": "fixture-13",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-89",
+      "message_id": "fixture-13",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-90\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-91",
+      "message_id": "fixture-13",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-92\",\"tool\":\"scrubbed\",\"state\":{\"status\":\"completed\",\"input\":{\"patchText\":\"scrubbed\"},\"output\":\"scrubbed\",\"title\":\"scrubbed\",\"metadata\":{\"diff\":\"scrubbed\",\"files\":[{\"filePath\":\"scrubbed\",\"relativePath\":\"scrubbed\",\"type\":\"scrubbed\",\"diff\":\"scrubbed\",\"before\":\"scrubbed\",\"after\":\"scrubbed\",\"additions\":0,\"deletions\":0}],\"diagnostics\":{\"fixture-key-93\":[],\"fixture-key-94\":[],\"fixture-key-95\":[]},\"truncated\":false},\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-96\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-97",
+      "message_id": "fixture-13",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-98",
+      "message_id": "fixture-14",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-99",
+      "message_id": "fixture-14",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0},\"metadata\":{\"openai\":{\"itemId\":\"fixture-100\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-101",
+      "message_id": "fixture-14",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-102",
+      "message_id": "fixture-15",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\"}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-103",
+      "message_id": "fixture-15",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"file\",\"mime\":\"scrubbed\",\"filename\":\"scrubbed\",\"url\":\"scrubbed\",\"source\":{\"text\":{\"value\":\"scrubbed\",\"start\":0,\"end\":0},\"type\":\"file\",\"path\":\"/fixture\"}}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-104",
+      "message_id": "fixture-15",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"synthetic\":true}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-105",
+      "message_id": "fixture-15",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"synthetic\":true}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-106",
+      "message_id": "fixture-16",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-107",
+      "message_id": "fixture-16",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-108\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-109",
+      "message_id": "fixture-16",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0},\"metadata\":{\"openai\":{\"itemId\":\"fixture-110\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-111",
+      "message_id": "fixture-16",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-112",
+      "message_id": "fixture-17",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\"}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-113",
+      "message_id": "fixture-18",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-114",
+      "message_id": "fixture-18",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-115\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-116",
+      "message_id": "fixture-18",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"tool\",\"callID\":\"fixture-117\",\"tool\":\"bash\",\"state\":{\"status\":\"completed\",\"input\":{\"command\":\"printf scrubbed\",\"description\":\"scrubbed\"},\"output\":\"scrubbed\",\"title\":\"scrubbed\",\"metadata\":{\"output\":\"scrubbed\",\"exit\":0,\"description\":\"scrubbed\",\"truncated\":false},\"time\":{\"start\":0,\"end\":0}},\"metadata\":{\"openai\":{\"itemId\":\"fixture-118\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-119",
+      "message_id": "fixture-18",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-120",
+      "message_id": "fixture-19",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-121",
+      "message_id": "fixture-19",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-122\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-123",
+      "message_id": "fixture-19",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0},\"metadata\":{\"openai\":{\"itemId\":\"fixture-124\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-125",
+      "message_id": "fixture-19",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-126",
+      "message_id": "fixture-20",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\"}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-127",
+      "message_id": "fixture-21",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-128",
+      "message_id": "fixture-21",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-129\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-130",
+      "message_id": "fixture-21",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0},\"metadata\":{\"openai\":{\"itemId\":\"fixture-131\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-132",
+      "message_id": "fixture-21",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-133",
+      "message_id": "fixture-22",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\"}",
+      "role": "user"
+    },
+    {
+      "id": "fixture-134",
+      "message_id": "fixture-23",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-start\"}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-135",
+      "message_id": "fixture-23",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"reasoning\",\"text\":\"scrubbed\",\"metadata\":{\"openai\":{\"itemId\":\"fixture-136\",\"reasoningEncryptedContent\":\"scrubbed\"}},\"time\":{\"start\":0,\"end\":0}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-137",
+      "message_id": "fixture-23",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"text\",\"text\":\"scrubbed\",\"time\":{\"start\":0,\"end\":0},\"metadata\":{\"openai\":{\"itemId\":\"fixture-138\"}}}",
+      "role": "assistant"
+    },
+    {
+      "id": "fixture-139",
+      "message_id": "fixture-23",
+      "session_id": "fixture-0",
+      "time_created": 0,
+      "time_updated": 0,
+      "data": "{\"type\":\"step-finish\",\"reason\":\"scrubbed\",\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}",
+      "role": "assistant"
+    }
+  ]
+}
