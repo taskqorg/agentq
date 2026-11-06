@@ -289,7 +289,12 @@ pub fn enroll_with(data: &Path, destination: &str, wire: &mut dyn Wire) -> Resul
     let wire = &mut Machine(wire, None);
     let d = seed(data)?;
     let host = crate::host();
-    let req = Request { installation: None, product: "agentq", host_label: &host, schemas: &[SCHEMA], scope: None, capabilities: &[configure::CAPABILITY] };
+    let previous=enroll::active(&d)?.unwrap_or_default();
+    let mut schemas=vec![SCHEMA];
+    if previous["schemas"].as_array().is_some_and(|a|a.contains(&json!(agentq_runtime::archive::SCHEMA))){schemas.push(agentq_runtime::archive::SCHEMA);}
+    let mut capabilities=vec![configure::CAPABILITY];
+    if previous["capabilities"].as_array().is_some_and(|a|a.contains(&json!(agentq_runtime::archive::MANUAL))){capabilities.push(agentq_runtime::archive::MANUAL);}
+    let req = Request { installation: None, product: "agentq", host_label: &host, schemas: &schemas, scope: None, capabilities: &capabilities };
     enroll::pair(&d, destination, &req, wire)?;
     let (rec, file) = queue_snapshot(data, wire.now())?;
     let id = rec["event_id"].as_str().unwrap_or_default().to_string();
@@ -331,10 +336,12 @@ pub fn disconnect_with(data: &Path, wire: &mut dyn Wire) -> Result<&'static str,
         return Ok("not connected");
     }
     let _ = std::fs::remove_file(d.join("verified.json"));
-    if s["pending"].is_object() {
-        let _ = enroll::cancel(&d, wire);
-    }
-    match enroll::disconnect(&d, wire) {
+    // Clear active authority before any remote cancellation or revoke can wait on the network.
+    let disconnected=enroll::disconnect(&d, wire);
+    let disconnected=if s["pending"].is_object() && (disconnected.is_ok() || disconnected.as_ref().is_err_and(|e|e.ends_with("revoke pending"))) {
+        enroll::cancel(&d,wire)
+    }else{disconnected};
+    match disconnected {
         Ok(()) => Ok("disconnected; revoked"),
         Err(e) if e.ends_with("revoke pending") => Ok("Disconnected locally; revocation pending"),
         Err(e) => Err(e),
@@ -638,6 +645,28 @@ mod tests {
         assert_eq!(status(&d)["export"]["error"], "revoked");
         assert_eq!(records(&d), 1, "kept: never sent elsewhere, pruned by the queue caps");
         let _ = std::fs::remove_dir_all(d.parent().unwrap());
+    }
+
+    /// M6.12/A7: even a lost pairing acknowledgement must stop content authority before a network call.
+    #[test]
+    fn disconnect_stops_before_pending_pairing_network_calls() {
+        let data=data("archive-disconnect");let mut dash=Dash {now:1000,..Dash::default()};
+        enroll_with(&data,"https://dash.example",&mut dash).unwrap();
+        dash.lose=Some("/machine/connect/ack");
+        assert!(enroll_with(&data,"https://other.example",&mut dash).is_err());
+        assert!(enroll::active(&dir(&data)).unwrap().is_some());
+        struct Checked<'a> {data:&'a Path,dash:&'a mut Dash}
+        impl Wire for Checked<'_> {
+            fn post(&mut self,d:&str,r:&str,a:Option<&str>,b:&Value)->Result<(u16,Value),String> {
+                assert!(enroll::active(&dir(self.data)).unwrap().is_none(),"sending must stop before {r}");self.dash.post(d,r,a,b)
+            }
+            fn now(&self)->u64{self.dash.now()}
+            fn sleep(&mut self,s:u64){self.dash.sleep(s)}
+            fn show(&mut self,u:&str,c:&str){self.dash.show(u,c)}
+        }
+        disconnect_with(&data,&mut Checked {data:&data,dash:&mut dash}).unwrap();
+        assert_eq!(status(&data)["state"],"disconnected");
+        let _=std::fs::remove_dir_all(data.parent().unwrap());
     }
 
     /// A3, A4: a schema outside the grant is rejected and counted; old backlog keeps its grant across a destination

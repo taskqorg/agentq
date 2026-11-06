@@ -25,6 +25,7 @@ fn read_report(text:&str,values:&[Value],_:Option<&Path>)->Report {
     } r
 }
 static PROTOCOL: Protocol=Protocol {
+    history_format:"claude-stream", native_history_format:"claude-native",
     turn_ended:|ended,v|ended || is_end(v),
     parse_event:|_,v,out,_| {if let Some(text)=v["answer"].as_str() {out.push(Event::Message {item:None,text:text.into()});}},
     terminal:|_,v,_,_,_|is_end(v).then_some("ok"),assistant_failure:|_|None,permission_mode:|_|None,lifecycle:|_|None,advances:|_|false,

@@ -16,6 +16,8 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
     let action=registry::entry(agent).filter(|e|e.name==agent).map(|e|(e.hook)(event)).unwrap_or(Hook::None);
     if matches!(action,Hook::None) {return Ok(empty());}
     let v: Value=serde_json::from_str(input).map_err(|e|format!("hook JSON: {e}"))?;
+    let project=crate::observe::archive_project(&v);
+    if let Ok(data)=data() {agentq_runtime::archive::hook(&data,agent,&v,launched(),&project);}
     match action {
         Hook::Stop {model} => {
             let started=std::time::Instant::now();

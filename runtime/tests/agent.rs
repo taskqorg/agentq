@@ -23,6 +23,7 @@ fn main() {
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
+        ("archive_capture_and_failure_never_change_work", archive_capture_and_failure_never_change_work),
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("quota_account_read_guards_credentials", quota_account_read_guards_credentials),
         ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
@@ -1808,4 +1809,49 @@ fn ready_reads_native_login_and_minimum_version() {
     let r = agent::runtime("codex").unwrap().ready(Some(&home.join("absent")), Some(&home));
     assert_eq!((r.install.state, r.login.state), ("missing", "unknown"));
     std::fs::remove_dir_all(&home).unwrap();
+}
+
+// M6.12/M6.13: a real adapter launch registers exact turn attribution and raw app-server bytes;
+// unavailable archive storage cannot change a native turn's outcome.
+fn archive_capture_and_failure_never_change_work() {
+    #[derive(Default)] struct Sink(Vec<Value>);
+    impl coreq::enroll::Wire for Sink {
+        fn post(&mut self,_:&str,route:&str,_:Option<&str>,body:&Value)->Result<(u16,Value),String> {
+            assert_eq!(route,"/machine/archive/1");self.0.push(body.clone());
+            Ok((200,json!({"protocol":1,"schema":"agent-history/1","state":"accepted","id":"fixture","source":body["source"],"start":body["start"],"end":body["end"],"sha256":body["sha256"],"manifest_sha256":body["manifest_sha256"],"complete":true})))
+        }
+        fn now(&self)->u64{1800000000}
+        fn sleep(&mut self,_:u64){panic!("no archive sleep");}
+        fn show(&mut self,_:&str,_:&str){}
+    }
+    for (name,app) in [("claude",false),("codex",true)] {
+        let root=scratch(&format!("archive-{name}"));let data=root.join("install/data");
+        std::fs::create_dir_all(data.join("connection")).unwrap();
+        std::fs::write(data.join("connection/connection.json"),json!({"installation":"fixture","active":{"destination":"https://fixture.invalid","workspace":"fixture","installation":"fixture","generation":1,"credential":"invented","schemas":["agent-history/1"],"capabilities":[]},"pending":null,"revoke":[]}).to_string()).unwrap();
+        let app_env=[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref())];
+        let mut launch=fake_launch(name,&root,"brief",if app{&app_env}else{&[]});
+        launch.install=Some(root.join("install"));launch.home=Some(root.join("native-home"));launch.deltas=app;
+        let runtime=agent::runtime(name).unwrap();let mut run=runtime.launch(&launch).unwrap();
+        assert_eq!(finish(runtime,&mut run),agent::State::Finished);
+        let ctx=Context {product:"fixture",version:"1",project:"fixture/archive",task:Some((283,7)),route:None,account:"default"};
+        let frozen=run.snapshot(&ctx).unwrap();let event=frozen.events().unwrap()[0].id().to_owned();
+        let until=Instant::now()+Duration::from_secs(10);
+        loop {
+            let captured=std::fs::read_dir(data.join("archive/captures")).into_iter().flatten().flatten().filter(|e|e.path().extension().is_some_and(|e|e=="json"))
+                .any(|e|std::fs::read_to_string(e.path()).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()).is_some_and(|v|v["turn"]==event));
+            if captured{break;}assert!(Instant::now()<until,"archive capture missing");std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut sink=Sink::default();agentq_runtime::archive::pass(&data,&mut sink).unwrap();
+        assert!(sink.0.iter().any(|b|b["manifest"]["project"]=="fixture/archive" && b["manifest"]["task"]==283 && b["turns"][0]["event_id"]==event));
+        if app {assert!(sink.0.iter().any(|b|b["format"]=="codex-app-server"));}
+        assert_eq!(run.archive_status()["state"],"unknown","the run never invents a sink receipt");
+        drop(run);
+        let bad=root.join("bad-install");std::fs::create_dir_all(bad.join("data/connection")).unwrap();
+        std::fs::copy(data.join("connection/connection.json"),bad.join("data/connection/connection.json")).unwrap();
+        std::fs::write(bad.join("data/archive"),b"unwritable archive directory").unwrap();launch.install=Some(bad);
+        let mut run=runtime.launch(&launch).unwrap();assert_eq!(finish(runtime,&mut run),agent::State::Finished);assert_eq!(runtime.report(&run).unwrap().outcome,"ok");
+        drop(run);
+        // shortcut: the asynchronous writer can outlive fixture cleanup; add a drain if strict removal is needed.
+        let _=std::fs::remove_dir_all(root);
+    }
 }

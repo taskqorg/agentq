@@ -250,6 +250,8 @@ pub(super) fn with_test_path<T>(path: &Path,f: impl FnOnce()->T) -> T {
 }
 
 pub(crate) struct Protocol {
+    pub history_format: &'static str,
+    pub native_history_format: &'static str,
     pub prepare_command:fn(Command,&Spec,&str)->Res<(Command,Box<dyn TurnExtension>)>,
     pub input_bytes:fn(&str)->Vec<u8>,
     pub native_record:fn(&mut native::NativeTurn,&Value)->Res<()>,

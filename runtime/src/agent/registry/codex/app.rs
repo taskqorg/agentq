@@ -9,13 +9,21 @@ pub(crate) struct AppServer {
     child:Child,
     input:Option<SyncSender<WriteRequest>>,
     events:Receiver<Res<Value>>,
+    pub(crate) archive:Option<PathBuf>,
+    log:PathBuf,
+    log_start:Option<u64>,
+    recording:mpsc::Sender<PathBuf>,
 }
 
 impl AppServer {
-    pub(crate) fn spawn(mut command:Command,private_log:&Path,process:&super::Process)->Res<Self> {
+    pub(crate) fn spawn(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {
+        Self::spawn_recorded(command,private_log,process,None)
+    }
+    pub(crate) fn spawn_recorded(mut command:Command,private_log:&Path,process:&super::Process,archive:Option<PathBuf>)->Res<Self> {
         let mut options=File::options();options.create(true).append(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(private_log).map_err(|e|format!("app-server log: {e}"))?;
+        let log_start=log.metadata().ok().map(|m|m.len());
         let mut diagnostics=log.try_clone().map_err(|e|format!("app-server log: {e}"))?;
         crate::telemetry::capture::inherit_context(&mut command);
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log);
@@ -31,6 +39,8 @@ impl AppServer {
             }
         });
         let (output,events)=mpsc::sync_channel(16);
+        let mut recording=archive.clone();
+        let (recording_control,recording_changes)=mpsc::channel();
         std::thread::spawn(move || {
             let mut reader=BufReader::new(stdout);
             loop {
@@ -52,13 +62,20 @@ impl AppServer {
                     },
                     Err(e)=>Err(format!("app-server read failed: {e}")),
                 };
+                while let Ok(path)=recording_changes.try_recv(){recording=Some(path);}
+                if let Some(path)=&recording {if !line.is_empty(){crate::archive::stream(path,&line);}}
                 let failed=event.is_err();
                 if output.send(event).is_err() || failed {break;}
             }
         });
-        Ok(Self {child,input:Some(input),events})
+        Ok(Self {child,input:Some(input),events,archive,recording:recording_control,log:private_log.into(),log_start})
     }
 
+    pub(crate) fn archive_sources(&self)->Vec<crate::archive::Source> {
+        let mut sources:Vec<_>=self.archive.as_ref().map(|path|crate::archive::Source {path:path.clone(),format:"codex-app-server".into(),start:0,end:None}).into_iter().collect();
+        if let Some(start)=self.log_start {sources.push(crate::archive::Source {path:self.log.clone(),format:"raw".into(),start,end:None});}sources
+    }
+    pub(crate) fn record_archive(&mut self,path:PathBuf) {self.archive=Some(path.clone());let _=self.recording.send(path);}
     pub fn id(&self)->u32 {self.child.id()}
 
     /// A timeout may follow partial native delivery. Retain the original request and reconcile; never resend it.
@@ -139,6 +156,7 @@ pub(crate) struct AppSession {
 }
 
 impl AppSession {
+    pub(crate) fn history_home(&self)->Option<PathBuf> {spec_home(&self.spec)}
     pub fn new(spec: &Spec) -> Res<Self> {
         if spec.client != Client::Codex || spec.resume && (!native::plain_id(&spec.session) || spec.session == "-") {
             return Err("app-server session invalid".into());

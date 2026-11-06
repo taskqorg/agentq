@@ -300,6 +300,7 @@ pub struct Run {
     deadline: Option<Instant>,
     /// The launch requested Claude Remote Control (`title`).
     remote: bool,
+    archive: crate::archive::Handle,
 }
 
 enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>) }
@@ -337,6 +338,8 @@ impl Run {
         }
         Ok(self)
     }
+    /// Archive work is asynchronous; a run never claims a sink receipt it has not observed.
+    pub fn archive_status(&self) -> Value {json!({"state":"unknown","reason":"no shipper receipt observed by this run"})}
     /// The descriptor name of the runtime that owns this run.
     pub fn runtime(&self) -> &'static str { self.runtime }
     /// The optimization state configured at launch, never proof of compression.
@@ -348,13 +351,14 @@ impl Run {
     /// The finished run's immutable records for a deferred append, without a store, lock or native call; a repeated call
     /// returns the same value with the first caller context. A run without a terminal observation reads `running`.
     pub fn snapshot(&mut self, ctx: &Context) -> Res<super::Frozen> {
-        if let Some(frozen) = &self.frozen { return Ok(frozen.clone()); }
+        if let Some(frozen) = &self.frozen {self.archive.record(frozen);return Ok(frozen.clone());}
         let frozen = match &self.body {
             Body::Turn(t) => t.snapshot(ctx)?,
             Body::Native(n) => n.turn.snapshot(n.report.as_ref().ok_or("running")?, ctx)?,
             // Each app-server turn records once under its native thread and turn identity.
             Body::App(a) => a.session.snapshot(ctx)?.ok_or("running")?,
         };
+        self.archive.record(&frozen);
         self.frozen = Some(frozen.clone());
         Ok(frozen)
     }
@@ -842,8 +846,21 @@ impl Adapter {
 
     fn run(&'static self, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
         self.live.fetch_add(1, Ordering::SeqCst);
+        let (sources,session)=match &body {
+            Body::Turn(t)=>(vec![crate::archive::Source {path:t.log.clone(),format:self.ops.protocol.history_format.into(),start:t.start,end:None}],
+                t.resumed.clone()),
+            Body::Native(n)=>(vec![crate::archive::Source {path:n.turn.path().into(),format:self.ops.protocol.native_history_format.into(),start:n.turn.start(),end:None}],
+                Some(n.turn.session().into())),
+            Body::App(a)=>(match &a.transport {
+                Some(Transport::Plain(server))=>server.archive_sources(),
+                Some(Transport::Protected(server))=>server.archive_sources(),
+                _=>vec![],
+            },a.session.session().map(String::from)),
+        };
+        let home=match &body {Body::Turn(t)=>t.home.clone(),Body::Native(n)=>spec_home(&n.spec),Body::App(a)=>a.session.history_home()};
+        let archive=crate::archive::Handle::launch(self.descriptor.name,l,sources,session,home);
         Run { runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
-            remote: l.title.is_some() }
+            remote: l.title.is_some(), archive }
     }
 
     fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {
@@ -866,7 +883,7 @@ impl Adapter {
                 if self.descriptor.has("app-server") && automatic(l) {
                     turn_thread(l)?;
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
-                    let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
+                    let server = AppServer::spawn_recorded((self.ops.app_command)(command, &spec)?, &l.log, &l.process,Some(crate::archive::stream_path(l.install.as_deref(),&l.log)))?;
                     let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l)?;
                     return Ok(self.run(Body::App(Box::new(app)), 0, optimization, l));
                 }
@@ -899,7 +916,7 @@ impl Adapter {
             }
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
-                let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
+                let server = AppServer::spawn_recorded((self.ops.app_command)(command, &spec)?, &l.log, &l.process,Some(crate::archive::stream_path(l.install.as_deref(),&l.log)))?;
                 let app = App::open(&spec, Transport::Plain(server), initialize, thread, l)?;
                 Ok(self.run(Body::App(Box::new(app)), 0, optimization, l))
             }
@@ -919,7 +936,7 @@ impl Runtime for Adapter {
         let items = input_items(&self.descriptor, parts)?;
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
-            Body::App(a) if !a.owned => { a.pump()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
+            Body::App(a) if !a.owned => { a.pump()?; run.archive.next_turn(); a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
             // A CLI run reads one input; the next turn is a resume.
             _ => Err(Failure::Refused(Cause("input-unsupported"))),
         }
@@ -992,7 +1009,10 @@ impl Runtime for Adapter {
                 }
                 // An agentapi turn has exited once its deadline stop killed it.
                 let exited = t.poll()?.is_some() || t.timed_out && t.extension.is_submission() && t.exit.is_some();
-                if !exited { return Ok(State::Running); }
+                if !exited {
+                    run.archive.observe(self.session_id(run),None);
+                    return Ok(State::Running);
+                }
                 t.freeze()?;
                 state(&t.report())
             }
@@ -1006,6 +1026,11 @@ impl Runtime for Adapter {
             },
         };
         if s != State::Running && s != State::Unknown { run.live = None; }
+        let end=if matches!(s,State::Finished|State::Failed) {match &run.body {
+            Body::Turn(t)=>std::fs::metadata(&t.log).ok().map(|m|m.len()),
+            Body::Native(n)=>std::fs::metadata(n.turn.path()).ok().map(|m|m.len()),Body::App(_)=>None,
+        }}else{None};
+        run.archive.observe(self.session_id(run),end);
         Ok(s)
     }
 
@@ -1241,12 +1266,13 @@ impl Runtime for Adapter {
 }
 
 /// A protected host frontend opened as a Codex app-server run (`ProtectedAppServer::open`).
-pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
+pub(crate) fn open_protected(mut server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
     let adapter = registry::app_adapter();
     let Mode::AppServer { initialize, thread } = &l.mode else { return Err("protected open requires mode app-server".into()) };
     if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
     let (spec, _) = adapter.spec(l, session.unwrap_or("-").into(), session.is_some())?;
     let optimization = server.optimization();
+    server.record_archive(crate::archive::stream_path(l.install.as_deref(),&l.log));
     let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l)?;
     Ok(adapter.run(Body::App(Box::new(app)), 0, optimization, l))
 }

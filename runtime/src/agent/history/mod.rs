@@ -328,3 +328,6 @@ fn block(format: &str, v: Value) -> Value {
         _ => json!({"type":"unknown","native":v}),
     }
 }
+
+/// Private native identity for archive replacement detection; not execution authority.
+pub(crate) fn file_identity(file: &File) -> Res<String> { native::file_id(file) }

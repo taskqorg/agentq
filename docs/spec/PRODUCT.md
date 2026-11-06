@@ -1,6 +1,6 @@
 # AgentQ — internal organization package
 
-Revision: 5. Product outcomes; decisions and the requirement map live in [agentq.md](../../agentq.md) § 11. [Acceptance](VERIFICATION.md).
+Revision: 6. Product outcomes; decisions and the requirement map live in [agentq.md](../../agentq.md) § 11. [Acceptance](VERIFICATION.md).
 
 ## Purpose
 
@@ -24,6 +24,7 @@ AgentQ also owns the reusable Codex/Claude/Antigravity worker runtime that TaskQ
 - **R12 — Spec-driven agents.** AI manager assigns bounded tasks against an approved spec revision. Independent acceptance verifies integrated outcomes before authorized merge/deploy. Behavior changes require discussion/evidence, approved spec amendment, then implementation. Minimum meaningful product scenarios plus targeted high-risk checks; no test-count/coverage quota or function-by-function duplication.
 - **R13 — Reusable runtime.** Products launch, resume, cancel and observe native worker turns through AgentQ without a service installation. Preserve runtime modes, accounts, tools, policy, recovery and attributable observations. Optimization intent stays a compatible no-op until TaskQ, PilotQ and Pipe adopt it.
 - **R14 — Reliable worker start.** Before a worker gets its task, the runtime checks everything that worker needs and repairs only what it owns. A worker starts ready, or it refuses before spending tokens, with the exact cause and next step. Nothing makes a worker silently wait for a person. Our optional observation parts never stop work. Unverified readiness stays visible, never reported as ready.
+- **R15 — Separate session archive.** An explicitly granted host archives launched worker and manager sessions; manual capture needs separate per-host opt-in, off by default. Native bytes and manifests resume idempotently after an outage, including child sessions, background transcripts, logs and recorded app-server streams. Best-effort secret scrubbing and project exclusions run before upload. Archive failure never blocks work. Content stays 365 days at the sink; index and metadata have no expiry. Telemetry remains metadata-only.
 
 ## Evidence and limits
 

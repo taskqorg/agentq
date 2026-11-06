@@ -191,7 +191,8 @@ fn read_snapshot(events:&[Value],_rollout:Option<&Path>)->Snapshot {
 
 fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end_index=events.iter().rposition(|v|v["event"]=="result" || matches!(v["type"].as_str(),Some("PLANNER_RESPONSE"|"TOOL_RESPONSE"|"turn.failed"|"turn.cancelled"))).filter(|i|ends(&events[*i])); let failure=None; classify_report(Client::Antigravity,text,events,rollout,end_index,failure,vec![])}
 
-static PROTOCOL: Protocol=Protocol {turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:prepare_command,input_bytes:input_bytes,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
+static PROTOCOL: Protocol=Protocol {
+    history_format: "agy-stream", native_history_format: "antigravity-sidecar",turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:prepare_command,input_bytes:input_bytes,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
 fn code_assist_call(token: &str, host: &str, method: &str, body: Value) -> String {
     format!("url = \"https://{host}/v1internal:{method}\"\nheader = \"Authorization: Bearer {token}\"\nheader = \"Content-Type: application/json\"\nheader = \"User-Agent: antigravity/hub/2.28.2\"\ndata = {}\n",json!(body.to_string()))

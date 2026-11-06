@@ -343,7 +343,8 @@ fn read_snapshot(events:&[Value],rollout:Option<&Path>)->Snapshot {
 
 fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end_index=events.iter().rposition(|v|ends(v) || assistant_failure(v).is_some()); let failure=None; classify_report(Client::Codex,text,events,rollout,end_index,failure,vec![])}
 
-static PROTOCOL: Protocol=Protocol {turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:Some(verify_meta),finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
+static PROTOCOL: Protocol=Protocol {
+    history_format: "codex-exec", native_history_format: "codex-rollout",turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:Some(verify_meta),finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
 pub(crate) fn codex_groups(v: &Value) -> Option<Vec<(&str, &Value)>> {
     if let Some(groups) = v["result"].get("rateLimitsByLimitId").or(v["params"].get("rateLimitsByLimitId")).or(v.get("rateLimitsByLimitId")) {

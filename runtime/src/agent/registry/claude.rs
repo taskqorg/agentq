@@ -370,7 +370,8 @@ fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end
  events[..end_index?].iter().rev().take_while(|v|!ends(v) && !(v["type"]=="system" && matches!(v["subtype"].as_str(),Some("init"|"turn_duration")))).find(|v|v["type"]=="assistant").and_then(assistant_failure)
  }); classify_report(Client::Claude,text,events,rollout,end_index,failure,live_background(events))}
 
-static PROTOCOL: Protocol=Protocol {turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
+static PROTOCOL: Protocol=Protocol {
+    history_format: "claude-stream", native_history_format: "claude-native",turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
 pub(crate) fn claude_info(v: &Value) -> Option<Value> {
     let mut info=if v["type"]=="rate_limit_event" {Some(&v["rate_limit_info"])}

@@ -32,7 +32,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROJECT: &str = "host";
 const PASS: u64 = 30;
 const UPDATE_EVERY: u64 = 3600;
-const USAGE: &str = "agentq status [--json] | disable|enable [agent] [--dry-run] | agent turn | agent history | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
+const USAGE: &str = "agentq status [--json] | disable|enable [agent] [--dry-run] | agent turn | agent history | archive enroll|status | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -171,6 +171,15 @@ fn main() {
         },
         ["connection", "status"] => println_code(&connection_line(&connect::status(&t.install.join("data")))),
         ["connection", "status", "--json"] => println_code(&connect::status(&t.install.join("data")).to_string()),
+        ["archive", "enroll", url, rest @ ..] if rest.iter().all(|arg|matches!(*arg,"--manual"|"--headless")) => {
+            let data=t.install.join("data");
+            let mut wire=coreq::enroll::Https {browser:!rest.contains(&"--headless")};
+            match agentq_runtime::archive::enroll(&data,url,&telemetry::installation(&data),&host(),rest.contains(&"--manual"),&mut wire) {
+                Ok(())=>println_code("archive: approved; the service captures independently"),
+                Err(e)=>fail(&e,"run `agentq archive status --json`, then retry archive enrollment"),
+            }
+        },
+        ["archive", "status"] | ["archive", "status", "--json"] => println_code(&agentq_runtime::archive::status(&t.install.join("data")).to_string()),
         ["disconnect"] => match connect::disconnect(&t.install.join("data")) {
             Ok(m) => println_code(&format!("disconnect: {m}")),
             Err(e) => fail(&format!("disconnect: {e}"), "run `agentq disconnect` again"),
@@ -684,6 +693,15 @@ fn serve(t: &Tool) -> ! {
     }).unwrap_or_else(|e| { eprintln!("agentq: retirement: {e}"); serde_json::json!({"state":"unknown", "reason":"retirement_failed"}) });
     let install = t.install.clone();
     std::thread::spawn(move || telemetry::sender(&install, PASS));
+    let data=t.install.join("data");
+    std::thread::spawn(move || loop {
+        if control::host_disabled(&data)==Ok(false) {
+            if agentq_runtime::archive::pass(&data,&mut coreq::enroll::Https {browser:false}).is_err() {
+                eprintln!("agentq: archive pass unavailable");
+            }
+        }
+        std::thread::sleep(Duration::from_secs(PASS));
+    });
     let mut checked = 0;
     let mut error = None;
     let launched = std::env::current_exe().ok() == Some(t.release_exe(VERSION));
@@ -708,6 +726,7 @@ fn serve(t: &Tool) -> ! {
         s["retirement"] = onboard::retirement_state(&journal(t),migration.clone());
         s["legacy_route"] = profiles::legacy_route(&profiles::clients());
         s["release"] = release::observe(t, now());
+        s["archive"] = agentq_runtime::archive::status(&t.install.join("data"));
         s["queue"] = telemetry::status(&t.install.join("data"), now());
         s["model_backlog"] = model::backlog(&t.install.join("data"));
         s["configuration"] = profiles::status(&t.install.join("data"), now());

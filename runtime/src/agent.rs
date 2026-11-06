@@ -15,7 +15,7 @@ use registry::app;
 mod protected;
 pub mod host;
 mod adapter;
-mod capture;
+pub(crate) mod capture;
 mod events;
 mod limits;
 pub use events::{AssistantFailure, Event, LogRecord, Model, RecordTime, TimeFault, ToolKind};
@@ -511,15 +511,6 @@ pub struct Context<'a> {
     pub account: &'a str,
 }
 
-/// Start, wait and report one turn, then append its `agent.turn` observation to `store`. A failed append is kept in
-/// `Report::recorded` and never changes the turn's result (R30).
-pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store) -> Res<Report> {
-    let mut turn = Turn::start(base, spec, log, text, &Process::default())?;
-    turn.wait(deadline)?;
-    let mut r = turn.report();
-    r.recorded = turn.snapshot(ctx).and_then(|f| f.append(store));
-    Ok(r)
-}
 
 // ---------- reading client output ----------
 
@@ -889,3 +880,6 @@ fn protocol(client:Client)->&'static registry::Protocol {registry::protocol(clie
 impl Report {
     fn empty()->Self {Report {session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,text:None,exit:None,started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
 }
+
+/// Standard padded base64 for the archive wire.
+pub(crate) fn encode_base64(bytes: &[u8]) -> String { adapter::b64(bytes) }

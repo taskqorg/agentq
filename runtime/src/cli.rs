@@ -58,10 +58,18 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     };
     let mut spec = Spec { client, root, session, resume, args: strings(&v, "args")?.into_iter().map(OsString::from).collect(), home: path(&v, "home")?, env };
     let optimization = optimization::prepare(intent, ctx.product, &mut spec, install.map(Path::to_path_buf).or_else(optimization::install_root).as_deref());
-    let report = agent::with_environment_caller(|| match &store {
-        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?),
-        None => { let mut t = agent::Turn::start(base, &spec, &log, input, &agent::Process::default())?; t.wait(deadline)?; Ok(t.report()) }
+    let mut archive=crate::archive::Handle::legacy(&spec,&log,install,&ctx);
+    let report = agent::with_environment_caller(|| -> Res<Report> {
+        let store=store.as_ref().map(|p|crate::telemetry::Store::open(p)).transpose()?;
+        let mut turn=agent::Turn::start(base,&spec,&log,input,&agent::Process::default())?;
+        turn.wait(deadline)?;
+        let mut report=turn.report();
+        if let Some(store)=store {
+            report.recorded=turn.snapshot(&ctx).and_then(|frozen| {archive.record(&frozen);frozen.append(&store)});
+        }
+        Ok(report)
     })?;
+    archive.observe(report.session.clone(),std::fs::metadata(&log).ok().map(|m|m.len()));
     let mut out = report_json(&report);
     out["recorded"] = match (&store, &report.recorded) { (None, _) => json!("not-requested"), (Some(_), Ok(())) => json!("ok"), (Some(_), Err(e)) => json!(e) };
     out["optimization"] = optimization.json();
@@ -71,7 +79,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
 /// The report as JSON: codes, numbers and the final text; every null in `usage` and `limit` has its `unknown` reason.
 pub fn report_json(r: &Report) -> Value {
     let u = &r.usage;
-    json!({"schema": 1, "session": r.session, "outcome": r.outcome, "error": r.error, "text": r.text, "exit": r.exit,
+    json!({"schema": 1, "archive":{"state":"unknown","reason":"no shipper receipt observed by this run"}, "session": r.session, "outcome": r.outcome, "error": r.error, "text": r.text, "exit": r.exit,
         "started_ms": r.started_ms, "duration_us": r.duration_us,
         "usage": {"calls": u.calls, "input": u.input, "cache_read": u.cache_read, "cache_write": u.cache_write, "output": u.output, "reasoning": u.reasoning, "model": u.model, "unknown": u.unknown},
         "process": {"user_cpu_us": r.process.user_cpu_us, "system_cpu_us": r.process.system_cpu_us, "peak_rss_bytes": r.process.peak_rss_bytes, "unknown": r.process.unknown},
