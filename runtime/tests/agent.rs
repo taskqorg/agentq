@@ -700,7 +700,7 @@ fn settings_env_reaches_the_session() {
     finish(claude, &mut run);
     let turn = record(&root, 1);
     let settings = settings_of(&turn["args"]);
-    assert_eq!(settings["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child", "AGENTQ_OPTIMIZATION": "off"}), "the optimizer's own values win");
+    assert_eq!(settings["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child"}), "launcher attribution survives without optimizer injection");
     assert_eq!(settings["hooks"]["SessionStart"][0]["hooks"][0]["command"], "rules");
     assert_eq!(turn["extra"], Value::Null, "settings values stay out of the child environment");
 
@@ -710,7 +710,7 @@ fn settings_env_reaches_the_session() {
     bg.settings_env = vec![("FAKE_EXTRA".into(), "settings".into())];
     claude.launch(&bg).unwrap();
     let launched: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
-    assert_eq!(settings_of(&launched["args"])["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child", "AGENTQ_OPTIMIZATION": "off"}), "off reaches the daemon's session");
+    assert_eq!(settings_of(&launched["args"])["env"], json!({"FAKE_EXTRA": "settings", "AGENTQ_LAUNCHER": "child"}), "retired intent adds no daemon settings");
     bg.settings_env.clear();
     claude.launch(&bg).unwrap();
     let plain: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
@@ -779,7 +779,7 @@ fn settings_env_off_precedes_state_read() {
             finish(runtime, &mut run);
             assert_eq!((run.optimization().effective, run.optimization().reason), ("off", "optimization_retired"), "{name} invalid={invalid}");
             let turn = record(&root, 1);
-            assert_eq!(turn["optimization"], "off");
+            assert_eq!(turn["optimization"], if name == "claude" { "on" } else { "off" }, "caller environment stays unchanged");
             if name == "claude" { assert_eq!(settings_of(&turn["args"])["env"]["AGENTQ_OPTIMIZATION"], "off"); }
             else { assert!(!turn["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization")))); }
         }
