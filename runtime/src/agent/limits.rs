@@ -113,11 +113,11 @@ fn exchange(server: &mut app::AppServer, session: &mut app::AppSession, request:
 }
 
 /// One bounded native read session with no thread or turn. Credentials stay in the client's home.
-fn codex_read<T>(home: Option<&Path>, read: impl FnOnce(&mut app::AppServer, &mut app::AppSession, Instant)->Res<T>) -> Res<T> {
+fn codex_read<T>(home: Option<&Path>, executable: Option<&Path>, read: impl FnOnce(&mut app::AppServer, &mut app::AppSession, Instant)->Res<T>) -> Res<T> {
     let root=std::env::current_dir().map_err(|_|"working directory unavailable")?;
     let spec=Spec {client:Client::Codex,root,session:"-".into(),resume:false,args:vec![],env:vec![],home:home.map(Path::to_path_buf)};
     let log=std::env::temp_dir().join(format!("agentq-read-{}.log",crate::incident::uuid()));
-    let exe=adapter::runtime("codex").ok_or("runtime missing")?.executable(None)?;
+    let exe=match executable {Some(path)=>super::codex_native(path.to_path_buf())?,None=>adapter::runtime("codex").ok_or("runtime missing")?.executable(None)?};
     let mut server=app::AppServer::spawn(app::app_server_command(Command::new(exe),&spec)?,&log,&Process::default())?;
     let result=(|| {
         let until=Instant::now()+Duration::from_secs(30);
@@ -131,8 +131,8 @@ fn codex_read<T>(home: Option<&Path>, read: impl FnOnce(&mut app::AppServer, &mu
     let result=result?; stopped?; Ok(result)
 }
 
-pub(super) fn catalogue(home: Option<&Path>) -> Res<Vec<Model>> {
-    codex_read(home, |server,session,until| {
+pub(super) fn catalogue(home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> {
+    codex_read(home, executable, |server,session,until| {
         let mut models=vec![]; let mut cursor=Value::Null;
         for _ in 0..100 {
             let request=session.request("model/list",json!({"cursor":cursor,"limit":100,"includeHidden":false}))?;
@@ -156,7 +156,7 @@ pub(super) fn account(client: Client, home: Option<&Path>, now: i64) -> Vec<Wind
     if client != Client::Codex { return oauth_account(client, &home, explicit, now); }
     let path = home.join("auth.json");
     let before = match std::fs::read(&path) { Ok(b) => b, Err(_) => return unknown("credential-unreadable") };
-    let response = codex_read(Some(&home), |server,session,until| {let request=session.request("account/rateLimits/read",json!({}))?;exchange(server,session,request,until)});
+    let response = codex_read(Some(&home), None, |server,session,until| {let request=session.request("account/rateLimits/read",json!({}))?;exchange(server,session,request,until)});
     if std::fs::read(path).ok().as_ref() != Some(&before) { return unknown("credential-changed"); }
     match response {
         Ok(v) => reported(client, &v, now.max(0) as u64).unwrap_or_else(|| unknown("not-reported")),

@@ -642,7 +642,9 @@ pub trait Runtime: Send + Sync {
     /// Read-only login identity of a session run (capability `account`); never refreshes or writes a credential.
     fn account(&self, run: &mut Run) -> Result<Account, Failure>;
     /// Read the login's model catalogue; no turn or product protocol handler is needed.
-    fn catalogue(&self, home: Option<&Path>) -> Res<Vec<Model>>;
+    fn catalogue(&self, home: Option<&Path>) -> Res<Vec<Model>> { self.catalogue_with_executable(home, None) }
+    /// Read with the caller-configured native executable, using normal lookup only when absent.
+    fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>>;
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window>;
     fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window>;
     /// Request the stop; true when the exit is already confirmed.
@@ -1044,7 +1046,7 @@ impl Runtime for Adapter {
         }
     }
 
-    fn catalogue(&self, home: Option<&Path>) -> Res<Vec<Model>> { self.needs("catalogue")?; super::limits::catalogue(home) }
+    fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> { self.needs("catalogue")?; super::limits::catalogue(home, executable) }
 
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window> {
         let events = log.lines().filter_map(|l| serde_json::from_str(l).ok()).collect::<Vec<_>>();
@@ -1124,7 +1126,7 @@ impl Runtime for Adapter {
             Body::Turn(t) => { t.sync_antigravity_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
-            Body::App(a) => { a.pump()?; return Ok(run.events.read(self.client, std::mem::take(&mut a.pending))); }
+            Body::App(a) => { a.pump()?; return Ok(run.events.read_owned(self.client, std::mem::take(&mut a.pending), a.session.session())); }
         };
         let (mut values, next) = lines_from(&path, run.progress)?;
         if let Body::Turn(t) = &run.body {
