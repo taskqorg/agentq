@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 mod protected;
 
 fn main() {
+    if std::env::args().nth(1).as_deref()==Some("--lifetime-owner") {return lifetime_owner_fixture(Path::new(&std::env::args_os().nth(2).unwrap()),&std::env::args().nth(3).unwrap());}
     if let Some(gate)=std::env::var_os("AGENTQ_FAKE_DESCENDANT") {
         while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}
         std::fs::write(Path::new(&gate).with_extension("done"),b"exited fixture body").unwrap();return;
@@ -36,6 +37,7 @@ fn main() {
     let tests: &[(&str, fn())] = &[
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("session_ownership_and_stall_signal", session_ownership_and_stall_signal),
+        ("process_lifetime_and_orphan_cleanup",process_lifetime_and_orphan_cleanup),
         ("quota_account_read_guards_credentials", quota_account_read_guards_credentials),
         ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
         ("project_identity_read_stays_inside_adapter", project_identity_read_stays_inside_adapter),
@@ -622,7 +624,7 @@ fn session_ownership_and_stall_signal() {
     drop(rt.session_owner(Some(&session),&terminal).unwrap());
     let stop_root=root.join("stop");std::fs::create_dir_all(&stop_root).unwrap();let stop_gate=stop_root.join("gate");
     let child_gate=stop_root.join("child-gate");let stop_cleanup=Gates(vec![stop_gate.clone(),child_gate.clone()]);
-    let mut stop=fake_launch("claude",&stop_root,"stop explicitly",&[("COREQ_FAKE_GATE",stop_gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);stop.home=l.home.clone();stop.inactivity=Some(Duration::from_millis(20));stop.stop_on_stall=true;
+    let mut stop=fake_launch("claude",&stop_root,"stop explicitly",&[("COREQ_FAKE_GATE",stop_gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);stop.process.configure=Some(std::sync::Arc::new(|_|{}));stop.home=l.home.clone();stop.inactivity=Some(Duration::from_millis(20));stop.stop_on_stall=true;
     let mut stopped=rt.launch(&stop).unwrap();wait_for(&stop_root.join("fake-turn-1.json"));let native=rt.checkpoint(&stopped).unwrap()["owner"]["session"].clone();
     wait_for(&stop_root.join("descendant.json"));let descendant:agent::NativeProcess=serde_json::from_slice(&std::fs::read(stop_root.join("descendant.json")).unwrap()).unwrap();
     append(&stop.log,&[json!({"type":"system","subtype":"init","session_id":native})]);rt.observe(&mut stopped);let before_stop=rt.checkpoint(&stopped).unwrap();
@@ -650,6 +652,72 @@ fn session_ownership_and_stall_signal() {
     assert!(agentq_runtime::cli::turn(&request,None).unwrap_err().starts_with("session-busy"),"a pinned fresh JSON session is fenced before input");
     std::fs::write(&json_gate,"").unwrap();assert_eq!(writer.join().unwrap().unwrap()["outcome"],"ok");assert!(!json_root.join("fake-turn-2.json").exists());
     drop(json_cleanup);drop(stop_cleanup);drop(cleanup);std::fs::remove_dir_all(root).unwrap();
+}
+
+// #296: owner death preserves recoverable work or stops its native scope, including real descendants.
+fn lifetime_owner_fixture(root:&Path,policy:&str) {
+    let gate=root.join("gate");let child=root.join("child-gate");
+    let mut launch=fake_launch("claude",root,"one native input",&[("COREQ_FAKE_GATE",gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child.as_os_str())]);
+    launch.lifetime=if policy=="stop" {agent::Lifetime::StopWithOwner} else {agent::Lifetime::Recoverable};
+    let rt=agent::runtime("claude").unwrap();let run=rt.launch(&launch).unwrap();
+    wait_for(&root.join("descendant.json"));
+    std::fs::write(root.join("owner-ready.json"),serde_json::to_vec(&rt.checkpoint(&run).unwrap()).unwrap()).unwrap();
+    // Dropping the observation handle cannot become owner death.
+    drop(run);std::fs::write(root.join("handle-dropped"),"").unwrap();
+    wait_for(&root.join("owner-release"));
+}
+fn process_lifetime_and_orphan_cleanup() {
+    fn gone(native:&agent::NativeProcess) {
+        let until=Instant::now()+Duration::from_secs(30);
+        loop {
+            if matches!(agent::NativeProcess::read(native.pid),Ok(None)) {return;}
+            assert!(Instant::now()<until,"private fixture still present: {native:?}");std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let rt=agent::runtime("claude").unwrap();
+    for policy in ["recoverable","stop"] {
+        let root=scratch(&format!("lifetime-{policy}"));
+        struct Release(PathBuf);impl Drop for Release {fn drop(&mut self) {for name in ["owner-release","gate","child-gate"] {let _=std::fs::write(self.0.join(name),"");}}}
+        let _release=Release(root.clone());
+        let mut controller=Command::new(exe()).arg("--lifetime-owner").arg(&root).arg(policy).stdin(std::process::Stdio::null()).spawn().unwrap();
+        wait_for(&root.join("owner-ready.json"));wait_for(&root.join("handle-dropped"));
+        let saved:Value=serde_json::from_slice(&std::fs::read(root.join("owner-ready.json")).unwrap()).unwrap();
+        let gate=root.join("gate");let child_gate=root.join("child-gate");
+        let mut launch=fake_launch("claude",&root,"one native input",&[("COREQ_FAKE_GATE",gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);launch.lifetime=if policy=="stop" {agent::Lifetime::StopWithOwner} else {agent::Lifetime::Recoverable};
+        let native=agent::NativeProcess::read(saved["turn"]["pid"].as_u64().unwrap() as u32).unwrap().unwrap();
+        let child:agent::NativeProcess=serde_json::from_slice(&std::fs::read(root.join("descendant.json")).unwrap()).unwrap();
+        let entry=rt.orphans(&launch).unwrap().remove(0);assert_eq!((&*entry.state,&*entry.controller,&*entry.scope),("owned","live","verified"));
+        assert!(rt.stop_orphan(&entry,&launch).unwrap_err().contains("controller-not-absent"));
+        controller.kill().unwrap();controller.wait().unwrap();
+        if policy=="stop" {gone(&native);gone(&child);} else {
+            assert_eq!(agent::NativeProcess::read(native.pid).unwrap(),Some(native.clone()));
+            assert_eq!(agent::NativeProcess::read(child.pid).unwrap(),Some(child.clone()));
+            let entry=rt.orphans(&launch).unwrap().remove(0);assert_eq!(entry.state,"orphan");
+            let mut changed=entry.clone();changed.token="another-token".into();assert!(rt.stop_orphan(&changed,&launch).is_err());
+            let file=std::fs::read_dir(&launch.session_store.path).unwrap().map(|e|e.unwrap().path()).find(|p|p.extension().is_some_and(|e|e=="json")).unwrap();
+            let durable=std::fs::read(&file).unwrap();let mut wrong_identity:Value=serde_json::from_slice(&durable).unwrap();wrong_identity["native"]["started"]=json!("another native incarnation");
+            std::fs::write(&file,wrong_identity.to_string()).unwrap();assert_eq!(rt.orphans(&launch).unwrap()[0].state,"unknown");assert!(rt.stop_orphan(&entry,&launch).is_err());
+            assert_eq!(agent::NativeProcess::read(native.pid).unwrap(),Some(native.clone()),"unproven identity cannot become signal authority");std::fs::write(&file,&durable).unwrap();
+            let mut wrong_scope:Value=serde_json::from_slice(&durable).unwrap();wrong_scope["process_scope"]=json!({"kind":"unknown"});std::fs::write(&file,wrong_scope.to_string()).unwrap();
+            assert_eq!(rt.orphans(&launch).unwrap()[0].scope,"unknown");assert!(rt.stop_orphan(&entry,&launch).is_err());std::fs::write(&file,&durable).unwrap();
+            // Recovery keeps the original lifetime owner; it does not gain another writer or change the policy.
+            let mut wrong=launch.clone();wrong.lifetime=agent::Lifetime::StopWithOwner;assert!(rt.recover(&saved,&wrong).is_err());
+            let recovered=rt.recover(&saved,&launch).unwrap();assert_eq!(recovered.id(),Some(native.pid));drop(recovered);
+            assert_eq!(rt.orphans(&launch).unwrap()[0].controller,"absent");
+            rt.stop_orphan(&entry,&launch).unwrap();
+            assert!(rt.adopt(&entry.session,&launch,&[]).unwrap_err().contains("unresolved native stop"));
+            gone(&native);gone(&child);
+            let until=Instant::now()+Duration::from_secs(30);
+            loop {match rt.reconcile_stop(&entry,&launch) {Ok(())=>break,Err(error)=>{assert!(Instant::now()<until,"scope reconciliation: {error}");std::thread::sleep(Duration::from_millis(20));}}}
+            rt.adopt(&entry.session,&launch,&[]).unwrap();
+        }
+        assert!(!root.join("fake-turn-2.json").exists(),"lifetime and cleanup never replay input");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    let root=scratch("lifetime-refusal");let mut launch=fake_launch("claude",&root,"never submitted",&[]);launch.lifetime=agent::Lifetime::StopWithOwner;
+    launch.process.configure=Some(std::sync::Arc::new(|_|{}));assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));assert!(!root.join("fake-turn-1.json").exists());
+    launch.process=agent::Process::default();launch.mode=agent::Mode::Background;assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn native_owner(name:&str,spec:&agent::NativeSpec)->agent::SessionOwner {
