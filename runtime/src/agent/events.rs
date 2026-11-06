@@ -143,6 +143,8 @@ pub(crate) struct Cursor {
     pub(crate) seen: HashSet<String>,
     #[serde(default)]
     pub(crate) start_limit: StartLimit,
+    #[serde(default)]
+    pub(crate) acp: super::acp::ReadState,
 }
 
 pub(crate) fn string(v: &Value) -> Option<String> { v.as_str().map(String::from) }
@@ -197,7 +199,7 @@ impl Cursor {
     pub fn read_owned(&mut self, client: Client, values: Vec<Value>, thread: Option<&str>, turn: Option<&str>) -> Vec<Event> {
         let mut out = vec![];
         for v in values {
-            if v["type"]=="acp" {out.extend(super::acp::record_events(&v));continue;}
+            if v["type"]=="acp" {out.extend(self.acp.record_events(&v));continue;}
             if matches!(self.start_limit,StartLimit::Pending) {
                 if let Some(start)=(protocol(client).start_limit)(&v) {self.start_limit=start;}
             }

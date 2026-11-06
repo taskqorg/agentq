@@ -86,6 +86,7 @@ fn main() {
     let mut lingering=r.launch(&linger).unwrap();
     while r.poll(&mut lingering).unwrap()==State::Running {std::thread::yield_now();}
     let report=r.report(&lingering).unwrap();assert_eq!(report.outcome,"ok");assert_eq!(report.exit,None);assert_eq!(report.process.exit_unknown,"session-process-running");
+    assert!(matches!(report.termination,agent::ProcessTermination::Unknown{..}),"native settlement does not prove server termination");
     assert!(r.progress(&mut lingering).is_ok());
     let stop=r.stop_event(&mut lingering,u64::MAX).unwrap().unwrap();
     assert_eq!(stop.cause,agent::history::stop::StopCause::TurnEndProcessLive);
@@ -115,6 +116,23 @@ fn main() {
     let error=loop {match r.progress(&mut invalid) {Err(error)=>break error,Ok(_)=>std::thread::yield_now()}};
     assert!(error.contains("ACP payload invalid"));
     assert!(std::fs::read_to_string(&malformed.log).unwrap().contains("\"text\":17"),"malformed native fields stay in raw evidence");drop(invalid);
+    // Rejected completions and transport bytes must stay evidence, never become success on readback.
+    let mut rejected=l.clone();rejected.input="rejected-completion".into();rejected.log=root.join("rejected.jsonl");
+    let mut invalid=r.launch(&rejected).unwrap();
+    let error=loop {match r.progress(&mut invalid) {Err(error)=>break error,Ok(_)=>std::thread::yield_now()}};
+    assert!(error.contains("ACP payload invalid"));
+    let raw=std::fs::read_to_string(&rejected.log).unwrap();
+    assert_ne!(r.classify(&raw).outcome,"ok","rejected usage must not become retained success");
+    assert!(!r.log_events(&raw).iter().any(|e|matches!(e,Event::TurnEnd{..})),"rejected completion has no terminal authority");
+    assert!(raw.contains("bad-counter"));drop(invalid);
+    for (input,bytes) in [("raw-json",b"{\"jsonrpc\":\"2.0\",MALFORMED_RAW_SENTINEL}\n".as_slice()),("raw-utf8",b"{\xffUTF8_RAW_SENTINEL}\n".as_slice()),("raw-tail",b"{\"TAIL_RAW_SENTINEL\":".as_slice())] {
+        let mut malformed=l.clone();malformed.input=input.into();malformed.log=root.join(format!("{input}.jsonl"));
+        let mut invalid=r.launch(&malformed).unwrap();
+        while r.poll(&mut invalid).unwrap()==State::Running {std::thread::yield_now();}
+        assert_eq!(r.poll(&mut invalid).unwrap(),State::Unknown);
+        assert_eq!(std::fs::read(malformed.log.with_extension("stderr")).unwrap(),bytes,"exact rejected bytes retained privately");
+        drop(invalid);
+    }
     l.deadline=Some(Instant::now()+Duration::from_secs(20));
     l.env.push(("AGENTQ_FAKE_ACP_BAD_VERSION".into(),"1".into()));
     assert!(r.launch(&l).err().unwrap().contains("workspace write defect"));
@@ -162,6 +180,13 @@ fn server() {
             Some("session/prompt")=>{
                 if std::env::var_os("AGENTQ_FAKE_ACP_EOF").is_some() {return;}
                 if std::env::var_os("AGENTQ_FAKE_ACP_BAD_FIELD").is_some() {update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":17}}));return;}
+                match v["params"]["prompt"][0]["text"].as_str() {
+                    Some("rejected-completion")=>{reply(&v,json!({"stopReason":"end_turn","usage":{"inputTokens":"bad-counter"}}));return;},
+                    Some("raw-json")=>{std::io::stdout().write_all(b"{\"jsonrpc\":\"2.0\",MALFORMED_RAW_SENTINEL}\n").unwrap();return;},
+                    Some("raw-utf8")=>{std::io::stdout().write_all(b"{\xffUTF8_RAW_SENTINEL}\n").unwrap();return;},
+                    Some("raw-tail")=>{std::io::stdout().write_all(b"{\"TAIL_RAW_SENTINEL\":").unwrap();return;},
+                    _=>{},
+                }
                 prompt=v["id"].clone();
                 if v["params"]["prompt"][0]["text"]=="second" {continue;}
                 if v["params"]["prompt"][0]["text"]=="linger" {linger=true;emit(json!({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"end_turn"}}));continue;}
