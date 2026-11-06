@@ -2070,7 +2070,9 @@ fn stopped_app_runs_keep_distinct_recoverable_ids() {
     let root=scratch("stopped-app-identities");let rt=agent::runtime("codex").unwrap();let mut previous=None;
     for _ in 0..2 {
         let mut l=fake_launch("codex",&root,"private request",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref())]);l.deltas=true;
-        let run=if previous.is_none() {rt.launch(&l)} else {rt.resume("native-thread",&l)}.unwrap();
+        let run=if previous.is_none() {rt.launch(&l)} else {
+            rt.adopt("native-thread",&l,&[]).unwrap();rt.resume("native-thread",&l)
+        }.unwrap();
         let saved=rt.checkpoint(&run).unwrap();drop(run);
         let mut recovered=rt.recover(&saved,&l).unwrap();let stop=rt.stop_event(&mut recovered,u64::MAX).unwrap().unwrap();
         assert_eq!(stop.cause,agent::history::stop::StopCause::LostOwner);
