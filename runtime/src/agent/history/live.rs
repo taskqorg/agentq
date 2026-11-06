@@ -140,7 +140,8 @@ impl super::sessions::Session {
         let mut raw=String::new();file.read_to_string(&mut raw).map_err(|e|format!("history unavailable: {e}"))?;
         let rows:Vec<Value>=raw.split_inclusive('\n').filter(|s|s.ends_with('\n') && !s.trim().is_empty()).map(|s|serde_json::from_str(s).map_err(|_|"history invalid JSON".to_string())).collect::<Res<_>>()?;
         let rt=super::super::registry::history_runtime(&self.history.format).ok_or("live data runtime unsupported")?;
-        let calls=(super::super::registry::history_protocol(&self.history.format).ok_or("live data runtime unsupported")?.read_calls)(&rows).0;
+        let protocol=super::super::registry::history_protocol(&self.history.format).ok_or("live data runtime unsupported")?;
+        let calls=(protocol.read_calls)(&rows).0;
         let mut context=Context::default();
         if let Some(call)=calls.last() {
             context.used=call.input.and_then(|v|v.checked_add(call.cache_read?)).and_then(|v|v.checked_add(call.cache_write?));
@@ -148,8 +149,11 @@ impl super::sessions::Session {
             if context.used.is_some(){context.unknown.remove("used");}if context.model.is_some(){context.unknown.remove("model");}
             if call.at_ms.is_some(){context.unknown.remove("time");}
         }
-        if let Some(v)=rows.iter().rev().find(|v|v["payload"]["info"]["model_context_window"].is_u64()) {
-            context.window=v["payload"]["info"]["model_context_window"].as_u64();context.unknown.remove("window");
+        if let Some((record,(used,window)))=rows.iter().rev().find_map(|v|(protocol.history_context)(v).map(|facts|(v,facts))) {
+            context.used=used;context.window=window;context.source="native-context".into();context.time=record["timestamp"].clone();
+            for (name,known) in [("used",used.is_some()),("window",window.is_some()),("time",!context.time.is_null())] {
+                if known{context.unknown.remove(name);}else{context.unknown.insert(name.into(),"native context field not reported".into());}
+            }
         }
         let mut windows=rt.log_limits(&raw,Some(&self.history.session),None);
         if let Some(feed)=feed {

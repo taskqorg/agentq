@@ -49,6 +49,7 @@ fn main() {
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("native_queue_identified_usage_freezes_latest_scoped_requests", native_queue_identified_usage_freezes_latest_scoped_requests),
+        ("native_queue_untagged_usage_keeps_verified_task_scope", native_queue_untagged_usage_keeps_verified_task_scope),
         ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
         ("typed_log_reads_are_public", typed_log_reads_are_public),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
@@ -2136,4 +2137,23 @@ fn native_queue_identified_usage_freezes_latest_scoped_requests() {
         append(&path,&[request("native-thread","turn",999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);assert_eq!(rt.report(&run).unwrap().usage.input,Some(12));
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+// M12.20: untagged legacy usage inherits only a verified accepted native task boundary.
+fn native_queue_untagged_usage_keeps_verified_task_scope() {
+ let root=scratch("queue-untagged-scope");let path=root.join("native.jsonl");
+ append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);
+ let rt=agent::runtime("codex").unwrap();let mut launch=fake_launch("codex",&root,"owned reference",&[("COREQ_FAKE_CONTROL","1".as_ref())]);launch.mode=agent::Mode::Queue{transcript:path.clone()};
+ let mut run=rt.resume("native-thread",&launch).unwrap();
+ let usage=|input:u64|{let u=json!({"input_tokens":input,"cached_input_tokens":0,"output_tokens":2});json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":u,"total_token_usage":u}}})};
+ append(&path,&[usage(999),json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}),json!({"type":"event_msg","payload":{"type":"user_message","message":"owned reference","turn_id":"turn"}}),usage(10)]);
+ assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Running);let checkpoint=rt.checkpoint(&run).unwrap();drop(run);let mut run=rt.recover(&checkpoint,&launch).unwrap();
+ let mut foreign=usage(500);foreign["payload"]["thread_id"]=json!("foreign");foreign["payload"]["turn_id"]=json!("turn");
+ append(&path,&[foreign,json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"other"}}),usage(600),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}})]);
+ finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);assert_eq!(report.usage.input,Some(10));
+ let history=agent::history::History::new("codex-rollout","source","native-thread").unwrap();let mut history=history;assert!(history.steps(&path,u64::MAX).is_err(),"foreign session records must refuse the whole history read");
+ let pure=root.join("scoped.jsonl");let text=std::fs::read_to_string(&path).unwrap();let rows:Vec<serde_json::Value>=text.lines().map(|l|serde_json::from_str(l).unwrap()).filter(|v:&serde_json::Value|v["payload"]["thread_id"]!="foreign").collect();append(&pure,&rows);
+ let steps=agent::history::History::new("codex-rollout","source","native-thread").unwrap().steps(&pure,u64::MAX).unwrap().steps;
+ let owned=steps.iter().find(|s|s.kind==agent::history::StepKind::Usage && s.turn.native_id.as_deref()==Some("turn") && s.data["input"]==10).unwrap();assert_eq!(owned.data["id"],json!(report.calls[0].id));
+ let context=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};let frozen=run.snapshot(&context).unwrap();append(&path,&[usage(999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);std::fs::remove_dir_all(root).unwrap();
 }
