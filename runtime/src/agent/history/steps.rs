@@ -332,7 +332,7 @@ pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
         "WebSearch"|"web_search_call"|"webSearch" => StepKind::Web,
         "CollabAgentToolCall"|"collabAgentToolCall" => StepKind::Subagent,
         "SubAgentActivity" => StepKind::Subagent,
-        "ImageView"|"image_view"|"imageGeneration" => StepKind::Image,
+        name if super::super::registry::codex_image_kind(name).is_some() => StepKind::Image,
         "ContextCompaction"|"context_compacted"|"compaction" => StepKind::Compaction,
         "token_count" => StepKind::Usage,
         _ if record["type"]=="token_usage_record" => StepKind::Usage,

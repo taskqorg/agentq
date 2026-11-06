@@ -86,3 +86,17 @@ offline selftest, workflow-pinned lint and diff check. Accounting's five focused
 regressions also pass after the stack rebase. No full local suite, paid/native turn
 or working configuration change was made; Windows/WSL, native audio/video playback,
 archive retention and viewer end-to-end behavior remain unproved.
+
+The second media review now stops at quoted conversation and text/prose containers
+inside structured tool results. Sidecar media/tool_calls require the actual
+Antigravity sidecar format, native root position and recognized record schema;
+fields in an ordinary Codex message cannot impersonate that container. A shared
+Codex image classifier supplies events, steps and media, including ImageGeneration.
+Direct structured tool-result paths/files and native arguments still authorize
+signature-checked reads; existing physical origin and generated-anchor guards stay.
+
+Final focused proof: 11 media tests, 12 step tests, 16 event tests and a read-only
+probe of the three existing real Mac sources pass, plus offline selftest, pinned
+lint and diff check. Each native source still returns PNG signature bytes. No paid
+turn, full local suite or working configuration change was made; previous platform,
+archive and viewer gaps remain.
