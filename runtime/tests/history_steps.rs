@@ -212,3 +212,20 @@ fn alias_steps_and_subagent_parent_bindings_survive_recovery() {
     assert_eq!(h.steps(&p,u64::MAX).unwrap_err(),"history native parent differs");assert_eq!(h.checkpoint(),saved);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn transport_separators_keep_ranges_and_malformed_records_still_refuse() {
+    let p=path("separators");let separators="\n \t\r\n";
+    let row=format!("{}\n",json!({"type":"user","sessionId":"session","message":{"content":"activity"}}));
+    fs::write(&p,format!("{separators}{row}{separators}")).unwrap();
+    let new=||History::new("claude-native","fixture","session").unwrap();
+    let mut forward=new();let page=forward.poll(&p).unwrap();assert_eq!(page.events.len(),1);assert_eq!(page.events[0]["start"],separators.len());
+    let mut backward=new();assert_eq!(backward.poll_before(&p).unwrap().events.len(),1);
+    let mut steps=new();let page=steps.steps(&p,u64::MAX).unwrap();assert_eq!(page.steps.len(),1);assert_eq!(page.steps[0].source["start"],separators.len());
+    use std::io::Write;fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"malformed\n").unwrap();
+    let before=forward.checkpoint();assert_eq!(forward.poll(&p).unwrap_err(),"history invalid JSON");assert_eq!(forward.checkpoint(),before);
+    let mut backward=new();let before=backward.checkpoint();assert_eq!(backward.poll_before(&p).unwrap_err(),"history invalid JSON");assert_eq!(backward.checkpoint(),before);
+    let before=steps.checkpoint();assert_eq!(steps.steps(&p,u64::MAX).unwrap_err(),"history invalid JSON");assert_eq!(steps.checkpoint(),before);
+    fs::write(&p,separators).unwrap();assert!(new().poll_before(&p).unwrap().events.is_empty());
+    fs::remove_file(p).unwrap();
+}

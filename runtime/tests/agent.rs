@@ -59,6 +59,7 @@ fn main() {
         ("runtime_trait_runs_every_runtime_by_descriptor", runtime_trait_runs_every_runtime_by_descriptor),
         ("cli_turn_recovers_its_running_child", cli_turn_recovers_its_running_child),
         ("stopped_runs_have_typed_activity", stopped_runs_have_typed_activity),
+        ("stopped_app_runs_keep_distinct_recoverable_ids", stopped_app_runs_keep_distinct_recoverable_ids),
         ("process_hooks_shape_the_child", process_hooks_shape_the_child),
         ("runtime_trait_exposes_native_seams", runtime_trait_exposes_native_seams),
         ("preflight_checks_order_and_journals_exact_trust", preflight_checks_order_and_journals_exact_trust),
@@ -1682,6 +1683,7 @@ fn antigravity_native_submission_tails_and_resumes() {
     // The double exits after receipt. Supply the terminal later, as a separately owned server would.
     wait_agentapi_receipt(ag, &mut run, &l.log, "first");
     assert_eq!(ag.poll(&mut run).unwrap(), agent::State::Running, "submission is not completion");
+    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none(),"submitter exit is not a stopped sidecar turn");
     let history = home.join("brain/native-conv/.system_generated/logs/transcript.jsonl");
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"first done","input_tokens":3,"cache_read_tokens":2,"cache_write_tokens":0,"output_tokens":1,"tool_calls":[]})]);
@@ -1692,9 +1694,17 @@ fn antigravity_native_submission_tails_and_resumes() {
     let mut run=ag.resume(&session,&l).unwrap();
     wait_agentapi_receipt(ag, &mut run, &l.log, "second");
     assert_eq!(ag.poll(&mut run).unwrap(), agent::State::Running);
+    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none());
     append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"second done","input_tokens":7,"cache_read_tokens":4,"cache_write_tokens":0,"output_tokens":2})]);
     finish(ag, &mut run);let report=ag.report(&run).unwrap();
     assert_eq!((report.outcome,report.usage.input,report.usage.calls,report.text.as_deref()),("ok",Some(7),Some(1),Some("second done")));
+    l.log=root.join("cancel.log");
+    let mut run=ag.resume(&session,&l).unwrap();wait_agentapi_receipt(ag,&mut run,&l.log,"second");
+    append(&history,&[json!({"type":"TOOL_RESPONSE","step_index":3,"status":"DONE","content":"last activity"})]);
+    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none());ag.cancel(&mut run).unwrap();finish(ag,&mut run);
+    let stop=ag.stop_event(&mut run,u64::MAX).unwrap().unwrap();
+    assert!(stop.last_activity.is_some(),"receipt separators retain subsequent activity: {:?}",stop.activity_unknown);
+    assert_eq!(stop.last_activity.unwrap().source["format"],"agy-stream");
     l.input="timeout".into(); l.deadline=Some(Instant::now()+Duration::from_millis(100));
     let mut run=ag.resume(&session,&l).unwrap();
     finish(ag, &mut run);
@@ -1951,4 +1961,21 @@ fn stopped_runs_have_typed_activity() {
     let stop=loop {if let Some(s)=r.stop_event(&mut run,u64::MAX).unwrap() {break s;}std::thread::yield_now();};
     assert_eq!(stop.cause,StopCause::TurnEndProcessLive);
     finish(r,&mut run);assert!(r.stop_event(&mut run,u64::MAX).unwrap().is_none(),"our cleanup after native end is not lost ownership");let _=std::fs::remove_dir_all(root);
+}
+
+// M12.19: recovering one run keeps its ID; resuming the same thread starts a distinct run.
+fn stopped_app_runs_keep_distinct_recoverable_ids() {
+    let root=scratch("stopped-app-identities");let rt=agent::runtime("codex").unwrap();let mut previous=None;
+    for _ in 0..2 {
+        let mut l=fake_launch("codex",&root,"private request",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref())]);l.deltas=true;
+        let run=if previous.is_none() {rt.launch(&l)} else {rt.resume("native-thread",&l)}.unwrap();
+        let saved=rt.checkpoint(&run).unwrap();drop(run);
+        let mut recovered=rt.recover(&saved,&l).unwrap();let stop=rt.stop_event(&mut recovered,u64::MAX).unwrap().unwrap();
+        assert_eq!(stop.cause,agent::history::stop::StopCause::LostOwner);
+        assert_eq!(rt.stop_event(&mut recovered,u64::MAX).unwrap().unwrap().id,stop.id);
+        let saved=rt.checkpoint(&recovered).unwrap();drop(recovered);
+        let mut recovered=rt.recover(&saved,&l).unwrap();assert_eq!(rt.stop_event(&mut recovered,u64::MAX).unwrap().unwrap().id,stop.id);
+        assert_ne!(previous.as_ref(),Some(&stop.id));previous=Some(stop.id);
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }

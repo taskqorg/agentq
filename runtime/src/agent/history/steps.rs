@@ -53,6 +53,7 @@ impl History {
             if reader.read_until(b'\n', &mut row).map_err(|e|e.to_string())? == 0 { break; }
             if !row.ends_with(b"\n") { break; }
             let raw = std::str::from_utf8(&row).map_err(|_| "history invalid UTF-8")?;
+            if raw.trim().is_empty() {consumed+=row.len() as u64;continue;}
             let value: Value = serde_json::from_str(raw).map_err(|_| "history invalid JSON")?;
             if !value.is_object() { return Err("history invalid record".into()); }
             let event = self.event(&value, raw, consumed)?;

@@ -522,7 +522,11 @@ it never becomes a failed run merely because ownership was lost.
 
 The event includes the last complete native activity in the caller-selected tail
 byte window, or a reason it cannot be read. Partial records never become activity.
-Its stable identity permits repeated delivery and recovery without duplicate display.
+Its persisted run identity permits repeated delivery and recovery without duplicate display,
+while later runs in the same native session remain distinct. A sidecar submitter exit
+is not a stopped turn while its native transport still reports running. Native modules
+register the stream and transcript formats used for stop activity; core code never
+selects them by runtime name.
 Full activity output remains available by the original source byte range. No extra
 timeout or output ceiling applies. `poll` and `report` retain completion authority;
 the event does not release a permit, retry work, send messages or synthesize success.
@@ -555,7 +559,9 @@ stderr stay separate. Unknown records are steps with exact raw bytes.
 `History::steps(path, bytes)` consumes complete JSONL records up to the caller's
 chosen byte window, including a complete record crossing that window. No record
 size ceiling is imposed. A partial last record waits; validation failures leave
-the checkpoint unchanged. `read_bytes(path, start, length)` returns the exact source
+the checkpoint unchanged. Complete whitespace-only transport separators are consumed
+without producing steps or events; malformed nonempty records still refuse.
+`read_bytes(path, start, length)` returns the exact source
 range after the same identity/prefix checks. Clients choose display/output sizes.
 Legacy `poll` and `poll_before` keep their existing paging contract below.
 

@@ -40,3 +40,16 @@ provenance without becoming LostOwner. The stopped-run regression covers both th
 initial TurnEndProcessLive observation and the completed cleanup. Other Runtime
 implementations explicitly refuse unsupported stop observations by default, keeping
 the registration example and external trait implementations source-compatible.
+
+Independent review follow-up covers sidecar receipt exit while the native turn is
+still running, then cancellation after complete activity behind blank receipt
+separators. A shared transport-liveness predicate now drives both polling and stop
+facts. Stop IDs include a persisted per-run identity; two resumed app-server runs
+in one thread remain distinct, while repeated and recovered reads retain one ID.
+Native modules register stream and transcript history formats, including the
+example module, without a runtime-name switch. Whitespace-only transport separators
+are consumed in forward, backward and step reads; malformed nonempty JSON refuses
+without advancing the checkpoint. These are focused fixture/process checks; native
+Windows and sidecar-server termination qualification remain unproved. Consumers must
+create new run checkpoints containing stop_id; no live-worker compatibility path is
+provided during this refactor.

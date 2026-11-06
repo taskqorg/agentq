@@ -254,6 +254,8 @@ pub(super) fn with_test_path<T>(path: &Path,f: impl FnOnce()->T) -> T {
 }
 
 pub(crate) struct Protocol {
+    pub stream_history: &'static str,
+    pub native_history: &'static str,
     pub history_provenance:fn(&str,&Value,u64)->bool,
     pub history_parent:fn(&Value)->Option<String>,
     pub rollout_report:fn(Option<&Path>,&mut Report),

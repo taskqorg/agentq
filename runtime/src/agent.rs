@@ -393,13 +393,19 @@ impl Turn {
         Ok(code)
     }
 
+    /// A sidecar submission process can exit while its native turn remains live.
+    fn has_exited(&self) -> bool {
+        self.exit.is_some() && (!self.extension.is_submission() || self.stopping
+            || self.receipt.is_none() && (self.exit != Some(0) || self.extension.session().is_none() || self.ended))
+    }
+
     fn poll_exit(&mut self) -> Res<Option<i32>> {
         if self.extension.is_submission() {
             if self.exit.is_none() {
                 self.exit = self.child.try_wait()?.map(|c| c.unwrap_or(-1));
             }
             self.read()?;
-            return Ok(self.exit.filter(|code| self.stopping || (self.receipt.is_none() && (*code != 0 || self.extension.session().is_none() || self.ended))));
+            return Ok(self.exit.filter(|_| self.has_exited()));
         }
         if self.exit.is_some() { return Ok(self.exit); }
         self.read()?;
