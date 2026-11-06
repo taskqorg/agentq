@@ -1,5 +1,5 @@
 //! M12.18: raw source truth, typed console fields, fork provenance and convergent revisions.
-use agentq_runtime::agent::{self, State, history::{History, StepKind}};
+use agentq_runtime::agent::{self, history::{History, StepKind}};
 use serde_json::{Value,json};
 use std::fs;
 
@@ -83,8 +83,9 @@ fn trait_and_cli_discover_read_and_describe_resume() {
     let page=session.steps(1).unwrap();assert_eq!(page.steps.len(),1);
     let request=json!({"runtime":"claude","session":"child","home":root,"bytes":1});
     let cli=agent::history::sessions::request(&request.to_string()).unwrap();assert_eq!(cli["steps"].as_array().unwrap().len(),1);
-    for state in [State::Running,State::Unknown] {assert!(rt.descriptor().history_resume("child",state).is_err());}
-    assert_eq!(rt.descriptor().history_resume("child",State::Finished).unwrap(),["claude","--resume","child"]);
+    let mut launch=agent::Launch::new(&root,root.join("resume.log"),"","fixture");
+    launch.command=vec![root.join("missing-client").into_os_string()];launch.home=Some(root.clone());
+    assert!(session.resume_command(&launch,&[]).err().is_some_and(|e|e.starts_with("client-missing")),"terminal resume must pass preflight before adoption");
     let saved:Value=page.checkpoint;assert!(rt.history("foreign",Some(&root),None,Some(&saved)).is_err());
     fs::remove_dir_all(root).unwrap();
 }

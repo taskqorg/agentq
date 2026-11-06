@@ -23,7 +23,7 @@ pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
-pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
@@ -267,6 +267,7 @@ fn reap(pid: u32) -> Option<Option<i32>> {
 /// One running turn: the client process with stdout and stderr appended to the caller's log.
 pub struct Turn {
     readiness: Option<Readiness>,
+    owner:Option<SessionOwner>,
     client: Client,
     /// The caller cancelled the run.
     cancelled: bool,
@@ -333,12 +334,13 @@ impl Turn {
         } else {
             drop(stdin);
         }
-        Ok(Turn { readiness: None, client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, reaped: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
+        Ok(Turn { owner:None,readiness: None, client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, reaped: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
             ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), extension, receipt, sampler, terminal: None })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }
 
+    pub(crate) fn owned(mut self,owner:SessionOwner)->Self {self.owner=Some(owner);self}
     pub(crate) fn prepared(mut self, readiness: Readiness) -> Self {self.readiness=Some(readiness);self}
 
     /// Private recovery value of a running turn (docs/spec/RUNTIME.md § Turn recovery and process setup).
@@ -366,7 +368,7 @@ impl Turn {
         let flag = |k: &str| saved[k].as_bool().ok_or_else(invalid);
         let resumed = match &saved["resumed"] { Value::Null => None, v => Some(v.as_str().filter(|s| native::plain_id(s)).ok_or_else(invalid)?.to_string()) };
         let age = Duration::from_millis(unix_ms().saturating_sub(started_ms).max(0) as u64);
-        Ok(Turn { readiness: None, client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, reaped: false, scope: native::scope(spec), log: log.to_path_buf(),
+        Ok(Turn { owner:None,readiness: None, client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, reaped: false, scope: native::scope(spec), log: log.to_path_buf(),
             start, pos: start, ended: false, stopping: false, timed_out: flag("timed_out")?, started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
             started_ms, exit: None, home: spec_home(spec), resumed, extension: Box::new(StdioTurn), receipt: None, sampler: None, terminal: None })
     }
@@ -391,6 +393,11 @@ impl Turn {
     /// (Codex on Windows kept running after its turn ended).
     pub fn poll(&mut self) -> Res<Option<i32>> {
         let code = self.poll_exit()?;
+        if let Some(owner)=&self.owner {
+            let report=self.report();
+            if let Some(session)=report.session.as_deref() {owner.bind(session)?;}
+            if code.is_some() && report.outcome!="unknown" {owner.finish(&report)?;}
+        }
         if code.is_some() { self.freeze()?; }
         Ok(code)
     }
@@ -488,6 +495,7 @@ impl Turn {
         let rollout=session.as_deref().and_then(|session|registry::native_transcript(self.client,session,self.home.as_deref()));
         let mut r = Report::read(self.client, text, &events, rollout.as_deref());
         r.session = session;
+        r.owner=self.owner.as_ref().map(SessionOwner::observation).unwrap_or_default();
         r.readiness = self.readiness.clone();
         r.duration_us = self.started.elapsed().as_micros() as u64;
         r.started_ms = self.started_ms;
@@ -536,8 +544,8 @@ pub struct Context<'a> {
 
 /// Start, wait and report one turn, then append its `agent.turn` observation to `store`. A failed append is kept in
 /// `Report::recorded` and never changes the turn's result (R30).
-pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness) -> Res<Report> {
-    let mut turn = Turn::start(base, spec, log, text, &Process::default())?.prepared(readiness);
+pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness,owner:SessionOwner) -> Res<Report> {
+    let mut turn = Turn::start(base, spec, log, text, &owner.process_hooks(&Process::default()))?.owned(owner).prepared(readiness);
     turn.wait(deadline)?;
     let mut r = turn.report();
     r.recorded = turn.snapshot(ctx).and_then(|f| f.append(store));
@@ -610,6 +618,7 @@ pub enum ProcessTermination { Observed, Unknown { reason: &'static str } }
 pub struct Report {
     /// Ordered launch evidence; absent for log-only classification.
     pub readiness: Option<Readiness>,
+    pub owner:OwnerObservation,
     pub session: Option<String>,
     pub usage: Usage,
     pub limit: Snapshot,
@@ -934,7 +943,7 @@ use registry::claude_settings;
 fn protocol(client:Client)->&'static registry::Protocol {registry::protocol(client)}
 
 impl Report {
-    fn empty()->Self {Report {readiness:None,session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,reason:None,text:None,exit:None,termination:ProcessTermination::Unknown {reason:"native-process-exit-not-observed"},started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
+    fn empty()->Self {Report {owner:OwnerObservation::default(),readiness:None,session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,reason:None,text:None,exit:None,termination:ProcessTermination::Unknown {reason:"native-process-exit-not-observed"},started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
 }
 
 #[cfg(test)]
