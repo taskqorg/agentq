@@ -40,6 +40,7 @@ pub fn adopt(request:&str)->Res<Value> {
 pub fn preflight(request: &str, repair: bool, journal: Option<&Path>) -> Res<Value> {
     let v:Value=serde_json::from_str(request).map_err(|e|format!("invalid request: {e}"))?;
     let runtime=agent::runtime(text(&v,"client")?).ok_or("unknown client")?;
+    let mut archive=crate::archive::Handle::legacy(&spec,&log,install,&ctx);
     let launch=preflight_launch(&v)?;
     let repair=agent::Repair {workspace:repair,hooks:repair,journal:journal.map(Path::to_path_buf)};
     let mut readiness=runtime.preflight(&launch,&repair);
@@ -99,6 +100,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let mut spec = Spec { client, root, session, resume, args: strings(&v, "args")?.into_iter().map(OsString::from).collect(), home: path(&v, "home")?, env };
     agent::registry::validate_native_args(client,&spec.args)?;
     let optimization = optimization::prepare(intent, ctx.product, &mut spec, install.map(Path::to_path_buf).or_else(optimization::install_root).as_deref());
+    let mut archive=crate::archive::Handle::legacy(&spec,&log,install,&ctx);
     let launch=preflight_launch(&v)?;
     if launch.policy!=agent::Policy::default() {return Err("native JSON turn arguments require the default policy; use Runtime::launch for abstract policies".into());}
     let mut readiness=agent::runtime(client.code()).ok_or("unknown runtime")?.preflight(&launch,&agent::Repair::default());
@@ -110,9 +112,10 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let owner=runtime.session_owner(resume.then_some(spec.session.as_str()),&launch)?;
     if !resume && runtime.descriptor().has("caller-session-id") {owner.bind(&spec.session)?;}
     let report = agent::with_environment_caller(|| match &store {
-        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?, readiness.clone(),owner.clone(),managed),
+        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?, readiness.clone(),owner.clone(),managed,&mut archive),
         None => { let mut t = agent::Turn::start(base, &spec, &log, input, &owner.process_hooks(&agent::Process::default(),managed)?)?.owned(owner.clone()).prepared(readiness.clone()); t.wait(deadline)?; Ok(t.report()) }
     })?;
+    archive.observe(report.session.clone(),std::fs::metadata(&log).ok().map(|m|m.len()));
     let mut out = report_json(&report);
     out["readiness"]=json!(readiness);
     out["recorded"] = match (&store, &report.recorded) { (None, _) => json!("not-requested"), (Some(_), Ok(())) => json!("ok"), (Some(_), Err(e)) => json!(e) };
@@ -123,7 +126,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
 /// The report as JSON: codes, numbers and the final text; every null in `usage` and `limit` has its `unknown` reason.
 pub fn report_json(r: &Report) -> Value {
     let u = &r.usage;
-    json!({"schema": 1, "readiness": r.readiness, "owner":r.owner, "session": r.session, "outcome": r.outcome, "error": r.error, "reason": r.reason, "detail": r.detail, "text": r.text, "exit": r.exit, "termination": r.termination,
+    json!({"schema": 1, "archive":{"state":"unknown","reason":"no shipper receipt observed by this run"}, "readiness": r.readiness, "owner":r.owner, "session": r.session, "outcome": r.outcome, "error": r.error, "reason": r.reason, "detail": r.detail, "text": r.text, "exit": r.exit, "termination": r.termination,
         "started_ms": r.started_ms, "duration_us": r.duration_us,
         "usage": {"calls": u.calls, "input": u.input, "cache_read": u.cache_read, "cache_write": u.cache_write, "output": u.output, "reasoning": u.reasoning, "model": u.model, "unknown": u.unknown,
             "cost_usd":u.cost_usd,"cost_source":u.cost_usd.map(|_|"native-reported"),"cost_unknown":if u.cost_usd.is_none(){Some("native cost not reported")}else{None}},

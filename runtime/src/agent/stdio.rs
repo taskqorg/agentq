@@ -23,15 +23,21 @@ pub(crate) struct Stdio {
     stopped:bool,
     #[cfg(windows)] job:Option<std::sync::Arc<windows_job::Job>>,
     events:Receiver<Res<Value>>,
+    archive:Option<PathBuf>,
+    recording:mpsc::Sender<PathBuf>,
+    log:PathBuf,
+    log_start:Option<u64>,
 }
 
 impl Stdio {
-    pub(crate) fn spawn(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,true)}
-    pub(crate) fn spawn_stream(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,false)}
-    fn spawn_inner(mut command:Command,private_log:&Path,process:&super::Process,bounded:bool)->Res<Self> {
+    pub(crate) fn spawn(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,true,None)}
+    pub(crate) fn spawn_stream(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,false,None)}
+    pub(crate) fn spawn_recorded(command:Command,private_log:&Path,process:&super::Process,archive:Option<PathBuf>)->Res<Self> {Self::spawn_inner(command,private_log,process,true,archive)}
+    fn spawn_inner(mut command:Command,private_log:&Path,process:&super::Process,bounded:bool,archive:Option<PathBuf>)->Res<Self> {
         let mut options=File::options();options.create(true).append(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(private_log).map_err(|e|format!("app-server log: {e}"))?;
+        let log_start=log.metadata().ok().map(|m|m.len());
         let mut diagnostics=log.try_clone().map_err(|e|format!("app-server log: {e}"))?;
         crate::telemetry::capture::inherit_context(&mut command);
         command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(log);
@@ -60,6 +66,8 @@ impl Stdio {
             }
         });
         let (output,events)=channel(bounded.then_some(16));
+        let mut recording=archive.clone();
+        let (recording_control,recording_changes)=mpsc::channel();
         std::thread::spawn(move || {
             let mut reader=BufReader::new(stdout);
             loop {
@@ -81,6 +89,8 @@ impl Stdio {
                     },
                     Err(e)=>Err(format!("app-server read failed: {e}")),
                 };
+                while let Ok(path)=recording_changes.try_recv(){recording=Some(path);}
+                if let Some(path)=&recording {if !line.is_empty(){crate::archive::stream(path,&line);}}
                 let failed=event.is_err();
                 if failed {
                     if let Err(e)=diagnostics.write_all(&line).and_then(|_|diagnostics.flush()) {let _=output.send(Err(format!("app-server raw evidence log: {e}")));break;}
@@ -88,8 +98,14 @@ impl Stdio {
                 if output.send(event).is_err() || failed {break;}
             }
         });
-        Ok(Self {child,input:Some(input),events,bounded,stopped:false,#[cfg(windows)] job})
+        Ok(Self {child,input:Some(input),events,bounded,stopped:false,archive,recording:recording_control,log:private_log.into(),log_start,#[cfg(windows)] job})
     }
+
+    pub(crate) fn archive_sources(&self)->Vec<crate::archive::Source> {
+        let mut sources:Vec<_>=self.archive.as_ref().map(|path|crate::archive::Source {path:path.clone(),format:"codex-app-server".into(),start:0,end:None}).into_iter().collect();
+        if let Some(start)=self.log_start {sources.push(crate::archive::Source {path:self.log.clone(),format:"raw".into(),start,end:None});}sources
+    }
+    pub(crate) fn record_archive(&mut self,path:PathBuf) {self.archive=Some(path.clone());let _=self.recording.send(path);}
 
     pub fn id(&self)->u32 {self.child.id()}
 

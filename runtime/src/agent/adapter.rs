@@ -362,6 +362,7 @@ pub struct Run {
     activity:activity::Activity,
     inactivity:Option<Duration>,
     stop_on_stall:bool,
+    archive: crate::archive::Handle,
 }
 
 enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>), Acp(Box<super::acp::Session>), Rpc(Box<super::jsonl_rpc::Session>) }
@@ -415,6 +416,8 @@ impl Run {
         }
         Ok(self)
     }
+    /// Archive work is asynchronous; a run never claims a sink receipt it has not observed.
+    pub fn archive_status(&self) -> Value {json!({"state":"unknown","reason":"no shipper receipt observed by this run"})}
     /// The descriptor name of the runtime that owns this run.
     pub fn owner(&self)->Option<&SessionOwner> {self.owner.as_ref()}
     pub fn readiness(&self) -> &Readiness { &self.readiness }
@@ -428,7 +431,7 @@ impl Run {
     /// The finished run's immutable records for a deferred append, without a store, lock or native call; a repeated call
     /// returns the same value with the first caller context. A run without a terminal observation reads `running`.
     pub fn snapshot(&mut self, ctx: &Context) -> Res<super::Frozen> {
-        if let Some(frozen) = &self.frozen { return Ok(frozen.clone()); }
+        if let Some(frozen) = &self.frozen {self.archive.record(frozen);return Ok(frozen.clone());}
         let frozen = match &self.body {
             Body::Acp(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
             Body::Rpc(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
@@ -440,6 +443,7 @@ impl Run {
         let mut saved = frozen.save();
         saved["records"][0]["observation"]["counts"] = self.readiness.metadata();
         let frozen = super::Frozen::restore(&saved)?;
+        self.archive.record(&frozen);
         self.frozen = Some(frozen.clone());
         Ok(frozen)
     }
@@ -1045,8 +1049,23 @@ impl Adapter {
 
     fn run(&'static self, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
         self.live.fetch_add(1, Ordering::SeqCst);
+        let (sources,session)=match &body {
+            Body::Acp(a)=>(vec![crate::archive::Source {path:a.path.clone(),format:"acp".into(),start:a.boundary,end:None}],Some(a.session.clone())),
+            Body::Rpc(a)=>(vec![crate::archive::Source {path:a.path.clone(),format:"jsonl-rpc".into(),start:a.boundary,end:None}],Some(a.session.clone())),
+            Body::Turn(t)=>(vec![crate::archive::Source {path:t.log.clone(),format:self.ops.protocol.stream_history.into(),start:t.start,end:None}],
+                t.resumed.clone()),
+            Body::Native(n)=>(vec![crate::archive::Source {path:n.turn.path().into(),format:self.ops.protocol.native_history.into(),start:n.turn.start(),end:None}],
+                Some(n.turn.session().into())),
+            Body::App(a)=>(match &a.transport {
+                Some(Transport::Plain(server))=>server.archive_sources(),
+                Some(Transport::Protected(server))=>server.archive_sources(),
+                _=>vec![],
+            },a.session.session().map(String::from)),
+        };
+        let home=match &body {Body::Turn(t)=>t.home.clone(),Body::Native(n)=>spec_home(&n.spec),Body::App(a)=>a.session.history_home(),Body::Acp(_)|Body::Rpc(_)=>l.home.clone()};
+        let archive=crate::archive::Handle::launch(self.descriptor.name,l,sources,session,home);
         Run { stop_id: crate::incident::uuid(), runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
-            remote: l.title.is_some(), readiness: Readiness::default(), starting: Instant::now(),owner:None,activity:activity::Activity::new(progress),inactivity:l.inactivity,stop_on_stall:l.stop_on_stall }
+            remote: l.title.is_some(), readiness: Readiness::default(), starting: Instant::now(),owner:None,activity:activity::Activity::new(progress),inactivity:l.inactivity,stop_on_stall:l.stop_on_stall,archive }
     }
 
     fn checked_run(&'static self, readiness: &Readiness, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
@@ -1090,7 +1109,7 @@ impl Adapter {
                 if self.descriptor.has("app-server") && automatic(l) {
                     turn_thread(l)?;
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
-                    let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
+                    let server = AppServer::spawn_recorded((self.ops.app_command)(command, &spec)?, &l.log, &l.process,Some(crate::archive::stream_path(l.install.as_deref(),&l.log)))?;
                     let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l,&owner)?;
                     let mut run=self.checked_run(&readiness,Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);return Ok(run);
                 }
@@ -1125,7 +1144,7 @@ impl Adapter {
             }
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
-                let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
+                let server = AppServer::spawn_recorded((self.ops.app_command)(command, &spec)?, &l.log, &l.process,Some(crate::archive::stream_path(l.install.as_deref(),&l.log)))?;
                 let app = App::open(&spec, Transport::Plain(server), initialize, thread, l,&owner)?;
                 Ok(self.checked_run(&readiness, Body::App(Box::new(app)), 0, optimization, l))
             }
@@ -1160,7 +1179,7 @@ impl Runtime for Adapter {
         let items = input_items(&self.descriptor, parts)?;
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
-            Body::App(a) if !a.owned => { a.pump()?;run.owner.as_ref().ok_or("session-owner-unknown")?.submit()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
+            Body::App(a) if !a.owned => { a.pump()?;run.owner.as_ref().ok_or("session-owner-unknown")?.submit()?; run.archive.next_turn(); a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
             // A CLI run reads one input; the next turn is a resume.
             _ => Err(Failure::Refused(Cause("input-unsupported"))),
         }
@@ -1265,6 +1284,12 @@ impl Runtime for Adapter {
             if matches!(s,State::Finished|State::Failed) {owner.finish(&self.report(run)?)?;}
         }
         if s != State::Running && s != State::Unknown { run.live = None; }
+        let end=if matches!(s,State::Finished|State::Failed) {match &run.body {
+            Body::Turn(t)=>std::fs::metadata(&t.log).ok().map(|m|m.len()),
+            Body::Native(n)=>std::fs::metadata(n.turn.path()).ok().map(|m|m.len()),Body::App(_)=>None,
+            Body::Acp(a)=>std::fs::metadata(&a.path).ok().map(|m|m.len()),Body::Rpc(a)=>std::fs::metadata(&a.path).ok().map(|m|m.len()),
+        }}else{None};
+        run.archive.observe(self.session_id(run),end);
         Ok(s)
     }
 
@@ -1506,7 +1531,7 @@ impl Runtime for Adapter {
 }
 
 /// A protected host frontend opened as a Codex app-server run (`ProtectedAppServer::open`).
-pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
+pub(crate) fn open_protected(mut server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
     if l.lifetime==Lifetime::StopWithOwner {return Err("lifetime-unsupported: protected scope".into());}
     let adapter = registry::app_adapter();
     let Mode::AppServer { initialize, thread } = &l.mode else { return Err("protected open requires mode app-server".into()) };
@@ -1516,6 +1541,7 @@ pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, 
     owner.spawned(server.id())?;
     if !l.input.is_empty() || !l.parts.is_empty() {owner.submit()?;}
     let optimization = server.optimization();
+    server.record_archive(crate::archive::stream_path(l.install.as_deref(),&l.log));
     let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner)?;
     let mut run=adapter.run(Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);Ok(run)
 }

@@ -427,3 +427,6 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
 }
+
+/// Project attribution reused by the separate archive hook.
+pub fn archive_project(input: &Value) -> String { project(input) }

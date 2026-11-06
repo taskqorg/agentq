@@ -49,6 +49,7 @@ pub(crate) fn main() {
         ("account_login_pipes_remain_private_and_owned",signin::pipes),
         ("account_login_cancel_fences_changed_or_unknown_credentials",signin::cancel_guards),
         ("account_login_retains_home_until_native_transport_cleanup",signin::transport_cleanup),
+        ("archive_capture_and_failure_never_change_work", archive_capture_and_failure_never_change_work),
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("session_ownership_and_stall_signal", session_ownership_and_stall_signal),
         ("process_lifetime_and_orphan_cleanup",process_lifetime_and_orphan_cleanup),
@@ -2428,3 +2429,47 @@ fn native_queue_reused_response_keeps_distinct_frozen_turns(){
 let root=scratch("queue-reused-response");let path=root.join("native.jsonl");append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);let rt=agent::runtime("codex").unwrap();let mut sum=0;let mut frozen_turns=vec![];
 for turn in ["t1","t2"]{let input=format!("owned {turn}");let mut l=fake_launch("codex",&root,&input,&[("COREQ_FAKE_CONTROL","1".as_ref())]);l.mode=agent::Mode::Queue{transcript:path.clone()};if sum==0 {rt.adopt("native-thread",&l,&[]).unwrap();}let mut run=rt.resume("native-thread",&l).unwrap();append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),json!({"type":"event_msg","payload":{"type":"user_message","message":input,"turn_id":turn}}),json!({"type":"token_usage_record","payload":{"thread_id":"native-thread","turn_id":turn,"response_id":"r","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}}),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn}})]);finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);sum+=report.calls.len();let ctx=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};frozen_turns.push(run.snapshot(&ctx).unwrap());}
 assert_ne!(frozen_turns[0],frozen_turns[1]);let live=rt.history("native-thread",None,Some(&path),None).unwrap().live_data(None).unwrap();println!("NATIVE_REPEATED_RESPONSE frozen_calls={sum} live_calls={}",live.calls.len());assert_eq!(live.calls.len(),sum,"distinct accepted native turns cannot collapse in public history");teardown(root);}
+// M6.12/M6.13: a real adapter launch registers exact turn attribution and raw app-server bytes;
+// unavailable archive storage cannot change a native turn's outcome.
+fn archive_capture_and_failure_never_change_work() {
+    #[derive(Default)] struct Sink(Vec<Value>);
+    impl coreq::enroll::Wire for Sink {
+        fn post(&mut self,_:&str,route:&str,_:Option<&str>,body:&Value)->Result<(u16,Value),String> {
+            assert_eq!(route,"/machine/archive/1");self.0.push(body.clone());
+            Ok((200,json!({"protocol":1,"schema":"agent-history/1","state":"accepted","id":"fixture","source":body["source"],"start":body["start"],"end":body["end"],"sha256":body["sha256"],"manifest_sha256":body["manifest_sha256"],"complete":true})))
+        }
+        fn now(&self)->u64{1800000000}
+        fn sleep(&mut self,_:u64){panic!("no archive sleep");}
+        fn show(&mut self,_:&str,_:&str){}
+    }
+    for (name,app) in [("claude",false),("codex",true)] {
+        let root=scratch(&format!("archive-{name}"));let data=root.join("install/data");
+        std::fs::create_dir_all(data.join("connection")).unwrap();
+        std::fs::write(data.join("connection/connection.json"),json!({"installation":"fixture","active":{"destination":"https://fixture.invalid","workspace":"fixture","installation":"fixture","generation":1,"credential":"invented","schemas":["agent-history/1"],"capabilities":[]},"pending":null,"revoke":[]}).to_string()).unwrap();
+        let app_env=[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref())];
+        let mut launch=fake_launch(name,&root,"brief",if app{&app_env}else{&[]});
+        launch.install=Some(root.join("install"));launch.home=Some(root.join("native-home"));launch.deltas=app;
+        let runtime=agent::runtime(name).unwrap();let mut run=runtime.launch(&launch).unwrap();
+        assert_eq!(finish(runtime,&mut run),agent::State::Finished);
+        let ctx=Context {product:"fixture",version:"1",project:"fixture/archive",task:Some((283,7)),route:None,account:"default"};
+        let frozen=run.snapshot(&ctx).unwrap();let event=frozen.events().unwrap()[0].id().to_owned();
+        let until=Instant::now()+Duration::from_secs(10);
+        loop {
+            let captured=std::fs::read_dir(data.join("archive/captures")).into_iter().flatten().flatten().filter(|e|e.path().extension().is_some_and(|e|e=="json"))
+                .any(|e|std::fs::read_to_string(e.path()).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()).is_some_and(|v|v["turn"]==event));
+            if captured{break;}assert!(Instant::now()<until,"archive capture missing");std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut sink=Sink::default();agentq_runtime::archive::pass(&data,&mut sink).unwrap();
+        assert!(sink.0.iter().any(|b|b["manifest"]["project"]=="fixture/archive" && b["manifest"]["task"]==283 && b["turns"][0]["event_id"]==event));
+        if app {assert!(sink.0.iter().any(|b|b["format"]=="codex-app-server"));}
+        assert_eq!(run.archive_status()["state"],"unknown","the run never invents a sink receipt");
+        drop(run);
+        let bad=root.join("bad-install");std::fs::create_dir_all(bad.join("data/connection")).unwrap();
+        std::fs::copy(data.join("connection/connection.json"),bad.join("data/connection/connection.json")).unwrap();
+        std::fs::write(bad.join("data/archive"),b"unwritable archive directory").unwrap();launch.install=Some(bad);
+        let mut run=runtime.launch(&launch).unwrap();assert_eq!(finish(runtime,&mut run),agent::State::Finished);assert_eq!(runtime.report(&run).unwrap().outcome,"ok");
+        drop(run);
+        // shortcut: the asynchronous writer can outlive fixture cleanup; add a drain if strict removal is needed.
+        let _=std::fs::remove_dir_all(root);
+    }
+}

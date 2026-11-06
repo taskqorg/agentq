@@ -1,7 +1,7 @@
 # agentq contract
 
 AgentQ is the single worker layer for native agents: prepare, launch, resume, observe, control, history and archive (§12). Products keep admission, grants, scheduling and UI. It ships one static binary and one runtime library on [coreq](https://github.com/taskqorg/coreq), with optional host recording and no server, relay or dashboard of its own.
-This file holds every agentq decision; its linked detail files hold binding detail.
+This file holds every agentq decision; its linked detail files hold binding detail. Session archives are separate from metadata-only telemetry.
 
 It follows the [specq release contract](https://github.com/taskqorg/specq/blob/main/engineering/release-contract.md) and [taskq.md](https://github.com/taskqorg/taskq/blob/main/taskq.md) § 4 and § 8 as their reference consumer. Product outcomes: [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md) revision 6; § 11 maps each requirement here. Principles `P1`–`P5` and section rules `M<section>.<n>` are mandatory; text after them in a section is binding detail.
 
@@ -125,6 +125,9 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - One sample per 300 s wall-clock bucket `floor(unix / 300)`, taken by the first sender pass (30 s pace) in a bucket; a start waits for the next bucket. Event ID = first 32 hex of SHA-256 of `<installation>:resource:<bucket>`, so a resend, second sampler or clock step replaces that trace, never adds one. CPU, memory and disk probes: [TELEMETRY.md](docs/spec/TELEMETRY.md#resource-samples).
 ### Profiling
 - Profiling follows [specq profiling](https://github.com/taskqorg/specq/blob/main/engineering/profiling.md): it reuses local export samples and the queue `state.json`, adds no collector, process or network call, and stores operation names, numbers and class codes only. Operations, budgets, samples, trace switch and ranking: [TELEMETRY.md](docs/spec/TELEMETRY.md#profiling).
+### Session archive
+- **M6.12** Native session content uses a separate archive store and shipper with explicit `agent-history/1` approval, off by default. Observation grants never imply capture. Launched workers and managers are captured; manual sessions require a separately approved per-host `agent-history.manual` opt-in.
+- **M6.13** Archive failures never block or fail work. Raw native bytes, with best-effort secret scrubbing and replacement counts, remain authoritative; steps are derived at read time. Sink content retention is 365 days; index and metadata do not expire. [Archive detail](docs/spec/ARCHIVE.md).
 
 ## 7. Incidents via coreq
 - **M7.1** A report never changes agent work or an exit code.
@@ -156,10 +159,13 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - R13: one worker layer, per-runtime registry, policy, recovery, control and history (§12); history/archive ownership follows [specq agent runtimes](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md#step-history-and-archive).
 - R14: ordered worker preflight and owned repairs (§12); native qualification remains separate.
 
+- R15: separately granted, nonblocking session archive (§6).
+
 ## 12. Agent runtime
 - **M12.1** `agentq-runtime` (folder `runtime/`, Rust library `agentq_runtime`) starts, resumes, cancels and observes Codex CLI, Claude Code and Antigravity (`antigravity`) turns: CLI and ACP turns, Claude background jobs, Codex app and app-server sessions, Remote Control, session recovery, dynamic tools, private drafts, the model catalogue and account selection.
 - **M12.2** It depends only on CoreQ primitives (process, telemetry store, `quiet`); never on TaskQ, PilotQ or the optimizer modules of `agentq`. CoreQ never depends on it.
-- **M12.3** A plain turn needs no service, engine, MCP server or installation; the library and `agentq agent turn` never write the installation. Callers keep grants, permissions, model, effort, input files, storage, process ownership, stop authority and UI.
+- **M12.3** A plain turn needs no service, engine, MCP server or installation. The library and `agentq agent turn` never change installation or native configuration; an explicit archive grant permits asynchronous private capture only.
+  Callers keep grants, permissions, model, effort, input files, storage, process ownership, stop authority and UI.
 - **M12.4** Each finished turn appends exactly one attributable `agent.turn` observation to the caller's CoreQ store; recovery and repeated observation never count it twice. The child gets `AGENTQ_LAUNCHER` unless `TASKQ_TASK` or `AGENTQ_LAUNCHER` is set, so § 6 M6.9 holds.
 - **M12.5** Compatibility API `Intent::{Inherit,Off,On}` and optimization reports remain until TaskQ, PilotQ and Pipe adopt the retired feature. Every intent is a no-op reporting `off`, reason `optimization_retired`; no installation or native configuration is read.
 - **M12.6** A launch never edits global or client configuration, previously transmitted replay bytes, provider or model. Optimization intent adds no environment or provider-header override.
@@ -212,4 +218,5 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - [docs/spec/INTEGRATION-CONTROL.md](docs/spec/INTEGRATION-CONTROL.md): temporary control lifecycle, transitions, status and revisions.
 - [docs/spec/SERVICE.md](docs/spec/SERVICE.md): install layout, release artifacts, command registration, service processes, update, status, host tools and release observation.
 - [docs/spec/TELEMETRY.md](docs/spec/TELEMETRY.md): heartbeat attributes, model call mapping, resource probes and profiling.
+- [docs/spec/ARCHIVE.md](docs/spec/ARCHIVE.md): separate grants, native capture, scrubbed byte identity, checkpoints, exclusions and archive status.
 - [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md): agent runtime arguments, end detection, usage, limits, accounts, compatibility modes, the `agentq agent` JSON contract, optimization intent, consumer inventory and adoption boundaries.

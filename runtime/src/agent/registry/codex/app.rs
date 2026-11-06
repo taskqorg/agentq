@@ -42,6 +42,7 @@ pub(crate) struct AppSession {
 }
 
 impl AppSession {
+    pub(crate) fn history_home(&self)->Option<PathBuf> {spec_home(&self.spec)}
     pub fn new(spec: &Spec) -> Res<Self> {
         if spec.client != Client::Codex || spec.resume && (!native::plain_id(&spec.session) || spec.session == "-") {
             return Err("app-server session invalid".into());
