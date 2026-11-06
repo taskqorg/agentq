@@ -24,18 +24,26 @@ fn window(name: Option<String>, used: Option<f64>, reset: Option<u64>, id: Optio
     Window { window: name, used, exhausted: used.map(|u|u>=1.0), resets_at: reset, event_id: id, unknown: partial.then(|| "partial-snapshot".into()) }
 }
 
+pub(super) fn claude_info(v: &Value) -> Option<Value> {
+    let mut info=if v["type"]=="rate_limit_event" {Some(&v["rate_limit_info"])}
+        else {v.get("quotaLimits").filter(|v|v.is_object()).or_else(||v.pointer("/apiErrorParams/rate_limit_info").filter(|v|v.is_object()))}?.clone();
+    if v["type"]!="rate_limit_event" && info.is_object() {
+        let fallback=&v["apiErrorParams"]["rate_limit_info"];
+        if info["rateLimitType"].as_str().is_none() {
+            info["rateLimitType"]=fallback["rateLimitType"].clone();
+            if let Some(native)=info["rateLimitType"].as_str().and_then(|name|info["unifiedWindows"].get(name)).cloned() {
+                if info["utilization"].as_f64().is_none() {info["utilization"]=native["utilization"].clone();}
+                if info["resetsAt"].as_u64().is_none() {info["resetsAt"]=native["resetsAt"].clone();}
+            }
+        }
+        if info["resetsAt"].as_u64().is_none() {info["resetsAt"]=fallback["resetsAt"].clone();}
+    }
+    Some(info)
+}
+
 pub(super) fn reported(client: Client, v: &Value, now: u64) -> Option<Vec<Window>> {
     let id = v["event_id"].as_str().or(v["uuid"].as_str()).or(v["id"].as_str()).map(String::from);
-    let claude_info = if v["type"] == "rate_limit_event" {Some(&v["rate_limit_info"])}
-        else {v.get("quotaLimits").filter(|v|v.is_object()).or_else(||v.pointer("/apiErrorParams/rate_limit_info").filter(|v|v.is_object()))};
-    if let Some(i) = claude_info.filter(|_|client == Client::Claude) {
-        let mut info=i.clone();
-        if v["type"]!="rate_limit_event" && info.is_object() {
-            let fallback=&v["apiErrorParams"]["rate_limit_info"];
-            if info["rateLimitType"].as_str().is_none() {info["rateLimitType"]=fallback["rateLimitType"].clone();}
-            if info["resetsAt"].as_u64().is_none() {info["resetsAt"]=fallback["resetsAt"].clone();}
-        }
-        let i=&info;
+    if let Some(ref i) = (client==Client::Claude).then(||claude_info(v)).flatten() {
         let mut windows = vec![];
         if let Some(all) = i["unifiedWindows"].as_object() {
             for (name, w) in all {
@@ -398,6 +406,23 @@ mod tests {
             (json!({"utilization":0.2}),Some(false)),
             (json!({}),None),
         ] {assert_eq!(claude_window(None,&info,None).exhausted,expected);}
+    }
+
+    // #258 A3/P2: naming a partial top-level rejection must not erase readable native window fields.
+    #[test]
+    fn fallback_quota_name_preserves_readable_native_window() {
+        for fallback_reset in [Value::Null,json!(1800000000)] {
+            let row=json!({"type":"assistant","quotaLimits":{"status":"rejected","unifiedWindows":{"seven_day":{"utilization":0.8,"resetsAt":1900000000}}},"apiErrorParams":{"rate_limit_info":{"rateLimitType":"seven_day","resetsAt":fallback_reset}}});
+            let runtime=adapter::runtime("claude").unwrap();
+            let windows=runtime.log_limits(&row.to_string(),None,None);
+            assert_eq!(windows.len(),1);
+            assert_eq!(windows[0].window.as_deref(),Some("seven_day"));
+            assert_eq!(windows[0].used,Some(0.8));
+            assert_eq!(windows[0].resets_at,Some(1900000000));
+            assert_eq!(windows[0].exhausted,Some(true));
+            assert_eq!(windows[0].unknown,None);
+            assert_eq!(runtime.classify(&row.to_string()).reached,Some(Some(1900000000)));
+        }
     }
 
     // #258 A4: optional null windows/scopes are absent; malformed siblings remain unknown.

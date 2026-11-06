@@ -921,7 +921,7 @@ impl StartLimit {
         let kind = v["type"].as_str().unwrap_or_default();
         if kind == "assistant" {
             if v["apiError"] == "usage_limit_reached" || v["quotaLimits"]["status"] == "rejected" {
-                return Some(Self::Reached(v["quotaLimits"]["resetsAt"].as_i64().or(v["apiErrorParams"]["rate_limit_info"]["resetsAt"].as_i64())));
+                return Some(Self::Reached(limits::claude_info(v).and_then(|info|info["resetsAt"].as_i64())));
             }
             return Some(Self::Working);
         }
