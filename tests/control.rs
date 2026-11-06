@@ -1,5 +1,5 @@
 //! Temporary controls through the real CLI, native runner and MCP transport, in private roots only.
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{io::Write, path::{Path, PathBuf}, process::{Command, Output, Stdio}};
 
 fn cli(root: &Path, args: &[&str], input: Option<&str>) -> Output {
@@ -41,21 +41,13 @@ fn setup() -> PathBuf {
     std::fs::write(root.join("claude/settings.json"), r#"{"model":"fixture-native-model","permissions":{"defaultMode":"default"}}"#).unwrap();
     std::fs::write(root.join("claude/.claude.json"), r#"{"mcpServers":{"foreign":{"command":"foreign-tool"}}}"#).unwrap();
     let projection = value(&root, &["configure"]);
-    for kind in ["codex", "claude-code", "claude-desktop-chat"] {
+    for kind in ["codex", "claude-code"] {
         let id = profile(&projection, kind)["id"].as_str().unwrap();
-        let args = if kind == "claude-desktop-chat" { vec!["configure", id, "mcp=registered", "--yes"] }
-            else { vec!["configure", id, "mcp=registered", "hooks=registered", "--yes"] };
+        let args = vec!["configure", id, "hooks=registered", "--yes"];
         let out = cli(&root, &args, None);
         assert!(out.status.success(), "{out:?}");
     }
     root
-}
-
-fn mcp(root: &Path, name: &str, args: Value) -> Value {
-    let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}).to_string()+"\n";
-    let out = cli(root, &["mcp", "claude"], Some(&req));
-    assert!(out.status.success(), "{out:?}");
-    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 /// A private recipe cannot grant ownership of another installation's loaded OS label.
@@ -129,89 +121,5 @@ fn idle_registered_service_is_unloaded_once_and_restored_before_enable() {
     assert_eq!(std::fs::read_to_string(root.join("unit-actions")).unwrap(), "unload\nload\n");
     assert!(root.join("unit-loaded").exists());
     assert_eq!(value(&root, &["status", "--json"])["host_disabled"], false);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn switches_detach_recovery_and_native_output_cross_cli_boundaries() {
-    let root = setup();
-    let settings = std::fs::read(root.join("claude/settings.json")).unwrap();
-    let original = root.join("original.txt");
-    std::fs::write(&original, "original bytes survive both controls\n").unwrap();
-    let indexed = mcp(&root, "index_document", json!({"path":original}));
-    let indexed: Value = serde_json::from_str(indexed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    value(&root, &["optimization", "off", "claude"]);
-    value(&root, &["optimization", "off"]);
-    let paused = cli(&root, &["hook", "claude", "PreToolUse"], Some(r#"{"tool_name":"Bash","tool_input":{"command":"cargo test"}}"#));
-    assert_eq!(serde_json::from_slice::<Value>(&paused.stdout).unwrap(), json!({}), "pause must keep the native command and its approval classification unchanged");
-    assert_ne!(mcp(&root, "index_document", json!({"path":original}))["result"]["isError"], true, "compression off keeps MCP available");
-    assert_eq!(std::fs::read(root.join("claude/settings.json")).unwrap(), settings);
-    let preview = value(&root, &["disable", "claude", "--dry-run"]);
-    assert_eq!(preview["outcome"], "planned");
-    assert_eq!(preview["blocked"], false);
-    assert!(!root.join("install/data/integration.json").exists());
-    assert_eq!(std::fs::read(root.join("claude/settings.json")).unwrap(), settings);
-    value(&root, &["disable", "claude"]);
-    let status = value(&root, &["status", "--json"]);
-    let p = profile(&status["configuration"], "claude-code");
-    assert_eq!(p["integration"]["desired"], "disabled");
-    assert_eq!(p["integration"]["configuration"], "detached");
-    assert_eq!(p["hooks"], "absent");
-    assert_eq!(p["mcp"], "absent");
-    assert_eq!(p["optimization_reason"], "integration_disabled");
-    let hook = cli(&root, &["hook", "claude", "PreToolUse"], Some(r#"{"tool_name":"Bash","tool_input":{"command":"cargo test"}}"#));
-    assert_eq!(serde_json::from_slice::<Value>(&hook.stdout).unwrap(), json!({}));
-    assert_eq!(mcp(&root, "index_document", json!({"path":original}))["result"]["isError"], true);
-    let recovered = mcp(&root, "get_original", json!({"ref": indexed["ref"]}));
-    let recovered: Value = serde_json::from_str(recovered["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(recovered["content"], "original bytes survive both controls\n");
-    let denied = cli(&root, &["onboard", "--yes", "claude"], None);
-    assert!(!denied.status.success());
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("integration_disabled"));
-    let projection = value(&root, &["configure"]);
-    let id = profile(&projection, "claude-code")["id"].as_str().unwrap();
-    let denied = cli(&root, &["configure", id, "hooks=registered", "--yes"], None);
-    assert!(!denied.status.success());
-    assert!(String::from_utf8_lossy(&denied.stdout).contains("integration_disabled"));
-    value(&root, &["disable"]);
-    let denied = cli(&root, &["service", "install"], None);
-    assert!(!denied.status.success(), "a disabled host must not reach the OS unit manager");
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("integration_disabled"));
-    value(&root, &["enable", "codex"]);
-    let s = value(&root, &["status", "--json"]);
-    assert_eq!(profile(&s["configuration"], "codex")["integration"]["desired"], "enabled");
-    assert_eq!(profile(&s["configuration"], "claude-code")["integration"]["desired"], "disabled");
-    value(&root, &["enable"]);
-    value(&root, &["disable", "claude-desktop"]);
-    let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"index_document","arguments":{"path":original}}}).to_string()+"\n";
-    let desktop = cli(&root, &["mcp", "claude-desktop"], Some(&req));
-    assert_eq!(serde_json::from_slice::<Value>(&desktop.stdout).unwrap()["result"]["isError"], true);
-    assert_ne!(mcp(&root, "index_document", json!({"path":original}))["result"]["isError"], true, "Desktop Chat disable keeps Claude Code MCP independent");
-    value(&root, &["enable", "claude-desktop"]);
-    value(&root, &["optimization", "on"]);
-    let s = value(&root, &["status", "--json"]);
-    assert_eq!(profile(&s["configuration"], "claude-code")["optimization_preference"], "disabled");
-    let config: Value = serde_json::from_str(&std::fs::read_to_string(root.join("claude/.claude.json")).unwrap()).unwrap();
-    assert_eq!(config["mcpServers"]["foreign"]["command"], "foreign-tool");
-    let settings: Value = serde_json::from_str(&std::fs::read_to_string(root.join("claude/settings.json")).unwrap()).unwrap();
-    assert_eq!(settings["permissions"]["defaultMode"], "default");
-    assert_eq!(settings["model"], "fixture-native-model");
-    let native = root.join(format!("bin/cargo{}", std::env::consts::EXE_SUFFIX));
-    assert!(Command::new("rustc").args(["--edition=2024", "tests/fixtures/compression-runner.rs", "-o"]).arg(&native).status().unwrap().success());
-    let rtk = root.join(format!("install/engines/rtk-0.51.0/rtk{}", std::env::consts::EXE_SUFFIX));
-    std::fs::create_dir_all(rtk.parent().unwrap()).unwrap();
-    std::fs::copy(&native, rtk).unwrap();
-    let out = cli(&root, &["run", "--", "cargo", "test"], None);
-    assert_eq!(out.status.code(), Some(7));
-    assert_eq!(out.stdout, "test result with preserved details\n".repeat(100).as_bytes());
-    assert_eq!(out.stderr, b"native stderr\n");
-    assert!(!root.join("install/data/runs").exists(), "disabled runs do not capture native output");
-    value(&root, &["optimization", "on", "claude"]);
-    let out = cli(&root, &["run", "--", "cargo", "test"], None);
-    assert_eq!(out.status.code(), Some(7));
-    assert_eq!(out.stderr, b"native stderr\n");
-    assert!(String::from_utf8_lossy(&out.stdout).contains("get_original"));
-    assert_eq!(std::fs::read_to_string(root.join("calls")).unwrap().lines().count(), 2, "no native rerun");
-    assert_eq!(value(&root, &["enable"])["outcome"], "unchanged");
     std::fs::remove_dir_all(root).unwrap();
 }

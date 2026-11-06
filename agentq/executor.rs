@@ -4,7 +4,7 @@
 //!
 //! Entries: `agentq configure` (local grant) and the enrolled operation pass in `connect.rs`.
 
-use crate::{configure, onboard, profiles, routing};
+use crate::{configure, onboard, profiles};
 use coreq::write_atomic;
 use serde_json::{Value, json};
 use std::fs::{File, TryLockError};
@@ -122,7 +122,7 @@ pub fn execute(h: &Host, raw: &str, now: u64) -> Value {
         "operation": op, "digest": configure::digest(&req), "actor": h.grant["actor"], "workspace": h.grant["workspace"], "installation": req["installation"],
         "generation": req["generation"], "plan": plan["digest"], "at": now,
         "sequence": history.iter().map(|r| record_order(r).0).max().unwrap_or(0).saturating_add(1), "changes": changes, "journal": entries(h),
-        "compression": compression(&h.data)["agents"], "result": r,
+        "result": r,
     });
     // A3: the record is durable before any write
     if store(&h.data, &rec).is_err() {
@@ -141,28 +141,6 @@ fn entries(h: &Host) -> Vec<String> {
     onboard::load(&h.journal()).iter().map(|e| configure::digest(e)[..16].to_string()).collect()
 }
 
-fn config(data: &Path) -> Value {
-    std::fs::read_to_string(data.join("config.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}))
-}
-
-fn compression(data: &Path) -> Value {
-    config(data)["compression"].clone()
-}
-
-/// `compression.agents.<agent>`: `false`, or absent for the default; host-wide keys and other agents stay.
-fn set_preference(data: &Path, agent: &str, v: &Value) -> Result<(), String> {
-    let mut c = config(data);
-    if !c["compression"]["agents"].is_object() {
-        c["compression"]["agents"] = json!({});
-    }
-    let agents = c["compression"]["agents"].as_object_mut().expect("object");
-    match v {
-        Value::Null => agents.shift_remove(agent),
-        v => agents.insert(agent.into(), v.clone()),
-    };
-    write_atomic(&data.join("config.json"), &serde_json::to_string_pretty(&c).unwrap_or_default())
-}
-
 fn agent_of(c: &profiles::Client) -> &'static str {
     if c.kind == "claude-desktop-chat" { "claude-desktop" } else { c.agent }
 }
@@ -172,18 +150,12 @@ fn write(h: &Host, c: &profiles::Client, field: &str, value: &str) -> Result<(),
     let journal = h.journal();
     let failed = |lines: Vec<String>| if lines.iter().any(|l| l.starts_with("conflict:")) { Err("conflict") } else { Ok(()) };
     match (field, value) {
-        ("optimization", v) => set_preference(&h.data, c.agent, &if v == "disabled" { json!(false) } else { Value::Null }).map_err(|_| "write_failed"),
         ("routing", "direct") => {
             let files: Vec<String> = c.files.iter().map(|f| f.display().to_string()).collect();
             let mine = |_: usize, e: &Value| e["routing"] == c.agent && e["file"].as_str().is_some_and(|f| files.iter().any(|x| x == f));
             onboard::restore_where(&journal, false, true, &mine).map_err(|_| "write_failed").and_then(failed)
         }
-        ("routing", _) => {
-            let install = h.data.parent().unwrap_or(&h.data);
-            crate::engines::headroom_exe(install).ok_or("engine_unavailable")?;
-            let port = routing::fix_port(&h.data, c.agent).map_err(|_| "engine_unavailable")?;
-            onboard::apply(&onboard::routing_wants(c.agent, &c.root, port), &journal).map_err(|_| "write_failed").and_then(failed)
-        }
+        ("routing" | "optimization" | "mcp", _) => Err("feature_retired"),
         (f, _) => {
             let claude_json = c.files.get(1).cloned().unwrap_or_default();
             let wants: Vec<onboard::Want> = onboard::wants(agent_of(c), &c.root, &claude_json, &h.exe).into_iter().filter(|w| w.field() == f).collect();
@@ -201,14 +173,12 @@ fn client<'a>(h: &'a Host, id: &Value) -> Option<&'a profiles::Client> {
 }
 
 /// Undo this operation's owned edits and preference for one client; later foreign edits stay.
-fn restore(h: &Host, c: &profiles::Client, rec: &Value, changes: &[Value]) {
+fn restore(h: &Host, c: &profiles::Client, rec: &Value, _changes: &[Value]) {
     let before = &rec["journal"];
     let files: Vec<String> = c.files.iter().map(|f| f.display().to_string()).collect();
     let mine = |_: usize, e: &Value| before.as_array().is_some_and(|b| !b.contains(&json!(configure::digest(e)[..16]))) && e["file"].as_str().is_some_and(|f| files.iter().any(|x| x == f));
     let _ = onboard::restore_where(&h.journal(), false, true, &mine);
-    if changes.iter().any(|ch| ch["field"] == "optimization") {
-        let _ = set_preference(&h.data, c.agent, &rec["compression"][c.agent]);
-    }
+
 }
 
 /// The per-profile changes of `rec`, grouped by profile ID in plan order.
@@ -402,13 +372,9 @@ pub fn verification(data: &Path, agent: &str, p: &Value) -> Value {
         return unknown("revision_changed");
     }
     let Some(applied) = rec["evidence_after"][id].as_u64() else { return unknown("no_evidence"); };
-    let events: &[&str] = match (p["effective"]["state"].as_str(), p["effective"]["adapter"].as_str()) {
-        (Some("configured"), Some("hook")) if p["effective"]["event"] == "PostToolUse" => &["PostToolUse"],
-        (Some("configured"), Some("hook")) => &["PreToolUse"],
-        (Some("bypassed" | "disabled"), _) => &EVENTS,
-        // ponytail: the provider and plugin adapters have no evidence source yet
-        _ => &[],
-    };
+    let events: &[&str] = if p["effective"]["state"] == "configured" && p["effective"]["adapter"] == "hook" {
+        &["SessionStart", "Stop"]
+    } else { &[] };
     let newest = events.iter().filter_map(|e| stamped(data, agent, e).filter(|t| *t > applied).map(|t| (t, *e))).max();
     match newest {
         Some((at, event)) => json!({
@@ -450,7 +416,6 @@ mod tests {
         std::fs::write(data.join("config.json"), r#"{"ports": {"codex": 1}, "compression": {"enabled": true, "min_bytes": 4096, "agents": {"hermes": false}}}"#).unwrap();
         let mut wants = onboard::wants("codex", &clients[0].root, &clients[1].files[1], &exe);
         wants.extend(onboard::wants("claude", &clients[1].root, &clients[1].files[1], &exe));
-        wants.extend(onboard::routing_wants("codex", &clients[0].root, 1));
         onboard::apply(&wants, &data.join("owned.json")).unwrap();
         let mut h = Host { data, exe, clients, installation: "inst-1".into(), generation: 0, grant: Value::Null };
         let ids: Vec<Value> = profiles::status_with(&h.clients, &h.data, 1000)["profiles"].as_array().unwrap().iter().map(|p| p["id"].clone()).collect();
@@ -502,95 +467,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_reads_back_and_verifies_by_evidence() {
-        let d = dir("apply");
-        let h = host(&d);
-        let (codex, desktop, claude) = (id(&h, "codex"), id(&h, "claude-desktop-chat"), id(&h, "claude-code"));
-        let claude_before = std::fs::read_to_string(&h.clients[1].files[0]).unwrap();
-        let changes = json!([{"profile": codex, "field": "routing", "value": "direct"}, {"profile": codex, "field": "optimization", "value": "disabled"}, {"profile": desktop, "field": "mcp", "value": "registered"}]);
-        let (plan, req) = plan_apply(&h, "a0000000000000000000000000000001", changes, 1000);
-        assert_eq!((plan["writable"].as_bool(), plan["blocked"].clone()), (Some(true), json!([])), "{plan}");
-        assert!(records(&h.data).is_empty(), "a plan stores nothing");
-
-        let r = execute(&h, &req.to_string(), 1001);
-        assert_eq!((r["outcome"].as_str(), r["reason"].clone()), (Some("applied"), Value::Null), "{r}");
-        assert_eq!(r["profiles"], json!([{"id": codex, "state": "applied"}, {"id": desktop, "state": "applied"}]));
-        assert!(configure::valid_result(&r));
-        let toml = std::fs::read_to_string(&h.clients[0].files[0]).unwrap();
-        assert!(!toml.lines().any(|l| l.starts_with("model_provider =")) && toml.contains("[mcp_servers.agentq]") && toml.contains(onboard::CODEX_DIRECT_PROVIDER), "Direct keeps MCP and saved conversation access: {toml}");
-        let cfg = config(&h.data)["compression"].clone();
-        assert_eq!(cfg, json!({"enabled": true, "min_bytes": 4096, "agents": {"hermes": false, "codex": false}}), "host-wide keys and siblings stay");
-        assert_eq!(std::fs::read_to_string(&h.clients[1].files[0]).unwrap(), claude_before, "sibling profile untouched");
-        let desk: Value = serde_json::from_str(&std::fs::read_to_string(&h.clients[2].files[0]).unwrap()).unwrap();
-        assert_eq!(desk["mcpServers"]["agentq"]["args"], json!(["mcp", "claude-desktop"]));
-
-        let st = profiles::status_with(&h.clients, &h.data, 1002);
-        let p = st["profiles"].as_array().unwrap().iter().find(|p| p["id"] == codex).unwrap().clone();
-        assert_eq!((p["routing"].as_str(), p["optimization"].as_str(), p["effective"]["state"].as_str()), (Some("direct"), Some("disabled"), Some("disabled")));
-        assert_eq!(p["verification"], json!({"state": "unknown", "reason": "no_evidence"}), "configured is not verified");
-
-        let before = files(&h);
-        assert_eq!(execute(&h, &req.to_string(), 1003), r, "duplicate delivery returns the first result");
-        let mut changed = req.clone();
-        changed["changes"][2]["profile"] = claude.clone();
-        assert_eq!(execute(&h, &changed.to_string(), 1003)["reason"], "payload_mismatch");
-        assert_eq!(files(&h), before, "neither repeat writes");
-
-        stamp(&h.data, "codex", "SessionStart", 1000);
-        assert_eq!(verification(&h.data, "codex", &p)["reason"], "no_evidence", "an event before the apply proves nothing");
-        stamp(&h.data, "codex", "SessionStart", 1005);
-        stamp(&h.data, "codex", "../x", 1005);
-        let v = verification(&h.data, "codex", &p);
-        assert_eq!((v["state"].as_str(), v["at"].as_u64(), v["revision"].clone()), (Some("verified"), Some(1005), p["revision"].clone()), "{v}");
-        assert!(!d.join("install/data/x").exists() && !d.join("install/x").exists(), "event names no path");
-        let mut native_settings: Value = serde_json::from_str(&claude_before).unwrap();
-        native_settings["permissions"] = json!({"defaultMode": "auto"});
-        std::fs::write(&h.clients[1].files[0], native_settings.to_string()).unwrap();
-        let (_, auto_req) = plan_apply(&h, "a0000000000000000000000000000002", json!([{"profile": claude, "field": "hooks", "value": "registered"}]), 1010);
-        assert_eq!(execute(&h, &auto_req.to_string(), 1010)["outcome"], "applied");
-        let auto_status = profiles::status_with(&h.clients, &h.data, 1011);
-        let auto_profile = auto_status["profiles"].as_array().unwrap().iter().find(|p| p["id"] == claude).unwrap();
-        assert_eq!(auto_profile["effective"]["event"], "PostToolUse");
-        stamp(&h.data, "claude", "PreToolUse", 1012);
-        assert_eq!(verification(&h.data, "claude", auto_profile)["state"], "unknown", "the auto-mode pre-hook cannot verify result replacement");
-        stamp(&h.data, "claude", "PostToolUse", 1013);
-        assert_eq!(verification(&h.data, "claude", auto_profile)["state"], "verified");
-        // A2: rapid applies and a wall-clock rollback still select the last committed profile state.
-        for (index, (op, value, at)) in [
-            ("a0000000000000000000000000000004", "disabled", 1010),
-            ("a0000000000000000000000000000003", "enabled", 1010),
-            ("a0000000000000000000000000000005", "disabled", 1009),
-        ].into_iter().enumerate() {
-            let (_, req) = plan_apply(&h, op, json!([{"profile": claude, "field": "optimization", "value": value}]), at);
-            assert_eq!(execute(&h, &req.to_string(), at)["outcome"], "applied");
-            let current = read_profile(&h, &h.clients[1]);
-            assert_eq!(verification(&h.data, "claude", &current)["state"], "unknown", "an old hook stamp cannot verify a later apply after clock rollback: {op}");
-            stamp(&h.data, "claude", "PostToolUse", 1014 + index as u64);
-            assert_eq!(verification(&h.data, "claude", &current)["state"], "verified", "newest operation must win: {op}");
-        }
-        let current = read_profile(&h, &h.clients[1]);
-        let latest = records(&h.data).into_iter().max_by_key(record_order).unwrap();
-        let mut legacy = latest.clone();
-        legacy.as_object_mut().unwrap().shift_remove("evidence_after");
-        store(&h.data, &legacy).unwrap();
-        assert_eq!(verification(&h.data, "claude", &current)["reason"], "no_evidence", "legacy records cannot prove event ordering");
-        store(&h.data, &latest).unwrap();
-        std::fs::write(&h.clients[0].files[0], format!("{toml}\n# edited\n")).unwrap();
-        let st = profiles::status_with(&h.clients, &h.data, 1006);
-        let p = st["profiles"].as_array().unwrap().iter().find(|p| p["id"] == codex).unwrap();
-        assert_eq!(p["verification"]["reason"], "revision_changed", "a foreign edit drops verification");
-        assert!(!st.to_string().contains(&d.display().to_string()), "no path in the projection");
-        let _ = std::fs::remove_dir_all(d);
-    }
-
-    /// #103 A1, A2, A6: a foreign edit after review is stale, a held lock is busy, full storage refuses, an unwritable
-    /// value is restored with its cause, revocation before acceptance rejects and after it keeps the actual outcome.
-    #[test]
     fn guards_and_races_keep_files() {
         let d = dir("guards");
         let h = host(&d);
         let codex = id(&h, "codex");
-        let off = json!([{"profile": codex, "field": "optimization", "value": "disabled"}]);
+        let off = json!([{"profile": codex, "field": "hooks", "value": "registered"}]);
 
         let (_, req) = plan_apply(&h, "b0000000000000000000000000000001", off.clone(), 1000);
         let toml = h.clients[0].files[0].clone();
@@ -616,15 +497,6 @@ mod tests {
         assert_eq!(r["outcome"], "applied", "{r}");
         assert_eq!(execute(&revoked, &req.to_string(), 1002), r, "revoked after it: the actual outcome, never an undo");
 
-        let (_, req) = plan_apply(&h, "b0000000000000000000000000000004", json!([{"profile": codex, "field": "routing", "value": "direct"}]), 1000);
-        assert_eq!(execute(&h, &req.to_string(), 1001)["outcome"], "applied");
-        // Codex routing needs headroom, absent here: nothing is claimed, the cause is reported
-        let routed = json!([{"profile": codex, "field": "routing", "value": "routed"}]);
-        let (_, req) = plan_apply(&h, "b0000000000000000000000000000003", routed, 1000);
-        let before = files(&h);
-        let r = execute(&h, &req.to_string(), 1001);
-        assert_eq!((r["outcome"].as_str(), r["reason"].as_str(), r["profiles"][0]["state"].as_str()), (Some("rejected"), Some("engine_unavailable"), Some("restored")), "{r}");
-        assert_eq!(files(&h), before);
         let _ = std::fs::remove_dir_all(d);
     }
 
@@ -638,13 +510,13 @@ mod tests {
     fn interrupted_operation_reconciles_without_reapply() {
         let d = dir("crash");
         let h = host(&d);
-        let (codex, desktop) = (id(&h, "codex"), id(&h, "claude-desktop-chat"));
-        let changes = json!([{"profile": codex, "field": "optimization", "value": "disabled"}, {"profile": desktop, "field": "mcp", "value": "registered"}]);
+        let (codex, desktop) = (id(&h, "codex"), id(&h, "claude-code"));
+        let changes = json!([{"profile": codex, "field": "hooks", "value": "registered"}, {"profile": desktop, "field": "hooks", "value": "registered"}]);
         let (plan, req) = plan_apply(&h, "c0000000000000000000000000000001", changes, 1000);
-        // a crash after the first write: preference written, Desktop MCP not
-        set_preference(&h.data, "codex", &json!(false)).unwrap();
+        // A crash after Codex hooks committed, before the Claude hooks were written.
+        onboard::restore_where(&h.journal(), false, true, &|_, e: &Value| e["agent"] == "claude").unwrap();
         let rec = json!({"operation": "c0000000000000000000000000000001", "digest": configure::digest(&req), "plan": plan["digest"], "at": 1001, "journal": [],
-            "changes": [{"profile": codex, "field": "optimization", "old": "enabled", "new": "disabled"}, {"profile": desktop, "field": "mcp", "old": "absent", "new": "registered"}],
+            "changes": [{"profile": codex, "field": "hooks", "old": "absent", "new": "registered"}, {"profile": desktop, "field": "hooks", "old": "absent", "new": "registered"}],
             "result": configure::result(Some("c0000000000000000000000000000001"), "accepted", None, plan["digest"].as_str())});
         store(&h.data, &rec).unwrap();
         let before = files(&h);
@@ -652,24 +524,9 @@ mod tests {
         assert_eq!((r["outcome"].as_str(), r["reason"].as_str()), (Some("partial"), Some("interrupted")), "{r}");
         assert_eq!(r["profiles"], json!([{"id": codex, "state": "applied"}, {"id": desktop, "state": "restored"}]));
         assert_eq!(files(&h), before, "never reapplied");
-        let (_, next) = plan_apply(&h, "c0000000000000000000000000000002", json!([{"profile": desktop, "field": "mcp", "value": "registered"}]), 1003);
+        let (_, next) = plan_apply(&h, "c0000000000000000000000000000002", json!([{"profile": desktop, "field": "hooks", "value": "registered"}]), 1003);
         assert_eq!(execute(&h, &next.to_string(), 1003)["outcome"], "applied", "the installation is free again");
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // a read-only Desktop Chat root: its MCP write fails and is reported, the Codex preference still applies
-            let desk = &h.clients[2].root;
-            onboard::restore_where(&h.journal(), false, true, &|_, e: &Value| e["file"].as_str().is_some_and(|f| f.contains("desktop"))).unwrap();
-            assert!(!h.clients[2].files[0].exists());
-            std::fs::set_permissions(desk, std::fs::Permissions::from_mode(0o500)).unwrap();
-            let both = json!([{"profile": codex, "field": "optimization", "value": "enabled"}, {"profile": desktop, "field": "mcp", "value": "registered"}]);
-            let (_, req) = plan_apply(&h, "c0000000000000000000000000000004", both, 1005);
-            let r = execute(&h, &req.to_string(), 1005);
-            std::fs::set_permissions(desk, std::fs::Permissions::from_mode(0o700)).unwrap();
-            assert_eq!((r["outcome"].as_str(), r["reason"].as_str()), (Some("partial"), Some("write_failed")), "{r}");
-            assert_eq!(r["profiles"], json!([{"id": codex, "state": "applied"}, {"id": desktop, "state": "restored"}]));
-        }
         let _ = std::fs::remove_dir_all(d);
     }
 

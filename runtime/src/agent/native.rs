@@ -74,11 +74,6 @@ pub(crate) fn background_stop(mut base: Command, spec: &Spec, job: &BackgroundJo
 pub(crate) fn app_queue(mut base: Command, spec: &Spec, reference: &str, budget: Duration) -> Res<std::process::Output> {
     if spec.client != Client::Codex || !plain_id(&spec.session) || spec.session == "-" { return Err("app thread invalid".into()); }
     base.args(["queue", "--thread", &spec.session, "--message", reference]);
-    // Queue uses the app's saved policy; forward only the per-launch optimizer override, never CLI permissions.
-    let key = format!("model_providers.agentq.http_headers.{}=", crate::optimization::HEADER);
-    for pair in spec.args.windows(2) {
-        if (pair[0] == "-c" || pair[0] == "--config") && pair[1].to_str().is_some_and(|s| s.starts_with(&key)) { base.args(pair); }
-    }
     crate::process::output("agent.app-queue", &mut environment(base, spec), budget).map_err(|e| e.to_string())
 }
 

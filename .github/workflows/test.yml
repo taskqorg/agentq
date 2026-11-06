@@ -38,9 +38,6 @@ jobs:
         if: runner.environment == 'github-hosted'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: python tests/client_compression_check.py
-      - run: python tests/provider_adapter.py
       - run: python tests/hermes_adapter.py
-      - run: python tests/telemetry_qualification.py
       - run: cargo test --locked
       - run: cargo run --locked -- selftest

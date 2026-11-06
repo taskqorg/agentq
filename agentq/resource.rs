@@ -631,3 +631,11 @@ pub(crate) mod tests {
         eprintln!("resource sample: {took:?}; memory total {total} available {av}; root total {t} free {f} used {u}; {} filesystems", disks.len());
     }
 }
+
+pub fn new_id() -> String {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let h = format!("{:020x}{:08x}{:04x}", t & ((1 << 80) - 1), std::process::id(), n & 0xffff);
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}

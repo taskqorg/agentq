@@ -946,17 +946,14 @@ impl Adapter {
         args.extend(l.host_args.iter().cloned());
         let mut env = l.env.clone();
         if self.client != Client::Claude { env.extend(l.settings_env.iter().map(|(k, v)| (k.into(), v.into()))); }
-        else if l.settings_env.iter().rev().find(|(k, _)| k == optimization::ENV).is_some_and(|(_, v)| v == "off") {
-            env.push((optimization::ENV.into(), "off".into()));
-        }
         if l.policy.subscription && self.client == Client::Claude { env.extend(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].map(|k| (k.into(), OsString::new()))); }
         let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: l.home.clone(), env };
         // Isolation excludes the user hooks that carry optimization, so it cannot be effective.
-        let intent = if l.policy.isolated && self.client == Client::Claude { Intent::Off } else { l.optimization };
+        let intent = l.optimization;
         let optimization = optimization::prepare(intent, &l.product, &mut spec, l.install.as_deref());
         if self.client == Client::Claude && !l.settings_env.is_empty() {
             // A `--bg` session runs under the Claude daemon, whose environment is not this child's: settings `env` reaches it.
-            let child: Vec<(String, String)> = [optimization::ENV, "TASKQ_TASK", "AGENTQ_LAUNCHER"].into_iter()
+            let child: Vec<(String, String)> = ["TASKQ_TASK", "AGENTQ_LAUNCHER"].into_iter()
                 .filter_map(|k| child_env(&spec, k).map(|v| (k.into(), v.to_string_lossy().into_owned()))).collect();
             let mut vars: Vec<(&str, &str)> = l.settings_env.iter().chain(&child).map(|(k, v)| (k.as_str(), v.as_str())).collect();
             if l.policy.subscription { vars.extend([("ANTHROPIC_API_KEY", ""), ("ANTHROPIC_AUTH_TOKEN", "")]); }

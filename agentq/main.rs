@@ -1,18 +1,15 @@
-//! agentq: update, service, status, MCP, engines, onboarding, hooks, telemetry and uninstall on coreq (agentq.md § 1-§ 6, § 9).
+//! agentq: update, service, status, onboarding, hooks, telemetry and uninstall on coreq (agentq.md § 1-§ 6, § 9).
 
+#[cfg(test)]
 mod accounting;
-mod check;
 mod command_path;
 mod configure;
-mod compression;
 mod connect;
 mod control;
-mod engines;
 mod hooks;
 mod host;
 mod executor;
 mod local;
-mod mcp;
 mod model;
 mod observe;
 mod onboard;
@@ -20,7 +17,6 @@ mod profile;
 mod profiles;
 mod resource;
 mod release;
-mod routing;
 mod snapshot;
 mod telemetry;
 
@@ -36,10 +32,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROJECT: &str = "host";
 const PASS: u64 = 30;
 const UPDATE_EVERY: u64 = 3600;
-const DRAIN: u64 = 900;
-/// `onboard --yes` waits this long for a started proxy to answer, before and after one restart (#137).
-const PROXY_START: Duration = Duration::from_secs(60);
-const USAGE: &str = "agentq status [--json] | optimization on|off [agent] [--dry-run] | disable|enable [agent] [--dry-run] | agent turn | agent host --action <action> --request <json> | run -- <cmd> [args..] | compress <agent> | stats [--json|--records] | stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>] | profile [--json] | profile trace on [<minutes>]|off | onboard [--yes] [codex|claude|hermes|antigravity..] | direct [codex|claude|hermes..] | configure [<profile> <field>=<value>.. [--yes]] | hook <agent> <event> | update [--check] | selftest | setup-path | check compression [codex|claude|both] | mcp codex|claude|hermes|claude-desktop | service install|run|restart|stop|uninstall|status | doctor | langfuse | telemetry status|verify|export | enroll <https-url> [--headless] | connection status [--json] | disconnect | uninstall [--dry-run] | --version";
+const USAGE: &str = "agentq status [--json] | disable|enable [agent] [--dry-run] | agent turn | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -63,7 +56,6 @@ fn fail(problem: &str, next: &str) -> ! {
 }
 
 fn main() {
-    if let Some(code) = compression::replay() { std::process::exit(code); }
     let t = tool();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Recovery can rename the executing launcher; remember its role before current_exe changes on Unix.
@@ -90,16 +82,11 @@ fn main() {
             Ok(None) => println_code(&format!("update: {} is the latest", t.current().unwrap_or(VERSION.into()))),
             Err(e) => fail(&format!("update: {e}"), "check the network and run `agentq update` again"),
         },
-        ["check", "compression", rest @ ..] => match check::run(&t.install,rest) {
-            Ok(code)=>code,
-            Err(e)=>fail(&e,"install Python or use the managed Headroom runtime; run agentq check compression --help"),
-        },
         ["selftest"] => selftest(&t),
         ["setup-path"] => match command_path::register(&t.install) {
             Ok(()) => 0,
             Err(e) => fail(&e, "resolve the command registration error and run `agentq setup-path` again"),
         },
-        ["run", "--", cmd @ ..] if !cmd.is_empty() => engines::run(&t.install, &args[2..]),
         ["agent", "host", "--action", action, "--request", request] => match agentq_runtime::agent::host::dispatch(action, request) {
             Ok(()) => 0,
             Err(e) => fail(&e, "retain the original permit and reconcile; never replay uncertain work"),
@@ -108,38 +95,9 @@ fn main() {
             Ok(v) => println_code(&v.to_string()),
             Err(e) => fail(&e, "send one JSON turn request on stdin (docs/spec/RUNTIME.md § JSON command)"),
         },
-        ["compress", agent] => match std::io::read_to_string(std::io::stdin()).map_err(|e|e.to_string()).and_then(|s|compression::compress(&t.install.join("data"),agent,&s)) {
-            Ok(v)=>println_code(&v.to_string()),
-            Err(e)=>fail(&e,"send one JSON object with adapter, tool and text; preserve the native result on failure"),
-        },
         ["model", "codex"] => match std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string()).and_then(|s| model::codex(&t.install.join("data"), &s)) {
             Ok(()) => 0,
             Err(e) => fail(&e, "send one finished Codex response's id, model, usage and created_at as JSON"),
-        },
-        ["stats", "--records"] => match local::snapshot(&t.install.join("data")) {
-            Ok(v) => {
-                let mut errors = vec![];
-                if !compression::failed(&t.install.join("data")).is_empty() { errors.push("stats write failed"); }
-                println_code(&serde_json::json!({"schema":1,"records":v["records"],"errors":errors}).to_string())
-            }
-            Err(e) if e=="stats unknown: no stats file" => println_code(&serde_json::json!({"schema":1,"records":[],"errors":[],"state":"unknown","reason":"no retained observations"}).to_string()),
-            Err(e) => fail(&e, "inspect local telemetry storage"),
-        },
-        ["stats", "--accounting", rest @ ..] => accounting_cmd(&t, rest),
-        ["stats"] | ["stats","--json"] =>match compression::stats(&t.install.join("data")) {
-            Ok(v) if a.len()==2=>println_code(&v.to_string()),
-            Ok(v)=>{
-                for g in v["groups"].as_array().unwrap() {
-                    let bytes=match (g["bytes_in"].as_u64(),g["bytes_out"].as_u64()) {
-                        (Some(a),Some(b))=>format!("{a} bytes in, {b} bytes out"),
-                        _=>format!("bytes unknown: {}",g["bytes_unknown"].as_str().unwrap()),
-                    };
-                    println!("{} · {}: {} calls, {} compressed, {} passed, {} failed, {bytes}",g["agent"].as_str().unwrap(),g["engine"].as_str().unwrap(),g["calls"],g["compressed"],g["passed"],g["failed"]);
-                }
-                0
-            },
-            Err(e) if a.len()==2=>{println!("{}",serde_json::json!({"schema":1,"state":"unknown","reason":e,"groups":null}));1},
-            Err(e)=>fail(&e,"run a tool through agentq; inspect data/telemetry.sqlite3 if records are unreadable"),
         },
         ["profile"] => {
             for l in profile::lines(&profile::report(&t.install.join("data"), now())) {
@@ -156,21 +114,12 @@ fn main() {
             Ok(_) => println_code("profile: trace off"),
             Err(e) => fail(&format!("profile trace: {e}"), "fix data/config.json, then run `agentq profile trace off` again"),
         },
-        ["mcp", agent @ ("codex" | "claude" | "hermes" | "claude-desktop")] => mcp::serve(&t.install.join("data").join("originals"), agent),
         ["service", cmd] => service_cmd(&t, cmd),
         ["onboard", rest @ ..] => onboard(&t, rest),
         ["direct", rest @ ..] => direct(&t, rest),
         ["status"] => control_status(&t, false),
         ["status", "--json"] => control_status(&t, true),
         [action @ ("disable" | "enable"), rest @ ..] => integration_cmd(&t, rest, *action == "enable"),
-        ["optimization", mode @ ("on" | "off"), rest @ ..] => {
-            let agents: Vec<_> = rest.iter().copied().filter(|a| *a != "--dry-run").collect();
-            if agents.len() > 1 { fail("optimization: select one agent or the host", "agentq optimization on|off [agent] [--dry-run]"); }
-            match control::optimization(&t.install.join("data"), agents.first().copied(), *mode == "on", rest.contains(&"--dry-run")) {
-                Ok(v) => println_code(&v.to_string()),
-                Err(e) => fail(&e, "inspect AgentQ control state; no native settings were changed"),
-            }
-        }
         ["configure", rest @ ..] => configure_cmd(&t, rest),
         ["hook", agent @ ("codex" | "claude" | "hermes" | "antigravity"), event] => {
             let data = t.install.join("data");
@@ -180,11 +129,6 @@ fn main() {
             let response = input.as_ref().map_err(|e| format!("stdin: {e}")).and_then(|s| {
                 match control::disabled(&data, agent) {
                     Ok(false) => {
-                        if matches!(*agent, "claude" | "antigravity") && ["PreToolUse", "PostToolUse"].contains(event) {
-                            let c = compression::policy(&data, agent)?;
-                            // A wrapper can change native approval decisions even when its compression is paused.
-                            if c["enabled"] == false || c["agents"][*agent] == false { return Ok(pass()); }
-                        }
                         hooks::response(agent,event,s,&t.install.join(t.exe_name()))
                     },
                     Ok(true) => Ok(pass()),
@@ -262,7 +206,7 @@ fn connection_line(s: &Value) -> String {
     }
 }
 
-/// agentq.md § 1: read-only install, service, engines, owned edits and telemetry state; exit 1 on a problem.
+/// agentq.md § 1: read-only install, service, owned edits and telemetry state; exit 1 on a problem.
 fn doctor(t: &Tool) -> i32 {
     let mut ok = true;
     let mut line = |good: bool, l: String| {
@@ -278,15 +222,6 @@ fn doctor(t: &Tool) -> i32 {
     let service = &report["service"];
     line(matches!(service["state"].as_str(), Some("running" | "stopped")), format!("service: {} ({})", service["state"].as_str().unwrap_or("unknown"), service["reason"].as_str().unwrap_or("fresh process and status readback")));
     line(report["control"] != "unknown", format!("control: {}", report["control"].as_str().unwrap_or("unknown")));
-    if service["state"] != "stopped" {
-        for l in engines::check(&t.install) { line(!l.contains("unavailable"), l); }
-    }
-    let agents = routing::agents(&t.install.join("data"));
-    for (a, r) in agents.as_object().into_iter().flatten() {
-        let want = r["intended"].as_str().unwrap_or("unknown");
-        let fix = if want == "routed" && r["routing"] != "routed" { "; run `agentq onboard --yes`" } else { "" };
-        line(r["routing"] != "unknown" && want != "unknown" && fix.is_empty(), format!("routing: {a} {} ({}), intended {want} ({}){fix}", r["routing"].as_str().unwrap_or("unknown"), r["reason"].as_str().unwrap_or(""), r["intended_reason"].as_str().unwrap_or("")));
-    }
     for f in executor::hook_failures(&t.install.join("data")) {
         if f.split_whitespace().next().is_some_and(|a| control::disabled(&t.install.join("data"), a) == Ok(true)) { continue; }
         line(false, format!("hooks: {f} failed; its next successful run clears it"));
@@ -301,16 +236,13 @@ fn doctor(t: &Tool) -> i32 {
         let good = hooks == "registered" || (hooks == "absent" && p["owned"] == false);
         line(good, format!("hooks: antigravity {hooks}{}", if good { "" } else { "; run `agentq onboard --yes antigravity`" }));
     }
-    for d in routing::drift(&journal(t)) {
-        line(false, format!("routing: drift: {d} changed since onboard; run `agentq onboard --yes`"));
-    }
     let owned = std::fs::read_to_string(journal(t)).ok().and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok()).map_or(0, |j| j.len());
     line(true, format!("owned edits: {owned}"));
     let tel = telemetry_line(t);
     // Remote keys are optional; local collection is qualified independently.
     line(tel.contains("keys set") || !t.install.join("data/langfuse").exists(),format!("{tel} (optional remote export)"));
     match local::check_store(&t.install.join("data")) {
-        Ok(n)=>line(true,format!("local telemetry: readable SQLite, {n} retained records; compression unqualified")),
+        Ok(n)=>line(true,format!("local telemetry: readable SQLite, {n} retained records")),
         Err(e)=>line(false,format!("local telemetry: unknown ({e})")),
     }
     if ok { 0 } else { 1 }
@@ -357,7 +289,7 @@ fn integration_cmd(t: &Tool, args: &[&str], enabled: bool) -> i32 {
         if let Err(e) = recover_service(t) { fail(&e, "run `agentq status`; service state remains unknown"); }
     }
     let h = integration_host(t);
-    let prepare = &mut |ports: &[u16], start: bool| -> Result<(), String> {
+    let prepare = &mut |_ports: &[u16], start: bool| -> Result<(), String> {
         if !start { return Ok(()); }
         let s = control::state(&h.data)?;
         let u = unit_snapshot(t);
@@ -366,9 +298,7 @@ fn integration_cmd(t: &Tool, args: &[&str], enabled: bool) -> i32 {
         if s["service"]["registered"] != true || u["registered"] != true { return Err("saved service registration is unavailable".into()); }
         if u["loaded"].is_null() { return Err("service registration inventory unavailable".into()); }
         if u["digest"] != s["service"]["digest"] { return Err("service registration changed while disabled".into()); }
-        if !ports.is_empty() && engines::headroom_exe(&t.install).is_none() { return Err("existing Headroom engine unavailable".into()); }
         if u["active"] != true && !(cfg!(target_os = "macos") && u["loaded"] == true) { service::run_all(&service::unit(t, &t.install, PROJECT).load, false)?; }
-        if !routing::await_proxies(ports, PROXY_START, &mut || {}).is_empty() { return Err("saved proxy not answering".into()); }
         Ok(())
     };
     match control::integrations(&h, agents.first().copied(), enabled, args.contains(&"--dry-run"), unit_snapshot(t), prepare) {
@@ -393,8 +323,7 @@ fn finish_disable(t: &Tool, from_service: bool) -> Result<(), String> {
     if !from_service && s["service"]["state"] == "stopped" && service_owners(t)?.is_empty() { return Ok(()); }
     let ignore = service_owners(t)?;
     let deps = control::dependencies(&ignore);
-    let ports: Vec<u16> = routing::ROUTED.iter().filter_map(|a| routing::port(&data, a)).collect();
-    if !control::drain(&data, deps, routing::open_connections(&ports))? { return Ok(()); }
+    if !control::settle(&data, deps)? { return Ok(()); }
     let generation;
     {
         let _lock = executor::lock(&data)?;
@@ -519,8 +448,6 @@ fn control_report(t: &Tool) -> Value {
     let runs = process_result.as_deref().unwrap_or(&[]);
     let owners = service_owners(t);
     let inventory = if process_result.is_ok() { owners.as_ref().map_err(|e| e.clone()).and_then(|p| control::dependencies(p)) } else { Err("service inventory unavailable".into()) };
-    let ports: Vec<u16> = routing::ROUTED.iter().filter_map(|a| routing::port(&data, a)).collect();
-    let connections = routing::open_connections(&ports);
     let mut configuration = profiles::readonly(&clients, &data, now());
     for p in configuration["profiles"].as_array_mut().into_iter().flatten() {
         if let Some(c) = clients.iter().find(|c| p["kind"] == c.kind) {
@@ -532,8 +459,8 @@ fn control_report(t: &Tool) -> Value {
                         let agent = if c.agent == "claude-desktop" { "claude" } else { c.agent };
                         if p["integration"]["configuration"] != "detached" { "unknown" }
                         else if i.get(agent).copied().unwrap_or(0) + i.get("agentq").copied().unwrap_or(0) > 0 {
-                            if c.agent == "codex" { "pending_drain" } else { "pending_reload" }
-                        } else if c.agent == "codex" && connections != Ok(0) { "pending_drain" }
+                            "pending_reload"
+                        }
                         else { "drained" }
                     },
                     Err(_) => "unknown",
@@ -553,14 +480,9 @@ fn control_report(t: &Tool) -> Value {
         } else { serde_json::json!({"state": "unknown", "reason": "no_fresh_service_evidence"}) };
     let owned: Vec<_> = configuration["profiles"].as_array().into_iter().flatten().filter(|p| p["owned"] == true || p["integration"]["desired"] == "disabled").collect();
     let integration: Vec<_> = owned.iter().map(|p| match p["integration"]["configuration"].as_str() { Some("attached") => "on", Some("detached") => "off", _ => "unknown" }).collect();
-    let optimization: Vec<_> = owned.iter().filter(|p| p["effective"]["state"] != "unsupported").map(|p| {
-        if p["effective"]["state"] == "unknown" { "unknown" } else if p["effective"]["state"] == "configured" { "on" } else { "off" }
-    }).collect();
     serde_json::json!({"schema": 1, "at": now(), "service": service, "configuration": configuration,
-        "integration": control::summary(&integration), "optimization": control::summary(&optimization), "engines": engines::status(&t.install),
+        "integration": control::summary(&integration),
         "host_disabled": state.as_ref().ok().map(|s| &s["host_disabled"]),
-        "compression": config.as_ref().ok().map(|c| serde_json::json!({"enabled": c["compression"]["enabled"].as_bool().unwrap_or(true),
-            "min_bytes": c["compression"]["min_bytes"].as_u64().unwrap_or(2048), "stats": c["compression"]["stats"].as_str().unwrap_or("queue")})),
         "control": if state.is_ok() && config.is_ok() { "readable" } else { "unknown" }})
 }
 
@@ -568,13 +490,11 @@ fn control_status(t: &Tool, json: bool) -> i32 {
     let report = control_report(t);
     if json { println!("{report}"); } else {
         println!("service: {}", report["service"]["state"].as_str().unwrap_or("unknown"));
-        println!("integration: {}, optimization: {} (configured, runtime verification separate)", report["integration"].as_str().unwrap_or("unknown"), report["optimization"].as_str().unwrap_or("unknown"));
-        println!("host optimization: {}", report["compression"]["enabled"].as_bool().map_or("unknown", |b| if b { "on" } else { "off" }));
+        println!("integration: {}", report["integration"].as_str().unwrap_or("unknown"));
         for p in report["configuration"]["profiles"].as_array().into_iter().flatten() {
-            println!("{}: integration {}, configuration {}, runtime {}; optimization {}, adapter {} ({})", p["kind"].as_str().unwrap_or("unknown"),
+            println!("{}: integration {}, configuration {}, runtime {}", p["kind"].as_str().unwrap_or("unknown"),
                 p["integration"]["desired"].as_str().unwrap_or("unknown"), p["integration"]["configuration"].as_str().unwrap_or("unknown"),
-                p["integration"]["runtime"].as_str().unwrap_or("unknown"), p["optimization"].as_str().unwrap_or("unsupported"),
-                p["effective"]["adapter"].as_str().unwrap_or("unsupported"), p["effective"]["state"].as_str().unwrap_or("unknown"));
+                p["integration"]["runtime"].as_str().unwrap_or("unknown"));
         }
     }
     i32::from(report["control"] == "unknown")
@@ -641,51 +561,15 @@ fn service_cmd(t: &Tool, cmd: &str) -> i32 {
     }
 }
 
-/// `service install` before the unit: the release, each failing host requirement with its fix, then the engines.
+/// `service install` before the unit: the release, each failing host requirement with its fix, then host requirements.
 fn install_release(t: &Tool) -> Result<(), String> {
     release::install_self(t).and_then(|_| command_path::register(&t.install))
-        .map(|_| host::problems().iter().chain(&engines::ensure(&t.install)).for_each(|l| println!("{l}")))
+        .map(|_| host::problems().iter().for_each(|l| println!("{l}")))
 }
 
 /// Writes the unit and (re)starts it.
 fn start_unit(u: &service::Unit) -> Result<(), String> {
     service::write_unit(u).and_then(|_| service::run_all(&u.unload, true)).and_then(|_| service::run_all(&u.load, false))
-}
-
-/// `onboard --yes` after the release (#137): fix each routed agent's port, apply `wants` plus routing edits, then
-/// `start` the service and wait for each proxy (one `restart` for a silent one). Each routed agent, its port and
-/// whether its proxy answers.
-#[allow(clippy::too_many_arguments)]
-fn route_and_start<'a>(
-    data: &Path,
-    root: &dyn Fn(&str) -> PathBuf,
-    agents: &[&'a str],
-    mut wants: Vec<onboard::Want>,
-    journal: &Path,
-    headroom: Result<(), String>,
-    limit: Duration,
-    start: &mut dyn FnMut() -> Result<(), String>,
-    restart: &mut dyn FnMut(),
-) -> Result<Vec<(&'a str, u16, bool)>, String> {
-    let mut ports = vec![];
-    {
-        let _lock = executor::lock(data).map_err(|e| format!("onboard: {e}"))?;
-        if agents.iter().any(|a| control::disabled(data, a) != Ok(false)) { return Err("integration_disabled: run `agentq enable`".into()); }
-        for a in agents.iter().filter(|a| routing::ROUTED.contains(a)) {
-            match headroom.clone().and_then(|_| routing::fix_port(data, a)) {
-                Ok(port) => {
-                    wants.extend(onboard::routing_wants(a, &root(a), port));
-                    ports.push((*a, port));
-                }
-                Err(e) => println!("routing: {a} direct: {e}"),
-            }
-        }
-        routing::set_direct(data, agents, false).map_err(|e| format!("onboard: {e}"))?;
-        onboard::apply(&wants, journal).map_err(|e| format!("onboard: {e}"))?.iter().for_each(|l| println!("{l}"));
-    }
-    start()?;
-    let silent = routing::await_proxies(&ports.iter().map(|p| p.1).collect::<Vec<_>>(), limit, restart);
-    Ok(ports.into_iter().map(|(a, p)| (a, p, !silent.contains(&p))).collect())
 }
 
 /// `schtasks /End` ends only the launcher; end every service run tree too, orphans included (agentq.md § 5).
@@ -775,13 +659,9 @@ fn single_instance_selftest() -> bool {
 
 /// One status pass every 30 s, update check hourly; a new release exits 75 so the unit restarts into it.
 fn serve(t: &Tool) -> ! {
-    // a release with a new engine pin installs it here; status keeps its 30 s pace meanwhile
-    let install = t.install.clone();
-    let maintain = control::host_disabled(&install.join("data")) == Ok(false);
     // each start, so each update, names a host requirement the new release lacks (agentq.md § 5 Host requirements)
     std::thread::spawn(move || {
         host::problems().iter().for_each(|l| eprintln!("agentq: {l}"));
-        if maintain { engines::ensure(&install).iter().for_each(|l| eprintln!("agentq: {l}")); }
     });
     let install = t.install.clone();
     std::thread::spawn(move || telemetry::sender(&install, PASS));
@@ -791,12 +671,9 @@ fn serve(t: &Tool) -> ! {
     }
     let mut checked = 0;
     let mut error = None;
-    let mut workers = vec![];
     let launched = std::env::current_exe().ok() == Some(t.release_exe(VERSION));
-    let mut seen: Option<(u64, String)> = None;
     loop {
         if let Err(e) = finish_disable(t, true) { eprintln!("agentq: disable: {e}"); }
-        routing::supervise(&t.install, &mut workers);
         let maintenance = control::host_disabled(&t.install.join("data")) == Ok(false);
         if maintenance && now() >= checked + UPDATE_EVERY {
             checked = now();
@@ -809,33 +686,13 @@ fn serve(t: &Tool) -> ! {
                 Err(e) => Some(format!("update: {e}")),
             };
         }
-        // agentq.md § 5: the CLI `agentq update` moves `current` too; restart into it once the proxy drains
-        match t.current().filter(|c| control::host_disabled(&t.install.join("data")) == Ok(false) && launched && c != VERSION) {
-            None => seen = None,
-            Some(c) => {
-                let since = seen.as_ref().map_or(now(), |s| s.0);
-                let ports: Vec<u16> = workers.iter().map(|w| w.0).collect();
-                match drain(routing::open_connections(&ports), now().saturating_sub(since)) {
-                    Ok(why) => {
-                        eprintln!("agentq: restarting into {c} ({why})");
-                        routing::stop(&mut workers);
-                        std::process::exit(75);
-                    }
-                    Err(why) => {
-                        if seen.as_ref().is_none_or(|s| s.1 != why) {
-                            eprintln!("agentq: restart into {c} deferred: {why}");
-                        }
-                        seen = Some((since, why));
-                    }
-                }
-            }
+        if t.current().is_some_and(|c| control::host_disabled(&t.install.join("data")) == Ok(false) && launched && c != VERSION) {
+            std::process::exit(75);
         }
         let mut s = status::common(t, &host(), PROJECT, now(), error.clone(), None);
         s["release"] = release::observe(t, now());
         s["queue"] = telemetry::status(&t.install.join("data"), now());
         s["model_backlog"] = model::backlog(&t.install.join("data"));
-        s["agents"] = routing::agents(&t.install.join("data"));
-        s["engines"] = engines::status(&t.install);
         s["configuration"] = profiles::status(&t.install.join("data"), now());
         match write_atomic(&status_path(t), &serde_json::to_string_pretty(&s).unwrap_or_default()) {
             // ponytail: healthy after the first written status; add real checks when the service owns ports (§ 5)
@@ -851,16 +708,6 @@ fn serve(t: &Tool) -> ! {
     }
 }
 
-/// Restart into a new `current` (agentq.md § 5): Ok once no proxied connection is open or 15 min passed, else the deferral.
-fn drain(open: Result<usize, String>, waited: u64) -> Result<String, String> {
-    match open {
-        Ok(0) => Ok("no open proxied connection".into()),
-        _ if waited >= DRAIN => Ok(format!("drain ended after {} min", DRAIN / 60)),
-        Ok(n) => Err(format!("{n} open proxied connections")),
-        Err(e) => Err(format!("proxied connections unknown: {e}")),
-    }
-}
-
 /// Built-in fixtures only; writes nothing outside the OS temp dir (coreq.md § Selftest harness).
 fn selftest(t: &Tool) -> i32 {
     let u = service::unit(t, &t.install, PROJECT);
@@ -869,7 +716,6 @@ fn selftest(t: &Tool) -> i32 {
         ("unit", u.path.file_name().is_some_and(|f| f.to_string_lossy().contains(PROJECT))),
         ("unit commands", !u.load.is_empty() && !u.unload.is_empty() && !u.stop.is_empty()),
         ("status", status::common(t, "h", PROJECT, 1, None, None)["version"] == VERSION),
-        ("mcp tools", mcp::tools().as_array().is_some_and(|a| a.len() == 3)),
         ("telemetry event", telemetry::span("agentq.verify", "selftest", Value::Null, 1, "i", "h")["attributes"].as_array().is_some_and(|a| a.len() == 7)),
         ("transactional install", release::selftest()),
         ("json bom", onboard::selftest()),
@@ -877,7 +723,6 @@ fn selftest(t: &Tool) -> i32 {
         ("configuration fixtures", configure::selftest()),
         ("snapshot", snapshot::project("i", "linux", None, None, 0)["resource"]["unknown"] == "no sample yet"),
         ("local telemetry", local::selftest()),
-        ("engine pins", engines::rtk_asset().is_some() && engines::HEADROOM_LOCK.contains(&format!("headroom-ai=={}", engines::HEADROOM))),
     ];
     let bad: Vec<&str> = checks.iter().filter(|c| !c.1).map(|c| c.0).collect();
     if bad.is_empty() {
@@ -918,84 +763,37 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
         fail("service registration belongs to another installation or is unreadable", "keep it and select the intended installation explicitly");
     }
     let agents: Vec<&str> = if picked.is_empty() { ready } else { picked.into_iter().filter(|a| ready.contains(a)).collect() };
-    // engines first: routing points an agent at the loopback port only when headroom can serve it
-    if let Err(e) = install_release(t) {
-        fail(&format!("service install: {e}"), "run `agentq service status`");
-    }
+    if let Err(e) = install_release(t) { fail(&e, "run `agentq service status`"); }
     let exe = t.install.join(t.exe_name());
     let wants: Vec<_> = agents.iter().flat_map(|a| onboard::wants(a, &onboard::root(a), &onboard::claude_json(), &exe)).collect();
-    let headroom = engines::headroom_exe(&t.install).map(|_| ()).ok_or("headroom unavailable".to_string());
-    let unit = service::unit(t, &t.install, PROJECT);
-    let routed = route_and_start(&t.install.join("data"), &onboard::root, &agents, wants, &journal(t), headroom, PROXY_START, &mut || {
-        // the unit after the ports and edits (#137): its first pass starts the proxy on each fixed port
-        start_unit(&unit).map(|_| println!("service: install done")).map_err(|e| format!("service install: {e}"))
-    }, &mut || {
-        println!("routing: proxy not answering after {} s; restarting the service", PROXY_START.as_secs());
-        service_cmd(t, "restart");
-    });
-    match routed {
-        Ok(ports) => ports.iter().for_each(|(a, p, up)| {
-            let state = if *up { "answers" } else { "not answering; run `agentq service restart`" };
-            println!("routing: {a} proxy on 127.0.0.1:{p} {state}");
-        }),
-        Err(e) => fail(&e, "fix it, then run `agentq onboard --yes` again"),
+    {
+        let _lock = executor::lock(&t.install.join("data")).unwrap_or_else(|e| fail(&e, "retry after the lifecycle operation finishes"));
+        let retired = onboard::retire(&journal(t), &agents).unwrap_or_else(|e| fail(&e, "resolve retired integration conflicts"));
+        if retired.iter().any(|l| l.starts_with("conflict:")) { fail(&retired.join("; "), "keep foreign edits and resolve the owned conflict"); }
+        onboard::apply(&wants, &journal(t)).unwrap_or_else(|e| fail(&e, "resolve the owned configuration conflict")).iter().for_each(|l| println!("{l}"));
     }
+    start_unit(&service::unit(t, &t.install, PROJECT)).unwrap_or_else(|e| fail(&e, "run `agentq service status`"));
     doctor(t);
-    if agents.contains(&"antigravity") {
-        println!("verify: start a new Antigravity session and run a qualified command; configured hooks do not prove compression");
-    }
-    let mcp: Vec<_> = agents.into_iter().filter(|a| *a != "antigravity").collect();
-    if mcp.is_empty() { 0 } else { println_code(&format!("verify: start a new {} session and call agentq search_document", mcp.join(", "))) }
+    println_code("verify: finish a native turn and check its local record")
 }
 
-/// agentq.md § 1: remove routing edits only; MCP, hooks and telemetry stay. Files only, so it works without the service.
+/// agentq.md § 1: remove legacy routing edits only; record hooks and telemetry stay. Files only, so it works without the service.
 fn direct(t: &Tool, args: &[&str]) -> i32 {
     if let Some(a) = args.iter().find(|a| !onboard::AGENTS.contains(a)) {
         fail(&format!("unknown agent `{a}`"), &format!("usage: {USAGE}"));
     }
     let agents = if args.is_empty() { &onboard::AGENTS[..] } else { args };
     let _lock = executor::lock(&t.install.join("data")).unwrap_or_else(|e| fail(&format!("direct: {e}"), "wait for it to finish, then run `agentq direct` again"));
-    if let Err(e) = routing::set_direct(&t.install.join("data"), agents, true) {
-        fail(&format!("direct: {e}"), "fix the file, then run `agentq direct` again");
-    }
     match onboard::restore(&journal(t), false, Some(agents)) {
         Ok(lines) if lines.is_empty() => println_code(&format!("direct: {} already direct", agents.join(", "))),
         Ok(lines) => {
             lines.iter().for_each(|l| println!("{l}"));
-            println_code("direct: done; `agentq onboard --yes` routes again")
+            println_code("direct: retired routing removed; native record hooks stay")
         }
         Err(e) => fail(&format!("direct: {e}"), "fix the file, then run `agentq direct` again"),
     }
 }
 
-/// ACCOUNTING O1-O3 over local stats or exported events; default window the last 7 days through this second. Unknown
-/// exits 1.
-fn accounting_cmd(t: &Tool, args: &[&str]) -> i32 {
-    let at = now();
-    let data = t.install.join("data");
-    let mut input = serde_json::json!({"window": {"start": at.saturating_sub(7 * 86400), "end": at + 1}, "now": at});
-    let mut source = None;
-    for pair in args.chunks(2) {
-        let n = || pair.get(1).and_then(|v| v.parse::<u64>().ok()).unwrap_or_else(|| fail(&format!("stats: {} requires unix seconds", pair[0]), "pass a whole number"));
-        match pair {
-            ["--from", _] => input["window"]["start"] = n().into(),
-            ["--to", _] => input["window"]["end"] = n().into(),
-            ["--bucket", _] => input["bucket"] = n().into(),
-            ["--events", p] => source = Some(accounting::exported(Path::new(p)).unwrap_or_else(|e| fail(&format!("stats: {e}"), "pass a queue folder or an exported events file"))),
-            _ => fail(&format!("stats: unknown option {}", pair.join(" ")), "agentq stats --accounting [--from <unix>] [--to <unix>] [--bucket <s>] [--events <path>]"),
-        }
-    }
-    input["sources"] = serde_json::json!([source.unwrap_or_else(|| accounting::local(&data, at))]);
-    match accounting::aggregate(&input) {
-        Ok(v) => {
-            println!("{v}");
-            i32::from(v["state"] == "unknown")
-        }
-        Err(e) => fail(&format!("stats: {e}"), "pass --from before --to"),
-    }
-}
-
-/// CONFIGURATION "Host executor": no change prints the profiles; changes print the plan; `--yes` applies that plan.
 fn configure_cmd(t: &Tool, args: &[&str]) -> i32 {
     let exe = t.install.join(t.exe_name());
     let at = now();
@@ -1086,40 +884,6 @@ mod tests {
         assert_eq!(s, f);
     }
 
-    /// #137 A2: `onboard --yes` starts the service only after the port and the Codex edits exist, so the service's
-    /// first pass starts the proxy and doctor right after onboard reads codex routed. Fails with the 0.5.9 order
-    /// (service started first: its pass finds no port and starts no proxy).
-    #[test]
-    fn onboard_routes_before_service_start() {
-        let d = std::env::temp_dir().join(format!("agentq-onboard-route-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let (data, codex) = (d.join("data"), d.join("codex"));
-        std::fs::create_dir_all(&codex).unwrap();
-        std::fs::write(codex.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
-        let mut proxy = None;
-        // the service's first pass: one proxy per fixed port, as `routing::supervise` does
-        let mut start = || {
-            let p = routing::port(&data, "codex").ok_or("service started before the port was fixed")?;
-            proxy = Some(std::net::TcpListener::bind(("127.0.0.1", p)).map_err(|e| e.to_string())?);
-            Ok(())
-        };
-        let mut restarts = 0;
-        let routed = route_and_start(&data, &|_| codex.clone(), &["codex"], vec![], &d.join("journal.json"), Ok(()), Duration::from_secs(5), &mut start, &mut || restarts += 1).unwrap();
-        let p = routing::port(&data, "codex").unwrap();
-        assert_eq!(routed, [("codex", p, true)]);
-        assert_eq!(restarts, 0);
-        assert_eq!(routing::state("codex", &codex, Some(p)).0, "routed", "doctor right after onboard");
-        drop(proxy);
-        let paused = r#"{"compression":{"enabled":false}}"#;
-        std::fs::write(data.join("config.json"), paused).unwrap();
-        control::save(&data, "integration.json", &serde_json::json!({"schema":1,"generation":1,"host_disabled":true,"profiles":{}})).unwrap();
-        let rejected = route_and_start(&data, &|_| codex.clone(), &["codex"], vec![], &d.join("journal.json"), Ok(()), Duration::ZERO,
-            &mut || panic!("a disabled installation must not start"), &mut || panic!("a disabled installation must not restart"));
-        assert!(rejected.unwrap_err().contains("integration_disabled"));
-        assert_eq!(std::fs::read_to_string(data.join("config.json")).unwrap(), paused, "disabled onboarding must not allocate a port or race with compression preferences");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
     #[test]
     fn date_is_utc_civil() {
         assert_eq!(date(0), "1970-01-01");
@@ -1127,16 +891,6 @@ mod tests {
         assert_eq!(date(951_782_400), "2000-02-29");
     }
 
-    /// #111 A2/A3: a new `current` restarts at once when idle, defers on open or unknown connections, at most 15 min.
-    #[test]
-    fn restart_waits_for_drain() {
-        assert!(drain(Ok(0), 0).is_ok());
-        assert_eq!(drain(Ok(2), DRAIN - 1), Err("2 open proxied connections".into()));
-        assert!(drain(Err("netstat: not found".into()), 0).unwrap_err().contains("unknown"));
-        assert!(drain(Ok(2), DRAIN).is_ok());
-    }
-
-    /// #74 A2/A3: two release service runs are counted, the Windows launcher is not.
     #[test]
     fn service_runs_skip_launcher() {
         assert!(single_instance_selftest());
