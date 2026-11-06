@@ -734,6 +734,7 @@ fn selftest(t: &Tool) -> i32 {
         ("json bom", onboard::selftest()),
         ("single service run", single_instance_selftest()),
         ("configuration fixtures", configure::selftest()),
+        ("agent registry", agentq_runtime::agent::registry::validate().is_ok()),
         ("snapshot", snapshot::project("i", "linux", None, None, 0)["resource"]["unknown"] == "no sample yet"),
         ("local telemetry", local::selftest()),
     ];
@@ -766,8 +767,11 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
         return 0;
     }
     let selected = if picked.is_empty() { &ready } else { &picked };
+    let (agents, skipped)=onboard::available(selected,!picked.is_empty()).unwrap_or_else(|e|fail(&e,"install the selected native client before onboarding"));
+    skipped.iter().for_each(|line|println!("{line}"));
+    if agents.is_empty() {return 0;}
     if control::host_disabled(&t.install.join("data")) != Ok(false)
-        || selected.iter().any(|a| control::disabled(&t.install.join("data"), a) != Ok(false))
+        || agents.iter().any(|a| control::disabled(&t.install.join("data"), a) != Ok(false))
     {
         fail("integration_disabled: onboarding cannot restore a disabled integration", "run `agentq enable` first");
     }
@@ -775,7 +779,6 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
     if unit["foreign"] == true || unit["registered"].is_null() {
         fail("service registration belongs to another installation or is unreadable", "keep it and select the intended installation explicitly");
     }
-    let agents: Vec<&str> = if picked.is_empty() { ready } else { picked.into_iter().filter(|a| ready.contains(a)).collect() };
     if let Err(e) = install_release(t) { fail(&e, "run `agentq service status`"); }
     let exe = t.install.join(t.exe_name());
     let wants: Vec<_> = agents.iter().flat_map(|a| onboard::wants(a, &onboard::root(a), &onboard::claude_json(), &exe)).collect();
@@ -783,7 +786,7 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
         let _lock = executor::lock(&t.install.join("data")).unwrap_or_else(|e| fail(&e, "retry after the lifecycle operation finishes"));
         let retired = onboard::retire(&journal(t), &agents).unwrap_or_else(|e| fail(&e, "resolve retired integration conflicts"));
         if retired.iter().any(|l| l.starts_with("conflict:")) { fail(&retired.join("; "), "keep foreign edits and resolve the owned conflict"); }
-        onboard::apply(&wants, &journal(t)).unwrap_or_else(|e| fail(&e, "resolve the owned configuration conflict")).iter().for_each(|l| println!("{l}"));
+        onboard::setup(&wants, &journal(t)).unwrap_or_else(|e| fail(&e, "resolve the owned configuration conflict")).iter().for_each(|l| println!("{l}"));
     }
     start_unit(&service::unit(t, &t.install, PROJECT)).unwrap_or_else(|e| fail(&e, "run `agentq service status`"));
     doctor(t);
@@ -875,6 +878,9 @@ fn date(secs: u64) -> String {
     let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
     format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
 }
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod tests {

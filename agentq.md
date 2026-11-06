@@ -168,6 +168,11 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M12.9** Callers reach runtimes only through the `agent::Runtime` trait and its `Descriptor` data ([specq agent runtimes](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md)). Per-runtime adapters own every Claude, Codex and Antigravity flag, file, environment, session format, quota and login source; the client enum, native transports and native parsers are private.
   Read-only log events, background-job evidence, exhausted windows and account identity stay inside the adapters.
   Callers state needs in `Launch` and read typed events; the adapter chooses the transport ([one run path](docs/spec/RUNTIME.md#one-run-path)).
+- The registry is the sole catalog for runtime descriptors and aliases, native policy/login methods, configuration roots and files, setup edits, hook actions and profile inspection. Each native client owns one module; Desktop Chat has its own integration-only entry. 
+  Catalog consumers select registered data and methods. Private execution, event and quota code still contains native branches; moving those parsers behind the modules is a separate follow-up.
+- Registry modules are discovered at build time. Adding a module adds its entry without editing a core list; a registration-only fake demonstrates discovery, not native extensibility. 
+  Required callbacks are typed; validation rejects incomplete metadata and duplicate identities. Behavioral checks compare declared and undeclared capabilities with their operations. 
+  Setup checks CLI presence before native writes; discovery skips missing CLIs, while explicitly selected missing clients refuse.
 - **M12.10** Permissions arrive as an abstract `Policy`; adapters map it to native flags and refuse launch for a part they cannot enforce. An operation a runtime lacks returns a named cause, never a fake success.
   `Policy` also covers never-prompt approval (Claude `dontAsk`), exact or added Codex writable roots, unelevated Windows sandbox, built-in tools, isolation from user settings and subscription-only login.
   Readiness checks the native login and minimum version. Trait, descriptors, policy map and causes: [RUNTIME.md](docs/spec/RUNTIME.md#runtime-trait).

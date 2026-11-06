@@ -33,6 +33,11 @@ fn setup() -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!("agentq-control-cli-{}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     for dir in ["install", "bin", "codex", "claude", "hermes"] { std::fs::create_dir_all(root.join(dir)).unwrap(); }
+    for entry in agentq_runtime::agent::registry::entries().into_iter().filter(|e|!e.profile.operations.is_empty()) {
+        for name in std::iter::once(entry.name).chain(entry.aliases.iter().copied()) {
+            std::fs::write(root.join("bin").join(format!("{name}{}",std::env::consts::EXE_SUFFIX)),b"\x7fELF").unwrap();
+        }
+    }
     let desktop = if cfg!(target_os = "macos") { root.join("Library/Application Support/Claude") }
         else if cfg!(windows) { root.join("Claude") } else { root.join("config/Claude") };
     std::fs::create_dir_all(desktop).unwrap();

@@ -22,6 +22,7 @@ pub use events::{AssistantFailure, Event, LogRecord, Model, RecordTime, TimeFaul
 pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
+pub use adapter::registry;
 pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
@@ -33,37 +34,9 @@ type Res<T> = Result<T, String>;
 pub(crate) enum Client { Claude, Codex, Antigravity }
 
 impl Client {
-    pub fn parse(code: &str) -> Option<Client> {
-        match code {
-            "claude" => Some(Client::Claude),
-            "codex" => Some(Client::Codex),
-            "antigravity" | "agy" => Some(Client::Antigravity),
-            _ => None,
-        }
-    }
-    /// The runtime code in observations.
-    pub fn code(self) -> &'static str {
-        match self {
-            Client::Claude => "claude",
-            Client::Codex => "codex",
-            Client::Antigravity => "antigravity",
-        }
-    }
-    /// The variable that names a login home to the client.
-    pub fn home_var(self) -> &'static str {
-        match self {
-            Client::Claude => "CLAUDE_CONFIG_DIR",
-            Client::Codex => "CODEX_HOME",
-            Client::Antigravity => "ANTIGRAVITY_HOME",
-        }
-    }
-    fn home_dir(self) -> &'static str {
-        match self {
-            Client::Claude => ".claude",
-            Client::Codex => ".codex",
-            Client::Antigravity => ".gemini/antigravity",
-        }
-    }
+    pub fn parse(code: &str) -> Option<Client> {registry::native_client(code)}
+    pub fn code(self) -> &'static str {registry::native_name(self)}
+    pub fn home_var(self) -> &'static str {registry::native_home_var(self)}
 }
 
 // ---------- executable ----------
@@ -90,56 +63,7 @@ pub fn user_bin_path(path: &OsStr, home: Option<&OsStr>) -> Option<OsString> {
     std::env::join_paths(dirs).ok()
 }
 
-fn antigravity_executable(path: &OsStr) -> PathBuf {
-    if let Some(path) = std::env::var_os("ANTIGRAVITY_AGENTAPI_EXE").filter(|s| !s.is_empty()) {
-        return PathBuf::from(path);
-    }
-    let path = path.to_os_string();
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    let path = user_bin_path(&path, home.as_deref()).unwrap_or(path);
-    let cli = which_in("agy", &path);
-    if cli.is_absolute() { return cli; }
-    let api = which_in("agentapi", &path);
-    if api.is_absolute() { return api; }
-    if let Some(home) = base_home(Client::Antigravity) {
-        let p = home.join("bin/agentapi");
-        if p.is_file() {
-            return p;
-        }
-    }
-    which_in("agy", &path)
-}
-
-/// The native Codex executor behind an npm `codex.js` launcher: a kill cannot reach the native child through Node.
-pub(crate) fn codex_native(bin: PathBuf) -> Res<PathBuf> {
-    if cfg!(windows) || !bin.exists() { return Ok(bin); }
-    let bin = bin.canonicalize().map_err(|e| format!("Codex executable unavailable: {e}"))?;
-    let native = |path: &Path| -> Res<bool> {
-        let mut magic = [0; 4];
-        File::open(path).and_then(|mut f| f.read_exact(&mut magic)).map_err(|e| format!("Codex executable unreadable: {e}"))?;
-        Ok(matches!(magic, [0x7f, b'E', b'L', b'F'] | [0xcf, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xcf] | [0xce, 0xfa, 0xed, 0xfe] | [0xfe, 0xed, 0xfa, 0xce] | [0xca, 0xfe, 0xba, 0xbe] | [0xbe, 0xba, 0xfe, 0xca]))
-    };
-    if native(&bin)? { return Ok(bin); }
-    let package = bin.parent().filter(|p| p.file_name().is_some_and(|n| n == "bin")).and_then(Path::parent)
-        .filter(|_| bin.file_name().is_some_and(|n| n == "codex.js"))
-        .ok_or("Codex launcher ownership unsupported; select a native Codex executable")?;
-    let metadata: Value = serde_json::from_reader(File::open(package.join("package.json")).map_err(|e| format!("Codex package unavailable: {e}"))?.take(64 * 1024))
-        .map_err(|e| format!("Codex package invalid: {e}"))?;
-    if metadata["name"] != "@openai/codex" { return Err("Codex launcher package identity differs".into()); }
-    let (platform, target) = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => ("darwin-arm64", "aarch64-apple-darwin"),
-        ("macos", "x86_64") => ("darwin-x64", "x86_64-apple-darwin"),
-        ("linux", "aarch64") => ("linux-arm64", "aarch64-unknown-linux-musl"),
-        ("linux", "x86_64") => ("linux-x64", "x86_64-unknown-linux-musl"),
-        _ => return Err("Codex native package unsupported on this platform".into()),
-    };
-    // Match Node's package lookup along the entrypoint's ancestors; never scan other installations.
-    let installed = package.ancestors().map(|p| p.join(format!("node_modules/@openai/codex-{platform}")))
-        .find(|p| p.join("package.json").is_file()).unwrap_or_else(|| package.to_path_buf());
-    let executable = installed.join(format!("vendor/{target}/bin/codex"));
-    if !native(&executable)? { return Err("Codex package executor is not a native binary".into()); }
-    executable.canonicalize().map_err(|e| format!("Codex native executable unavailable: {e}"))
-}
+pub(crate) use adapter::registry::codex_native;
 
 /// The client's CLI executable: `claude` on `PATH`, Codex's native executor, or Antigravity's `agy` / `agentapi` CLI. A caller
 /// that wraps the client (a sandbox) builds its own base command around this path.
@@ -147,12 +71,11 @@ pub(crate) fn executable(client: Client) -> Res<PathBuf> { executable_in(client,
 
 /// `executable` resolved on `path` instead of the process `PATH`.
 pub(crate) fn executable_in(client: Client, path: &OsStr) -> Res<PathBuf> {
-    match client {
-        Client::Claude => Ok(which_in("claude", path)),
-        Client::Codex => codex_native(which_in("codex", path)),
-        Client::Antigravity => Ok(antigravity_executable(path)),
-    }
+    registry::native_executable(client,path)
 }
+
+#[cfg(test)]
+fn antigravity_executable(path: &OsStr) -> PathBuf {registry::native_executable(Client::Antigravity,path).expect("native lookup is infallible")}
 
 // ---------- accounts ----------
 
@@ -217,12 +140,7 @@ impl Accounts {
 /// of this process, else `~/.claude` / `~/.codex` / `~/.gemini/antigravity-cli` when present, else the legacy
 /// `~/.gemini/antigravity` (a Windows service has no `HOME`, so `USERPROFILE`).
 pub(crate) fn base_home(client: Client) -> Option<PathBuf> {
-    std::env::var_os(client.home_var()).filter(|v| !v.is_empty()).map(PathBuf::from)
-        .or_else(|| (client == Client::Antigravity).then(|| std::env::var_os("ANTIGRAVITY_APP_DATA_DIR")).flatten().filter(|v| !v.is_empty()).map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| {
-            let cli = Path::new(&h).join(".gemini/antigravity-cli");
-            if client == Client::Antigravity && cli.is_dir() { cli } else { Path::new(&h).join(client.home_dir()) }
-        }))
+    registry::native_home(client)
 }
 
 /// `<base home>/<tool>-accounts/<label>` for a non-default account; None for `default` (the child keeps the
@@ -235,7 +153,7 @@ pub(crate) fn account_home(client: Client, tool: &str, label: &str) -> Option<Pa
 
 /// A new session ID: Claude takes a caller-chosen UUID; Codex and Antigravity name their session in output (`-` until then).
 pub(crate) fn new_session(client: Client) -> String {
-    match client { Client::Claude => crate::incident::uuid(), Client::Codex | Client::Antigravity => "-".into() }
+    registry::native_session(client)
 }
 
 /// One turn of one session.
@@ -263,34 +181,13 @@ pub(crate) fn child_env(spec: &Spec, key: &str) -> Option<OsString> {
 
 pub(crate) fn spec_home(spec: &Spec) -> Option<PathBuf> {
     spec.home.clone().or_else(|| child_env(spec, spec.client.home_var()).filter(|v| !v.is_empty()).map(PathBuf::from))
-        .or_else(|| (spec.client == Client::Antigravity).then(|| child_env(spec, "ANTIGRAVITY_APP_DATA_DIR")).flatten().filter(|v| !v.is_empty()).map(PathBuf::from))
+        .or_else(|| registry::alternate_home_var(spec.client).and_then(|var|child_env(spec,var)).filter(|v| !v.is_empty()).map(PathBuf::from))
         .or_else(|| base_home(spec.client))
 }
 
 /// The client argument list after the executable, in TaskQ's order.
 pub(crate) fn args(spec: &Spec) -> Vec<OsString> {
-    let mut a: Vec<OsString> = Vec::new();
-    let s = |v: &str| OsString::from(v);
-    match spec.client {
-        Client::Claude => {
-            a.extend(["-p", "--output-format", "stream-json", "--verbose"].map(s));
-            a.extend(spec.args.iter().cloned());
-            a.push(s(if spec.resume { "--resume" } else { "--session-id" }));
-            a.push(s(&spec.session));
-        }
-        Client::Codex => {
-            a.extend(["exec", "--json"].map(s));
-            a.extend(spec.args.iter().cloned());
-            if spec.resume { a.extend([s("resume"), s(&spec.session), s("-")]); }
-            else { a.extend([s("-C"), spec.root.clone().into_os_string(), s("-")]); }
-        }
-        Client::Antigravity => {
-            a.extend(["--input-format", "stream-json", "--output-format", "stream-json"].map(s));
-            a.extend(spec.args.iter().cloned());
-            if spec.resume { a.extend([s("--conversation"), s(&spec.session)]); }
-        }
-    }
-    a
+    registry::native_args(spec)
 }
 
 /// `base` (the client executable, or a sandbox wrapper around it) with the turn's arguments and environment. The
@@ -301,9 +198,9 @@ pub(crate) fn command(mut base: Command, spec: &Spec) -> Command {
 }
 
 fn environment(mut base: Command, spec: &Spec) -> Command {
-    base.current_dir(&spec.root).env_remove("CLAUDE_CODE_SESSION_ID").env_remove("CODEX_THREAD_ID")
-        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
-        .envs(spec.env.iter().map(|(k, v)| (k, v)));
+    base.current_dir(&spec.root);
+    for var in registry::session_vars() {base.env_remove(var);}
+    base.envs(spec.env.iter().map(|(k, v)| (k, v)));
     if let Some(home) = &spec.home { base.env(spec.client.home_var(), home); }
     crate::quiet(&mut base);
     base

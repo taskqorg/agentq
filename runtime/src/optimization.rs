@@ -33,7 +33,7 @@ pub fn install_root() -> Option<PathBuf> {
     else { std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share/agentq")) }
 }
 
-pub const AGENTS: [&str; 5] = ["codex", "claude", "hermes", "claude-desktop", "antigravity"];
+pub use crate::agent::registry::AGENTS;
 
 fn read_json(path: &Path, missing: Value) -> Result<Value, String> {
     match std::fs::read(path) {

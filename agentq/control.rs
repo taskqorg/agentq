@@ -74,7 +74,9 @@ fn enable_wants(h: &executor::Host, c: &profiles::Client, r: &Value) -> Result<V
     }
     let direct = r["direct"] == true || config(&h.data)?["direct"].as_array().is_some_and(|a| a.iter().any(|a| a == c.agent));
     let fields: Vec<_> = entries.iter().filter(|e| !onboard::retired_entry(e) && !(direct && e["field"] == "routing")).cloned().collect();
-    onboard::saved_wants(wants(c, &h.data, &h.exe), &fields)
+    let selected=onboard::saved_wants(wants(c, &h.data, &h.exe), &fields)?;
+    if !selected.is_empty() {onboard::setup_ready(&[c.agent])?;}
+    Ok(selected)
 }
 
 fn next_generation(s: &mut Value) -> Result<u64, String> {
@@ -158,7 +160,7 @@ pub fn integrations(
         for c in selected {
             let r = s["profiles"][c.agent].clone();
             let result = enable_wants(h, c, &r).and_then(|w| {
-                onboard::apply(&w, &h.data.join("owned.json")).and_then(|lines| {
+                onboard::setup(&w, &h.data.join("owned.json")).and_then(|lines| {
                     if lines.iter().any(|l| l.starts_with("conflict:")) { Err("owned value changed".into()) }
                     else if onboard::present(&w)? { Ok(()) } else { Err("enable readback mismatch".into()) }
                 })
@@ -336,6 +338,7 @@ mod tests {
     #[test]
     fn record_hooks_roundtrip_and_preserve_foreign_changes() {
         let root = std::env::temp_dir().join(format!("agentq-record-controls-{}", crate::resource::new_id()));
+        let _cli = crate::test_support::native_clis(&root);
         let home = root.join("codex");
         std::fs::create_dir_all(&home).unwrap();
         let native = "model = \"native\"\n";
@@ -365,6 +368,7 @@ mod tests {
     #[test]
     fn old_disabled_profile_ignores_retired_scope_and_never_restores_it() {
         let root = std::env::temp_dir().join(format!("agentq-old-disabled-{}", crate::resource::new_id()));
+        let _cli = crate::test_support::native_clis(&root);
         let home = root.join("codex");
         std::fs::create_dir_all(&home).unwrap();
         let h = executor::Host { data:root.join("install/data"),exe:root.join("install/agentq"),
