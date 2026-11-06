@@ -1212,8 +1212,10 @@ impl Runtime for Adapter {
         let activity_error=self.refresh_activity(run).err();
         let mut activity=if let Some(error)=activity_error {ActivityObservation {state:"unknown".into(),idle_ms:None,reason:Some(error)}} else {run.activity.observation(run.inactivity,unix_ms(),state==State::Running)};
         if activity.state=="stalled" && run.stop_on_stall {
-            activity.reason=Some(match self.cancel(run) {Ok(_)=>"stall-stop-requested: native subtree unverified".into(),Err(error)=>format!("stall-stop-failed: {error}")});
-            if let Some(owner)=&run.owner {if let Err(error)=owner.stop_uncertain() {activity.reason=Some(format!("stall-stop-ownership-unknown: {error}"));}}
+            activity.reason=Some(match run.owner.as_ref().ok_or_else(||"session-owner-unknown".to_string()).and_then(SessionOwner::stop_uncertain) {
+                Err(error)=>format!("stall-stop-ownership-unknown: {error}"),
+                Ok(())=>match self.cancel(run) {Ok(_)=>"stall-stop-requested: native subtree unverified".into(),Err(error)=>format!("stall-stop-failed: {error}")},
+            });
         }
         let (url, cause, detail) = match self.link(run) { Ok(u) => (Some(u), None, None), Err((c, d)) => (None, Some(c), d) };
         let session = self.session_id(run);

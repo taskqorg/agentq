@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 mod protected;
 
 fn main() {
+    if let Some(gate)=std::env::var_os("AGENTQ_FAKE_DESCENDANT") {
+        while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}
+        std::fs::write(Path::new(&gate).with_extension("done"),b"exited fixture body").unwrap();return;
+    }
     if std::env::var_os("AGENTQ_FAKE_QUOTA_HTTP").is_some() { return fake_quota_http(); }
     let wrapper: Vec<_> = std::env::args_os().skip(1).collect();
     if wrapper.first().is_some_and(|s| s == "--wrap") {
@@ -317,6 +321,10 @@ fn fake(client: &str) {
         "inherited_auth":std::env::var_os("OPENAI_API_KEY").is_some(),"git_prompt":std::env::var("GIT_TERMINAL_PROMPT").ok(),"askpass":std::env::var("GIT_ASKPASS").ok(),"git_ssh":std::env::var("GIT_SSH_COMMAND").ok(),
         "optimization": std::env::var("AGENTQ_OPTIMIZATION").ok(), "launcher": std::env::var("AGENTQ_LAUNCHER").ok(), "trace_context": std::env::var("COREQ_TRACE_CONTEXT").ok()});
     std::fs::write(format!("fake-turn-{turn}.json"), record.to_string()).unwrap();
+    if let Some(gate)=std::env::var_os("COREQ_FAKE_TOOL_CHILD_GATE") {
+        let child=Command::new(std::env::current_exe().unwrap()).env("AGENTQ_FAKE_DESCENDANT",gate).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let identity=agent::NativeProcess::read(child.id()).unwrap().unwrap();std::fs::write("descendant.json",serde_json::to_vec(&identity).unwrap()).unwrap();
+    }
     if let Ok(mode)=std::env::var("COREQ_FAKE_STOP") {
         let row=match client {
             "claude"=>json!({"type":"assistant","sessionId":session,"message":{"id":"last","content":[{"type":"thinking","thinking":"scrubbed"}]}}),
@@ -613,12 +621,20 @@ fn session_ownership_and_stall_signal() {
     drop(rt.descriptor().history_resume(&session,&terminal,&[]).unwrap());
     drop(rt.session_owner(Some(&session),&terminal).unwrap());
     let stop_root=root.join("stop");std::fs::create_dir_all(&stop_root).unwrap();let stop_gate=stop_root.join("gate");
-    let stop_cleanup=Gates(vec![stop_gate.clone()]);
-    let mut stop=fake_launch("claude",&stop_root,"stop explicitly",&[("COREQ_FAKE_GATE",stop_gate.as_os_str())]);stop.home=l.home.clone();stop.inactivity=Some(Duration::from_millis(20));stop.stop_on_stall=true;
+    let child_gate=stop_root.join("child-gate");let stop_cleanup=Gates(vec![stop_gate.clone(),child_gate.clone()]);
+    let mut stop=fake_launch("claude",&stop_root,"stop explicitly",&[("COREQ_FAKE_GATE",stop_gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);stop.home=l.home.clone();stop.inactivity=Some(Duration::from_millis(20));stop.stop_on_stall=true;
     let mut stopped=rt.launch(&stop).unwrap();wait_for(&stop_root.join("fake-turn-1.json"));let native=rt.checkpoint(&stopped).unwrap()["owner"]["session"].clone();
-    append(&stop.log,&[json!({"type":"system","subtype":"init","session_id":native})]);rt.observe(&mut stopped);
+    wait_for(&stop_root.join("descendant.json"));let descendant:agent::NativeProcess=serde_json::from_slice(&std::fs::read(stop_root.join("descendant.json")).unwrap()).unwrap();
+    append(&stop.log,&[json!({"type":"system","subtype":"init","session_id":native})]);rt.observe(&mut stopped);let before_stop=rt.checkpoint(&stopped).unwrap();
     std::thread::sleep(Duration::from_millis(30));assert_eq!(rt.observe(&mut stopped).activity.state,"stalled");finish(rt,&mut stopped);
     assert_eq!(rt.report(&stopped).unwrap().outcome,"cancelled");assert_eq!(rt.report(&stopped).unwrap().owner.state,"unknown","a caller stop is not native completion proof");
+    assert_eq!(agent::NativeProcess::read(descendant.pid).unwrap(),Some(descendant.clone()),"the direct process stop does not prove tool termination");
+    drop(stopped);let mut recovered_stop=rt.recover(&before_stop,&stop).unwrap();
+    assert_eq!(rt.observe(&mut recovered_stop).owner.reason.as_deref(),Some("native-subtree-stop-unverified"));drop(recovered_stop);
+    assert!(rt.adopt(native.as_str().unwrap(),&stop,&[]).unwrap_err().contains("unresolved native stop"),"generic adoption cannot erase the original cleanup fence");
+    assert!(rt.resume(native.as_str().unwrap(),&stop).is_err());
+    std::fs::write(&child_gate,"").unwrap();wait_for(&child_gate.with_extension("done"));
+    #[cfg(windows)] {let until=Instant::now()+Duration::from_secs(30);while agent::NativeProcess::read(descendant.pid).unwrap().as_ref()==Some(&descendant) {assert!(Instant::now()<until);std::thread::sleep(Duration::from_millis(20));}}
     let bad_root=root.join("malformed");std::fs::create_dir_all(&bad_root).unwrap();let bad_gate=bad_root.join("gate");let bad_cleanup=Gates(vec![bad_gate.clone()]);
     let mut bad=fake_launch("claude",&bad_root,"unreadable evidence",&[("COREQ_FAKE_GATE",bad_gate.as_os_str())]);bad.inactivity=Some(Duration::from_millis(20));bad.stop_on_stall=true;
     let mut unreadable=rt.launch(&bad).unwrap();wait_for(&bad_root.join("fake-turn-1.json"));let session=rt.checkpoint(&unreadable).unwrap()["owner"]["session"].clone();
@@ -2060,17 +2076,17 @@ fn stopped_runs_have_typed_activity() {
             if mode=="exit" {assert_eq!(stop.cause,StopCause::ExitWithoutTurnEnd);assert_eq!(stop.exit_code,Some(0));}
             else if cfg!(unix) {assert_eq!(stop.cause,StopCause::Signal);assert!(stop.exit_code.is_none());}
             else {assert!(matches!(stop.cause,StopCause::LostOwner|StopCause::ExitWithoutTurnEnd));}
+            assert_ne!(stop.outcome,"ok");assert!(stop.last_activity.is_some(),"{name}: {:?}",stop.activity_unknown);
+            assert_eq!(stop.step().kind,StepKind::Stop);
+            assert_eq!(r.stop_event(&mut run,u64::MAX).unwrap().unwrap().id,stop.id);
             if let Some(saved)=saved {
                 // A second observer did not reap the now-gone child: neither its exit nor outcome is known.
-                let mut gone=r.recover(&saved,&l).unwrap();
+                drop(run);let mut gone=r.recover(&saved,&l).unwrap();
                 assert_eq!(finish(r,&mut gone),agent::State::Unknown);
                 let report=r.report(&gone).unwrap();
                 assert_eq!((report.outcome,report.exit),("unknown",None));
                 assert_eq!(agentq_runtime::cli::report_json(&report)["termination"],json!({"state":"unknown","reason":"recovered-process-exit-not-observed"}));
             }
-            assert_ne!(stop.outcome,"ok");assert!(stop.last_activity.is_some(),"{name}: {:?}",stop.activity_unknown);
-            assert_eq!(stop.step().kind,StepKind::Stop);
-            assert_eq!(r.stop_event(&mut run,u64::MAX).unwrap().unwrap().id,stop.id);
             let _=std::fs::remove_dir_all(root);
         }
     }
