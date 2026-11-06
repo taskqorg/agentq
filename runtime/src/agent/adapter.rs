@@ -1258,6 +1258,66 @@ mod tests {
         mapped(Client::parse(name).unwrap(), name, l).map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect())
     }
 
+    // Registry declarations must agree with actual operations in both directions, not a second name whitelist.
+    #[test]
+    fn declared_and_undeclared_capabilities_match_operations() {
+        let root=std::env::temp_dir().join(format!("agentq-capabilities-{}",crate::incident::uuid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let absent=root.join("not-installed");
+        let mcp=root.join("mcp.json"); std::fs::write(&mcp,r#"{"mcpServers":{}}"#).unwrap();
+        let rules=root.join("rules.md"); std::fs::write(&rules,"rules").unwrap();
+        let launch=||Launch {home:Some(root.clone()),command:vec![absent.clone().into_os_string()],..Launch::new(&root,root.join("turn.log"),"input","fixtureq")};
+        for runtime in runtimes() {
+            let adapter=table(Client::parse(runtime.descriptor().name).unwrap());
+            let mut probes=std::collections::BTreeMap::new();
+            let supported=|result: Res<()>| result.err().is_none_or(|e|!e.contains("unsupported"));
+            // Each option goes through the same spec builder as launch, including native policy mapping.
+            for capability in ["compact-hook","title","effort","mcp-config","instructions-file","turn-parts","turn-deltas","host-args","settings-env"] {
+                let mut l=launch();
+                match capability {
+                    "compact-hook"=>l.compact_hook=Some("echo compact".into()),
+                    "title"=>l.title=Some("title".into()),
+                    "effort"=>l.effort=Some("high".into()),
+                    "mcp-config"=>l.mcp=Some(mcp.clone()),
+                    "instructions-file"=>l.instructions=Some(rules.clone()),
+                    "turn-parts"=>l.parts=vec![Part::Text("part".into())],
+                    "turn-deltas"=>l.deltas=true,
+                    "host-args"=>l.host_args=vec!["--fixture".into()],
+                    "settings-env"=>l.settings_env=vec![("FIXTURE".into(),"yes".into())],
+                    _=>unreachable!(),
+                }
+                probes.insert(capability,supported(adapter.spec(&l,"session-1".into(),false).map(|_|())));
+            }
+            // A missing caller-owned executable reaches spawn failure without ever starting a native agent.
+            probes.insert("turn",supported(runtime.launch(&launch()).map(|_|())));
+            probes.insert("resume",supported(runtime.resume("session-1",&launch()).map(|_|())));
+            for (capability,mode) in [("background",Mode::Background),("app-queue",Mode::Queue {transcript:root.join("transcript")}),("app-server",Mode::AppServer {initialize:json!({}),thread:json!({})})] {
+                let mut l=launch(); l.mode=mode;
+                probes.insert(capability,supported(runtime.resume("session-1",&l).map(|_|())));
+            }
+            let native=NativeSpec {root:root.clone(),session:"session-1".into(),home:Some(root.clone()),..NativeSpec::default()};
+            let command=runtime.command(Command::new(&absent),&native).unwrap();
+            let args:Vec<_>=command.get_args().map(|s|s.to_string_lossy()).collect();
+            probes.insert("caller-session-id",args.windows(2).any(|p|p==["--session-id","session-1"]));
+            probes.insert("session-url",!matches!(runtime.session_link(&native,None),Err((Cause("no-session-url"),_))));
+            probes.insert("catalogue",supported(runtime.catalogue_with_executable(Some(&root),Some(&absent)).map(|_|())));
+            probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
+            let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
+            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None}));
+            let mut run=adapter.run(body,0,Optimization {intent:Intent::Off,effective:"off",reason:"optimization_retired"},&launch());
+            probes.insert("account",!matches!(runtime.account(&mut run),Err(Failure::Refused(Cause("account-unsupported")))));
+            let quotas=concat!(r#"{"type":"rate_limit_event","rate_limit_info":{"rateLimitType":"five_hour","utilization":0.5,"resetsAt":9999999999}}"#,"\n",
+                r#"{"type":"event_msg","payload":{"rate_limits":{"primary":{"used_percent":50,"window_minutes":300,"resets_at":9999999999}}}}"#);
+            probes.insert("quota-snapshot",runtime.log_limits(quotas,None,Some(&root)).iter().any(|w|w.used.is_some()));
+            // Empty PATH and an isolated home avoid live clients and account credentials.
+            let windows=registry::with_test_path(&root,||runtime.account_limits(Some(&root),0));
+            probes.insert("account-limits",!windows.is_empty() && windows.iter().all(|w|w.unknown.as_deref().is_none_or(|s|!s.contains("unsupported"))));
+            for capability in runtime.descriptor().capabilities {assert!(probes.contains_key(capability),"{}: {capability} has no behavioral probe",runtime.descriptor().name);}
+            for (capability,actual) in probes {assert_eq!(actual,runtime.descriptor().has(capability),"{}: {capability}",runtime.descriptor().name);}
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     // #216 A2: native Windows layout seen on Claude Code 2.1.317. Risk: a verbatim canonical root (`\\?\C:\…`) names a
     // project folder (`----C--…`) Claude never writes, so a background run never attaches and never reads its URL.
     #[test]

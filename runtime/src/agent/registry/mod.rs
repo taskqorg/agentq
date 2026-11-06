@@ -25,7 +25,8 @@ impl Edit {
         if self.instruction { return "instructions"; }
         match (&self.routing, self.key[0].as_str()) {
             (Some(_), _) => "routing",
-            (None, "hooks" | "agentq") => "hooks",
+            (None, "hooks") => "hooks",
+            (None, key) if entry(&self.agent).is_some_and(|e|e.hook_key==key) => "hooks",
             (None, "plugins" | "$file") => "plugin",
             _ => "mcp",
         }
@@ -65,6 +66,7 @@ pub struct Entry {
     pub setup: fn(&Path, &Path, &Path) -> Vec<Edit>,
     pub inspect: fn(&[Option<String>], &[Option<Value>], &[bool]) -> ProfileState,
     pub hook: fn(&str) -> Hook,
+    pub hook_key: &'static str,
     pub fallback: fn(&str) -> Value,
     pub executable: fn() -> Option<PathBuf>,
     pub diagnose: fn(&Path) -> Value,
@@ -152,11 +154,8 @@ pub fn require_cli(name: &str) -> Result<PathBuf,String> {
 
 fn validate_descriptor(d: &Descriptor) -> Result<(),String> {
     if [d.name,d.label,d.brand,d.family].iter().any(|s|s.is_empty()) {return Err("incomplete runtime descriptor".into());}
-    for capability in d.capabilities {
-        if !matches!(*capability,"turn"|"resume"|"caller-session-id"|"compact-hook"|"session-url"|"quota-snapshot"|"account-limits"|"background"|"title"|"mcp-config"|"instructions-file"|"turn-parts"|"turn-deltas"|"settings-env"|"catalogue"|"app-queue"|"app-server"|"effort"|"image-input"|"account"|"host-args") {
-            return Err(format!("capability {capability} has no Runtime method"));
-        }
-    }
+    let mut capabilities=std::collections::BTreeSet::new();
+    if d.capabilities.iter().any(|c|c.is_empty() || !capabilities.insert(c)) {return Err("duplicate or empty capability".into());}
     Ok(())
 }
 
@@ -210,12 +209,12 @@ mod examples {
 mod tests {
     use super::*;
     #[test]
-    fn registered_entries_are_complete_and_capabilities_have_methods() {
+    fn registered_entries_have_complete_metadata() {
         validate().unwrap();
         let broken=Entry {name:"",..*ENTRIES[0]};
         assert!(validate_entries(&[&broken]).is_err());
-        let descriptor=Descriptor {name:"broken",label:"Broken",brand:"Test",family:"test",minimum:"",models:&[],capabilities:&["missing-method"]};
-        assert!(validate_descriptor(&descriptor).unwrap_err().contains("missing-method"));
+        let descriptor=Descriptor {name:"broken",label:"Broken",brand:"Test",family:"test",minimum:"",models:&[],capabilities:&["turn","turn"]};
+        assert!(validate_descriptor(&descriptor).unwrap_err().contains("capability"));
         assert!(validate_entries(&[ENTRIES[0],ENTRIES[0]]).is_err());
     }
 }
@@ -233,4 +232,16 @@ pub(crate) use codex::codex_native;
 
 pub fn legacy_provider(agent: &str,root: &Path) -> Result<Provider,String> {
     entry(agent).and_then(|e|e.provider).ok_or("no legacy provider")?(root)
+}
+
+#[cfg(test)]
+pub(super) fn with_test_path<T>(path: &Path,f: impl FnOnce()->T) -> T {
+    struct Restore(Option<OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {unsafe {match &self.0 {Some(v)=>std::env::set_var("PATH",v),None=>std::env::remove_var("PATH")}}}
+    }
+    // .cargo/config.toml serializes the tests; restore even if a probe panics.
+    let _restore=Restore(std::env::var_os("PATH"));
+    unsafe {std::env::set_var("PATH",path)}
+    f()
 }

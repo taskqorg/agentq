@@ -23,6 +23,19 @@ fn direct_codex_provider(text: &str) -> bool {
 
 pub fn root(agent: &str) -> PathBuf { registry::entry(agent).map(|e|(e.root)()).unwrap_or_default() }
 
+/// Automatic discovery skips stale/Desktop-only roots; explicit selection reports the missing client.
+pub fn available<'a>(agents: &[&'a str], explicit: bool) -> Result<(Vec<&'a str>,Vec<String>),String> {
+    let mut ready=vec![]; let mut lines=vec![];
+    for agent in agents {
+        match registry::require_cli(agent) {
+            Ok(_)=>ready.push(*agent),
+            Err(e) if explicit=>return Err(e),
+            Err(e)=>lines.push(format!("skipped: {agent}: {e}")),
+        }
+    }
+    Ok((ready,lines))
+}
+
 pub fn setup_ready(agents: &[&str]) -> Result<(),String> {
     for agent in agents {registry::require_cli(agent)?;} Ok(())
 }
@@ -1050,6 +1063,22 @@ mod tests {
             else {assert!(!file.exists(),"migration must preserve created-file uninstall ownership");}
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn discovery_skips_stale_roots_but_explicit_missing_cli_refuses() {
+        let root=std::env::temp_dir().join(format!("agentq-discovery-{}",crate::resource::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(format!("claude{}",std::env::consts::EXE_SUFFIX)),b"\x7fELF").unwrap();
+        let _path=crate::test_support::only_path(&root);
+        let (selected,lines)=available(&["codex","claude","hermes"],false).unwrap();
+        assert_eq!(selected,["claude"]);
+        assert_eq!(lines.len(),2); assert!(lines[0].starts_with("skipped: codex:"));
+        assert!(available(&["codex"],true).unwrap_err().contains("codex"));
+        let requests=wants("claude",&root.join("profile"),&root.join("claude.json"),Path::new("/agentq"));
+        setup(&requests,&root.join("owned.json")).unwrap();
+        assert!(root.join("profile/settings.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

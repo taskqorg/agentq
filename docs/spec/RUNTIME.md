@@ -8,9 +8,11 @@ This page holds the binding detail of [agentq.md § 12](../../agentq.md#12-agent
 
 The build discovers entry modules and generates references only; it does not run a native client or touch an installed profile. Stable ordering is entry data, preserving the existing runtime, onboarding and profile output order. The existing Runtime, Descriptor, Launch and optimization compatibility APIs retain their behavior.
 
-Core profile code still owns HMAC identities, revisions, error classification and JSON projections. The journal still validates edits and preserves later foreign changes. Hook code still owns bounded recording and fallback responses; an entry selects the native action. CLI presence is checked before setup writes a profile. Missing executables refuse setup with the missing program named; presence alone does not verify login or a native turn.
+Core profile code still owns HMAC identities, revisions, error classification and JSON projections. The journal still validates edits and preserves later foreign changes. Hook code still owns bounded recording and fallback responses; an entry selects the native action. CLI presence is checked before setup writes a profile. Discovery skips and names profiles without a CLI; an explicitly selected missing CLI refuses. Configure and enable retain their pre-write gate. Presence alone does not verify login or a native turn.
 
-Each entry supplies every required callback. Registry validation rejects missing identity/profile metadata, duplicate IDs or aliases, and a declared capability without a corresponding Runtime operation. The fake module in the registry example is compiled and validated through the same discovery path; it needs no core catalog edit and launches no native work. Existing native behavior tests remain unchanged.
+Each entry supplies every required callback. Registry validation rejects missing identity/profile metadata and duplicate IDs or aliases. Behavioral tests exercise capability operations in both directions: declared operations reach their implementation rather than an unsupported refusal, while undeclared operations return their documented unsupported/absence result. These checks use isolated files and inert commands, not login or paid calls. The fake module proves catalog discovery only; it does not prove native parser extensibility.
+
+Private execution, event, report and quota parsers still branch on the native client enum. A real new native protocol still needs parser changes there; moving those branches behind each runtime module and replacing the registration-only fake with a scripted CLI is the next follow-up. Existing native behavior tests remain unchanged.
 
 ## Runtime trait
 

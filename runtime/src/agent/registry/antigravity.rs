@@ -7,7 +7,7 @@ static ADAPTER: Adapter = Adapter {client: Client::Antigravity, live: AtomicUsiz
 pub(super) const ENTRY: Entry = Entry { name:"antigravity", aliases:&["agy"], order:4, profile_order:4, worker_order:2, onboard:true,
     profile:Profile {kind:"antigravity",label:"Antigravity",aliases:&["agy"],operations:&["hooks"]},
     runtime:Some(&ADAPTER), builtin:Some(&ADAPTER),
-    root:config_root,files,setup,inspect,hook,fallback,executable:cli,diagnose:no_diagnosis,provider:None,
+    root:config_root,files,setup,inspect,hook,hook_key:"agentq",fallback,executable:cli,diagnose:no_diagnosis,provider:None,
 };
 
 fn mapped(l: &Launch) -> Res<Vec<OsString>> {

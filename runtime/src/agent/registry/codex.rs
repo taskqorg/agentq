@@ -7,7 +7,7 @@ static ADAPTER: Adapter = Adapter {client: Client::Codex, live: AtomicUsize::new
 pub(super) const ENTRY: Entry = Entry { name:"codex", aliases:&[], order:0, profile_order:0, worker_order:1, onboard:true,
     profile:Profile {kind:"codex",label:"Codex",aliases:&["codex-cli", "codex-desktop"],operations:&["hooks"]},
     runtime:Some(&ADAPTER), builtin:Some(&ADAPTER),
-    root:config_root,files,setup,inspect,hook,fallback,executable:cli,diagnose:diagnose,provider:Some(provider),
+    root:config_root,files,setup,inspect,hook,hook_key:"hooks",fallback,executable:cli,diagnose:diagnose,provider:Some(provider),
 };
 
 fn config_root() -> PathBuf { root("CODEX_HOME", ".codex") }
@@ -184,4 +184,38 @@ fn native_args(spec: &Spec) -> Vec<OsString> {
             else { a.extend([s("-C"), spec.root.clone().into_os_string(), s("-")]); }
 
     a
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    #[test]
+    fn npm_presence_and_launch_share_the_native_dependency_lookup() {
+        let root=std::env::temp_dir().join(format!("agentq-npm-registry-{}",crate::incident::uuid()));
+        let package=root.join("lib/node_modules/@openai/codex");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(package.join("package.json"),r#"{"name":"@openai/codex"}"#).unwrap();
+        std::fs::write(package.join("bin/codex.js"),"#!/usr/bin/env node\n").unwrap();
+        std::os::unix::fs::symlink(package.join("bin/codex.js"),root.join("bin/codex")).unwrap();
+        let (platform,target)=match (std::env::consts::OS,std::env::consts::ARCH) {
+            ("macos","aarch64")=>("darwin-arm64","aarch64-apple-darwin"),
+            ("macos","x86_64")=>("darwin-x64","x86_64-apple-darwin"),
+            ("linux","aarch64")=>("linux-arm64","aarch64-unknown-linux-musl"),
+            ("linux","x86_64")=>("linux-x64","x86_64-unknown-linux-musl"),
+            _=>return,
+        };
+        let dependency=root.join(format!("lib/node_modules/@openai/codex-{platform}"));
+        std::fs::create_dir_all(dependency.join(format!("vendor/{target}/bin"))).unwrap();
+        std::fs::write(dependency.join("package.json"),"{}").unwrap();
+        let native=dependency.join(format!("vendor/{target}/bin/codex"));
+        std::fs::write(&native,b"\x7fELF").unwrap();
+        let launch=ADAPTER.executable(Some(root.join("bin").as_os_str())).unwrap();
+        let presence=with_test_path(&root.join("bin"),||cli_present(&ENTRY)).unwrap();
+        assert_eq!(launch,native.canonicalize().unwrap());
+        assert_eq!(presence,launch);
+        // Presence's callback uses the same runtime resolver, including npm's sibling dependency.
+        assert_eq!(native_executable(root.join("bin").as_os_str()).unwrap(),launch);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

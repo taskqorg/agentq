@@ -5,7 +5,7 @@ use agentq_runtime::agent::registry::{self,Hook};
 
 
 pub fn default_response(agent: &str, event: &str) -> Value {
-    registry::entry(agent).map(|e|(e.fallback)(event)).unwrap_or_else(||json!({}))
+    registry::entry(agent).filter(|e|e.name==agent).map(|e|(e.fallback)(event)).unwrap_or_else(||json!({}))
 }
 
 pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Value, String> {
@@ -13,7 +13,7 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
     // The client passes its own environment and working directory to the hook (M6.9, M6.10).
     let launched = || crate::model::launched(|k| std::env::var(k).ok());
     let data = || exe.parent().map(|p| p.join("data")).ok_or("hook launcher has no install root");
-    let action=registry::entry(agent).map(|e|(e.hook)(event)).unwrap_or(Hook::None);
+    let action=registry::entry(agent).filter(|e|e.name==agent).map(|e|(e.hook)(event)).unwrap_or(Hook::None);
     if matches!(action,Hook::None) {return Ok(empty());}
     let v: Value=serde_json::from_str(input).map_err(|e|format!("hook JSON: {e}"))?;
     match action {
@@ -47,6 +47,12 @@ mod tests {
         let input = json!({"conversationId": "c", "fullyIdle": false}).to_string();
         assert_eq!(response("antigravity", "Stop", &input, &d.join("agentq")).unwrap(), json!({"decision": "allow"}));
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn hooks_keep_exact_native_names_without_alias_widening() {
+        assert_eq!(default_response("agy","Stop"),json!({}));
+        assert_eq!(response("agy","Stop","invalid",Path::new("/agentq")).unwrap(),json!({}));
     }
 
     #[test]

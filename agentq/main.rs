@@ -767,8 +767,11 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
         return 0;
     }
     let selected = if picked.is_empty() { &ready } else { &picked };
+    let (agents, skipped)=onboard::available(selected,!picked.is_empty()).unwrap_or_else(|e|fail(&e,"install the selected native client before onboarding"));
+    skipped.iter().for_each(|line|println!("{line}"));
+    if agents.is_empty() {return 0;}
     if control::host_disabled(&t.install.join("data")) != Ok(false)
-        || selected.iter().any(|a| control::disabled(&t.install.join("data"), a) != Ok(false))
+        || agents.iter().any(|a| control::disabled(&t.install.join("data"), a) != Ok(false))
     {
         fail("integration_disabled: onboarding cannot restore a disabled integration", "run `agentq enable` first");
     }
@@ -776,8 +779,6 @@ fn onboard(t: &Tool, args: &[&str]) -> i32 {
     if unit["foreign"] == true || unit["registered"].is_null() {
         fail("service registration belongs to another installation or is unreadable", "keep it and select the intended installation explicitly");
     }
-    let agents: Vec<&str> = if picked.is_empty() { ready } else { picked.into_iter().filter(|a| ready.contains(a)).collect() };
-    onboard::setup_ready(&agents).unwrap_or_else(|e|fail(&e,"install the native client before onboarding"));
     if let Err(e) = install_release(t) { fail(&e, "run `agentq service status`"); }
     let exe = t.install.join(t.exe_name());
     let wants: Vec<_> = agents.iter().flat_map(|a| onboard::wants(a, &onboard::root(a), &onboard::claude_json(), &exe)).collect();

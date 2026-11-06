@@ -9,7 +9,7 @@ static ADAPTER: Adapter = Adapter {client: Client::Claude, live: AtomicUsize::ne
 pub(super) const ENTRY: Entry = Entry { name:"claude", aliases:&[], order:1, profile_order:1, worker_order:0, onboard:true,
     profile:Profile {kind:"claude-code",label:"Claude Code",aliases:&["claude-code-cli", "claude-desktop-code"],operations:&["hooks"]},
     runtime:Some(&ADAPTER), builtin:Some(&ADAPTER),
-    root:config_root,files,setup,inspect,hook,fallback,executable:cli,diagnose:no_diagnosis,provider:None,
+    root:config_root,files,setup,inspect,hook,hook_key:"hooks",fallback,executable:cli,diagnose:no_diagnosis,provider:None,
 };
 
 fn config_root() -> PathBuf { root("CLAUDE_CONFIG_DIR", ".claude") }

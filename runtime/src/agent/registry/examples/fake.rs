@@ -4,7 +4,7 @@ use super::*;
 pub(super) const ENTRY: Entry = Entry {
     name:"example-agent",aliases:&["example"],order:0,profile_order:0,worker_order:0,onboard:true,
     profile:Profile {kind:"example-agent",label:"Example Agent",aliases:&["example-client"],operations:&["hooks"]},
-    runtime:Some(&FAKE),builtin:None,root:home,files,setup,inspect:no_inspection,hook:no_hook,fallback:empty,executable:cli,diagnose:no_diagnosis,provider:None,
+    runtime:Some(&FAKE),builtin:None,root:home,files,setup,inspect:no_inspection,hook:no_hook,hook_key:"hooks",fallback:empty,executable:cli,diagnose:no_diagnosis,provider:None,
 };
 fn home() -> PathBuf {std::env::temp_dir().join(format!("agentq-registry-example-{}",std::process::id()))}
 fn files(root: &Path) -> Vec<PathBuf> {vec![root.join("hooks.json")]}
