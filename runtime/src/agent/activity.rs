@@ -11,6 +11,9 @@ pub(super) struct Activity {
 }
 impl Activity {
     pub fn new(progress:u64)->Self {Self {cursor:super::events::Cursor::new(false),progress,pending_seen:0,last:None,tools:vec![],unknown:false,latched:false,pending_stalls:vec![]}}
+    pub fn read(&mut self,client:Client,rows:Vec<Value>)->Vec<Event> {
+        rows.into_iter().flat_map(|row|if row.is_object() {self.cursor.read(client,vec![row])} else {vec![Event::Unsupported {reason:"native record invalid"}]}).collect()
+    }
     pub fn feed(&mut self,events:Vec<Event>,now:i64) {
         for event in events {
             match event {
@@ -55,6 +58,8 @@ mod tests {
         assert_eq!(a.observation(window,1000,true).state,"unknown");
         a.feed(vec![Event::Unsupported{reason:"native record invalid"},Event::Activity],1050);
         assert_eq!(a.observation(window,1060,true).state,"unknown");
+        a.feed(vec![Event::Unsupported{reason:"native record invalid"},Event::TurnStart],1080);
+        assert_eq!(a.observation(window,1090,true).state,"stalled","a later native boundary clears earlier unreadable records in the same batch");
         a.feed(vec![Event::TurnEnd{outcome:"ok"}],1100);assert_eq!(a.observation(window,2000,false).state,"active");
     }
 }

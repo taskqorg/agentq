@@ -867,19 +867,17 @@ fn mcp_servers(file: &Path) -> Res<Vec<String>> {
 }
 
 /// Complete JSON lines of `log` from byte `from`, and the byte after the last complete line.
-fn lines_from(log: &Path, from: u64) -> Res<(Vec<Value>, u64)> {let (rows,next,_)=activity_lines(log,from)?;Ok((rows,next))}
+fn lines_from(log: &Path, from: u64) -> Res<(Vec<Value>, u64)> {let (rows,next)=activity_lines(log,from)?;Ok((rows.into_iter().filter(Value::is_object).collect(),next))}
 
-fn activity_lines(log: &Path, from: u64) -> Res<(Vec<Value>, u64,bool)> {
+fn activity_lines(log: &Path, from: u64) -> Res<(Vec<Value>, u64)> {
     let mut f = File::open(log).map_err(|e| format!("agent log unreadable: {e}"))?;
     if f.metadata().map_err(|e| e.to_string())?.len() < from { return Err("agent log truncated; progress unknown".into()); }
     let mut rest = vec![];
     f.seek(SeekFrom::Start(from)).and_then(|_| f.read_to_end(&mut rest)).map_err(|e| format!("agent log read: {e}"))?;
-    let Some(end) = rest.iter().rposition(|b| *b == b'\n') else { return Ok((vec![], from,false)) };
-    let mut invalid=false;
-    let values=rest[..end].split(|b|*b==b'\n').filter(|line|!line.iter().all(u8::is_ascii_whitespace)).filter_map(|line| {
-        match serde_json::from_slice::<Value>(line) {Ok(v) if v.is_object()=>Some(v),_=>{invalid=true;None}}
-    }).collect();
-    Ok((values, from + end as u64 + 1,invalid))
+    let Some(end) = rest.iter().rposition(|b| *b == b'\n') else { return Ok((vec![], from)) };
+    let values=rest[..end].split(|b|*b==b'\n').filter(|line|!line.iter().all(u8::is_ascii_whitespace))
+        .map(|line|serde_json::from_slice::<Value>(line).unwrap_or(Value::Null)).collect();
+    Ok((values, from + end as u64 + 1))
 }
 
 impl Adapter {
@@ -911,14 +909,13 @@ impl Adapter {
 
     fn refresh_activity(&self,run:&mut Run)->Res<()> {
         let run=self.own_mut(run)?;
-        let mut invalid=false;
         let events=match &mut run.body {
             Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].to_vec();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
-            Body::Turn(t)=>{t.sync_transcript()?;let (rows,next,bad)=activity_lines(&t.log,run.activity.progress)?;invalid=bad;run.activity.progress=next;run.activity.cursor.read(self.client,rows)},
-            Body::Native(n) if n.attached=>{let (rows,next,bad)=activity_lines(n.turn.path(),run.activity.progress)?;invalid=bad;run.activity.progress=next;run.activity.cursor.read(self.client,rows)},
+            Body::Turn(t)=>{t.sync_transcript()?;let (rows,next)=activity_lines(&t.log,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
+            Body::Native(n) if n.attached=>{let (rows,next)=activity_lines(n.turn.path(),run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             _=>vec![],
         };
-        run.activity.feed(events,unix_ms());if invalid {run.activity.feed(vec![Event::Unsupported {reason:"native record invalid"}],unix_ms());}let _=run.activity.observation(run.inactivity,unix_ms(),run.live.is_some());Ok(())
+        run.activity.feed(events,unix_ms());let _=run.activity.observation(run.inactivity,unix_ms(),run.live.is_some());Ok(())
     }
 
     fn seam_readiness(&self, command: &Command, spec: &NativeSpec, log: Option<&Path>, input: &str) -> Res<Readiness> {

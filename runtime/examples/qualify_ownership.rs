@@ -1,6 +1,14 @@
 //! Explicit native #287 qualification; the driver supplies only private temporary homes and a loopback model.
 use agentq_runtime::agent::{self, Event, NativeProcess, SessionStore, State};
 use std::{path::PathBuf, time::Duration};
+struct Cleanup(NativeProcess);
+impl Drop for Cleanup {fn drop(&mut self) {
+    let identity=coreq::process::Identity {pid:self.0.pid,started:self.0.started.clone()};
+    if NativeProcess::read(self.0.pid).ok().flatten().as_ref()==Some(&self.0) {
+        if let Err(error)=coreq::process::terminate(&identity) {eprintln!("private native fixture cleanup unknown: {error}");return;}
+        while NativeProcess::read(self.0.pid).ok().flatten().as_ref()==Some(&self.0) {std::thread::sleep(Duration::from_millis(20));}
+    }
+}}
 fn main() {
     let mut args=std::env::args_os().skip(1);
     let root=PathBuf::from(args.next().expect("private fixture root")).canonicalize().unwrap();
@@ -13,7 +21,7 @@ fn main() {
     while !root.join("request").exists() {assert_eq!(rt.poll(&mut run).unwrap(),State::Running);std::thread::sleep(Duration::from_millis(20));}
     let _=rt.observe(&mut run);
     let session=rt.session_id(&run).expect("native thread ID");let pid=run.id().unwrap();
-    let process=NativeProcess::read(pid).unwrap().unwrap();
+    let process=NativeProcess::read(pid).unwrap().unwrap();let _cleanup=Cleanup(process.clone());
     let mut independent=launch.clone();independent.session_store=SessionStore::new(root.join("independent-store"));
     assert!(rt.adopt(&session,&independent,&[process.clone()]).unwrap_err().starts_with("session-busy"));
     assert!(rt.resume(&session,&launch).err().is_some_and(|e|e.starts_with("session-busy")));

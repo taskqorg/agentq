@@ -1724,12 +1724,13 @@ fn off_reaches_codex_queue_and_app_server() {
     assert_eq!(run.optimization().reason, "optimization_retired");
     let queue = control(&root);
     assert!(!queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue lost launch off: {queue}");
-    let mut l = fake_launch("codex", &root, "owned request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref()), ("CODEX_HOME", root.as_os_str())]);
-    l.log = root.join("private.log");
+    let app_root=root.join("app-account");std::fs::create_dir_all(&app_root).unwrap();
+    let mut l = fake_launch("codex", &app_root, "owned request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref()), ("CODEX_HOME", app_root.as_os_str())]);
+    l.log = app_root.join("private.log");
     l.optimization = Intent::Off;
     l.deltas = true;
     let mut run = agent::runtime("codex").unwrap().launch(&l).unwrap();
-    let args = serde_json::from_str::<Value>(&std::fs::read_to_string(root.join("app-transport.json")).unwrap()).unwrap()["args"].clone();
+    let args = serde_json::from_str::<Value>(&std::fs::read_to_string(app_root.join("app-transport.json")).unwrap()).unwrap()["args"].clone();
     assert!(args[0] == "app-server" && !args.as_array().unwrap().iter().any(|s| s.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "app-server lost launch off: {args}");
     agent::runtime("codex").unwrap().cancel(&mut run).unwrap();
     std::fs::remove_dir_all(root).unwrap();
