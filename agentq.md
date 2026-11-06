@@ -29,7 +29,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 | `agentq agent preflight` | Check one launch request from JSON on stdin and print its readiness report; `--repair` applies only M12.16 repairs. No model call (§ 12). Target: #284. |
 | `agentq hook <agent> <event>`, `agentq model codex` | Hook handler for § 4 events, JSON on stdin and stdout (M1.2); record entry for one finished Codex model call, JSON on stdin, queues `agentq.model` (§ 6). |
 | `agentq profile [--json]`, `agentq profile trace on [<minutes>]\|off` | Ranked profile of measured operations against their budgets; detailed trace switch (§ 6). |
-| `agentq direct [agent..]` | Restore journal-owned legacy routing only; preserve record hooks, telemetry and the exact direct Codex definition for saved chats. Works with the service stopped (PRODUCT R4); foreign edits remain conflicts. |
+| `agentq direct [agent..]` | Restore journal-owned legacy routing only; preserve record hooks, telemetry and the exact direct Codex definition for saved chats. Works with the service stopped (PRODUCT R4). Changed direct-provider receipts can be released explicitly; unresolved or unowned dead routes exit nonzero with exact manual edits. |
 | `agentq disable\|enable [codex\|claude\|hermes\|claude-desktop\|antigravity] [--dry-run]` | Reversibly detach selected owned integrations or restore the saved supported fields; data and installation stay. No target selects the installation; enable without a saved disable is unchanged (§ 4). |
 | `agentq status [--json]` | Fresh local integration and service state, including intentional disable, pending reload, aliases, conflicts and observation time; works with the service stopped. |
 | `agentq configure [<profile> <field>=<value>.. [--yes]]` | Profile projection, typed plan, or guarded apply with host readback under the lifecycle lock (§ 4). Released before qualification #95. |
@@ -39,7 +39,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 
 - Each `hook` run stamps the event time as configuration evidence. A run that cannot read stdin or write stdout records `data/evidence/<agent>.<event>.failed` with its time and error. A successful run moves it to `<agent>.<event>.last_failure`, so `.failed` exists exactly while the latest run failed; the last failure stays for the heartbeat (§ 6).
 - `doctor` checks install, host tools (§ 5), service, owned edits count, local SQLite integrity, telemetry queue and optional keys. Each recorded hook failure fails, an unreadable record included.
-- `doctor` and `status` report a selected legacy `agentq` loopback provider as `legacy_agentq_route`, with next step `agentq direct`; unreadable config means unknown. Service status and heartbeat carry this diagnosis too.
+- `doctor` and `status` report a selected legacy `agentq` loopback provider as `legacy_agentq_route`, or missing provider as a problem, with next step `agentq direct`; unreadable config means unknown. Cleanup runs at service start; a stopped or disabled host needs explicit `direct` cleanup. Service status and heartbeat carry the diagnosis too.
 
 ## 2. Retired retrieval tools
 - **M2.1** AgentQ registers no MCP document tools. `get_original` retires with compression; local measured use of `index_document` and `search_document` is recorded in [OPTIMIZATION-RETIRED.md](docs/spec/OPTIMIZATION-RETIRED.md).

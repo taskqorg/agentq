@@ -486,7 +486,7 @@ fn control_report(t: &Tool) -> Value {
     let owned: Vec<_> = configuration["profiles"].as_array().into_iter().flatten().filter(|p| p["owned"] == true || p["integration"]["desired"] == "disabled").collect();
     let integration: Vec<_> = owned.iter().map(|p| match p["integration"]["configuration"].as_str() { Some("attached") => "on", Some("detached") => "off", _ => "unknown" }).collect();
     serde_json::json!({"schema": 1, "at": now(), "service": service, "configuration": configuration,
-        "retirement": read_status(t, 3 * PASS).map(|s| s["retirement"].clone()),
+        "retirement": read_status(t, 3 * PASS).map(|s| onboard::retirement_state(&journal(t),s["retirement"].clone())),
         "legacy_route": profiles::legacy_route(&clients),
         "integration": control::summary(&integration),
         "host_disabled": state.as_ref().ok().map(|s| &s["host_disabled"]),
@@ -701,7 +701,7 @@ fn serve(t: &Tool) -> ! {
             std::process::exit(75);
         }
         let mut s = status::common(t, &host(), PROJECT, now(), error.clone(), None);
-        s["retirement"] = migration.clone();
+        s["retirement"] = onboard::retirement_state(&journal(t),migration.clone());
         s["legacy_route"] = profiles::legacy_route(&profiles::clients());
         s["release"] = release::observe(t, now());
         s["queue"] = telemetry::status(&t.install.join("data"), now());
@@ -797,11 +797,19 @@ fn direct(t: &Tool, args: &[&str]) -> i32 {
     }
     let agents = if args.is_empty() { &onboard::AGENTS[..] } else { args };
     let _lock = executor::lock(&t.install.join("data")).unwrap_or_else(|e| fail(&format!("direct: {e}"), "wait for it to finish, then run `agentq direct` again"));
-    match onboard::restore(&journal(t), false, Some(agents)) {
-        Ok(lines) if lines.is_empty() => println_code(&format!("direct: {} already direct", agents.join(", "))),
+    match onboard::direct(&journal(t), agents) {
         Ok(lines) => {
-            lines.iter().for_each(|l| println!("{l}"));
-            println_code("direct: retired routing removed; native record hooks stay")
+            lines.iter().for_each(|l|println!("{l}"));
+            let clients:Vec<_>=profiles::clients().into_iter().filter(|c|agents.contains(&c.agent)).collect();
+            let diagnostic=profiles::legacy_route(&clients);
+            if lines.iter().any(|l|l.starts_with("conflict:")) || diagnostic["state"]!="absent" {
+                let file=onboard::root("codex").join("config.toml");
+                eprintln!("Error: direct access remains unverified; unresolved or unowned legacy provider");
+                eprintln!("Next: edit {}: remove top-level model_provider = \"agentq\"; replace or add [model_providers.agentq] with name = \"OpenAI\", wire_api = \"responses\", requires_openai_auth = true, supports_websockets = true (one assignment per line, no base_url); preserve other settings",file.display());
+                return 1;
+            }
+            if lines.is_empty() {println_code(&format!("direct: {} already direct",agents.join(", ")))}
+            else {println_code("direct: retired routing resolved; native record hooks stay")}
         }
         Err(e) => fail(&format!("direct: {e}"), "fix the file, then run `agentq direct` again"),
     }
@@ -930,4 +938,37 @@ mod tests {
             assert!(!unit_owned_in(platform, &owned.replace("service run", "service stop").replace("service\nrun", "service\nstop"), "/install/agentq"));
         }
     }
+    #[test]
+    fn direct_reports_dead_unowned_and_conflicting_routes_and_can_release_a_foreign_provider() {
+        let root=std::env::temp_dir().join(format!("agentq-direct-review-{}",resource::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        struct Home(Option<std::ffi::OsString>);
+        impl Drop for Home {fn drop(&mut self) {unsafe {match &self.0 {Some(v)=>std::env::set_var("CODEX_HOME",v),None=>std::env::remove_var("CODEX_HOME")}}}}
+        let _home=Home(std::env::var_os("CODEX_HOME"));
+        // Binary tests are serialized; no installed profile or CLI command is used.
+        unsafe {std::env::set_var("CODEX_HOME",&root)}
+        let mut t=tool();t.install=root.join("install");
+        let file=root.join("config.toml");
+        let owned="[model_providers.agentq]\nname = \"AgentQ\"\nbase_url = \"http://127.0.0.1:1234/v1\"\n";
+        let unowned=format!("model_provider = \"agentq\"\n{owned}");
+        std::fs::write(&file,&unowned).unwrap();
+        assert_eq!(direct(&t,&["codex"]),1,"no receipt cannot claim already direct");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(),unowned);
+        std::fs::write(&file,"model_provider = \"agentq\"\n").unwrap();
+        assert_eq!(profiles::legacy_route(&profiles::clients())["reason"],"legacy_agentq_provider_missing");
+        assert_eq!(direct(&t,&["codex"]),1,"a selected missing provider also requires repair");
+        let receipt=serde_json::json!([{"file":file,"key":["model_providers","agentq"],"kind":"text","after":owned,"routing":"codex","agent":"codex"}]);
+        std::fs::write(journal(&t),receipt.to_string()).unwrap();
+        let changed=unowned.replace(":1234/",":9876/");std::fs::write(&file,&changed).unwrap();
+        assert_eq!(direct(&t,&["codex"]),1,"an unresolved loopback conflict must fail");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(),changed);
+        assert_eq!(onboard::retirement_state(&journal(&t),serde_json::json!({"state":"conflict"}))["state"],"conflict");
+        let foreign=unowned.replace("http://127.0.0.1:1234/v1","https://provider.example/v1");std::fs::write(&file,&foreign).unwrap();
+        assert_eq!(direct(&t,&["codex"]),0,"explicit direct can release the user's non-loopback block");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(),foreign);
+        assert!(onboard::load(&journal(&t)).is_empty());
+        assert_eq!(onboard::retirement_state(&journal(&t),serde_json::json!({"state":"conflict"}))["state"],"retired");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

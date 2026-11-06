@@ -43,7 +43,7 @@ Section references and P/M rule IDs below refer to [agentq.md](../../agentq.md).
 
 `<install>/status.json` holds the coreq keys (`host`, `version`, `pid`, `at`, `project`, `error`, `update`), published as [tests/fixtures/status.json](../../tests/fixtures/status.json) and as release asset `status.json` with the release version; a test keeps the fixture equal to the written keys. It adds:
 
-- `legacy_route`: `absent`, `problem` (`legacy_agentq_route`, next `agentq direct`), or `unknown` (`unreadable_config`). `retirement` reports startup cleanup as `retired`, `conflict`, or `unknown` (`retirement_failed`); neither field proves a native turn.
+- `legacy_route`: `absent`, `problem` (`legacy_agentq_route` or `legacy_agentq_provider_missing`, next `agentq direct`), or `unknown` (`unreadable_config`). `retirement` reports startup cleanup as `retired`, `conflict`, or `unknown` (`retirement_failed`); neither field proves a native turn.
 - Record hooks, queue `{pending, oldest_age, last_delivery, dropped}`, `model_backlog` ([telemetry](TELEMETRY.md#claude-transcript-reading)) and per-profile configuration.
 - `configuration` (CONFIGURATION A2, `agentq/profiles.rs`): per existing client root its kind, opaque `id`, `revision` (keyed hash of its files, owned journal entries and lifecycle intent), hooks, plugin, effective adapter/state, `owned`, read-only project `overrides` count (Codex `[profiles.*]`, Claude Code `.claude.json` projects with MCP servers or env; null when unknown or unsupported), `conflicts` and `incomplete` codes; no paths or file text.
 

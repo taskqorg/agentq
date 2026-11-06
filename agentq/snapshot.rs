@@ -56,7 +56,7 @@ const FIELDS: [(&str, &[&str]); 2] = [
 ];
 const EFFECTIVE: [&str; 6] = ["configured", "disabled", "bypassed", "missing", "unknown", "unsupported"];
 const ADAPTERS: [&str; 3] = ["provider", "hook", "plugin"];
-const CONFLICTS: [&str; 4] = ["foreign_provider", "unparseable_config", "integration_disabled", "legacy_agentq_route"];
+const CONFLICTS: [&str; 5] = ["foreign_provider", "unparseable_config", "integration_disabled", "legacy_agentq_route", "legacy_agentq_provider_missing"];
 const INCOMPLETE: [&str; 2] = ["unreadable_config", "unreadable_control"];
 
 fn id16(v: &Value) -> Option<&str> {

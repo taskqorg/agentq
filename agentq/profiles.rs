@@ -54,19 +54,20 @@ pub fn clients() -> Vec<Client> {
     clients
 }
 
-/// Old selected loopback routing no longer has a resident provider. This reads no credentials.
-pub fn legacy_route(clients: &[Client]) -> Value {
-    let Some(c) = clients.iter().find(|c| c.agent == "codex") else { return json!({"state":"absent"}) };
-    let text = match std::fs::read_to_string(c.root.join("config.toml")) {
+pub struct Provider {pub selected:bool,pub present:bool,pub loopback:bool}
+
+pub fn codex_provider(root: &Path) -> Result<Provider,String> {
+    let text = match std::fs::read_to_string(root.join("config.toml")) {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return json!({"state":"absent"}),
-        Err(_) => return json!({"state":"unknown", "reason":"unreadable_config"}),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Provider {selected:false,present:false,loopback:false}),
+        Err(_) => return Err("unreadable_config".into()),
     };
     let mut section = "";
-    let (mut selected, mut loopback) = (false, false);
+    let (mut selected, mut loopback, mut present) = (false, false, false);
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with('[') { section = line.split('#').next().unwrap_or("").trim(); continue; }
+        if line.starts_with('[') { section = line.split('#').next().unwrap_or("").trim();
+            present |= section == "[model_providers.agentq]"; continue; }
         let Some((key, value)) = line.split_once('=') else { continue };
         let value = value.trim().trim_matches(['"', '\'']).split(['"', '\'']).next().unwrap_or("");
         if section.is_empty() && key.trim() == "model_provider" { selected = value == "agentq"; }
@@ -75,8 +76,17 @@ pub fn legacy_route(clients: &[Client]) -> Value {
             loopback = host.is_some_and(|s| s == "localhost" || s.starts_with("localhost:") || s.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback()) || s.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback()));
         }
     }
-    if selected && loopback { json!({"state":"problem", "reason":"legacy_agentq_route", "next":"agentq direct"}) }
-    else { json!({"state":"absent"}) }
+    Ok(Provider {selected,present,loopback})
+}
+
+/// Read-only evidence of a selected legacy provider; no endpoint or credential is exported.
+pub fn legacy_route(clients: &[Client]) -> Value {
+    let Some(c)=clients.iter().find(|c|c.agent=="codex") else {return json!({"state":"absent"})};
+    match codex_provider(&c.root) {
+        Err(_)=>json!({"state":"unknown","reason":"unreadable_config"}),
+        Ok(p) if p.selected && (!p.present || p.loopback)=>json!({"state":"problem","reason":if p.present {"legacy_agentq_route"} else {"legacy_agentq_provider_missing"},"next":"agentq direct"}),
+        Ok(_)=>json!({"state":"absent"}),
+    }
 }
 
 fn sign(key: &hmac::Key, parts: &[&[u8]]) -> String {

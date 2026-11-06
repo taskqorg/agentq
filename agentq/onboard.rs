@@ -126,6 +126,7 @@ fn read_config(path: &Path) -> Result<Option<String>, String> {
 pub fn apply(wants: &[Want], journal: &Path) -> Result<Vec<String>, String> {
     // An owned plugin file still holding the bytes this journal wrote follows the release; journal first.
     let mut j = load(journal);
+    let mut out = vec![];
     for w in wants.iter().filter(|w| w.key == ["$file"]) {
         let (Some(old), Some(wanted)) = (read_config(&w.file)?, w.value.as_str()) else { continue };
         let file = w.file.display().to_string();
@@ -134,13 +135,13 @@ pub fn apply(wants: &[Want], journal: &Path) -> Result<Vec<String>, String> {
         e["after"] = wanted.into();
         save(journal, &j)?;
         write_atomic(&w.file, wanted)?;
+        out.push(format!("edited: {} (owned plugin updated)",w.file.display()));
     }
     // Do not enable a plugin whose source files cannot be installed safely.
     for w in wants.iter().filter(|w| w.key == ["$file"]) {
         let old = read_config(&w.file)?;
         place(old.as_deref().unwrap_or(""), w)?;
     }
-    let mut out = vec![];
     let mut files: Vec<&Path> = wants.iter().map(|w| w.file.as_path()).collect();
     files.sort();
     files.dedup();
@@ -162,7 +163,9 @@ pub fn apply(wants: &[Want], journal: &Path) -> Result<Vec<String>, String> {
         });
         match placed {
             Err(e) => out.push(format!("conflict: {} {e}; file unchanged", f.display())),
-            Ok(()) if entries.is_empty() => out.push(format!("kept: {}", f.display())),
+            Ok(()) if entries.is_empty() => {
+                if !out.contains(&format!("edited: {} (owned plugin updated)",f.display())) {out.push(format!("kept: {}", f.display()));}
+            },
             Ok(()) => {
                 for e in &mut entries {
                     e["file"] = f.display().to_string().into();
@@ -486,6 +489,55 @@ pub fn restore(journal: &Path, dry: bool, routing: Option<&[&str]>) -> Result<Ve
     restore_where(journal, dry, routing.is_some(), &pick)
 }
 
+fn prune_empty_owned(text: &str, entries: impl Iterator<Item=Value>) -> String {
+    let Ok(mut doc)=serde_json::from_str::<Value>(text) else {return text.into()};
+    fn prune(doc: &mut Value, keys: &[&str]) {
+        let Some((key,tail))=keys.split_first() else {return};
+        let Some(child)=doc.get_mut(*key) else {return};
+        prune(child,tail);
+        if child.as_object().is_some_and(|o|o.is_empty()) || child.as_array().is_some_and(|a|a.is_empty()) {
+            if let Some(o)=doc.as_object_mut() {o.shift_remove(*key);}
+        }
+    }
+    for e in entries {let keys:Vec<_>=e["key"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();prune(&mut doc,&keys);}
+    dump(&doc,text)
+}
+
+/// Explicit direct keeps foreign provider bytes and can release their obsolete routing receipt.
+pub fn direct(journal: &Path, agents: &[&str]) -> Result<Vec<String>,String> {
+    // Strict read before restore: corrupt ownership is never interpreted as no ownership.
+    let mut entries:Vec<Value>=match read_config(journal)? {Some(s)=>serde_json::from_str(&s).map_err(|_|"owned.json unreadable")?,None=>vec![]};
+    let mut out=restore(journal,false,Some(agents))?;
+    if journal.exists() {entries=serde_json::from_str(&std::fs::read_to_string(journal).map_err(|_|"owned.json unreadable")?).map_err(|_|"owned.json unreadable")?;}
+    let mut released=false;
+    entries.retain(|e| {
+        if !agents.iter().any(|a|e["routing"]==*a) {return true;}
+        let Some(file)=e["file"].as_str() else {return true};
+        let Some(root)=Path::new(file).parent() else {return true};
+        let Ok(p)=crate::profiles::codex_provider(root) else {return true};
+        let accept=(e["key"]==json!(["model_providers","agentq"]) && p.present && !p.loopback)
+            || (e["key"]==json!(["model_provider"]) && (!p.selected || p.present && !p.loopback));
+        if !accept {return true;}
+        let what=format!("{} {}",file,e["key"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("."));
+        out.retain(|line|line!=&format!("conflict: {what} changed since onboard; kept"));
+        out.push(format!("released ownership: {what}; foreign edit kept"));
+        released=true;false
+    });
+    if released {save(journal,&entries)?;}
+    Ok(out)
+}
+
+/// Fresh ownership can resolve a recorded startup conflict without restarting a healthy service.
+pub fn retirement_state(journal: &Path, prior: Value) -> Value {
+    if prior["state"]!="conflict" {return prior;}
+    let entries=read_config(journal).and_then(|s|s.map_or(Ok(vec![]),|s|serde_json::from_str::<Vec<Value>>(&s).map_err(|_|"owned.json unreadable".into())));
+    match entries {
+        Ok(entries) if !entries.iter().any(retired_entry)=>json!({"state":"retired"}),
+        Ok(_)=>prior,
+        Err(_)=>json!({"state":"unknown","reason":"retirement_failed"}),
+    }
+}
+
 /// `restore` of the entries `pick` selects by journal index; `forget` drops the restored ones from the journal.
 pub fn restore_where(journal: &Path, dry: bool, forget: bool, pick: &dyn Fn(usize, &Value) -> bool) -> Result<Vec<String>, String> {
     let mut out = vec![];
@@ -504,6 +556,9 @@ pub fn restore_where(journal: &Path, dry: bool, forget: bool, pick: &dyn Fn(usiz
             out.push(format!("conflict: {what} changed since onboard; kept"));
             continue;
         };
+        if e["created"]==true || e["retired_parent"].is_string() {
+            text=prune_empty_owned(&text,done.iter().copied().chain(std::iter::once(i)).filter(|&n|j[n]["file"]==e["file"]).map(|n|j[n].clone()));
+        }
         if let Some(o) = e["orig"].as_str().filter(|o| serde_json::from_str::<Value>(no_bom(o)).ok().is_some_and(|v| Some(v) == serde_json::from_str(&text).ok())) {
             text = o.into();
         }
@@ -874,6 +929,8 @@ mod tests {
         let new = wants("hermes", &d, &d.join("unused"), Path::new("/agentq"));
         let out = apply(&new, &journal).unwrap();
         assert!(out.iter().all(|l| !l.starts_with("conflict:")), "{out:?}");
+        assert!(out.contains(&format!("edited: {} (owned plugin updated)",source.display())),"{out:?}");
+        assert!(!out.contains(&format!("kept: {}",source.display())),"{out:?}");
         assert!(std::fs::read_to_string(&source).unwrap().contains("post_api_request"));
         restore(&journal, false, None).unwrap();
         assert!(!source.exists(), "the upgraded owned file is still removed on restore");
@@ -1029,6 +1086,27 @@ mod tests {
         assert_eq!(migrate(&journal, &clients, &root.join("agentq")), Err("owned.json unreadable".into()));
         assert_eq!(std::fs::read_to_string(&journal).unwrap(), "corrupt");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrated_created_hook_file_is_removed_but_foreign_empty_keys_survive() {
+        for foreign in [false,true] {
+            let root=std::env::temp_dir().join(format!("agentq-created-hooks-{}",crate::resource::new_id()));
+            std::fs::create_dir_all(&root).unwrap();
+            let file=root.join("hooks.json");let journal=root.join("owned.json");
+            let requests=wants("codex",&root,Path::new("unused"),Path::new("/agentq"));
+            apply(&requests,&journal).unwrap();
+            let clients=vec![crate::profiles::Client {kind:"codex",agent:"codex",root:root.clone(),files:vec![file.clone()]}];
+            migrate(&journal,&clients,Path::new("/agentq")).unwrap();
+            if foreign {
+                let mut doc:Value=serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+                doc["foreign"]=json!({});std::fs::write(&file,doc.to_string()).unwrap();
+            }
+            let out=restore(&journal,false,None).unwrap();assert!(!out.iter().any(|l|l.starts_with("conflict:")),"{out:?}");
+            if foreign {let doc:Value=serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();assert_eq!(doc,json!({"foreign":{}}));}
+            else {assert!(!file.exists(),"migration must preserve created-file uninstall ownership");}
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
 }

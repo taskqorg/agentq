@@ -41,7 +41,7 @@ A foreign Unix file or link at `~/.local/bin/agentq` is preserved and reported a
 - `agentq update [--check]`, `selftest`, `service status` check the installation.
 - `agentq uninstall --dry-run`, then `uninstall`, restores unchanged owned edits and removes the service/install.
 
-Service startup removes unchanged journal-owned optimizer registrations and updates an owned Hermes plugin to record-only. Foreign changes remain reported conflicts. A selected legacy Codex loopback endpoint is a problem with next step `agentq direct`. Reload clients normally; never kill active work to clear pending status.
+Cleanup runs at service start; an update alone does not clean a stopped service or disabled host. Use `agentq direct` for explicit routing cleanup. Service startup removes unchanged journal-owned optimizer registrations and updates an owned Hermes plugin to record-only. Foreign changes remain reported conflicts. A selected loopback or missing Codex provider is a problem with next step `agentq direct`; unowned dead routes and unresolved conflicts exit nonzero with manual edits. Reload clients normally; never kill active work to clear pending status.
 
 ## Run agent turns
 
