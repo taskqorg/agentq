@@ -46,7 +46,7 @@ fn main() -> Result<(), String> {
     if plain.outcome != "ok" { return Err(format!("plain outcome {}: {}", plain.outcome, plain.error)); }
     if name != "codex" {
         let mut counts=std::collections::BTreeMap::<&str,usize>::new();
-        for event in &observed {let kind=match event {Event::Text{..}=>"Text",Event::Message{..}=>"Message",Event::ToolStart{..}=>"ToolStart",Event::ToolEnd{..}=>"ToolEnd",Event::Quota(_)=>"Quota",Event::Context{..}=>"Context",Event::TurnStart=>"TurnStart",Event::TurnEnd{..}=>"TurnEnd",Event::Progress=>"Progress",Event::Unsupported{..}=>"Unsupported",Event::Activity=>"Activity",Event::Stalled{..}=>"Stalled"};*counts.entry(kind).or_default()+=1;}
+        for event in &observed {let kind=match event {Event::Text{..}=>"Text",Event::Message{..}=>"Message",Event::ToolStart{..}=>"ToolStart",Event::ToolEnd{..}=>"ToolEnd",Event::Quota(_)=>"Quota",Event::Context{..}=>"Context",Event::TurnStart=>"TurnStart",Event::TurnEnd{..}=>"TurnEnd",Event::Progress=>"Progress",Event::Unsupported{..}=>"Unsupported",Event::Request{..}=>"Request",Event::Metadata{..}=>"Metadata",Event::Stalled{..}=>"Stalled",Event::Activity=>"Activity"};*counts.entry(kind).or_default()+=1;}
         let statuses: Vec<_> = observed.iter().filter_map(|event| match event { Event::ToolEnd { status, .. } => Some(status), _ => None }).collect();
         println!("{}",json!({"runtime":name,"outcome":plain.outcome,"session":plain.session,"limits":plain.limits,"events":counts,"tool_end_statuses":statuses,"log":l.log,"delta_capability":runtime.descriptor().has("turn-deltas")}));
         if name == "antigravity" { antigravity_tools_completed(&observed)?; }

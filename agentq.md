@@ -176,6 +176,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - The registry is the sole catalog for runtime descriptors and aliases, native policy/login methods, configuration roots and files, setup edits, hook actions and profile inspection. Each native client owns one module; Desktop Chat has its own integration-only entry.
   Shared execution selects registered methods. Runtime modules own event, report, transcript and quota parsing; native identities are registration data, not variants in a core enum.
 - Registry modules are discovered at build time. Adding a module adds its entry without editing a core list; a scripted fake demonstrates launch, events and report through one added runtime module.
+  A shared ACP adapter owns protocol state; registration supplies native launch data and differences. Antigravity uses the installed `agy acp`; legacy native seams remain until cross-platform comparison passes ([ACP sessions](docs/spec/RUNTIME.md#acp-sessions)).
   Required callbacks are typed; validation rejects incomplete metadata and duplicate identities. Behavioral checks compare declared and undeclared capabilities with their operations.
   Setup checks CLI presence before native writes; discovery skips missing CLIs, while explicitly selected missing clients refuse.
 - **M12.10** Permissions arrive as an abstract `Policy`; adapters map it to native flags and refuse launch for a part they cannot enforce. An operation a runtime lacks returns a named cause, never a fake success.

@@ -10,6 +10,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod history;
+mod stdio;
+mod acp;
 mod native;
 use registry::app;
 mod protected;
@@ -20,12 +22,12 @@ pub(crate) use adapter::test_receipts;
 mod capture;
 mod events;
 mod limits;
-pub use events::{AssistantFailure, Event, LogRecord, Model, RecordTime, TimeFault, ToolKind};
+pub use events::{AssistantFailure, Choice, Event, LogRecord, Model, RecordTime, RequestKind, TimeFault, ToolKind};
 pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
-pub use adapter::{Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
