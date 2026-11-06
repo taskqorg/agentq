@@ -8,7 +8,7 @@ fn main() {
     if let Some(home)=std::env::var_os("AGENTQ_CHECK_ACP_HOME") {
         let r=agent::runtime("antigravity").unwrap();let home=PathBuf::from(home);
         assert_eq!(r.home(),Some(home.clone()));
-        assert_eq!(r.home_env("fixtureq","other"),vec![("GEMINI_HOME".into(),home.join("fixtureq-accounts/other").into_os_string())]);
+        assert_eq!(r.home_env("fixtureq","other"),vec![("GEMINI_HOME".into(),home.join("fixtureq-accounts").join("other").into_os_string())]);
         assert_eq!(r.protected_paths(None),vec![home.clone(),home.join("config")]);return;
     }
     if std::env::var_os("AGENTQ_FAKE_ACP").is_some() {return server();}

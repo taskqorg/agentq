@@ -1,6 +1,7 @@
 //! Bind the native server and its startup shim descendants before any protocol input.
 use super::*;
 use std::{ffi::c_void,os::windows::io::{AsRawHandle,FromRawHandle,OwnedHandle}};
+#[repr(C)] #[derive(Default)] struct Time {low:u32,high:u32}
 #[link(name="kernel32")]
 unsafe extern "system" {
     fn CreateJobObjectW(attributes:*const c_void,name:*const u16)->*mut c_void;
@@ -10,7 +11,7 @@ unsafe extern "system" {
     fn TerminateProcess(process:*mut c_void,code:u32)->i32;
     fn OpenProcess(access:u32,inherit:i32,pid:u32)->*mut c_void;
     fn GetProcessId(process:*mut c_void)->u32;
-    fn GetProcessTimes(process:*mut c_void,created:*mut u64,exit:*mut u64,kernel:*mut u64,user:*mut u64)->i32;
+    fn GetProcessTimes(process:*mut c_void,created:*mut Time,exit:*mut Time,kernel:*mut Time,user:*mut Time)->i32;
     fn CreateToolhelp32Snapshot(flags:u32,pid:u32)->*mut c_void;
     fn Process32FirstW(snapshot:*mut c_void,entry:*mut Entry)->i32;
     fn Process32NextW(snapshot:*mut c_void,entry:*mut Entry)->i32;
@@ -23,8 +24,8 @@ unsafe extern "system" {fn NtSuspendProcess(process:*mut c_void)->i32;fn NtResum
 #[repr(C)] #[derive(Default)] struct Limits {basic:Basic,io:Io,process_memory:usize,job_memory:usize,peak_process:usize,peak_job:usize}
 fn error(operation:&str)->String {format!("native job {operation}: {}",std::io::Error::last_os_error())}
 fn created(handle:*mut c_void)->Res<u64> {
-    let(mut start,mut exit,mut kernel,mut user)=(0,0,0,0);
-    if unsafe {GetProcessTimes(handle,&mut start,&mut exit,&mut kernel,&mut user)}==0 {return Err(error("creation identity"));}Ok(start)
+    let(mut start,mut exit,mut kernel,mut user)=(Time::default(),Time::default(),Time::default(),Time::default());
+    if unsafe {GetProcessTimes(handle,&mut start,&mut exit,&mut kernel,&mut user)}==0 {return Err(error("creation identity"));}Ok((u64::from(start.high)<<32)|u64::from(start.low))
 }
 struct Frozen {handle:OwnedHandle,pid:u32,created:u64,resume:bool}
 impl Drop for Frozen {fn drop(&mut self) {unsafe {if self.resume {NtResumeProcess(self.handle.as_raw_handle());}else{TerminateProcess(self.handle.as_raw_handle(),1);}}}}
