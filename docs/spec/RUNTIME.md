@@ -44,7 +44,7 @@ ACP imposes no record-size, queue-size or shutdown-grace limit. EOF closes its o
 
 ## Additional native launch registrations
 
-The catalog exposes qualification independently of protocol support. An entry with missing native proof is `unqualified`: its descriptor and reason remain inspectable, but runtime lookup and the offered runtime list do not return a launchable adapter. Installing a CLI, protocol-double checks and CI never promote it. Qualification binds the exact native version and platform and includes the common worker preflight when that implementation lands.
+The catalog exposes qualification independently of protocol support. An entry with missing native proof is `unqualified`: its descriptor and reason remain inspectable, but runtime lookup and the offered runtime list do not return a launchable adapter. Installing a CLI, protocol-double checks and CI never promote it. Qualification binds the exact native version and platform and includes the canonical worker preflight before native input.
 
 | Runtime | Protocol and command | Minimum verified upstream release | Home | Candidate qualification |
 |---|---|---|---|---|
