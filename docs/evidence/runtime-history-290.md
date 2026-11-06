@@ -82,3 +82,41 @@ session discovery; the focused source regression verifies that shared binding.
 Raw SQLite source parts contain the complete DB/WAL files, potentially including
 other sessions. Session-scoped projections do not authorize exporting those complete
 files; archive consumers retain their separate content authority checks.
+
+## Source-integrity review corrections
+
+Snapshots now validate every session-bearing native envelope/row and recognized
+metadata companion before publishing any page or media references. Cline metadata
+and Kiro metadata are included in the manifest and supply reported model/parent
+facts. Kiro toolUseId joins call/result revisions and thinking is typed. Kimi wires
+use native agent layout identity with state.json parent lineage; the parent session
+remains addressable and children no longer share its identity. OPENCODE_DB applies
+to both OpenCode readers. OpenCode file parts preserve document/audio/video/image
+MIME semantics, and external media scans physical revisions using normalized native
+containers without interpreting assistant/user JSON prose as references.
+
+Each native file has verified platform identity in the manifest/checkpoint binding;
+identical-byte replacement produces a new generation/reset. DB/WAL/index are read
+only as byte streams, checked again for content/identity change, and SQLite opens
+only a private copy. WAL headers, active frames and checksums are validated. A stable
+raw WAL-index header binds the last committed frame/checksum and excludes old
+physical frames left after native WAL restart; the private WAL copy contains only
+that validated prefix. Without an index, invalid/truncated WAL refuses. A missing
+or corrupt committed frame refuses transactionally rather than projecting stale
+before-state. Native index files are never opened through SQLite or written.
+
+Fifty focused source, source-authority, media, accounting, live and step regressions
+pass, plus offline selftest, workflow-pinned lint and diff checks. Eight source
+boundary regressions cover all review findings, recovered identical-byte
+replacement, physical media revisions and valid WAL restart tails as well as
+truncated/corrupt commits. The existing scrubbed SQL projection test now selects
+its actual scrubbed native session ID instead of relabelling its rows.
+
+Fresh read-only checks on this Mac still read the previous Hermes proof turn as
+five steps with HISTORY_OK, exact SQLite header and empty recovered next page.
+OpenCode discovery returns 62 sources and the selected historical session returns
+128 steps, with DB/WAL/SHM hashes unchanged and no recovered duplicate. No new
+native/paid turn, full local suite, login or working configuration change occurred.
+The prior OpenCode fresh-turn 404/402 and all native Windows/WSL, archive-export and
+viewer gaps remain. Raw database/WAL/index source parts can contain other sessions;
+local session selection still grants no off-host export authority.
