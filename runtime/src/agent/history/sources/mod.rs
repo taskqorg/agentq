@@ -87,5 +87,8 @@ pub(super) fn identify(name:&str,path:&Path)->Res<Vec<super::sessions::Source>> 
     let ids=snapshot::identities(spec,path)?;
     Ok(ids.into_iter().map(|(session,parent)|super::sessions::Source {id:source_id(name,path,&session),native_session:session.clone(),session,path:path.into(),format:spec.format.into(),parent,parent_step:None}).collect())
 }
+pub(super) fn same_family(runtime:&str,parent:&Path,child:&Path)->Res<bool> {
+    if runtime=="kimi" {kimi::family(parent,child)}else{Ok(true)}
+}
 pub(in crate::agent::history) use snapshot::{steps,source_bytes,media_steps};
 pub(in crate::agent) fn history_runtime(name:&str)->Option<&'static dyn super::super::Runtime> {runtime::get(name)}
