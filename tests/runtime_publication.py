@@ -1,8 +1,14 @@
-"""A7: an existing runtime tag must identify the checked SHA, never silently accept another candidate."""
+"""A7: an existing runtime tag must identify the checked SHA, never silently accept another candidate.
+
+#260 A1: a consumer that spells the documented CoreQ dependency beside the runtime resolves one CoreQ source.
+"""
 import importlib.util
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 import tomllib
 import unittest
 from unittest.mock import patch
@@ -38,6 +44,29 @@ class Publication(unittest.TestCase):
                     else:
                         with self.assertRaises(ValueError):
                             tag_runtime.main()
+
+
+class OneCoreQSource(unittest.TestCase):
+    # Risk: a runtime pin apart from the consumer's makes two CoreQ crates, two `Store` types and a refused TaskQ web build.
+    def test_consumer_of_runtime_and_coreq_resolves_one_source(self):
+        repository = Path(__file__).resolve().parents[1]
+        pin = tomllib.loads((repository / 'runtime/Cargo.toml').read_text())['dependencies']['coreq']
+        self.assertEqual(pin, tomllib.loads((repository / 'Cargo.toml').read_text())['dependencies']['coreq'])
+        self.assertEqual(set(pin), {'git', 'tag'}, 'the documented consumer spelling is a tag')
+        with tempfile.TemporaryDirectory() as temporary:
+            consumer = Path(temporary)
+            (consumer / 'src').mkdir()
+            (consumer / 'src/lib.rs').write_text('')
+            shutil.copy(repository / 'Cargo.lock', consumer / 'Cargo.lock')
+            (consumer / 'Cargo.toml').write_text(
+                '[package]\nname = "consumer"\nversion = "0.0.0"\nedition = "2024"\n\n[dependencies]\n'
+                f"agentq-runtime = {{ path = '{(repository / 'runtime').as_posix()}' }}\n"
+                f'coreq = {{ git = "{pin["git"]}", tag = "{pin["tag"]}" }}\n\n[workspace]\n')
+            metadata = subprocess.run([os.environ.get('CARGO', 'cargo'), 'metadata', '--format-version', '1', '--offline'],
+                                      cwd=consumer, check=True, text=True, capture_output=True).stdout
+        sources = {p['source'] for p in json.loads(metadata)['packages'] if p['name'] in ('coreq', 'coreq-instrument')}
+        self.assertEqual(len(sources), 1, sources)
+        self.assertIn(f'?tag={pin["tag"]}#', sources.pop())
 
 
 if __name__ == '__main__':
