@@ -20,7 +20,7 @@ mod events;
 mod limits;
 pub use events::{Event, LogRecord, Model, RecordTime, TimeFault, ToolKind};
 pub use limits::Window;
-pub use capture::{APPEND_CHUNK, Call, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
+pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::{Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
@@ -522,6 +522,8 @@ pub struct Turn {
     receipt: Option<std::sync::mpsc::Receiver<Res<String>>>,
     /// Samples the owned process tree; None for a recovered child or a sidecar submission.
     sampler: Option<capture::Sampler>,
+    /// The report and record identity, frozen at the terminal observation.
+    terminal: Option<(Report, String)>,
 }
 
 fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64) }
@@ -579,7 +581,7 @@ impl Turn {
             drop(stdin);
         }
         Ok(Turn { client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
-            ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt, sampler })
+            ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt, sampler, terminal: None })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }
@@ -611,7 +613,7 @@ impl Turn {
         let age = Duration::from_millis(unix_ms().saturating_sub(started_ms).max(0) as u64);
         Ok(Turn { client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(),
             start, pos: start, ended: false, stopping: false, timed_out: flag("timed_out")?, started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
-            started_ms, exit: None, home: spec_home(spec), resumed, ag: AntigravityTranscript::default(), receipt: None, sampler: None })
+            started_ms, exit: None, home: spec_home(spec), resumed, ag: AntigravityTranscript::default(), receipt: None, sampler: None, terminal: None })
     }
 
     fn sync_antigravity_transcript(&mut self) -> Res<()> {
@@ -661,6 +663,12 @@ impl Turn {
     /// The exit code once the process exited, else None. After a turn-end event a lingering process is stopped
     /// (Codex on Windows kept running after its turn ended).
     pub fn poll(&mut self) -> Res<Option<i32>> {
+        let code = self.poll_exit()?;
+        if code.is_some() { self.freeze()?; }
+        Ok(code)
+    }
+
+    fn poll_exit(&mut self) -> Res<Option<i32>> {
         if self.ag.native_agentapi {
             if self.exit.is_none() {
                 self.exit = self.child.try_wait()?.map(|c| c.unwrap_or(-1));
@@ -701,6 +709,7 @@ impl Turn {
                 let _ = self.kill();
                 if self.ag.native_agentapi {
                     if let Some(code) = self.exit {
+                        self.freeze()?;
                         return Ok(code);
                     }
                 }
@@ -709,22 +718,43 @@ impl Turn {
         }
     }
 
-    /// Immutable identity of this turn's `agent.call` records: recovery rebuilds the same one.
-    pub(crate) fn key(&self) -> String {
-        let session = session_of(self.client, &read_from(&self.log, self.start).unwrap_or_default()).or_else(|| self.ag.session.clone()).or_else(|| self.resumed.clone());
-        crate::sha256_hex(format!("{}\0{}\0{}\0{}\0{}", self.client.code(), session.as_deref().unwrap_or(""), self.log.display(), self.start, self.started_ms).as_bytes())
+    /// Immutable identity of this turn's records: recovery rebuilds the same one.
+    fn key(&self, session: Option<&str>) -> String {
+        crate::sha256_hex(format!("{}\0{}\0{}\0{}\0{}", self.client.code(), session.unwrap_or(""), self.log.display(), self.start, self.started_ms).as_bytes())
     }
 
-    /// The turn's report from its log bytes; call after `poll` returned an exit.
+    /// Fix the report at the terminal observation, once: later log bytes, a later cancel and elapsed time never change it.
+    /// An unreadable log freezes nothing, so the turn stays unobserved and the next poll retries.
+    pub(crate) fn freeze(&mut self) -> Res<()> {
+        if self.terminal.is_some() { return Ok(()); }
+        let report = self.read_report(&read_log(&self.log, self.start).map_err(|e| format!("agent log read: {e}"))?);
+        let key = self.key(report.session.as_deref());
+        self.terminal = Some((report, key));
+        Ok(())
+    }
+
+    /// The report frozen at the terminal observation.
+    pub(crate) fn terminal_report(&self) -> Option<Report> { self.terminal.as_ref().map(|(r, _)| r.clone()) }
+
+    /// The turn's records from its frozen report; a turn without a terminal observation reads `running`.
+    pub(crate) fn snapshot(&self, ctx: &Context) -> Res<Frozen> {
+        let (r, key) = self.terminal.as_ref().ok_or("running")?;
+        capture::freeze("agent.turn", key, &r.observation(self.client, ctx), r, self.client, ctx)
+    }
+
+    /// The report frozen at the terminal observation, else from the current log bytes; call after `poll` returned an exit.
     pub fn report(&self) -> Report {
-        let text = read_from(&self.log, self.start).unwrap_or_default();
+        self.terminal_report().unwrap_or_else(|| self.read_report(&read_from(&self.log, self.start).unwrap_or_default()))
+    }
+
+    fn read_report(&self, text: &str) -> Report {
         let events: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        let session = session_of(self.client, &text).or_else(|| self.ag.session.clone()).or_else(|| self.resumed.clone());
+        let session = session_of(self.client, text).or_else(|| self.ag.session.clone()).or_else(|| self.resumed.clone());
         let rollout = match self.client {
             Client::Codex => session.as_deref().and_then(|t| rollout(t, self.home.as_deref())),
             Client::Claude | Client::Antigravity => None,
         };
-        let mut r = Report::read(self.client, &text, &events, rollout.as_deref());
+        let mut r = Report::read(self.client, text, &events, rollout.as_deref());
         r.session = session;
         r.duration_us = self.started.elapsed().as_micros() as u64;
         r.started_ms = self.started_ms;
@@ -793,8 +823,7 @@ pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: 
     let mut turn = Turn::start(base, spec, log, text, &Process::default())?;
     turn.wait(deadline)?;
     let mut r = turn.report();
-    let key = turn.key();
-    r.recorded = crate::telemetry::Event::observation(r.observation(spec.client, ctx)).and_then(|e| capture::record(store, e, &r, spec.client, ctx, &key));
+    r.recorded = turn.snapshot(ctx).and_then(|f| f.append(store));
     Ok(r)
 }
 

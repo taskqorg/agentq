@@ -1,5 +1,14 @@
 # Runtime changelog
 
+## 0.12.0
+
+- Add `Run::snapshot(&Context) -> Res<Frozen>` for deferred persistence, and `Frozen::{events, append, save, restore}`. A snapshot needs no store, lock or native call, and repeated calls return the same value with the first caller context.
+- A terminal poll freezes the CLI report, its duration and resource use once. `Runtime::report`, `Turn::report` and `Run::record` read that value, so later shared-log bytes, queue delay, a late cancel or a passing deadline never change a finished turn. A repeated `poll` no longer rereads the log.
+- A CLI `agent.turn` now has an immutable ID instead of a random one, so a retry or a recovered run counts once. Stored records and `agent.call` IDs stay valid; new CLI turn records carry the new ID form.
+- `Run::record` retries after a failed append instead of refusing; a second call after a success stays refused. A background or queue record no longer reads the transcript again.
+
+No existing signature changes. `Run` checkpoints gain an optional `frozen` field; a checkpoint without it restores as before. Grants, policy, native arguments and the CoreQ pin stay unchanged.
+
 ## 0.11.0
 
 - Add `Report.live_background` (also in the JSON turn report): one fixed `Bash` or `Monitor` label per live Claude job, oldest first. Descriptions, commands, arguments and task IDs stay inside the adapter. Equal labels remain separate entries. `Report.background_job` is true exactly when this list is not empty.
