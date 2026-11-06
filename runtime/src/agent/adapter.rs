@@ -1026,6 +1026,7 @@ impl Adapter {
         let command = preflight::launch_base(self,l)?;
         if let Some(config)=self.acp(l)? {
             if l.mode!=Mode::Turn {return Err("mode unsupported by ACP".into());}
+            let mut command=command;command.envs(spec.env.iter().cloned());
             return Ok(self.run(Body::Acp(Box::new(super::acp::Session::open(command,config,l,session)?)),0,optimization,l));
         }
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),

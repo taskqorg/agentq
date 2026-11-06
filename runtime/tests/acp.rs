@@ -16,12 +16,14 @@ fn main() {
     l.model=Some("model-1".into());
     l.policy.approval=agent::Approval::Edits;
     let mut run=r.launch(&l).unwrap();
+    assert_eq!(r.checkpoint(&run).unwrap_err(),agent::Cause("no-checkpoint"));
     let mut seen=vec![];
     loop {
         let events=r.progress(&mut run).unwrap();
         for event in &events {if let Event::Request{id,..}=event {
             assert!(r.control(&mut run,Control::Reply{id:id.clone(),option:Some("invented".into())}).is_err());
             r.control(&mut run,Control::Reply{id:id.clone(),option:Some("once".into())}).unwrap();
+            assert!(r.control(&mut run,Control::Reply{id:id.clone(),option:Some("once".into())}).is_err());
         }}
         seen.extend(events);
         if r.poll(&mut run).unwrap()!=State::Running {break;}
@@ -34,6 +36,7 @@ fn main() {
     assert!(seen.iter().any(|e|matches!(e,Event::ToolEnd{id:Some(id),..} if id=="tool-1")));
     assert!(seen.iter().any(|e|matches!(e,Event::Metadata{kind,..} if kind=="future_update")));
     assert!(r.progress(&mut run).unwrap().is_empty());
+    assert!(r.control(&mut run,Control::Reply{id:json!("permission-1"),option:Some("once".into())}).is_err());
     l.input="second".into();
     let mut resumed=r.resume("session-1",&l).unwrap();
     r.cancel(&mut resumed).unwrap();
