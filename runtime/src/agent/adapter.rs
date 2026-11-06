@@ -27,6 +27,7 @@ pub struct Descriptor {
 
 impl Descriptor {
     pub fn has(&self, capability: &str) -> bool { self.capabilities.contains(&capability) }
+    pub fn history_support(&self)->Res<Value> {super::history::sources::capability(self.name)}
     pub fn history_resume(&self, session: &str, process: State) -> Res<Vec<String>> {
         super::history::sessions::resume(self.name, session, process)
     }
@@ -821,7 +822,7 @@ pub fn runtimes() -> Vec<&'static dyn Runtime> {
     entries.into_iter().filter_map(|e| e.runtime).collect()
 }
 
-pub fn runtime(name: &str) -> Option<&'static dyn Runtime> { registry::entry(name)?.runtime }
+pub fn runtime(name: &str) -> Option<&'static dyn Runtime> { registry::entry(name).and_then(|e|e.runtime).or_else(||super::history::sources::history_runtime(name)) }
 
 fn mapped(client: Client, _name: &str, l: &Launch) -> Res<Vec<OsString>> { (table(client).ops.mapped)(l) }
 

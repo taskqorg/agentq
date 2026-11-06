@@ -909,3 +909,74 @@ Runtime `Event::Image` retains the native item identity, whether it is generated
 its saved path and the full native image item. Codex imageGeneration/image_generation
 and savedPath/saved_path survive the trait boundary, including generation failure
 with no saved path; consumers need no native JSON parsing for those facts.
+
+## History sources
+
+Qualification record: [runtime-history-290.md](../evidence/runtime-history-290.md).
+
+The Runtime trait also resolves history-only adapters. These adapters advertise only
+history; launch, resume, input, control, account and process operations explicitly
+refuse as history-only. The existing execution-runtime enumeration remains unchanged;
+`history::sources::runtimes()` enumerates all history descriptors. No caller branches
+on agent names. Each source has its own small Rust module, adapted from Orca's MIT
+scanner/decoder contracts and fixtures (NOTICE). Search remains outside the runtime.
+
+Native JSONL records preserve exact ranges. Whole JSON documents and SQLite stores
+are read as source snapshots: each derived row carries its native JSON pointer or
+SQL table/key, physical file identity/hash and byte-range references. Reconstructed
+rows are labeled as projections, never original file bytes. `source_bytes` reads only
+these native source parts. Snapshot changes produce a new monotonic generation; every page exposes that generation, and the first page of a changed snapshot carries `reset: true` so clients replace the previous view before applying its steps. Stable native row keys keep step identities across rewrites. Cursor revisions remain monotonic;
+client-selected page bytes choose the next rows, including a complete crossing row.
+Unknown native records remain unknown with exact source access; no record cap applies.
+
+SQLite native DB/WAL bytes are opened only as files for reading, copied into a private
+temporary directory, checked again for concurrent changes, and queried there. Native
+-shm files are neither opened for writes nor created. A changing source refuses rather
+than retrying or claiming a consistent snapshot. Temporary query files are removed
+when the read ends. No native checkpoint, vacuum, migration or schema change occurs.
+Derived SQL rows are session-scoped, but raw DB/WAL source parts can contain other
+sessions. This local reader grants no archive or sharing authority over those bytes;
+a selected session alone never authorizes sending its entire database off-host.
+
+Explicit home roots, runtime home variables and caller-supplied WSL/UNC homes share
+the same readers. Callers list each explicit home through the same generic request. Sources
+are chosen by opaque IDs; shared databases scope every row to the selected session.
+An absent native proof means fixture-only, even if a CLI happens to be installed.
+Native Mac qualification never claims native Windows or WSL qualification.
+
+| Agent | Default native source under user home | Format | Support target / reason |
+| --- | --- | --- | --- |
+| claude | `.claude/projects` (`CLAUDE_CONFIG_DIR` override) | native | limited: native Mac read proof; unknown shapes retained |
+| codex | `.codex/sessions` (`CODEX_HOME` override) | native | limited: native Mac read proof; unknown shapes retained |
+| antigravity | `.gemini/antigravity-cli/brain` (`ANTIGRAVITY_HOME` override) | native | limited: native Mac read proof; unknown shapes retained |
+| hermes | `.hermes/sessions; .hermes/state.db` (`HERMES_HOME` override) | json/sqlite | limited: native Mac read proof; unknown shapes retained |
+| gemini | `.gemini/tmp` (`GEMINI_CLI_HOME` override) | mixed | fixture-only until native read proof |
+| cursor | `.cursor/projects` (`CURSOR_HOME` override) | jsonl | fixture-only until native read proof |
+| copilot | `.copilot/session-state` (`COPILOT_HOME` override) | jsonl | fixture-only until native read proof |
+| cline | `.cline/data/sessions` (`CLINE_SESSION_DATA_DIR` override) | json | fixture-only until native read proof |
+| codebuddy | `.codebuddy/projects` (`CODEBUDDY_HOME` override) | jsonl | fixture-only until native read proof |
+| devin | `.local/share/devin/cli/transcripts; .local/share/devin/cli/agent_logs` (`DEVIN_HOME` override) | json | fixture-only until native read proof |
+| droid | `.factory/sessions; .factory/projects` (`FACTORY_HOME` override) | jsonl | fixture-only until native read proof |
+| grok | `.grok/sessions` (`GROK_HOME` override) | mixed | fixture-only until native read proof |
+| jcode | `.jcode/sessions` (`JCODE_HOME` override) | json | fixture-only until native read proof |
+| kimi | `.kimi-code/sessions` (`KIMI_CODE_HOME` override) | mixed | fixture-only until native read proof |
+| kiro | `.kiro/sessions/cli` (`KIRO_HOME` override) | mixed | fixture-only until native read proof |
+| muse | `.local/share/muse/sessions` (`XDG_DATA_HOME` override) | jsonl | fixture-only until native read proof |
+| omp | `.omp/agent/sessions` (`OMP_CODING_AGENT_DIR` override) | jsonl | fixture-only until native read proof |
+| openclaw | `.openclaw/agents` (`OPENCLAW_STATE_DIR` override) | jsonl | fixture-only until native read proof |
+| opencode | `.local/share/opencode/.` (`XDG_DATA_HOME` / `OPENCODE_DB` override) | mixed | limited: native Mac read proof; unknown shapes retained |
+| opencode2 | `.local/share/opencode/.` (`XDG_DATA_HOME` / `OPENCODE_DB` override) | sqlite | fixture-only until native read proof |
+| pi | `.pi/agent/sessions` (`PI_CODING_AGENT_DIR` override) | jsonl | fixture-only until native read proof |
+| qoder | `.qoder/projects` (`QODER_HOME` override) | jsonl | fixture-only until native read proof |
+| zcode | `.zcode/cli/db` (`ZCODE_HOME` override) | sqlite | fixture-only until native read proof |
+| rovo | `.rovodev/sessions` (`ROVODEV_HOME` override) | json | fixture-only until native read proof |
+
+Source-specific companions: Cline <id>.messages.json; Kiro <uuid>.jsonl beside its
+metadata; Grok chat_history.jsonl beside summary.json; Rovo session_context.json;
+Kimi agents/*/wire.jsonl beneath session_*; OpenCode session/message/part JSON stores
+or session/message/part SQLite tables; OpenCode 2 session_v2/session_message tables;
+ZCode its separate db.sqlite. OMP/Pi/OpenClaw message envelopes retain tool results,
+thinking and compactions. Gemini thoughts/toolCalls, Copilot data envelopes, Devin
+ATIF observations, and OpenAI/Anthropic block variants retain their native fields.
+
+History-only native accounting retains reported token buckets and cost per message; absent buckets stay unknown. Session/model aggregates never become extra model calls. Snapshot pages preserve native parent-session fields independently of message chains. Devin also resolves its native APPDATA location on Windows; Pi/OMP overrides accept the native sessions root.
