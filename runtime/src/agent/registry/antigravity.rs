@@ -195,7 +195,7 @@ fn read_snapshot(events:&[Value],_rollout:Option<&Path>)->Snapshot {
     }
 }
 
-fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end_index=events.iter().rposition(|v|v["event"]=="result" || matches!(v["type"].as_str(),Some("PLANNER_RESPONSE"|"TOOL_RESPONSE"|"turn.failed"|"turn.cancelled"))).filter(|i|ends(&events[*i])); classify_report(text,events,rollout,end_index)}
+fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {if events.iter().any(|v|v["type"]=="acp") {return crate::agent::acp::read_report(text,events,rollout);} let end_index=events.iter().rposition(|v|v["event"]=="result" || matches!(v["type"].as_str(),Some("PLANNER_RESPONSE"|"TOOL_RESPONSE"|"turn.failed"|"turn.cancelled"))).filter(|i|ends(&events[*i])); classify_report(text,events,rollout,end_index)}
 
 static PROTOCOL: Protocol=Protocol {stream_history:"agy-stream",native_history:"antigravity-sidecar",history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},history_formats:&["agy-stream","antigravity-sidecar"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,history_usage:|rows|crate::agent::history::live::usage_rows(read_calls,rows),history_context:|_|None,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:prepare_command,input_bytes:input_bytes,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
