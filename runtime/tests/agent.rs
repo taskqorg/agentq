@@ -37,6 +37,7 @@ fn main() {
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
+        ("typed_log_reads_are_public", typed_log_reads_are_public),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
         ("app_resume_frames_stay_bounded_and_named", app_resume_frames_stay_bounded_and_named),
@@ -61,6 +62,9 @@ fn main() {
         ("launcher_output_is_handed_over_once", launcher_output_is_handed_over_once),
         ("caller_context_reaches_records_and_children", caller_context_reaches_records_and_children),
         ("agent_turn_command_inherits_its_caller_from_the_environment", agent_turn_command_inherits_its_caller_from_the_environment),
+        ("deferred_record_keeps_the_turn_of_its_terminal_poll", deferred_record_keeps_the_turn_of_its_terminal_poll),
+        ("snapshot_fixes_every_runtime_at_its_terminal_poll", snapshot_fixes_every_runtime_at_its_terminal_poll),
+        ("snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart", snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
@@ -289,7 +293,7 @@ fn fake(client: &str) {
     if client == "claude" {
         emit(json!({"type": "system", "subtype": "init", "session_id": session}));
         emit(json!({"type": "assistant", "message": {"id": format!("m{turn}"), "model": "claude-opus-5-5",
-            "usage": {"input_tokens": 3, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20, "output_tokens": 7}}}));
+            "usage": {"input_tokens": std::env::var("COREQ_FAKE_INPUT_TOKENS").map_or(3, |n| n.parse::<u64>().unwrap()), "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20, "output_tokens": 7}}}));
         emit(json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "resetsAt": 1792386000u64, "rateLimitType": "five_hour", "utilization": 0.25}}));
         emit(json!({"type": "result", "subtype": "success", "is_error": false, "result": format!("turn {turn}"), "session_id": session}));
     } else if client == "antigravity" {
@@ -844,6 +848,22 @@ fn launcher_output_is_handed_over_once() {
     std::fs::remove_dir_all(codex_root).unwrap();
 }
 
+// #261 A1/A4: a consumer outside the crate reads job labels and record time through the runtime trait alone.
+// Risk: the types stay private, which forces a caller back to native parsing.
+fn typed_log_reads_are_public() {
+    let claude = agent::runtime("claude").unwrap();
+    let log = [
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"sleep 9","description":"Wait","run_in_background":true}}]}}),
+        json!({"timestamp":"2026-11-06T00:00:00Z","type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"Command running in background with ID: j1."}]}}),
+    ].map(|row| row.to_string()).join("\n");
+    assert_eq!(claude.classify(&log).live_background, ["Bash"]);
+    let records: Vec<agent::LogRecord> = claude.log_records(&log);
+    assert_eq!(records[0].time, agent::RecordTime::Absent);
+    assert_eq!(records[1].line, 1);
+    assert_eq!(records[1].time.observed(0), Err(agent::TimeFault::Future));
+    assert!(matches!(records[1].events[..], [agent::Event::ToolEnd { .. }]));
+}
+
 // #222 A1: Claude's `agents --cwd <root>` lists nothing for a root under `.claude/worktrees`.
 // Risk: the job stays unattached, so observe reads session-unknown and cancel finds no job; or a foreign job attaches.
 fn background_job_found_when_cwd_listing_misses_it() {
@@ -1233,6 +1253,163 @@ fn child_fields(seen: &Value) -> Option<Value> {
     let text = seen["trace_context"].as_str()?;
     coreq::telemetry::capture::TraceContext::decode(text).expect("a child gets a valid context");
     Some(serde_json::from_str::<Value>(text.strip_prefix("2 ")?).unwrap()[2].clone())
+}
+
+// Chain: agentq.md M12.13, RUNTIME.md § Observation (#268 A4). Risk: a deferred append rereads a shared log, so the first
+// turn takes the tokens of its continuation.
+fn deferred_record_keeps_the_turn_of_its_terminal_poll() {
+    let root = scratch("deferred-record");
+    let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
+    let claude = agent::runtime("claude").unwrap();
+    let mut l = fake_launch("claude", &root, "brief", &[("COREQ_FAKE_INPUT_TOKENS", "2".as_ref())]);
+    l.policy.approval = agent::Approval::Auto;
+    let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: Some((268, 1)), route: None, account: "default" };
+    let mut run = claude.launch(&l).unwrap();
+    assert_eq!(finish(claude, &mut run), agent::State::Finished);
+    append(&l.log, &[json!({"type": "assistant", "message": {"id": "later", "model": "claude-opus-5-5", "usage": {"input_tokens": 100, "output_tokens": 1}}})]);
+    run.record(&ctx, &store).unwrap().recorded.unwrap();
+    let rows = records(&store);
+    let turn = rows.iter().find(|o| o["kind"] == "agent.turn").unwrap();
+    assert_eq!(turn["input_tokens"].as_u64(), Some(2), "the first agent.turn stays 2, not 102");
+    assert_eq!(rows.iter().filter(|o| o["kind"] == "agent.call").count(), 1, "the later call belongs to no earlier turn");
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// Chain: agentq.md M12.13, RUNTIME.md § Observation (#268 A1). Risk: a later shared-log or transcript record, queue delay or
+// a late cancel changes a finished turn, or a repeated native read refuses its deferred record.
+fn snapshot_fixes_every_runtime_at_its_terminal_poll() {
+    let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: Some((268, 1)), route: None, account: "default" };
+    let later = |name: &str| match name {
+        "claude" => json!({"type": "assistant", "message": {"id": "later", "model": "claude-opus-5-5", "usage": {"input_tokens": 100, "output_tokens": 1}}}),
+        "codex" => json!({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 1}}),
+        _ => json!({"event": "step_update", "step_update": {"step_index": 9, "step_type": "agent_response", "state": "DONE", "usage": {"input_tokens": 100, "cache_read_tokens": 0, "output_tokens": 1}}}),
+    };
+    for r in agent::runtimes() {
+        let name = r.descriptor().name;
+        let root = scratch(&format!("snapshot-{name}"));
+        let mut l = fake_launch(name, &root, "brief", &[]);
+        l.policy.approval = agent::Approval::Bypass;
+        if name == "codex" { l.policy.write = agent::Scope::Any; }
+        let mut run = r.launch(&l).unwrap();
+        assert_eq!(run.snapshot(&ctx).unwrap_err(), "running", "{name}: no record before the terminal observation");
+        assert_eq!(finish(r, &mut run), agent::State::Finished, "{name}");
+        let (frozen, report) = (run.snapshot(&ctx).unwrap(), r.report(&run).unwrap());
+        let (input, duration) = (report.usage.input, report.duration_us);
+        append(&l.log, &[later(name)]);
+        std::thread::sleep(Duration::from_millis(20));
+        r.cancel(&mut run).unwrap();
+        let other = Context { project: "owner/other", ..ctx.clone() };
+        assert_eq!(run.snapshot(&other).unwrap(), frozen, "{name}: a repeated snapshot is the same value");
+        let again = r.report(&run).unwrap();
+        assert_eq!((again.usage.input, again.duration_us, again.outcome), (input, duration, "ok"), "{name}: tokens, duration and outcome stay");
+        assert_eq!(r.poll(&mut run).unwrap(), agent::State::Finished, "{name}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // A transcript run: the next turn repeats the input, which a repeated native read refuses.
+    let root = scratch("snapshot-queue");
+    let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
+    let codex = agent::runtime("codex").unwrap();
+    let path = root.join("app.jsonl");
+    append(&path, &[json!({"type": "session_meta", "payload": {"id": "native-thread", "cwd": root}})]);
+    let turn = |id: &str, input: u64| {
+        let usage = json!({"input_tokens": input, "cached_input_tokens": 0, "output_tokens": 1, "reasoning_output_tokens": 0});
+        [json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": id}}),
+         json!({"type": "event_msg", "payload": {"type": "user_message", "message": "owned input reference", "turn_id": id}}),
+         json!({"type": "event_msg", "payload": {"type": "token_count", "turn_id": id, "info": {"last_token_usage": usage, "total_token_usage": usage}}}),
+         json!({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": id}})]
+    };
+    let mut q = fake_launch("codex", &root, "owned input reference", &[("COREQ_FAKE_CONTROL", "1".as_ref())]);
+    q.mode = agent::Mode::Queue { transcript: path.clone() };
+    let mut run = codex.resume("native-thread", &q).unwrap();
+    append(&path, &turn("t1", 7));
+    assert_eq!(finish(codex, &mut run), agent::State::Finished);
+    let frozen = run.snapshot(&ctx).unwrap();
+    append(&path, &turn("t2", 100));
+    assert_eq!(run.snapshot(&ctx).unwrap(), frozen);
+    run.record(&ctx, &store).unwrap().recorded.unwrap();
+    assert_eq!(observations(&store)[0]["input_tokens"].as_u64(), Some(7), "the queued turn keeps its own tokens");
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// Chain: agentq.md M12.4, M12.13, RUNTIME.md § Observation (#268 A2, A3). Risk: terminal polling waits for the budget lock, a
+// failed append loses or changes the turn, or a retry or restart adds a second turn, loses the caller, or leaks content.
+fn snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart() {
+    use coreq::telemetry::{Budget, INSTALLATION_BYTES, PEER_BYTES, Store, capture::Capture};
+    use tracing_subscriber::prelude::*;
+    let root = scratch("snapshot-lock");
+    let budget = Budget { lock: root.join("installation.lock"), peers: vec![], total: INSTALLATION_BYTES, reserved: PEER_BYTES };
+    let db = root.join("telemetry.db");
+    let store = Store::open_bounded(&db, budget.clone()).unwrap();
+    let capture = Capture::new(std::sync::Arc::new(Store::open(&root.join("spans.db")).unwrap()), "fixtureq", "1").unwrap();
+    let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(capture.clone()));
+    let bare = Context { product: "fixtureq", version: "1.0.0", project: "other", task: None, route: None, account: "default" };
+    let claude = agent::runtime("claude").unwrap();
+    let gate = root.join("gate");
+    let mut l = fake_launch("claude", &root, "private brief", &[("COREQ_FAKE_INPUT_TOKENS", "2".as_ref()), ("COREQ_FAKE_GATE", gate.as_os_str())]);
+    l.policy.approval = agent::Approval::Auto;
+    let mut run = claude.launch(&l).unwrap();
+    wait_for(&root.join("fake-turn-1.json"));
+    let checkpoint = claude.checkpoint(&run).unwrap();
+
+    // A2: the terminal poll and the snapshot finish while another writer holds the lock; the append alone fails.
+    let held = coreq::file_lock::lock(&budget.lock).unwrap();
+    std::fs::write(&gate, "").unwrap();
+    assert_eq!(finish(claude, &mut run), agent::State::Finished, "the terminal poll takes no store lock");
+    let frozen = tracing::dispatcher::with_default(&dispatch, || {
+        let _caller = tracing::info_span!("caller", project = "fixture/project", task = 2428_u64, attempt = 7_u64, actor = "worker", entry = 77_u64).entered();
+        run.snapshot(&bare).unwrap()
+    });
+    assert_eq!(frozen.append(&store).unwrap_err(), "telemetry installation budget lock unavailable");
+    let failed = run.record(&bare, &store).unwrap();
+    assert!(failed.recorded.is_err(), "a failed append stays visible");
+    assert_eq!((failed.outcome, claude.poll(&mut run).unwrap()), ("ok", agent::State::Finished), "and never changes the turn");
+    assert!(records(&store).is_empty(), "nothing is stored");
+    drop(held);
+
+    // A3: the same records append once, and the recovered run rebuilds the same immutable IDs.
+    let ids = |events: Vec<coreq::telemetry::Event>| events.iter().map(|e| e.id().to_string()).collect::<Vec<_>>();
+    let expected = ids(frozen.events().unwrap());
+    assert_eq!(expected.len(), 2, "one turn and one call");
+    frozen.append(&store).unwrap();
+    let stored = records(&store);
+    let mut cold = claude.recover(&checkpoint, &l).unwrap();
+    assert_eq!(finish(claude, &mut cold), agent::State::Finished);
+    let recovered = cold.snapshot(&bare).unwrap();
+    assert_eq!(ids(recovered.events().unwrap()), expected, "recovery rebuilds the same IDs");
+    recovered.append(&store).unwrap();
+    assert_eq!(records(&store), stored, "the first payload stays, its caller and process fields included");
+
+    // A shared-log continuation, then a retry and a restart from the durable form.
+    append(&l.log, &[json!({"type": "assistant", "message": {"id": "later", "model": "claude-opus-5-5", "usage": {"input_tokens": 100, "output_tokens": 1}}})]);
+    let saved = frozen.save().to_string();
+    for private in ["private brief", "turn 1", "worker.log"] { assert!(!saved.contains(private), "{private}: {saved}"); }
+    assert_eq!(run.record(&bare, &store).unwrap().usage.input, Some(2), "a failed record may retry");
+    assert!(run.record(&bare, &store).is_err(), "and then is refused");
+    drop(store);
+    let restored = agent::Frozen::restore(&serde_json::from_str(&saved).unwrap()).unwrap();
+    assert_eq!(restored, frozen);
+    assert_eq!(ids(restored.events().unwrap()), expected);
+    let store = Store::open_bounded(&db, budget).unwrap();
+    restored.append(&store).unwrap();
+    restored.append(&store).unwrap();
+    assert_eq!(records(&store), stored, "a restart counts nothing twice");
+    let turn = stored.iter().find(|o| o["kind"] == "agent.turn").unwrap();
+    assert_eq!((turn["input_tokens"].as_u64(), turn["outcome"].as_str(), turn["exit_code"].as_u64()), (Some(2), Some("ok"), Some(0)));
+    assert!(turn["duration_us"].as_u64().is_some());
+    for row in &stored {
+        assert_eq!((row["project"].as_str(), row["task"].as_u64(), row["attempt"].as_u64(), row["actor"].as_str(), row["entry"].as_u64()),
+            (Some("fixture/project"), Some(2428), Some(7), Some("worker"), Some(77)), "the snapshot keeps its caller: {row}");
+    }
+
+    for invalid in [json!({}), json!({"schema": "agentq-frozen/1", "records": []}), json!({"schema": "agentq-frozen/1", "records": [{"namespace": "agent.call", "key": "k", "observation": stored[1]}]})] {
+        assert_eq!(agent::Frozen::restore(&invalid).unwrap_err(), "frozen records invalid", "{invalid}");
+    }
+    drop(store);
+    drop(capture);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn one_claude_turn(root: &Path, ctx: &Context, store: &coreq::telemetry::Store) -> Value {

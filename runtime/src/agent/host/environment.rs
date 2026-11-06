@@ -51,8 +51,8 @@ mod tests {
                     let events=[json!({"type":"assistant","message":{"id":"invented-call","model":"fixture-model","usage":{}}}),json!({"type":"result"})];
                     let report=Report::read(Client::Claude,"",&events,None);
                     let store=coreq::telemetry::Store::open(&home.join("observations.db")).unwrap();
-                    let turn=coreq::telemetry::Event::observation(report.observation(Client::Claude,&ctx)).unwrap();
-                    for _ in 0..2 {capture::record(&store,turn.clone(),&report,Client::Claude,&ctx,"invented-turn").unwrap();}
+                    let turn=report.observation(Client::Claude,&ctx);
+                    for _ in 0..2 {capture::freeze("agent.turn","invented-turn",&turn,&report,Client::Claude,&ctx).unwrap().append(&store).unwrap();}
                     let rows=store.export(0,0,100).unwrap();let rows=rows["events"].as_array().unwrap();
                     assert_eq!(rows.len(),2,"idempotent turn and call");
                     let fields=expected.as_str().and_then(|s|s.strip_prefix("2 ")).map(|s|serde_json::from_str::<Value>(s).unwrap()[2].clone()).unwrap_or(json!({}));

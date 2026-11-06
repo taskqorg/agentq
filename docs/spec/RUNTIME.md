@@ -19,6 +19,7 @@ Each adapter implements every operation. The sections below remain the binding d
 | `poll(run)` | `running`, `finished`, `failed` or `unknown` from the existing end detection. |
 | `report(run)` | The `Report` of a finished run; a running one returns cause `running`. |
 | `log_events(log)` | Read complete JSONL attempt-log records into ordered typed events without a run, process, transcript lookup or write. Non-JSON diagnostic lines are ignored; native parsing stays in the adapter. Text deltas are included. |
+| `log_records(log)` | The same read as `log_events`, one `LogRecord` per source record, so a caller keeps source order and native time without native parsing ([log records](#log-records)). |
 | `account_identity(home)` | Read-only account identity without a run: Codex `account/read` with `refreshToken: false` returns email, else `chatgptAccountId`; Antigravity `loadCodeAssist` returns `cloudaicompanionProject`. Unknown or unsupported reads return `None`. No token leaves the adapter; no credential is refreshed. |
 | `progress(run)` | Typed `Event`s since the previous call, in native order, each returned at most once ([progress events](#progress-events)). |
 | `launcher_output(run)` | The raw `background` launcher exchange of this run, once (Caller launch data). |
@@ -122,15 +123,20 @@ The returned `Run` behaves the same in both forms: `poll`, `report`, `progress`,
 | `Event` | Meaning | Claude | Codex app-server | Codex `exec` |
 |---|---|---|---|---|
 | `Text { item, delta }` | Live text, only with `Launch.deltas` | `text_delta` partial record | `item/agentMessage/delta` | absent |
-| `Message { item, text }` | One complete assistant message | `assistant` text block | `item/completed` `agentMessage` | `item.completed` `agent_message` |
-| `ToolStart { id, kind, name, detail, timeout_ms }` | A tool began | `assistant` `tool_use` | `item/started` tool item | `item.started` tool item |
-| `ToolEnd { id, status }` | A tool ended | `user` `tool_result` | `item/completed` tool item | `item.completed` tool item |
+| `Message { item, text }` | One complete assistant text block or native message | `assistant` text block, in native block order | `item/completed` `agentMessage` | `item.completed` `agent_message` |
+| `ToolStart { id, kind, name, detail, timeout_ms }` | A tool began | `assistant` `tool_use` | `item/started` tool item | `item.started` tool item, rollout `function_call` or `custom_tool_call` |
+| `ToolEnd { id, status }` | A tool ended | `user` `tool_result` | `item/completed` tool item | `item.completed` tool item, rollout `function_call_output` or `custom_tool_call_output` |
 | `Quota(Vec<Window>)` | Windows just reported | `rate_limit_event` | `account/rateLimits/updated` | rollout `token_count` |
 | `Context { used, window }` | Context use of the last model call | `assistant` usage and session window | `thread/tokenUsage/updated` | rollout `token_count` |
-| `TurnEnd { outcome }` | Native terminal evidence (`ok`, `failed`, `cancelled` or `refused`); never process or descendant completion | `result` | `turn/completed` | `turn.completed`, `turn.failed`, `turn.cancelled` |
-| `Activity` | Any other native record, so inactivity watches stay correct | every other record | every other notification | every other record |
+| `TurnStart` | A turn boundary: pending tools and earlier progress no longer apply | `system` `init` | `turn/started` | `turn.started` |
+| `Progress` | `log_records` only: a supported record proved work advanced without a payload to report. A live stream keeps `Activity` for these records | nonempty string `user` text block, repeated `assistant` text | `item/completed` known non-tool item | `item.completed` known non-tool item, rollout `message` or `reasoning` |
+| `Unsupported { reason }` | A record the adapter recognizes but cannot read; the observation stays unknown | none | `turn/completed` with an unknown status | none |
+| `TurnEnd { outcome }` | Native terminal evidence (`ok`, `failed`, `cancelled`, `refused` or `unknown`); never process or descendant completion | `result`; `system` `turn_duration` reads `unknown` | `turn/completed` | `turn.completed`, `turn.failed`, `turn.cancelled`, rollout `task_complete` and `turn_aborted` |
+| `Activity` | Any other native record, so inactivity watches stay correct; it proves no progress | every other record | every other notification | every other record |
 
-Antigravity maps `step_update` and `result` to the events it can name and everything else to `Activity`. Native terminal records also emit `TurnEnd`; `poll` and `report` remain the run-completion authority. Antigravity sidecar tool-bearing planner records do not end a turn. Live app-server terminal events require the run's accepted native thread and turn IDs; a run-free reader describes the supplied records only. An unknown tool `kind` reads `Other`; known kinds are `Shell`, `Mcp` and `Web`.
+Antigravity maps `init` to `TurnStart`, a known non-tool `step_update` (`user_input`, `agent_response`, `system_message` or `checkpoint`) in state `DONE` to `Progress` in `log_records`, and the other `step_update` and `result` records to the events they name. A tool step in an unknown state or a `result` with an unknown status reads `Unsupported`; everything else reads `Activity`. Native terminal records also emit `TurnEnd`; `poll` and `report` remain the run-completion authority. Antigravity sidecar tool-bearing planner records do not end a turn. Live app-server terminal events require the run's accepted native thread and turn IDs; a run-free reader describes the supplied records only. An unknown tool `kind` reads `Other`; known kinds are `Shell`, `Mcp` and `Web`.
+
+`ToolStart.timeout_ms` reads `timeout_ms`, `timeoutMs`, `TimeoutMs` or `timeout` in milliseconds and `timeout_seconds` in seconds. A rollout call reads them from its `arguments` JSON and exports nothing else of it. Zero or an unreadable value is absent.
 
 `ToolStart.detail` is an optional local audit target, never telemetry. Adapters select only command or file fields, never tool input objects, output, patches or dynamic-tool arguments. Claude maps Bash `input.command` and Read/Write/Edit/NotebookEdit/MultiEdit `input.file_path`; Codex maps command and changed paths on both transports. Simple filesystem commands retain their command and file operands; known non-file commands retain only the executable with redacted arguments; unknown command forms are withheld. Shell expressions, environment assignments, URLs, control characters and credential-like operands are withheld. File details contain paths only, with the same scrubber. Antigravity reads only known native command/path fields; unsupported tool schemas keep detail absent. Missing or withheld detail stays absent; callers keep their existing secret scrubber before storage or display.
 
@@ -138,13 +144,28 @@ Consumers matching every `ToolStart` field must add `timeout_ms` or use `..`; ex
 
 App-server context notifications require a non-empty thread ID matching the run's owned native thread. Foreign or missing thread IDs yield activity only, without changing or invalidating context. Missing owned-thread measurements remain unknown. Exec rollout context comes only from the run's owned session file.
 
-Codex emits tool events only for native tool items. Compaction, non-tool items and unknown future item types remain `Activity`, on both exec and app-server paths.
+Codex emits tool events only for native tool items. Compaction, non-tool items and unknown future item types remain `Activity` in live events, on both exec and app-server paths. In `log_records`, completed `agentMessage`/`agent_message`, `userMessage`/`user_message`, `reasoning`, `plan`, `todo_list` and `contextCompaction`/`context_compaction` items can prove progress. Missing or unknown item types prove none.
 
 Antigravity sidecar tool calls and responses map to `ToolStart` and `ToolEnd`. Neither Antigravity source reports context capacity or quota events; these stay absent. Requesting live text through `Launch.deltas` is unsupported on Antigravity. Native `agy` text deltas without that request remain activity. No synthetic context or quota is emitted.
 
 Antigravity event qualification requires a native tool completion with status `DONE`; a successful final model response does not prove tool execution. A denied, cancelled or unknown tool result fails the qualification probe, which reports every `ToolEnd` status and retains the native log. Native macOS event evidence includes a pre-tool-hook denial: message and error events were observed, but successful tool execution remains unqualified ([native evidence](../evidence/runtime-246-antigravity.md)). Hooks and native authority are never bypassed to qualify this path.
 
 `Launch.command` is a caller sandbox command that replaces the native executable; `Launch.mode` selects a compatibility mode (Compatibility sessions). The adapter places these mapped arguments where caller `<args>` stood in the Arguments table, so the native argument order is unchanged.
+
+### Log records
+
+`LogRecord { line, time, events }` is one source record: its zero-based `line` in the supplied text, its `RecordTime` and the events it produced. Records keep source order; events inside a record keep native order. A line that does not start with `{` is a diagnostic and yields no record.
+
+A line that starts with `{` and does not parse yields a record with time `Malformed` and `Unsupported`. A caller that holds only complete lines treats it as unknown; a caller that may hold a partial last line waits for its newline.
+
+| `RecordTime` | Native `timestamp` | `observed(now)` |
+|---|---|---|
+| `Absent` | field missing | `Ok(None)`: the caller chooses its own lower bound |
+| `Null` | JSON null | `Err(TimeFault::Null)` |
+| `Malformed` | another JSON type, or a string that is not a real UTC `YYYY-MM-DDThh:mm:ss[.fff]Z` time after the epoch | `Err(TimeFault::Malformed)` |
+| `At(unix_ms)` | a valid time | `Ok(Some(unix_s))`, or `Err(TimeFault::Future)` when after the caller's `now` in Unix seconds |
+
+The caller supplies the clock, so a future check samples time after its read. A faulted record proves neither work nor a boundary; the caller decides how long the fault stays. `TurnStart` and `TurnEnd` are the only events that clear pending tools. `Activity` never counts as supported progress, so a log of only unknown records stays unknown. A caller record, such as a progress or rule marker the caller wrote into the log, reads `Activity`; the caller finds it by `line`.
 
 ### Caller launch data
 
@@ -237,7 +258,13 @@ A rejected Claude `rate_limit_event` before work also returns `Report::reached`,
 - A counted call without a value makes that sum unknown, never smaller. No counted call: every count is null with reason `no-usage`.
 - A model ID is a code of at most 64 characters from `[A-Za-z0-9._:-]`; any other value is not reported.
 
-`Report.background_job` states whether Claude log evidence leaves a live job. Bash `run_in_background` and Monitor start jobs; successful TaskStop/KillShell results and terminal `task-notification` statuses close only their matching job. Failed stops do not close jobs. Native background IDs are correlated with tool-use IDs. Notification-like tool output cannot close a job. This is log evidence only, never process, stop or cleanup authority. Other runtimes report false because these Claude job records are absent.
+`Report.live_background` lists, oldest first, one label per job that Claude log evidence leaves live; `Report.background_job` states that the list is not empty. Other runtimes report an empty list and false because these Claude job records are absent. This is log evidence only, never process, stop or cleanup authority.
+
+- **Start.** A tool-use record alone is unconfirmed. A Bash `run_in_background` or Monitor job needs a non-error result that names its native task, in `backgroundTaskId`, `taskId`, `task_id` or `shellId`, or in the text `with ID: <id>` or `(task <id>`. A foreground Bash call becomes a job only through a structured `backgroundTaskId`, so its output cannot start one. An error result means the job never ran.
+- **End.** A terminal notification ends the job matching its task ID or tool-use ID, read from `queue-operation` content, `queued_command` attachments, `system` `task_notification` records and user text. Terminal statuses are `completed`, `failed`, `killed`, `stopped`, `cancelled`, `error`, `timeout` and `expired`. Notification-like text in tool output, prompt snapshots or request records closes nothing.
+- **Stop.** A TaskStop, KillShell or KillBash call naming a job takes it out of the live list at once, because a stopping job gives a caller nothing to continue. A failed stop result restores it; a successful one ends it.
+- **Turn boundary.** A `system` `init` record clears earlier jobs, because the list describes what the last turn left running. A caller that marks its own turns in the log passes only the records after its last marker.
+- **Label.** Each job uses the fixed tool name `Bash` or `Monitor` (A1). Descriptions are untrusted and may copy private argument fragments, so they stay inside the adapter with commands, arguments and task IDs. Equal labels still occupy separate list entries.
 
 ## Limit snapshot
 
@@ -257,7 +284,7 @@ A rejected Claude `rate_limit_event` before work also returns `Report::reached`,
 
 ## Observation
 
-`Run::record` appends the records of a finished run in one call: one `agent.turn` and one `agent.call` per model request ([specq telemetry contract](https://github.com/taskqorg/specq/blob/main/engineering/profiling.md#telemetry-contract)). A second call on a CLI run is refused. Every record is the shared CoreQ `coreq-observation/1` shape, so a shared field not collected reads null with reason `not-collected`.
+`Run::record` appends the records of a finished run in one call: one `agent.turn` and one `agent.call` per model request ([specq telemetry contract](https://github.com/taskqorg/specq/blob/main/engineering/profiling.md#telemetry-contract)). A second call after a successful append is refused; a call after a failed append retries the same records. Every record is the shared CoreQ `coreq-observation/1` shape, so a shared field not collected reads null with reason `not-collected`.
 
 - `agent.turn` keys: `product`, `version`, `operation` and `kind` = `agent.turn`, `started_ms`, `duration_us`, `outcome`, `error`, `project`, `host`, `runtime`, `account`, `task`, `attempt`, `route`, `model`, `session_id`, `exit_code`, `user_cpu_us`, `system_cpu_us`, `peak_rss_bytes`, `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `reasoning_tokens`, `limit_used_percent`, `limit_resets_at`, `limit_window`, `unknown`.
 - `agent.call` keys: the identity keys above with `operation` and `kind` = `agent.call`, `model`, the five token buckets, `started_ms` (the record's native `timestamp`, else null with `not-reported`), `duration_us` (null with `not-reported`), `outcome`, `error` and `session_id`. `agent.turn` totals and `agent.call` records describe the same tokens: sum one kind, never both.
@@ -266,6 +293,25 @@ A rejected Claude `rate_limit_event` before work also returns `Report::reached`,
 - Runtime children: a CLI turn, an app-server session and each bounded native exchange (background, queue, job list, stop, readiness) receive the current context in `COREQ_TRACE_CONTEXT`, and a stale value is replaced or removed. `agentq agent turn` runs no collector, so it treats its own valid `COREQ_TRACE_CONTEXT` as the caller for its records and child; an invalid value stays unknown and never changes the turn.
 - The protected host carries CoreQ-validated `COREQ_TRACE_CONTEXT` through its launchd job and clean native environment. A current span wins over inherited context; without a collector, each hop decodes and re-encodes its process context. Missing or invalid context is omitted, and legacy trace-only context remains supported. Caller metadata grants no authority and changes no permit, native identity, input gate or recovery record.
 - A failed append is kept in `Report::recorded`; it never changes the turn's result. A repeated record keeps the first payload of each immutable id, so recovery never counts twice and never fails on a value only the first process could measure.
+- Every `agent.turn` has an immutable id: `agent.turn` under the CLI turn's key, `agent.native` or `agent.app` under the native turn's key.
+
+### Deferred persistence
+
+A caller that appends outside its supervision path, for example after a CoreQ budget lock wait, keeps the observation of the finished run and appends it later:
+
+```rust
+let state = runtime.poll(&mut run)?;      // Takes no store lock. A terminal poll freezes the CLI report.
+let frozen = run.snapshot(&context)?;     // `running` before the terminal observation. No store, lock or native call.
+let saved = frozen.save();                // Optional durable JSON for a retry after a restart.
+frozen.append(&store)?;                   // May wait for the store. An error leaves `frozen` and the run unchanged.
+```
+
+- The terminal poll freezes the CLI report once: tokens, calls, outcome, session, rollout values, duration, exit and resource use. `Runtime::report`, `Run::snapshot` and `Run::record` read that value. Later bytes in a shared log or rollout, queue delay, a late cancel and a passing deadline never change it. An unreadable log at that moment freezes nothing: `poll` returns the error and the next poll retries.
+- Background, queue and app-server runs freeze the same way from their native terminal report; a snapshot makes no second native read, so a later turn with the same input cannot refuse it.
+- The first `snapshot` fixes the records and the caller context of its thread. Take it in the caller's span. A repeated call returns the same value, whatever context it is given; `input` on an app-server run starts a new turn, whose snapshot is new.
+- `Frozen` holds only immutable IDs and CoreQ-validated metadata, never a prompt, result text or path. `save` writes schema `agentq-frozen/1`; `restore` refuses any other value as a whole. A `Run` checkpoint carries a taken snapshot.
+- Save the snapshot before starting a continuation on the same log. A CLI turn cannot checkpoint after its exit, so a recovered run that first observes the terminal state after a continuation cannot tell its own bytes from later ones. Its `agent.turn` id stays stable; the saved snapshot is what keeps later calls out.
+- A failed snapshot or append stays unknown to the caller and is no completion signal: it releases no capacity, permit or native ownership, and the caller retries with the same value.
 
 ### Model requests
 
@@ -491,7 +537,7 @@ History lifecycle events are descriptive only; existing terminal/identity parser
 | `context` | `product`, `version` (required), `project` (default `other`), `task` `[task, attempt]` or null, `route`, `account` (default `default`) |
 | `store` | Absolute CoreQ telemetry store path for the `agent.turn` and `agent.call` records; null records nothing |
 
-The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `started_ms`, `duration_us`, `usage` (`calls`, `input`, `cache_read`, `cache_write`, `output`, `reasoning`, `model`, `unknown`), `process` (`user_cpu_us`, `system_cpu_us`, `peak_rss_bytes`, `unknown`), `limit` (`used_percent`, `resets_at`, `window`, `unknown`), `limits` (every quota `Window`), `background_job` (boolean), `reached` (`{"reset": n|null}` or null), `recorded` (`ok`, `not-requested` or the append error) and `optimization`. Background, app and app-server modes stay library APIs: they need caller-owned checkpoints and transports that one stdin request cannot carry.
+The report has `schema` 1, `session`, `outcome`, `error`, `text`, `exit`, `started_ms`, `duration_us`, `usage` (`calls`, `input`, `cache_read`, `cache_write`, `output`, `reasoning`, `model`, `unknown`), `process` (`user_cpu_us`, `system_cpu_us`, `peak_rss_bytes`, `unknown`), `limit` (`used_percent`, `resets_at`, `window`, `unknown`), `limits` (every quota `Window`), `background_job` (boolean), `live_background` (job labels), `reached` (`{"reset": n|null}` or null), `recorded` (`ok`, `not-requested` or the append error) and `optimization`. Background, app and app-server modes stay library APIs: they need caller-owned checkpoints and transports that one stdin request cannot carry.
 
 ## Optimization intent
 
@@ -526,7 +572,7 @@ Consumers of the runtime and CoreQ on their default branches when this page chan
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
 | AssetQ | `coreq` v0.19.2, `agentq-runtime` tag `runtime-v0.2.0` (which resolves its own `coreq` v0.18.0) | Pinned; a newer revision follows its own contract and qualification |
 
-- Runtime crate version 0.10.0; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
+- Runtime crate version 0.12.0; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. After a runtime version change merges to main and that exact source passes the `Test` workflow on Linux, macOS and Windows, `.github/workflows/runtime-tag.yml` invokes `scripts/tag_runtime.py`. The script checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - One CoreQ source: a consumer that uses CoreQ directly spells the runtime's exact CoreQ dependency, currently `coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.0" }`. Cargo treats `tag` and `rev` at the same commit as two sources, and then two `Store` types. `tests/runtime_publication.py` resolves such a consumer and refuses more than one CoreQ source.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.

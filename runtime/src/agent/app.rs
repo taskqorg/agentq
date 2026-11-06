@@ -340,11 +340,17 @@ impl AppSession {
 
     pub fn record(&self, ctx: &Context, store: &crate::telemetry::Store) -> Res<Option<Report>> {
         let Some(mut r) = self.report() else { return Ok(None) };
+        r.recorded = self.snapshot(ctx).and_then(|f| f.ok_or("running")?.append(store));
+        Ok(Some(r))
+    }
+
+    /// The terminal turn's immutable records, without a store or native call.
+    pub(crate) fn snapshot(&self, ctx: &Context) -> Res<Option<super::Frozen>> {
+        let Some(r) = self.report() else { return Ok(None) };
         let mut value = r.observation(Client::Codex, ctx);
         value["duration_us"] = Value::Null; value["unknown"]["duration_us"] = json!("not-reported");
         let key = crate::sha256_hex(format!("{}\0{}\0{}\0{}", self.spec.root.display(),self.scope, self.thread.as_deref().unwrap_or(""), self.turn.as_deref().unwrap_or("")).as_bytes());
-        r.recorded = crate::telemetry::Event::identified("agent.app", &key, crate::telemetry::shared(&value)).and_then(|e| super::capture::record(store, e, &r, Client::Codex, ctx, &key));
-        Ok(Some(r))
+        super::capture::freeze("agent.app", &key, &value, &r, Client::Codex, ctx).map(Some)
     }
 
     /// Retire the terminal turn after the caller durably saved its outcome; the same server/thread can take another.
