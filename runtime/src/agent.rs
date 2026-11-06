@@ -904,6 +904,7 @@ fn model_code(m: &str) -> bool { !m.is_empty() && m.len() <= 64 && m.bytes().all
 /// None after work started or without a limit.
 pub(crate) fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
     for v in events {
+        if v["type"]=="rate_limit_event" && v["rate_limit_info"]["status"]=="rejected" {return Some(v["rate_limit_info"]["resetsAt"].as_i64());}
         if v["event"] == "step_update" && (v["step_update"]["step_type"] == "tool" || v["step_update"]["usage"].is_object()) { return None; }
         if v["event"] == "result" {
             let msg = v["result"]["error"].as_str().unwrap_or_default().to_lowercase();
@@ -1074,6 +1075,8 @@ pub struct Report {
     pub limits: Vec<Window>,
     /// A limit reached before work started, with its reset when known: the caller records it for the account switch.
     pub reached: Option<Option<i64>>,
+    /// Claude background tools still live according to this log, never process liveness proof.
+    pub background_job: bool,
     /// Telemetry outcome code and error code.
     pub outcome: &'static str,
     pub error: &'static str,
@@ -1113,7 +1116,7 @@ impl Report {
                 }
             };
         let (calls, count, known) = read_calls(events);
-        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), limits: limits::read(client, events, rollout), reached, outcome, error, detail,
+        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), limits: limits::read(client, events, rollout), reached, background_job: client==Client::Claude && events::background_job(events), outcome, error, detail,
             text: final_text(events), exit: None, started_ms: unix_ms(), duration_us: 0, recorded: Ok(()) }
     }
 

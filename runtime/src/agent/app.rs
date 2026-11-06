@@ -179,6 +179,7 @@ impl AppSession {
 
     pub fn ready(&self) -> bool { self.ready && self.fault.is_none() }
     pub fn session(&self) -> Option<&str> { self.thread.as_deref() }
+    pub(super) fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
 
     /// Save the returned state before writing this request to the transport. A lost reply remains pending.
     pub fn start_turn(&mut self, mut params: Value) -> Res<Value> {
