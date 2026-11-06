@@ -2,17 +2,30 @@
 use super::*;
 use std::sync::mpsc::{self, Receiver, SyncSender, RecvTimeoutError};
 
+enum Pipe<T> {Bounded(SyncSender<T>),Stream(mpsc::Sender<T>)}
+impl<T> Pipe<T> {
+    fn send(&self,value:T)->Result<(),()> {match self {Self::Bounded(s)=>s.send(value).map_err(|_|()),Self::Stream(s)=>s.send(value).map_err(|_|())}}
+    fn enqueue(&self,value:T)->Result<(),()> {match self {Self::Bounded(s)=>s.try_send(value).map_err(|_|()),Self::Stream(s)=>s.send(value).map_err(|_|())}}
+}
+fn channel<T>(bound:Option<usize>)->(Pipe<T>,Receiver<T>) {match bound {
+    Some(n)=>{let(s,r)=mpsc::sync_channel(n);(Pipe::Bounded(s),r)},
+    None=>{let(s,r)=mpsc::channel();(Pipe::Stream(s),r)},
+}}
+
 type WriteRequest=(Vec<u8>,mpsc::Sender<Res<()>>);
 
 /// Shared native stdio transport. Dropping the handle does not kill an active session; callers own its lifecycle.
 pub(crate) struct Stdio {
     child:Child,
-    input:Option<SyncSender<WriteRequest>>,
+    input:Option<Pipe<WriteRequest>>,
+    bounded:bool,
     events:Receiver<Res<Value>>,
 }
 
 impl Stdio {
-    pub(crate) fn spawn(mut command:Command,private_log:&Path,process:&super::Process)->Res<Self> {
+    pub(crate) fn spawn(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,true)}
+    pub(crate) fn spawn_stream(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,false)}
+    fn spawn_inner(mut command:Command,private_log:&Path,process:&super::Process,bounded:bool)->Res<Self> {
         let mut options=File::options();options.create(true).append(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(private_log).map_err(|e|format!("app-server log: {e}"))?;
@@ -22,7 +35,7 @@ impl Stdio {
         let mut child=process.spawn(command,"app-server")?;
         let mut stdin=child.stdin.take().ok_or("app-server stdin unavailable")?;
         let stdout=child.stdout.take().ok_or("app-server stdout unavailable")?;
-        let (input,writing)=mpsc::sync_channel::<WriteRequest>(1);
+        let (input,writing)=channel::<WriteRequest>(bounded.then_some(1));
         std::thread::spawn(move || {
             while let Ok((bytes,receipt))=writing.recv() {
                 let result=stdin.write_all(&bytes).and_then(|_|stdin.flush()).map_err(|e|format!("app-server write outcome unknown: {e}"));
@@ -30,16 +43,16 @@ impl Stdio {
                 if failed {break;}
             }
         });
-        let (output,events)=mpsc::sync_channel(16);
+        let (output,events)=channel(bounded.then_some(16));
         std::thread::spawn(move || {
             let mut reader=BufReader::new(stdout);
             loop {
                 // Bytes first: the bound can fall inside a valid character, which must read as size and not as invalid UTF-8.
                 let mut line=Vec::new();
-                let result=(&mut reader).take(8*1024*1024+1).read_until(b'\n',&mut line);
+                let result=if bounded {(&mut reader).take(8*1024*1024+1).read_until(b'\n',&mut line)} else {reader.read_until(b'\n',&mut line)};
                 let event=match result {
                     Ok(0)=>break,
-                    Ok(_) if line.len()>8*1024*1024=>Err("app-server record exceeds 8 MiB; native state unknown".into()),
+                    Ok(_) if bounded && line.len()>8*1024*1024=>Err("app-server record exceeds 8 MiB; native state unknown".into()),
                     Ok(n) if line.last()!=Some(&b'\n')=>Err(format!("app-server stream ended inside a record after {n} bytes; native state unknown")),
                     Ok(_)=>match std::str::from_utf8(&line) {
                         Err(_)=>Err("app-server record invalid; native state unknown".into()),
@@ -56,7 +69,7 @@ impl Stdio {
                 if output.send(event).is_err() || failed {break;}
             }
         });
-        Ok(Self {child,input:Some(input),events})
+        Ok(Self {child,input:Some(input),events,bounded})
     }
 
     pub fn id(&self)->u32 {self.child.id()}
@@ -68,11 +81,11 @@ impl Stdio {
 
     pub(crate) fn send_until(&mut self,message:&Value,until:Option<Instant>)->Res<()> {
         let mut bytes=serde_json::to_vec(message).map_err(|e|e.to_string())?;
-        if bytes.len()>=8*1024*1024 {return Err("app-server input exceeds 8 MiB; not submitted".into());}
+        if self.bounded && bytes.len()>=8*1024*1024 {return Err("app-server input exceeds 8 MiB; not submitted".into());}
         bytes.push(b'\n');
         let left=until.map(|d|d.checked_duration_since(Instant::now()).ok_or("app-server send deadline; not submitted")).transpose()?;
         let (receipt,done)=mpsc::channel();
-        self.input.as_ref().ok_or("app-server writer closed")?.try_send((bytes,receipt)).map_err(|_|"app-server writer unavailable; not submitted")?;
+        self.input.as_ref().ok_or("app-server writer closed")?.enqueue((bytes,receipt)).map_err(|_|"app-server writer unavailable; not submitted")?;
         match left {
             Some(left)=>done.recv_timeout(left).map_err(|_|"app-server write acknowledgment unavailable; submission unknown")?,
             None=>done.recv().map_err(|_|"app-server write acknowledgment unavailable; submission unknown")?,
@@ -101,6 +114,18 @@ impl Stdio {
         if self.poll()?.is_some() {return Ok(());}
         self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))?;
         self.child.wait().map_err(|e|format!("app-server reap unconfirmed: {e}"))?;
+        Ok(())
+    }
+
+    /// Native stream EOF requests shutdown; only the caller may bound cleanup.
+    pub(crate) fn close_stream(&mut self,until:Option<Instant>)->Res<()> {
+        self.input.take();
+        if let Some(until)=until {
+            while self.poll()?.is_none() {
+                if Instant::now()>=until {self.kill()?;return Err("native shutdown caller deadline; cleanup interrupted".into());}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        } else {self.child.wait().map_err(|e|format!("native reap: {e}"))?;}
         Ok(())
     }
 

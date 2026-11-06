@@ -4,9 +4,12 @@ use serde_json::{Value,json};
 use std::{io::{BufRead,Write},path::PathBuf,time::{Duration,Instant}};
 
 fn main() {
+    if let Some(home)=std::env::var_os("AGENTQ_CHECK_ACP_HOME") {assert_eq!(agent::runtime("antigravity").unwrap().home(),Some(PathBuf::from(home)));return;}
     if std::env::var_os("AGENTQ_FAKE_ACP").is_some() {return server();}
     let root=std::env::temp_dir().join(format!("agentq-acp-{}",std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
+    let expected=root.join("gemini-root");
+    assert!(std::process::Command::new(std::env::current_exe().unwrap()).env("AGENTQ_CHECK_ACP_HOME",&expected).env("GEMINI_HOME",&expected).env("ANTIGRAVITY_HOME",root.join("old-data")).status().unwrap().success());
     let r=agent::runtime("antigravity").unwrap();
     let mut l=Launch::new(&root,root.join("acp.jsonl"),"first","fixtureq");
     l.command=vec![std::env::current_exe().unwrap().into_os_string()];
@@ -53,10 +56,17 @@ fn main() {
     assert!(logged.iter().any(|e|matches!(e,Event::ToolStart{..})));
     assert!(logged.iter().any(|e|matches!(e,Event::TurnEnd{outcome:"ok"})));
     assert!(!logged.iter().any(|e|matches!(e,Event::Text{delta,..} if delta=="old replay")));
-    let mut legacy=l.clone();legacy.command=vec!["agentapi".into()];legacy.parts=vec![agent::Part::Text("structured".into())];
-    assert!(r.launch(&legacy).err().unwrap().contains("turn-parts unsupported"));
-    legacy.parts.clear();legacy.mcp=Some(root.join("mcp.json"));
-    assert!(r.launch(&legacy).err().unwrap().contains("mcp-config unsupported"));
+    let named=root.join(if cfg!(windows){"agentapi.exe"}else{"agentapi"});std::fs::copy(std::env::current_exe().unwrap(),&named).unwrap();
+    let mut named_launch=l.clone();named_launch.command=vec![named.into_os_string()];named_launch.deadline=Some(Instant::now()+Duration::from_secs(20));
+    let mut named_run=r.launch(&named_launch).unwrap();r.cancel(&mut named_run).unwrap();
+    while r.poll(&mut named_run).unwrap()==State::Running {std::thread::yield_now();}
+    assert_eq!(r.report(&named_run).unwrap().outcome,"cancelled");
+    let mut large=l.clone();large.input="x".repeat(9*1024*1024);large.env.push(("AGENTQ_FAKE_ACP_LARGE".into(),"1".into()));
+    large.deadline=Some(Instant::now()+Duration::from_secs(20));
+    let mut large_run=r.launch(&large).unwrap();r.cancel(&mut large_run).unwrap();
+    while r.poll(&mut large_run).unwrap()==State::Running {std::thread::yield_now();}
+    assert_eq!(r.report(&large_run).unwrap().outcome,"cancelled");
+    l.deadline=Some(Instant::now()+Duration::from_secs(20));
     l.env.push(("AGENTQ_FAKE_ACP_BAD_VERSION".into(),"1".into()));
     assert!(r.launch(&l).err().unwrap().contains("workspace write defect"));
     l.env.pop();l.env.push(("AGENTQ_FAKE_ACP_EOF".into(),"1".into()));
@@ -76,7 +86,7 @@ fn server() {
     for line in std::io::stdin().lock().lines() {
         let v:Value=serde_json::from_str(&line.unwrap()).unwrap();
         match v["method"].as_str() {
-            Some("initialize")=>reply(&v,json!({"protocolVersion":1,"agentInfo":{"version":if std::env::var_os("AGENTQ_FAKE_ACP_BAD_VERSION").is_some(){"1.4.3"}else{"1.5.2"}},"agentCapabilities":{"loadSession":true}})),
+            Some("initialize")=>reply(&v,json!({"protocolVersion":1,"agentInfo":{"version":if std::env::var_os("AGENTQ_FAKE_ACP_BAD_VERSION").is_some(){"1.4.3"}else{"1.5.2"}},"agentCapabilities":{"loadSession":true},"_meta":{"large":if std::env::var_os("AGENTQ_FAKE_ACP_LARGE").is_some(){"x".repeat(9*1024*1024)}else{String::new()}}})),
             Some("session/new"|"session/load")=>{
                 assert!(PathBuf::from(std::env::var_os("GEMINI_HOME").unwrap()).ends_with("account"));
                 if v["method"]=="session/load" {update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"old replay"}}));}

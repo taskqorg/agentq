@@ -34,9 +34,9 @@ The shared ACP adapter speaks JSON-RPC 2.0 over native stdio. Registration suppl
 
 Antigravity uses the installed `agy acp`; there is no downloaded server or managed pin. ACP versions 1.4.2 through 1.4.5 refuse because they may write built-in skills into the workspace. Its ACP home is a Gemini root, selected explicitly for an isolated chat; the server does not inherit a different scanned home. A qualification records the exact CLI version, empty-folder write inspection and source-profile preservation.
 
-The existing stream and agentapi native seams remain available until ACP has side-by-side task, tools, resume, cancellation, usage and history proof on macOS and Windows. Agentapi remains a compatibility seam, not a fallback after an uncertain ACP input. Authentication uses the separate login flow; launch never starts interactive sign-in. A missing login or native-platform proof remains an explicit qualification gap.
+The existing stream and agentapi native seams remain available until ACP has side-by-side task, tools, resume, cancellation, usage and history proof on macOS and Windows. These low-level seams serve comparison proof only; `launch` and `resume` always select ACP, without command-name opt-outs or sidecar fallback. Consumers must provide an ACP-capable executable and pass a Gemini root in `Launch.home` (or `GEMINI_HOME`); the old agentapi data directory is not an ACP home. Authentication uses the separate login flow; launch never starts interactive sign-in. A missing login or native-platform proof remains an explicit qualification gap.
 
-ACP owns a stateful stdio connection. A process checkpoint reads `no-checkpoint`; recovery never recreates that connection or resubmits its prompt. A later explicit resume uses `session/load`. The retained stateless CLI seam keeps its process-identity recovery contract.
+ACP imposes no record-size, queue-size or shutdown-grace limit. EOF closes its owned server; only a caller deadline bounds waiting for its exit. ACP owns a stateful stdio connection. A process checkpoint reads `no-checkpoint`; recovery never recreates that connection or resubmits its prompt. A later explicit resume uses `session/load`. The retained stateless CLI seam keeps its process-identity recovery contract.
 
 ## Runtime trait
 
