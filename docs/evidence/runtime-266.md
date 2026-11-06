@@ -26,7 +26,7 @@ No no-replay, fencing or retained-scope code or assertion changed: an interrupte
 
 ## Retained operation
 
-No command in this task launches, cancels or reconciles through the Mac host. The retained failed operation stays in the Mac journal. Its SHA-256 is `ab4281c3aa8971a1ab965d68495364c8dcc5c9410de2dbe29f7884b2b77d96f6` at 9,862 bytes, read on the Mac before the change. The hand-in recheck is the read-only task [#272](https://github.com/taskqorg/agentq/issues/272), pinned to the Mac host, because only that host can read the journal. Until #272 reports, the current digest is unknown.
+No command in this task launches, cancels or reconciles through the Mac host. The retained failed operation stays in the Mac journal. Its SHA-256 is `ab4281c3aa8971a1ab965d68495364c8dcc5c9410de2dbe29f7884b2b77d96f6` at 9,862 bytes, read on the Mac before the change. The read-only task [#272](https://github.com/taskqorg/agentq/issues/272), pinned to the Mac host, reported the same size and digest at `b5431b118c68494bdd8c8075715cc74c5b6485df`. The hand-in attempt of this task read the journal again on the Mac and got the same size and digest. These reads printed only the size and digest and ran no host action.
 
 ## Signed adapter
 
