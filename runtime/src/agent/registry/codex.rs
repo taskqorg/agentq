@@ -1,4 +1,9 @@
-//! Codex registration: native worker and installation behavior.
+#[path="codex/history.rs"]
+mod history;
+#[path="codex/parsing.rs"]
+pub(super) mod parsing;
+use self::parsing::*;
+// Codex registration: native worker and installation behavior.
 #[path="codex/app.rs"]
 pub(crate) mod app;
 use super::super::super::events::{string,tool_kind,audit_command,audit_files,native_timeout};
@@ -341,9 +346,9 @@ fn read_snapshot(events:&[Value],rollout:Option<&Path>)->Snapshot {
     }
 }
 
-fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end_index=events.iter().rposition(|v|ends(v) || assistant_failure(v).is_some()); let failure=None; classify_report(Client::Codex,text,events,rollout,end_index,failure,vec![])}
+fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end_index=events.iter().rposition(|v|ends(v) || assistant_failure(v).is_some()); classify_report(text,events,rollout,end_index)}
 
-static PROTOCOL: Protocol=Protocol {turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:Some(verify_meta),finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
+static PROTOCOL: Protocol=Protocol {history_alias:false,history_provenance:|format,v,offset|format=="codex-rollout" && v["type"]=="session_meta" && offset>0,history_parent:|_|None,rollout_report,history_formats:&["codex-exec","codex-rollout","codex-app-server"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:Some(verify_meta),finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
 pub(crate) fn codex_groups(v: &Value) -> Option<Vec<(&str, &Value)>> {
     if let Some(groups) = v["result"].get("rateLimitsByLimitId").or(v["params"].get("rateLimitsByLimitId")).or(v.get("rateLimitsByLimitId")) {
@@ -450,12 +455,12 @@ fn update_limits(v:&Value,now:u64,all:&mut BTreeMap<String,Vec<Window>>)->bool {
 
 }
 
-fn account_limits(home:Option<&Path>,now:i64)->Vec<Window> {let client=Client::Codex;
+fn account_limits(home:Option<&Path>,executable:Option<&Path>,now:i64)->Vec<Window> {let client=Client::Codex;
     let _explicit=home.is_some() || std::env::var_os(client.home_var()).is_some();
     let Some(home) = home.map(Path::to_path_buf).or_else(|| base_home(client)) else { return unknown("home-unavailable"); };
     let path = home.join("auth.json");
     let before = match credential_snapshot(&path) { Ok(b) => b, Err(_) => return unknown("credential-unreadable") };
-    let response = codex_read(Some(&home), None, |server,session,until| {let request=session.request("account/rateLimits/read",json!({}))?;exchange(server,session,request,until)});
+    let response = codex_read(Some(&home), executable, |server,session,until| {let request=session.request("account/rateLimits/read",json!({}))?;exchange(server,session,request,until)});
     if credential_snapshot(&path).ok().as_ref() != Some(&before) { return unknown("credential-changed"); }
     match response {
         Ok(v) => reported(&v, now.max(0) as u64).unwrap_or_else(|| unknown("not-reported")),
@@ -560,8 +565,41 @@ pub(crate) fn append_codex_usage(events:&mut Vec<Value>,last:&Value,total:&Value
 }
 
 fn session_report(text:&str,r:&mut Report) {
-        r.calls = capture::rollout_calls(text, false);
+        r.calls = rollout_calls(text, false);
         let known = !r.calls.is_empty();
         r.usage = sum_usage(&r.calls, None, known);
 
+}
+
+/// The model requests of a Codex rollout, each `token_count` once by its cumulative total. `last_turn` keeps only the
+/// requests after the last `task_started`.
+pub(crate) fn rollout_calls(text: &str, last_turn: bool) -> Vec<Call> {
+    let (mut events, mut model) = (Vec::<Value>::new(), None::<String>);
+    for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+        if v["type"] == "turn_context" { model = v["payload"]["model"].as_str().map(String::from); }
+        let p = &v["payload"];
+        if v["type"] != "event_msg" { continue; }
+        if last_turn && p["type"] == "task_started" { events.clear(); }
+        if p["type"] != "token_count" || !p["info"]["total_token_usage"].is_object() { continue; }
+        let before = events.len();
+        append_codex_usage(&mut events, &p["info"]["last_token_usage"], &p["info"]["total_token_usage"], false);
+        if events.len() > before {
+            let last = events.last_mut().expect("appended");
+            last["timestamp"] = v["timestamp"].clone();
+            if let Some(m) = &model { last["model"] = json!(m); }
+        }
+    }
+    read_calls(&events).0
+}
+fn rollout_report(rollout:Option<&Path>,r:&mut Report) {
+        // A Codex `exec` turn names each request only in its rollout; `turn.completed` holds the totals.
+        if let Some(text) = rollout.and_then(|p| std::fs::read_to_string(p).ok()) {
+            let calls = rollout_calls(&text, true);
+            if !calls.is_empty() {
+                let per_request = sum_usage(&calls, None, true);
+                r.usage.reasoning = per_request.reasoning;
+                r.usage.model = r.usage.model.take().or(per_request.model);
+                r.calls = calls;
+            }
+        }
 }

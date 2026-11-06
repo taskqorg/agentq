@@ -187,7 +187,7 @@ impl Cursor {
         let mut out = vec![];
         for v in values {
             if matches!(self.start_limit,StartLimit::Pending) {
-                if let Some(start)=StartLimit::read(&v) {self.start_limit=start;}
+                if let Some(start)=(protocol(client).start_limit)(&v) {self.start_limit=start;}
             }
             let before = out.len();
             if let Some(w) = limits::reported(client, &v, (unix_ms()/1000).max(0) as u64) { out.push(Event::Quota(w)); }
@@ -810,7 +810,7 @@ mod tests {
 }
 
 pub(crate) fn default_terminal(client: Client,cursor: &Cursor,v: &Value) -> Option<&'static str> {
-    if !ends(v) {return None;}
+    if !(protocol(client).ends)(v) {return None;}
     let outcome=Report::read(client,&v.to_string(),std::slice::from_ref(v),None).outcome;
     Some(match (cursor.start_limit,outcome) {(StartLimit::Reached(_),_)=>"refused",(StartLimit::Working,"refused")=>"failed",_=>outcome})
 }

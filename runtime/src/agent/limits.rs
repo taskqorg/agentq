@@ -11,17 +11,20 @@ pub struct Window {
     /// Explicit native status or measured exhaustion; None when neither is reported.
     #[serde(default)]
     pub exhausted: Option<bool>,
+    /// Native rejection status, independent of measured exhaustion; absent means unknown.
+    #[serde(default)]
+    pub rejected: Option<bool>,
     pub unknown: Option<String>,
 }
 
 pub(super) fn unknown(reason: &str) -> Vec<Window> {
-    vec![Window { window: None, used: None, resets_at: None, event_id: None, exhausted: None, unknown: Some(reason.into()) }]
+    vec![Window { window: None, used: None, resets_at: None, event_id: None, exhausted: None, rejected: None, unknown: Some(reason.into()) }]
 }
 
 pub(crate) fn window(name: Option<String>, used: Option<f64>, reset: Option<u64>, id: Option<String>) -> Window {
     let used = used.filter(|u| u.is_finite() && *u >= 0.0);
     let partial = used.is_none() || reset.is_none() || name.is_none();
-    Window { window: name, used, exhausted: used.map(|u|u>=1.0), resets_at: reset, event_id: id, unknown: partial.then(|| "partial-snapshot".into()) }
+    Window { window: name, used, exhausted: used.map(|u|u>=1.0), rejected: None, resets_at: reset, event_id: id, unknown: partial.then(|| "partial-snapshot".into()) }
 }
 
 /// Merge independent native snapshots, never key Codex groups by their shared window lengths.
@@ -228,7 +231,7 @@ pub(super) fn reported(client:Client,v:&Value,now:u64)->Option<Vec<Window>> {(pr
 
 pub(super) fn update(client:Client,v:&Value,now:u64,all:&mut BTreeMap<String,Vec<Window>>)->bool {(protocol(client).update_limits)(v,now,all)}
 
-pub(super) fn account(client:Client,home:Option<&Path>,now:i64)->Vec<Window> {(protocol(client).account_limits)(home,now)}
+pub(super) fn account(client:Client,home:Option<&Path>,executable:Option<&Path>,now:i64)->Vec<Window> {(protocol(client).account_limits)(home,executable,now)}
 
 pub(super) fn identity(client:Client,home:Option<&Path>)->Option<String> {(protocol(client).identity)(home)}
 
@@ -256,6 +259,6 @@ pub(crate) fn keychain(service:&str,account:Option<&str>)->Res<Option<String>> {
 
 fn read_credentials(client:Client,home:&Path,explicit:bool)->Res<String> {(protocol(client).credentials)(home,explicit)}
 
-pub(super) use registry::claude_info;
+
 #[cfg(test)]
 use registry::{claude_window,claude_windows,code_assist,project_identity,codex_identity};

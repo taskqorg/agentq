@@ -201,9 +201,11 @@ mod examples {
         assert_eq!((e.name,e.profile.operations),("example-agent",&["hooks"][..]));
         assert!(cli_present(e).unwrap_err().contains("example-agent"));
 
-        let root=(e.root)();
+        let root=std::env::temp_dir().join(format!("agentq-registry-setup-{}",crate::incident::uuid()));
+        assert!(!root.exists());
         let requests=(e.setup)(&root,Path::new(""),Path::new("/agentq"));
         assert_eq!(requests[0].file,root.join("hooks.json"));
+        assert!(!root.exists(),"registration only describes edits; it never writes setup");
 
     }
 }
@@ -250,6 +252,18 @@ pub(super) fn with_test_path<T>(path: &Path,f: impl FnOnce()->T) -> T {
 }
 
 pub(crate) struct Protocol {
+    pub history_provenance:fn(&str,&Value,u64)->bool,
+    pub history_parent:fn(&Value)->Option<String>,
+    pub rollout_report:fn(Option<&Path>,&mut Report),
+    pub history_alias: bool,
+    pub history_formats: &'static [&'static str],
+    pub history_session:fn(&str,&Value,&str)->Option<String>,
+    pub history_normalize:fn(&str,&Value)->super::super::history::Normalized,
+    pub history_validity:fn(&Value)->Value,
+    pub ends:fn(&Value)->bool,
+    pub start_limit:fn(&Value)->Option<StartLimit>,
+    pub read_calls:fn(&[Value])->(Vec<Call>,Option<u64>,bool),
+    pub final_text:fn(&[Value])->Option<String>,
     pub prepare_command:fn(Command,&Spec,&str)->Res<(Command,Box<dyn TurnExtension>)>,
     pub input_bytes:fn(&str)->Vec<u8>,
     pub native_record:fn(&mut native::NativeTurn,&Value)->Res<()>,
@@ -258,7 +272,7 @@ pub(crate) struct Protocol {
     pub session_report:fn(&str,&mut Report),
     pub reported:fn(&Value,u64)->Option<Vec<Window>>,
     pub update_limits:fn(&Value,u64,&mut BTreeMap<String,Vec<Window>>)->bool,
-    pub account_limits:fn(Option<&Path>,i64)->Vec<Window>,
+    pub account_limits:fn(Option<&Path>,Option<&Path>,i64)->Vec<Window>,
     pub identity:fn(Option<&Path>)->Option<String>,
     pub credentials:fn(&Path,bool)->Res<String>,
     pub oauth_token:fn(&Value,i64)->Res<&str>,
@@ -278,7 +292,7 @@ pub(crate) fn protocol(client:Client)->&'static Protocol {builtin(client).ops.pr
 #[cfg(test)]
 pub(crate) use antigravity::session as antigravity_session;
 
-pub(crate) use claude::claude_info;
+
 #[cfg(test)]
 pub(crate) use codex::codex_identity;
 #[cfg(test)]
@@ -299,3 +313,13 @@ pub(crate) fn native_transcript(client:Client,session:&str,home:Option<&Path>)->
 pub(crate) mod parsing;
 #[cfg(test)]
 pub(crate) use claude::claude_settings;
+
+#[cfg(test)]
+pub(crate) use codex::rollout_calls as codex_rollout_calls;
+
+#[cfg(test)]
+pub(crate) use codex::parsing::auth_rejected as codex_auth_rejected;
+
+pub(crate) fn history_protocol(format:&str)->Option<&'static Protocol> {
+    native_entries().filter_map(|e|e.builtin).map(|a|a.ops.protocol).find(|p|p.history_formats.contains(&format))
+}

@@ -326,9 +326,10 @@ impl AppSession {
         (r.outcome, r.error) = match status { "completed" => ("ok","none"), "interrupted" => ("cancelled","interrupted"), _ => ("failed","turn-failed") };
         if status=="failed" {
             if let Some(error)=&self.failure {
+                r.detail=error["message"].as_str().map(String::from);
                 let event=json!({"type":"turn.failed","error":error});
                 let evidence=[event.clone()];
-                if !self.worked && limit_reached(&evidence).is_some() {
+                if !self.worked && limit_reached(Client::Codex,&evidence).is_some() {
                     r.reached=Some(error["resetsAt"].as_i64().or_else(||r.limit.resets_at.and_then(|n|i64::try_from(n).ok())));
                     (r.outcome,r.error)=("refused","usage-limit");
                 } else if auth_rejected(&event.to_string()).is_some() {(r.outcome,r.error)=("failed","auth-rejected");}
@@ -520,6 +521,7 @@ mod tests {
             if let Some(phase)=phase {app.observe(&json!({"method":phase,"params":{"threadId":"native-thread","turnId":id,"item":{"type":"commandExecution"}}})).unwrap();}
             app.observe(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":id,"status":"failed","error":{"message":"usage limit reached","resetsAt":1793700000u64}}}})).unwrap();
             let report=app.report().unwrap();
+            assert_eq!(report.detail.as_deref(),Some("usage limit reached"));
             if worked {assert_eq!(report.reached,None);assert_eq!(report.outcome,"failed");}
             else {assert_eq!(report.reached,Some(Some(1793700000)));assert_eq!(report.outcome,"refused");}
         }

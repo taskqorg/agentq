@@ -605,3 +605,38 @@ fn migration_history_validity_distinguishes_ignored_metadata_from_invalid_record
         assert_eq!(observe(format, json!({}))["validity"], json!({"status":"unknown","reason":"envelope-validation-unsupported"}));
     }
 }
+
+#[test]
+fn copied_claude_job_requires_explicit_bound_alias() {
+    let path=std::env::temp_dir().join(format!("agentq-history-copy-{}.jsonl",std::process::id()));
+    let raw=format!("{}\n{}\n",json!({"type":"user","sessionId":"original","message":{"content":"copied input"}}),json!({"type":"assistant","sessionId":"copy","message":{"content":[]}}));
+    fs::write(&path,&raw).unwrap();
+    let mut strict=History::new("claude-native","copy-job","copy").unwrap();
+    let before=strict.checkpoint();
+    assert_eq!(strict.poll(&path).unwrap_err(),"history native session differs");
+    assert_eq!(strict.checkpoint(),before);
+    let mut h=History::with_native_session_alias("claude-native","copy-job","copy","original").unwrap();
+    let page=h.poll(&path).unwrap();
+    assert_eq!(page.events[0]["session"],"copy");
+    assert_eq!(page.events[0]["native_session"],"original");
+    assert_eq!(page.events[0]["session_binding"],"alias");
+    assert_eq!(page.events[0]["raw"],raw.lines().next().unwrap().to_owned()+"\n");
+    assert_eq!(page.events[1]["session_binding"],"native");
+    let saved=h.checkpoint();
+    let mut recovered=History::recover(&saved).unwrap();
+    assert!(recovered.poll(&path).unwrap().events.is_empty());
+    let mut reverse=History::with_native_session_alias("claude-native","copy-job","copy","original").unwrap();
+    assert_eq!(reverse.poll_before(&path).unwrap().events,page.events);
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"{\"type\":\"user\",\"sessionId\":\"third\"}\n").unwrap();
+    assert_eq!(recovered.poll(&path).unwrap_err(),"history native session differs");
+    assert_eq!(recovered.checkpoint(),saved);
+    for alias in ["","copy"] {assert!(History::with_native_session_alias("claude-native","s","copy",alias).is_err());}
+    assert!(History::with_native_session_alias("codex-exec","s","copy","original").is_err());
+    for invalid in [json!(""),json!(true),json!("copy")] {
+        let mut bad=saved.clone();bad["native_session_alias"]=invalid;
+        assert!(History::recover(&bad).is_err());
+    }
+    fs::write(&path,raw.replace("copied input","changed")).unwrap();
+    assert!(History::recover(&saved).unwrap().poll(&path).is_err(),"alias never weakens consumed-prefix validation");
+    fs::remove_file(path).unwrap();
+}
