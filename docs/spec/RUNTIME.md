@@ -570,6 +570,16 @@ let preceding_page = older.poll_before(&caller_selected_path)?;
 Each event includes source label, exact byte range, raw UTF-8 record (newline included),
 source SHA-256, source timestamp (`timestamp`, `time`, sidecar `created_at` or app-server `emittedAtMs`) when present (otherwise null), author (otherwise `unknown`),
 native item/step ID when present, physical byte order, normalized blocks and lifecycle kind.
+`validity` separates native envelope validity from normalization support. It contains
+`status` (`valid`, `invalid` or `unknown`) and `reason` (null only when valid).
+For Claude native and stream records, a non-empty string `type` is a valid envelope,
+including unrecognized types such as `file-history-snapshot`; missing, empty or
+non-string discriminators are invalid with reason `missing-or-invalid-record-type`.
+Other transports report unknown with reason `envelope-validation-unsupported`.
+This validates only the envelope, not message content, completion or authority.
+Unknown types keep their raw record, unknown author/kind and normalization limit;
+consumers use `validity` to skip unsupported metadata or refuse invalid envelopes
+without parsing native JSON. Forward and backward pages expose the same validity.
 An emitted native session ID must match the bound session; otherwise the page fails without advancing.
 `session_binding` is `native` only on a record carrying that ID; otherwise it is `caller`, never identity proof.
 `pending_bytes` names unconsumed bytes in a forward read, or excluded incomplete tail bytes
@@ -657,7 +667,7 @@ Consumers of the runtime and CoreQ on their default branches when this page chan
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
 | AssetQ | `coreq` v0.19.2, `agentq-runtime` tag `runtime-v0.2.0` (which resolves its own `coreq` v0.18.0) | Pinned; a newer revision follows its own contract and qualification |
 
-- Runtime crate version 0.13.0; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
+- Runtime crate version 0.13.1; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. After a runtime version change merges to main and that exact source passes the `Test` workflow on Linux, macOS and Windows, `.github/workflows/runtime-tag.yml` invokes `scripts/tag_runtime.py`. The script checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - One CoreQ source: a consumer that uses CoreQ directly spells the runtime's exact CoreQ dependency, currently `coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.0" }`. Cargo treats `tag` and `rev` at the same commit as two sources, and then two `Store` types. `tests/runtime_publication.py` resolves such a consumer and refuses more than one CoreQ source.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.

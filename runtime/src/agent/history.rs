@@ -173,6 +173,11 @@ impl History {
         });
         if native_session.is_some_and(|s| s != self.session) { return Err("history native session differs".into()); }
         let (author, kind, item, blocks, limited) = normalize(&self.format, v);
+        let validity = match self.format.as_str() {
+            "claude-native" | "claude-stream" if v["type"].as_str().is_some_and(|s| !s.is_empty()) => json!({"status":"valid","reason":null}),
+            "claude-native" | "claude-stream" => json!({"status":"invalid","reason":"missing-or-invalid-record-type"}),
+            _ => json!({"status":"unknown","reason":"envelope-validation-unsupported"}),
+        };
         let hash = crate::sha256_hex(raw.as_bytes());
         let id = crate::sha256_hex(json!([self.format,self.source,self.session,offset,hash]).to_string().as_bytes());
         let time = v.get("timestamp").or_else(|| v.get("time"))
@@ -181,7 +186,7 @@ impl History {
             .cloned().unwrap_or(Value::Null);
         Ok(json!({"id":id,"source":self.source,"session":self.session,"session_binding":if native_session.is_some(){"native"}else{"caller"},"format":self.format,
             "order":offset,"start":offset,"end":offset+raw.len() as u64,"sha256":hash,"raw":raw,
-            "assistant_failure":super::events::assistant_failure(client,v),
+            "validity":validity,"assistant_failure":super::events::assistant_failure(client,v),
             "lifecycle":super::events::lifecycle(client,v),"permission_mode":super::events::permission_mode(client,v),
             "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited}))
     }
