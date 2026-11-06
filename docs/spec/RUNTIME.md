@@ -364,6 +364,15 @@ A rejected Claude `rate_limit_event` before work also returns `Report::reached`,
 
 `Report.detail` retains a Claude terminal `result.subtype` or Codex failed-turn native `error.message`, including the app-server failure report. These fields do not change `outcome`, `error` or `reached`; runtimes without native detail retain unknown.
 
+`Report.reason` retains the short classified Codex authentication reason (`401 Unauthorized` or `refresh token rejected`) on both exec and app-server paths. `error` remains `auth-rejected`; `detail` keeps the full native failed-turn message. Other reports leave `reason` absent. Products consume these fields without parsing native messages.
+
+`Report.termination` is a typed native-process observation, independent of turn outcome, `exit` and `StopEvent`: `Observed` means AgentQ reaped the actual worker child; `Unknown { reason }` means termination was not observed. `Runtime::report` and the JSON report expose the same value (`state: observed` or `state: unknown` with `reason`). Log-only classification and native background/app-server session reports remain unknown because a terminal record is not process-termination evidence.
+
+On Unix, a child wait or owned-child `waitpid` confirms termination even when a signal supplies no numeric exit code. On Windows, a completed child wait confirms termination. AgentQ cleanup after a native turn end also confirms termination but leaves `Report.exit` absent and keeps the native turn outcome; it creates no stopped-turn failure. A recovered missing or replaced process identity stays unknown with reason `recovered-process-exit-not-observed`, even when the old incarnation is gone. A sidecar submitter exit never proves termination of its separately owned native server or turn, and stays unknown with reason `sidecar-process-not-observed`. Neither observation authorizes signalling a process or proves descendant/server-side cleanup. Consumers constructing `Report` add `reason` and `termination`; these observations do not change run checkpoints or `stop_id`.
+
+For an unfinished Claude turn, products read the latest ordered `Event::Message` from `log_records` for last-assistant evidence; `Report.text` remains final-result text. A message proves neither a terminal boundary nor success. Antigravity tool input evidence requires the native `step_update.state` (`ACTIVE` gives `ToolStart`; `DONE` gives `ToolEnd`); missing state gives `Unsupported`, never acceptance. `Activity` also proves no acceptance.
+
+
 ## Usage
 
 - Claude: each `assistant` message ID counts once, because one message spans several lines. Uncached input is `input_tokens`, cache read `cache_read_input_tokens`, cache write `cache_creation_input_tokens`, output `output_tokens`. The model is the one of most calls.

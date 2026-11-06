@@ -9,6 +9,6 @@ pub(crate) fn report(client: Client, text: &str, events: &[Value], rollout: Opti
     let (calls,count,known)=(protocol(client).read_calls)(events);
     Report {session:session_of(client,text), usage:sum_usage(&calls,count,known), calls, process:ProcessUse::default(),
         limit:snapshot(client,events,rollout), limits:limits::read(client,events,rollout), reached:limit_reached(client,events),
-        background_job:!live_background.is_empty(),live_background,outcome:status.0,error:status.1,detail:status.2,
-        text:(protocol(client).final_text)(events),exit:None,started_ms:unix_ms(),duration_us:0,readiness:None,recorded:Ok(())}
+        background_job:!live_background.is_empty(),live_background,outcome:status.0,error:status.1,detail:status.2,reason:None,
+        text:(protocol(client).final_text)(events),exit:None,termination:ProcessTermination::Unknown {reason:"native-process-exit-not-observed"},started_ms:unix_ms(),duration_us:0,readiness:None,recorded:Ok(())}
 }
