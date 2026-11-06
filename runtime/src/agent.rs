@@ -271,8 +271,10 @@ pub struct Turn {
     /// The caller cancelled the run.
     cancelled: bool,
     child: Proc,
-    /// The exit was not observed (a recovered child), so `exit` holds no code.
+    /// The native exit code was not observed, or belongs to post-terminal cleanup.
     exit_unknown: bool,
+    /// A child wait observed termination; a missing recovered identity is not a wait.
+    reaped: bool,
     /// `native::scope` of the launch, bound into a checkpoint.
     scope: String,
     log: PathBuf,
@@ -331,7 +333,7 @@ impl Turn {
         } else {
             drop(stdin);
         }
-        Ok(Turn { readiness: None, client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
+        Ok(Turn { readiness: None, client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, reaped: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
             ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), extension, receipt, sampler, terminal: None })
     }
 
@@ -364,7 +366,7 @@ impl Turn {
         let flag = |k: &str| saved[k].as_bool().ok_or_else(invalid);
         let resumed = match &saved["resumed"] { Value::Null => None, v => Some(v.as_str().filter(|s| native::plain_id(s)).ok_or_else(invalid)?.to_string()) };
         let age = Duration::from_millis(unix_ms().saturating_sub(started_ms).max(0) as u64);
-        Ok(Turn { readiness: None, client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(),
+        Ok(Turn { readiness: None, client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, reaped: false, scope: native::scope(spec), log: log.to_path_buf(),
             start, pos: start, ended: false, stopping: false, timed_out: flag("timed_out")?, started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
             started_ms, exit: None, home: spec_home(spec), resumed, extension: Box::new(StdioTurn), receipt: None, sampler: None, terminal: None })
     }
@@ -411,6 +413,7 @@ impl Turn {
         self.read()?;
         if self.exit.is_none() {
             if let Some(code) = self.child.try_wait()? {
+                self.reaped = code.is_some();
                 // After our stop of an ended turn, the code is the kill's (Windows 1, Unix -1), not the client's.
                 self.exit_unknown = code.is_none() || self.ended && self.stopping;
                 let code = code.unwrap_or(-1);
@@ -489,6 +492,9 @@ impl Turn {
         r.duration_us = self.started.elapsed().as_micros() as u64;
         r.started_ms = self.started_ms;
         r.exit = if self.exit_unknown { None } else { self.exit };
+        r.termination = if self.extension.is_submission() { ProcessTermination::Unknown { reason: "sidecar-process-not-observed" } }
+            else if self.reaped { ProcessTermination::Observed }
+            else { ProcessTermination::Unknown { reason: if self.exit.is_some() { "recovered-process-exit-not-observed" } else { "native-process-exit-not-observed" } } };
         r.process = match &self.sampler {
             Some(s) => s.usage(),
             None if self.extension.is_submission() => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("sidecar-server") },
@@ -594,6 +600,11 @@ fn percent(v: f64) -> Option<u64> { (v.is_finite() && v >= 0.0).then(|| v.round(
 /// last `rate_limits` (`primary`/`secondary`: `used_percent` 0-100, `resets_at`, `window_minutes`) in the turn's events,
 /// else the last `token_count` of the thread rollout; the window with the higher use binds.
 
+/// Native process termination is separate from the turn outcome and numeric exit code.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProcessTermination { Observed, Unknown { reason: &'static str } }
+
 /// What one turn did, read from its log.
 #[derive(Clone, Debug)]
 pub struct Report {
@@ -615,8 +626,11 @@ pub struct Report {
     pub error: &'static str,
     /// Native terminal detail (Claude result subtype, Codex failed-turn message), else a classified failure reason.
     pub detail: Option<String>,
+    /// Short classified native failure reason, independently of the full native detail.
+    pub reason: Option<String>,
     pub text: Option<String>,
     pub exit: Option<i32>,
+    pub termination: ProcessTermination,
     pub started_ms: i64,
     pub duration_us: u64,
     /// The observation append; Ok(()) before `run` appends.
@@ -920,7 +934,7 @@ use registry::claude_settings;
 fn protocol(client:Client)->&'static registry::Protocol {registry::protocol(client)}
 
 impl Report {
-    fn empty()->Self {Report {readiness:None,session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,text:None,exit:None,started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
+    fn empty()->Self {Report {readiness:None,session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,reason:None,text:None,exit:None,termination:ProcessTermination::Unknown {reason:"native-process-exit-not-observed"},started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
 }
 
 #[cfg(test)]

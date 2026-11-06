@@ -121,9 +121,10 @@ pub(super) fn classify_report(
     rollout: Option<&Path>,
     end_index: Option<usize>,
 ) -> Report {
+    let auth_reason = auth_rejected(text);
     let mut status = if limit_reached(Client::Codex, events).is_some() {
         ("refused", "usage-limit", None)
-    } else if let Some(a) = auth_rejected(text) {
+    } else if let Some(a) = auth_reason {
         ("failed", "auth-rejected", Some(a.into()))
     } else if let Some(c) = transient_failure(events) {
         ("failed", "model-capacity", Some(c))
@@ -142,5 +143,7 @@ pub(super) fn classify_report(
     {
         status.2 = Some(detail.into());
     }
-    report(Client::Codex, text, events, rollout, status, vec![])
+    let mut r = report(Client::Codex, text, events, rollout, status, vec![]);
+    if r.error == "auth-rejected" { r.reason = auth_reason.map(String::from); }
+    r
 }

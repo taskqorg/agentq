@@ -332,7 +332,7 @@ impl AppSession {
                 if !self.worked && limit_reached(Client::Codex,&evidence).is_some() {
                     r.reached=Some(error["resetsAt"].as_i64().or_else(||r.limit.resets_at.and_then(|n|i64::try_from(n).ok())));
                     (r.outcome,r.error)=("refused","usage-limit");
-                } else if auth_rejected(&event.to_string()).is_some() {(r.outcome,r.error)=("failed","auth-rejected");}
+                } else if let Some(reason)=auth_rejected(&event.to_string()) {(r.outcome,r.error)=("failed","auth-rejected");r.reason=Some(reason.into());}
                 else if transient_failure(&evidence).is_some() {(r.outcome,r.error)=("failed","model-capacity");}
             }
         }
@@ -524,6 +524,17 @@ mod tests {
             assert_eq!(report.detail.as_deref(),Some("usage limit reached"));
             if worked {assert_eq!(report.reached,None);assert_eq!(report.outcome,"failed");}
             else {assert_eq!(report.reached,Some(Some(1793700000)));assert_eq!(report.outcome,"refused");}
+        }
+        // Auth classification never replaces or reparses the native failure detail.
+        for (message,reason) in [("unexpected status 401 Unauthorized: token expired, auth error: 401","401 Unauthorized"),
+            ("Your refresh token was already used; sign in again","refresh token rejected")] {
+            app.finish_turn().unwrap();let start=app.start_turn(json!({"input":[]})).unwrap();
+            app.observe(&json!({"id":start["id"],"result":{"turn":{"id":"auth"}}})).unwrap();
+            app.observe(&json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"auth","status":"failed","error":{"message":message}}}})).unwrap();
+            let report=app.report().unwrap();let fields=crate::cli::report_json(&report);
+            assert_eq!((report.error,fields["reason"].as_str(),fields["detail"].as_str()),("auth-rejected",Some(reason),Some(message)));
+            let cold=AppSession::recover(&spec,&app.checkpoint()).unwrap();
+            assert_eq!(crate::cli::report_json(&cold.report().unwrap())["reason"],reason);
         }
         spec.resume=false;spec.session="-".into();let mut new=AppSession::new(&spec).unwrap();
         let req=new.initialize(json!({})).unwrap();new.observe(&json!({"id":req["id"],"result":{}})).unwrap();

@@ -1058,6 +1058,8 @@ fn lingering_process_is_stopped_after_its_turn_ends() {
     let report = codex.report(&run).unwrap();
     assert_eq!(report.outcome, "ok", "the ended turn keeps its outcome");
     assert_eq!(report.exit, None, "the code of our own stop is not the client's exit");
+    assert_eq!(agentq_runtime::cli::report_json(&report)["termination"], json!({"state":"observed"}), "reaped cleanup proves termination without an exit code");
+    assert!(codex.stop_event(&mut run,u64::MAX).unwrap().is_none(), "cleanup remains distinct from stopped-turn failure");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1689,6 +1691,7 @@ fn antigravity_native_submission_tails_and_resumes() {
     append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"first done","input_tokens":3,"cache_read_tokens":2,"cache_write_tokens":0,"output_tokens":1,"tool_calls":[]})]);
     finish(ag, &mut run); let report=ag.report(&run).unwrap();
     assert_eq!((report.outcome,report.text.as_deref(),report.session.as_deref()),("ok",Some("first done"),Some("native-conv")));
+    assert_eq!(agentq_runtime::cli::report_json(&report)["termination"],json!({"state":"unknown","reason":"sidecar-process-not-observed"}));
     let session=report.session.unwrap();
     l.input="second".into();
     let mut run=ag.resume(&session,&l).unwrap();
@@ -1763,6 +1766,15 @@ fn runtime_trait_exposes_native_seams() {
     assert_eq!((capacity.error,capacity.detail.as_deref()),("model-capacity",Some("Selected model is at capacity")));
     let auth=codex.classify(&json!({"type":"error","message":"401 Unauthorized"}).to_string());
     assert_eq!((auth.error,auth.detail.as_deref()),("auth-rejected",Some("401 Unauthorized")));
+    for (message,reason) in [("unexpected status 401 Unauthorized: token expired, auth error: 401","401 Unauthorized"),
+        ("Your refresh token was already used; sign in again","refresh token rejected")] {
+        let auth=codex.classify(&json!({"type":"turn.failed","error":{"message":message}}).to_string());
+        let fields=agentq_runtime::cli::report_json(&auth);
+        assert_eq!((auth.error,auth.reason.as_deref(),auth.detail.as_deref()),("auth-rejected",Some(reason),Some(message)));
+        assert_eq!((fields["reason"].as_str(),fields["detail"].as_str()),(Some(reason),Some(message)));
+        let quoted=codex.classify(&json!({"type":"item.completed","item":{"type":"agent_message","text":message}}).to_string());
+        assert_ne!(quoted.error,"auth-rejected");assert_eq!(quoted.reason,None);
+    }
     assert_eq!(codex.classify(&json!({"type":"thread.started","thread_id":"t-1"}).to_string()).session.as_deref(),Some("t-1"));
     assert_eq!(codex.classify(&json!({"type":"error","message":"You've hit your usage limit"}).to_string()).reached,Some(None));
 
@@ -1943,12 +1955,20 @@ fn stopped_runs_have_typed_activity() {
             let r=agent::runtime(name).unwrap();
             let l=fake_launch(name,&root,"x",&[("COREQ_FAKE_STOP",mode.as_ref())]);
             let mut run=r.launch(&l).unwrap();wait_for(&root.join("stop-ready"));
-            if mode=="kill" {let saved=r.checkpoint(&run).unwrap();drop(run);run=r.recover(&saved,&l).unwrap();r.cancel(&mut run).unwrap();}
+            let saved=if mode=="kill" {let saved=r.checkpoint(&run).unwrap();drop(run);run=r.recover(&saved,&l).unwrap();r.cancel(&mut run).unwrap();Some(saved)}else{None};
             while r.poll(&mut run).unwrap()==agent::State::Running {std::thread::yield_now();}
             let stop=r.stop_event(&mut run,u64::MAX).unwrap().unwrap();
             if mode=="exit" {assert_eq!(stop.cause,StopCause::ExitWithoutTurnEnd);assert_eq!(stop.exit_code,Some(0));}
             else if cfg!(unix) {assert_eq!(stop.cause,StopCause::Signal);assert!(stop.exit_code.is_none());}
             else {assert!(matches!(stop.cause,StopCause::LostOwner|StopCause::ExitWithoutTurnEnd));}
+            if let Some(saved)=saved {
+                // A second observer did not reap the now-gone child: neither its exit nor outcome is known.
+                let mut gone=r.recover(&saved,&l).unwrap();
+                assert_eq!(finish(r,&mut gone),agent::State::Unknown);
+                let report=r.report(&gone).unwrap();
+                assert_eq!((report.outcome,report.exit),("unknown",None));
+                assert_eq!(agentq_runtime::cli::report_json(&report)["termination"],json!({"state":"unknown","reason":"recovered-process-exit-not-observed"}));
+            }
             assert_ne!(stop.outcome,"ok");assert!(stop.last_activity.is_some(),"{name}: {:?}",stop.activity_unknown);
             assert_eq!(stop.step().kind,StepKind::Stop);
             assert_eq!(r.stop_event(&mut run,u64::MAX).unwrap().unwrap().id,stop.id);

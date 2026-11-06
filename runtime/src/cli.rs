@@ -108,7 +108,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
 /// The report as JSON: codes, numbers and the final text; every null in `usage` and `limit` has its `unknown` reason.
 pub fn report_json(r: &Report) -> Value {
     let u = &r.usage;
-    json!({"schema": 1, "readiness": r.readiness, "session": r.session, "outcome": r.outcome, "error": r.error, "text": r.text, "exit": r.exit,
+    json!({"schema": 1, "readiness": r.readiness, "session": r.session, "outcome": r.outcome, "error": r.error, "reason": r.reason, "detail": r.detail, "text": r.text, "exit": r.exit, "termination": r.termination,
         "started_ms": r.started_ms, "duration_us": r.duration_us,
         "usage": {"calls": u.calls, "input": u.input, "cache_read": u.cache_read, "cache_write": u.cache_write, "output": u.output, "reasoning": u.reasoning, "model": u.model, "unknown": u.unknown},
         "process": {"user_cpu_us": r.process.user_cpu_us, "system_cpu_us": r.process.system_cpu_us, "peak_rss_bytes": r.process.peak_rss_bytes, "unknown": r.process.unknown},
