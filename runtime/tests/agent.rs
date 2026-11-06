@@ -21,7 +21,6 @@ fn main() {
     if wrapper.first().is_some_and(|s| s == "--wrap") {
         std::process::exit(Command::new(&wrapper[1]).args(&wrapper[2..]).status().unwrap().code().unwrap_or(1));
     }
-    if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
     if matches!(std::env::args().nth(1).as_deref(), Some("service"|"agent")) { return protected::fake_host(); }
     if std::env::args().nth(1).as_deref()==Some("sandbox") && std::env::var("COREQ_FAKE_AGENT").as_deref()==Ok("codex") {
         if std::env::var_os("FAKE_SANDBOX_REFUSED").is_some() {eprintln!("native sandbox unavailable");std::process::exit(1);}
@@ -47,8 +46,6 @@ fn main() {
         ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
         ("project_identity_read_stays_inside_adapter", project_identity_read_stays_inside_adapter),
         ("rollout_progress_survives_fast_resume_and_recovery", rollout_progress_survives_fast_resume_and_recovery),
-        ("antigravity_wrapped_submission_keeps_prompt_and_tail", antigravity_wrapped_submission_keeps_prompt_and_tail),
-        ("antigravity_native_submission_tails_and_resumes", antigravity_native_submission_tails_and_resumes),
         ("claude_starts_and_resumes_one_session", claude_starts_and_resumes_one_session),
         ("codex_resumes_its_thread_in_the_account_home", codex_resumes_its_thread_in_the_account_home),
         ("lingering_process_is_stopped_after_its_turn_ends", lingering_process_is_stopped_after_its_turn_ends),
@@ -1999,102 +1996,6 @@ fn off_reaches_codex_queue_and_app_server() {
     assert!(args[0] == "app-server" && !args.as_array().unwrap().iter().any(|s| s.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "app-server lost launch off: {args}");
     agent::runtime("codex").unwrap().cancel(&mut run).unwrap();
     std::fs::remove_dir_all(root).unwrap();
-}
-
-// M12.1/M12.6: a caller-owned executable wrapper must preserve agentapi prompt/tailing and reject server off.
-fn antigravity_wrapped_submission_keeps_prompt_and_tail() {
-    let root = scratch("wrapped-agentapi");
-    let bin = root.join(if cfg!(windows) {"agentapi.exe"} else {"agentapi"});
-    std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
-    let ag = agent::runtime("antigravity").unwrap();
-    let home = root.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let mut l = agent::Launch::new(&root, root.join("turn.log"), "first", "fixtureq");
-    l.command = vec![exe(), "--wrap".into(), bin.clone().into()];
-    l.env = vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("AGENTQ_OPTIMIZATION".into(),"inherit".into()),("ANTIGRAVITY_HOME".into(),home.clone().into())];
-    let mut run = ag.launch(&l).unwrap();
-    let history = home.join("brain/native-conv/.system_generated/logs/transcript.jsonl");
-    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
-    append(&history, &[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"wrapper answer"})]);
-    finish(ag, &mut run);
-    let r = ag.report(&run).unwrap();
-    assert_eq!((r.outcome,r.text.as_deref()),("ok",Some("wrapper answer")));
-    l.env.push(("AGENTQ_OPTIMIZATION".into(),"off".into()));l.log=root.join("wrapped-resume.log");
-    let mut run = ag.resume("native-conv",&l).unwrap();
-    assert_eq!(run.optimization().reason, "optimization_retired");
-    wait_agentapi_receipt(ag,&mut run,&l.log,"first");
-    ag.cancel(&mut run).unwrap();finish(ag,&mut run);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-// M12.1/M12.3: agentapi acknowledges submission before terminal transcript evidence; resume consumes only new steps.
-// Risk: exit 0 is mistaken for completed work, stale history counts twice, or the caller's prompt/args are lost.
-fn antigravity_native_submission_tails_and_resumes() {
-    let root = scratch("native-agentapi");
-    let bin = root.join(if cfg!(windows) { "agentapi.exe" } else { "agentapi" });
-    std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
-    let ag = agent::runtime("antigravity").unwrap();
-    let home = root.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let mut l = agent::Launch::new(&root, root.join("turns.log"), "first", "fixtureq");
-    l.command = vec![bin.clone().into()];
-    l.env = vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("ANTIGRAVITY_HOME".into(),home.clone().into())];
-    let mut run = ag.launch(&l).unwrap();
-    // The double exits after receipt. Supply the terminal later, as a separately owned server would.
-    wait_agentapi_receipt(ag, &mut run, &l.log, "first");
-    assert_eq!(ag.poll(&mut run).unwrap(), agent::State::Running, "submission is not completion");
-    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none(),"submitter exit is not a stopped sidecar turn");
-    let history = home.join("brain/native-conv/.system_generated/logs/transcript.jsonl");
-    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
-    append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"first done","input_tokens":3,"cache_read_tokens":2,"cache_write_tokens":0,"output_tokens":1,"tool_calls":[]})]);
-    finish(ag, &mut run); let report=ag.report(&run).unwrap();
-    assert_eq!((report.outcome,report.text.as_deref(),report.session.as_deref()),("ok",Some("first done"),Some("native-conv")));
-    assert_eq!(agentq_runtime::cli::report_json(&report)["termination"],json!({"state":"unknown","reason":"sidecar-process-not-observed"}));
-    let session=report.session.unwrap();
-    l.input="second".into();
-    let mut run=ag.resume(&session,&l).unwrap();
-    wait_agentapi_receipt(ag, &mut run, &l.log, "second");
-    assert_eq!(ag.poll(&mut run).unwrap(), agent::State::Running);
-    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none());
-    append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"second done","input_tokens":7,"cache_read_tokens":4,"cache_write_tokens":0,"output_tokens":2})]);
-    finish(ag, &mut run);let report=ag.report(&run).unwrap();
-    assert_eq!((report.outcome,report.usage.input,report.usage.calls,report.text.as_deref()),("ok",Some(7),Some(1),Some("second done")));
-    l.log=root.join("cancel.log");
-    let mut run=ag.resume(&session,&l).unwrap();wait_agentapi_receipt(ag,&mut run,&l.log,"second");
-    append(&history,&[json!({"type":"TOOL_RESPONSE","step_index":3,"status":"DONE","content":"last activity"})]);
-    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none());ag.cancel(&mut run).unwrap();finish(ag,&mut run);
-    let stop=ag.stop_event(&mut run,u64::MAX).unwrap().unwrap();
-    assert!(stop.last_activity.is_some(),"receipt separators retain subsequent activity: {:?}",stop.activity_unknown);
-    assert_eq!(stop.last_activity.unwrap().source["format"],"agy-stream");
-    drop(run);ag.adopt(&session,&l,&[]).unwrap();
-    l.input="timeout".into(); l.deadline=Some(Instant::now()+Duration::from_millis(100));
-    let mut run=ag.resume(&session,&l).unwrap();
-    finish(ag, &mut run);
-    let report=ag.report(&run).unwrap();
-    assert_eq!((report.outcome,report.error),("cancelled","timeout"));
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-fn wait_agentapi_receipt(ag: &dyn agent::Runtime, run: &mut agent::Run, log: &Path, prompt: &str) {
-    let until = Instant::now()+Duration::from_secs(5);
-    loop {
-        assert_eq!(ag.poll(run).unwrap(), agent::State::Running, "receipt alone is not a terminal");
-        if std::fs::read_to_string(log).unwrap_or_default().contains(&format!("\"prompt\":\"{prompt}\"")) {break;}
-        assert!(Instant::now()<until); std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn fake_agentapi() {
-    let args:Vec<String>=std::env::args().skip(1).collect();
-    assert!(matches!(args.first().map(String::as_str),Some("new-conversation" | "send-message")));
-    assert!(matches!(args.last().map(String::as_str),Some("first" | "second" | "timeout")),"native prompt is argv, not '-' or stdin");
-    if args[0]=="send-message" {assert_eq!(args[1],"native-conv");}
-    use std::io::Write;
-    let receipt = serde_json::to_string_pretty(&json!({"response":{"newConversation":{"conversationId":"native-conv"}},"prompt":args.last()})).unwrap();
-    let half=receipt.len()/2;
-    print!("{}",&receipt[..half]); std::io::stdout().flush().unwrap();
-    std::thread::sleep(Duration::from_millis(40));
-    print!("{}",&receipt[half..]); std::io::stdout().flush().unwrap();
 }
 
 // taskq#2271: a caller that builds its own native session reaches every native seam through the trait, and an optional

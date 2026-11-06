@@ -902,9 +902,6 @@ fn activity_lines(log: &Path, from: u64) -> Res<(Vec<Value>, u64)> {
 }
 
 impl Adapter {
-    fn acp(&self,l:&Launch)->Res<Option<&'static super::acp::Config>> {
-        Ok(self.ops.acp.filter(|config|base(&l.command,self.client).is_ok_and(|command|!(config.legacy_command)(&command))))
-    }
     fn native(&self, s: &NativeSpec) -> Spec {
         Spec { client: self.client, root: s.root.clone(), session: s.session.clone(), resume: s.resume, args: s.args.clone(), home: s.home.clone(), env: s.env.clone() }
     }
@@ -977,11 +974,10 @@ impl Adapter {
     fn spec(&self, l: &Launch, session: String, resume: bool) -> Res<(Spec, Optimization)> {
         (self.ops.validate)(&l.command.iter().skip(1).chain(l.host_args.iter()).cloned().collect::<Vec<_>>(),&l.settings_env,&l.policy)?;
         let name = self.descriptor.name;
-        let legacy=self.ops.acp.is_some() && self.acp(l)?.is_none();
         let app = matches!(l.mode, Mode::AppServer { .. }) || self.descriptor.has("app-server") && automatic(l);
         for (capability, set) in [("mcp-config", l.mcp.is_some()), ("instructions-file", l.instructions.is_some()), ("turn-parts", !l.parts.is_empty()),
             ("turn-deltas", l.deltas && !app), ("host-args", !l.host_args.is_empty())] {
-            if set && (l.mode != Mode::Turn || !self.descriptor.has(capability) || legacy && matches!(capability,"turn-parts"|"mcp-config")) { return Err(format!("{capability} unsupported by {name}")); }
+            if set && (l.mode != Mode::Turn || !self.descriptor.has(capability)) { return Err(format!("{capability} unsupported by {name}")); }
         }
         if !l.host_args.is_empty() && l.policy != Policy::default() { return Err(format!("host-args require the native policy on {name}")); }
         if app && !l.host_args.is_empty() { return Err("host-args unsupported with relay input".into()); }
@@ -989,7 +985,7 @@ impl Adapter {
             return Err(format!("settings-env unsupported by {name}"));
         }
         // App-server policy travels as thread parameters; only the Codex extras stay flags.
-        let mut args = if let Some(acp)=self.acp(l)? {super::acp::validate_launch(acp,l)?;vec![]} else if !app { mapped(self.client, name, l)? } else if self.descriptor.has("app-server") { (self.ops.extras)(&l.policy) } else { vec![] };
+        let mut args = if let Some(acp)=self.ops.acp {super::acp::validate_launch(acp,l)?;vec![]} else if !app { mapped(self.client, name, l)? } else if self.descriptor.has("app-server") { (self.ops.extras)(&l.policy) } else { vec![] };
         args.extend(l.host_args.iter().cloned());
         let env = l.env.clone();
         let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: l.home.clone(), env };
@@ -1018,7 +1014,7 @@ impl Adapter {
         if l.lifetime==Lifetime::StopWithOwner && (!matches!(l.mode,Mode::Turn) || !self.descriptor.has("process-lifetime")) {return Err("lifetime-unsupported: native submission scope".into());}
         let readiness = self.preflight(l, &Repair::default());
         readiness.permit(l.readiness)?;
-        let acp=self.acp(l)?;
+        let acp=self.ops.acp;
         if session.is_some_and(|s| s.is_empty() || s == "-" || acp.is_none() && !native::plain_id(s)) { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let mut owner_spec=spec.clone();
@@ -1377,7 +1373,7 @@ impl Runtime for Adapter {
         match path { Some(p) => executable_in(self.client, p), None => executable(self.client) }
     }
 
-    fn home(&self) -> Option<PathBuf> { base_home(self.client) }
+    fn home(&self) -> Option<PathBuf> { self.ops.acp.map_or_else(||base_home(self.client),|c|(c.home)()) }
 
     fn session_transcript(&self, session: &str, home: Option<&Path>) -> Option<PathBuf> {
         (self.ops.transcript)(session, home)

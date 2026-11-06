@@ -10,7 +10,7 @@ pub(super) struct Config {
     pub modes: &'static [(Approval, &'static str)],
     pub rejected_versions: &'static [&'static str],
     pub bypass_args: &'static [&'static str],
-    pub legacy_command: fn(&Command)->bool,
+    pub home: fn()->Option<PathBuf>,
     pub question_prefixes: &'static [&'static str],
 }
 
@@ -72,7 +72,7 @@ impl Session {
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(&l.log).map_err(|e|format!("ACP log: {e}"))?;
         let boundary=log.metadata().map_err(|e|format!("ACP log metadata: {e}"))?.len();
-        let server=Stdio::spawn(command,&l.log.with_extension("stderr"),&l.process)?;
+        let server=Stdio::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?;
         let sampler=Some(capture::Sampler::start(server.id()));
         let mut s=Self {server,path:l.log.clone(),boundary,log,session:resume.unwrap_or("").into(),pending:vec![],requests:BTreeMap::new(),serial:0,prompt:None,
             report:None,text:String::new(),started:Instant::now(),started_ms:unix_ms(),closed:None,deadline:l.deadline,sampler,question_prefixes:config.question_prefixes};
@@ -114,12 +114,12 @@ impl Session {
         self.serial=self.serial.checked_add(1).ok_or("ACP request ID overflow")?;
         let request=json!({"jsonrpc":"2.0","id":self.serial,"method":method,"params":params});
         self.write(&request)?;
-        writeln!(self.log,"{}",json!({"type":"acp","message":request,"outgoing":true,"replay":false})).map_err(|e|format!("ACP transcript: {e}"))?;
+        writeln!(self.log,"{}",json!({"type":"acp","message":request,"outgoing":true,"replay":false}).to_string()).map_err(|e|format!("ACP transcript: {e}"))?;
         Ok(request["id"].clone())
     }
     fn log(&mut self,v:&Value,replay:bool)->Res<()> {
         let terminal=self.prompt.as_ref()==v.get("id") && v.get("method").is_none();
-        writeln!(self.log,"{}",json!({"type":"acp","message":v,"replay":replay,"terminal":terminal})).map_err(|e|format!("ACP transcript: {e}"))
+        writeln!(self.log,"{}",json!({"type":"acp","message":v,"replay":replay,"terminal":terminal}).to_string()).map_err(|e|format!("ACP transcript: {e}"))
     }
     fn exchange(&mut self,method:&str,params:Value,replay:bool)->Res<Value> {
         let id=self.request(method,params)?;
@@ -207,7 +207,7 @@ impl Session {
             }
         }
         if self.report.is_some() {
-            self.server.close()?;self.closed=Some("terminal".into());
+            self.server.close_stream(self.deadline)?;self.closed=Some("terminal".into());
             if let Some(report)=&mut self.report {
                 report.exit=self.server.poll()?;
                 if let Some(sampler)=self.sampler.take() {report.process=sampler.usage();}

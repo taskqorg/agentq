@@ -8,7 +8,7 @@ use super::super::super::events::{string,tool_kind,audit_path,audit_command,nati
 use super::*;
 use super::super::super::limits::{window,unknown,reset,https,token_text,oauth_account};
 
-static ACP: crate::agent::acp::Config=crate::agent::acp::Config {args:&["acp"],env:&[],home_var:"GEMINI_HOME",home_arg:Some("--gemini-dir"),modes:&[(Approval::Plan,"plan"),(Approval::Edits,"accept-edits")],rejected_versions:&["1.4.2","1.4.3","1.4.4","1.4.5"],bypass_args:&["--dangerously-skip-permissions"],question_prefixes:&["interaction_"],legacy_command:|cmd|std::iter::once(cmd.get_program()).chain(cmd.get_args()).any(|arg|matches!(Path::new(arg).file_stem().and_then(|s|s.to_str()),Some("agentapi"|"language_server")))};
+static ACP: crate::agent::acp::Config=crate::agent::acp::Config {args:&["acp"],env:&[],home_var:"GEMINI_HOME",home_arg:Some("--gemini-dir"),modes:&[(Approval::Plan,"plan"),(Approval::Edits,"accept-edits")],rejected_versions:&["1.4.2","1.4.3","1.4.4","1.4.5"],bypass_args:&["--dangerously-skip-permissions"],question_prefixes:&["interaction_"],home:acp_home};
 static ADAPTER: Adapter = Adapter {client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "1.5.2",
         capabilities: &["history", "turn", "resume", "turn-parts", "turn-deltas", "image-input", "mcp-config", "acp", "account-limits"] } , ops: NativeOps {acp:Some(&ACP),catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"ANTIGRAVITY_HOME",alternate_home_var:Some("ANTIGRAVITY_APP_DATA_DIR"),session_vars:&["ANTIGRAVITY_CONVERSATION_ID"],auth_vars:&["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, preparation, restore_preparation:None, sandbox:None,hook_status:None, limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
 
@@ -66,23 +66,14 @@ fn cli() -> Option<PathBuf> {executable(Client::Antigravity).ok()}
 fn background_transcript(_: &Spec, _: &str) -> Res<PathBuf> {Err("background unsupported".into())}
 
 fn antigravity_executable(path: &OsStr) -> PathBuf {
-    if let Some(path) = std::env::var_os("ANTIGRAVITY_AGENTAPI_EXE").filter(|s| !s.is_empty()) {
-        return PathBuf::from(path);
-    }
     let path = path.to_os_string();
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     let path = user_bin_path(&path, home.as_deref()).unwrap_or(path);
-    let cli = which_in("agy", &path);
-    if cli.is_absolute() { return cli; }
-    let api = which_in("agentapi", &path);
-    if api.is_absolute() { return api; }
-    if let Some(home) = base_home(Client::Antigravity) {
-        let p = home.join("bin/agentapi");
-        if p.is_file() {
-            return p;
-        }
-    }
     which_in("agy", &path)
+}
+
+fn acp_home() -> Option<PathBuf> {
+    std::env::var_os("GEMINI_HOME").filter(|h|!h.is_empty()).map(PathBuf::from).or_else(||std::env::var_os("HOME").or_else(||std::env::var_os("USERPROFILE")).map(|h|Path::new(&h).join(".gemini")))
 }
 
 fn native_home() -> Option<PathBuf> {
