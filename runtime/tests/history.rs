@@ -577,3 +577,31 @@ fn migration_exact_input_and_identity_survive_restart() {
         fs::remove_file(path).unwrap();
     }
 }
+
+// #288 A1/A2, M12.9: skip unsupported metadata but refuse invalid envelopes without native parsing.
+#[test]
+fn migration_history_validity_distinguishes_ignored_metadata_from_invalid_records() {
+    for format in ["claude-native", "claude-stream"] {
+        let path = std::env::temp_dir().join(format!("agentq-288-validity-{}-{format}.jsonl", std::process::id()));
+        fs::write(&path, "{\"type\":\"file-history-snapshot\",\"snapshot\":{}}\n{}\n").unwrap();
+        let events = History::new(format, "source", "session").unwrap().poll(&path).unwrap().events;
+        assert_ne!(events[0]["validity"], events[1]["validity"], "A2: ignored metadata and invalid records need different consumer decisions");
+        assert_eq!(events[0]["validity"], json!({"status":"valid","reason":null}));
+        assert_eq!(events[1]["validity"], json!({"status":"invalid","reason":"missing-or-invalid-record-type"}));
+        for event in &events {
+            assert_eq!(event["kind"], "unknown");
+            assert_eq!(event["limited"], "unsupported-source-shape");
+        }
+        assert_eq!(History::new(format, "source", "session").unwrap().poll_before(&path).unwrap().events, events);
+        fs::remove_file(path).unwrap();
+        for row in [json!({"type":null}), json!({"type":false}), json!({"type":42}), json!({"type":[]}), json!({"type":{}}), json!({"type":""})] {
+            assert_eq!(observe(format, row)["validity"], json!({"status":"invalid","reason":"missing-or-invalid-record-type"}));
+        }
+        for row in [json!({"type":"future"}), json!({"type":"user","message":{"content":"exact input"}})] {
+            assert_eq!(observe(format, row)["validity"], json!({"status":"valid","reason":null}));
+        }
+    }
+    for format in ["codex-exec", "codex-rollout", "codex-app-server", "agy-stream", "antigravity-sidecar"] {
+        assert_eq!(observe(format, json!({}))["validity"], json!({"status":"unknown","reason":"envelope-validation-unsupported"}));
+    }
+}

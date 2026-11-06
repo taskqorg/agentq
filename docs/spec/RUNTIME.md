@@ -570,6 +570,16 @@ let preceding_page = older.poll_before(&caller_selected_path)?;
 Each event includes source label, exact byte range, raw UTF-8 record (newline included),
 source SHA-256, source timestamp (`timestamp`, `time`, sidecar `created_at` or app-server `emittedAtMs`) when present (otherwise null), author (otherwise `unknown`),
 native item/step ID when present, physical byte order, normalized blocks and lifecycle kind.
+`validity` separates native envelope validity from normalization support. It contains
+`status` (`valid`, `invalid` or `unknown`) and `reason` (null only when valid).
+For Claude native and stream records, a non-empty string `type` is a valid envelope,
+including unrecognized types such as `file-history-snapshot`; missing, empty or
+non-string discriminators are invalid with reason `missing-or-invalid-record-type`.
+Other transports report unknown with reason `envelope-validation-unsupported`.
+This validates only the envelope, not message content, completion or authority.
+Unknown types keep their raw record, unknown author/kind and normalization limit;
+consumers use `validity` to skip unsupported metadata or refuse invalid envelopes
+without parsing native JSON. Forward and backward pages expose the same validity.
 An emitted native session ID must match the bound session; otherwise the page fails without advancing.
 `session_binding` is `native` only on a record carrying that ID; otherwise it is `caller`, never identity proof.
 `pending_bytes` names unconsumed bytes in a forward read, or excluded incomplete tail bytes

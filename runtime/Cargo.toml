@@ -1,6 +1,6 @@
 [package]
 name = "agentq-runtime"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2024"
 publish = false
 description = "Codex, Claude and Antigravity worker runtime with optional AgentQ optimization (agentq.md § 12)"
