@@ -28,6 +28,14 @@ After the fix, `cargo test --locked -p agentq-runtime --test history` passed all
 
 No paid native turns, working-profile configuration changes, consumer adoption or host deployment were performed. Cross-platform qualification and merge-result CI remain separate observations for review (R12; TaskQ §7).
 
+## Protected gate repair
+
+Review returned this candidate after the Intel macOS release job [128043131260](https://github.com/taskqorg/agentq/actions/runs/42261730122/job/128043131260) failed on `2ca392b26413122bab152cd68baf7cd437abc314`: `protected_launch_refuses_tampering_and_preserves_native_transport` exited 101 at `protected.rs:347`, with `Running` instead of `Unknown`.
+
+The old wait loop treated a failed process-identity read as exit and immediately asserted the run state. [PR #281](https://github.com/taskqorg/agentq/pull/281) independently measured the macOS window in which identity reads fail before `try_wait` observes exit. The scoped gate repair also waits for the runtime poll to leave `Running`, within the existing 10-second deadline. The final `Unknown` assertion and all authority, no-replay, cancellation and occupancy assertions remain unchanged (A3; §12 M12.8; R12/R13). Runtime implementation and production timeouts are unchanged.
+
+On Windows x86_64, `cargo test --locked -p agentq-runtime --test agent protected_launch_refuses_tampering_and_preserves_native_transport` passed after this repair. The Intel macOS before-failure is confirmed from its job log; an Intel macOS after-pass remains a CI observation, not a Windows claim. The already-pushed branch is not rebased again for unrelated main movement (TaskQ §7.4).
+
 ## Consumer contract and publication
 
 Runtime 0.13.1 adds `validity: {status, reason}` to every history event. Claude records with a non-empty string discriminator have status `valid`, even when their meaning is unsupported; missing or malformed discriminators have status `invalid`. Other transports report `unknown` with a reason. This field proves envelope validity only. Raw bytes, content projections, event IDs, cursor checkpoints and execution APIs retain their existing behavior.
