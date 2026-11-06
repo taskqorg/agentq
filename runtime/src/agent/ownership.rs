@@ -146,7 +146,7 @@ impl SessionOwner {
         Process {configure:process.configure.clone(),spawned:Some(Arc::new(move |child| {if let Some(previous)=&previous {previous(child)?;}owner.spawned(child.id())?;owner.submit()}))}
     }
 }
-fn valid_session(session:&str)->Res<()> {if session!="-" && native::plain_id(session) {Ok(())} else {Err("session requires a native session ID".into())}}
+fn valid_session(session:&str)->Res<()> {if !session.starts_with('-') && native::plain_id(session) {Ok(())} else {Err("session requires a native session ID".into())}}
 fn binding(spec:&Spec)->Res<Value> {
     let home=spec_home(spec).map(|p|p.canonicalize().map_err(|_|"session account home unavailable")).transpose()?;
     Ok(json!({"schema":"agentq-owner/1","runtime":spec.client.code(),"root":spec.root.canonicalize().map_err(|e|e.to_string())?,"home":home,

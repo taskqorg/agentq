@@ -103,7 +103,9 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let mut readiness=agent::runtime(client.code()).ok_or("unknown runtime")?.preflight(&launch,&agent::Repair::default());
     native_arguments_readiness(&mut readiness,&v)?;
     readiness.permit(launch.readiness)?;
-    let owner=agent::runtime(client.code()).ok_or("unknown runtime")?.session_owner(resume.then_some(spec.session.as_str()),&launch)?;
+    let runtime=agent::runtime(client.code()).ok_or("unknown runtime")?;
+    let owner=runtime.session_owner(resume.then_some(spec.session.as_str()),&launch)?;
+    if !resume && runtime.descriptor().has("caller-session-id") {owner.bind(&spec.session)?;}
     let report = agent::with_environment_caller(|| match &store {
         Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?, readiness.clone(),owner.clone()),
         None => { let mut t = agent::Turn::start(base, &spec, &log, input, &owner.process_hooks(&agent::Process::default()))?.owned(owner.clone()).prepared(readiness.clone()); t.wait(deadline)?; Ok(t.report()) }

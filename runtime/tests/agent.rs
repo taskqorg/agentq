@@ -557,6 +557,9 @@ fn exe() -> std::ffi::OsString { std::env::current_exe().unwrap().into() }
 fn fake_launch(name: &str, root: &Path, input: &str, env: &[(&str, &std::ffi::OsStr)]) -> agent::Launch {
     let mut l = agent::Launch::new(root, root.join("worker.log"), input, "fixtureq");
     l.command = vec![exe()];
+    if !env.iter().any(|(key,_)|["CODEX_HOME","CLAUDE_CONFIG_DIR","ANTIGRAVITY_HOME"].contains(key)) {
+        let home=root.join("account");std::fs::create_dir_all(&home).unwrap();l.home=Some(home);
+    }
     for (key,value) in env {if ["CODEX_HOME","CLAUDE_CONFIG_DIR","ANTIGRAVITY_HOME"].contains(key) {std::fs::create_dir_all(Path::new(value)).unwrap();}}
     l.env = std::iter::once(("COREQ_FAKE_AGENT".into(), name.into())).chain(env.iter().map(|(k, v)| (k.into(), v.into()))).collect();
     l
@@ -610,7 +613,12 @@ fn session_ownership_and_stall_signal() {
     append(&stop.log,&[json!({"type":"system","subtype":"init","session_id":native})]);rt.observe(&mut stopped);
     std::thread::sleep(Duration::from_millis(30));assert_eq!(rt.observe(&mut stopped).activity.state,"stalled");finish(rt,&mut stopped);
     assert_eq!(rt.report(&stopped).unwrap().outcome,"cancelled");assert_eq!(rt.report(&stopped).unwrap().owner.state,"unknown","a caller stop is not native completion proof");
-    drop(stop_cleanup);drop(cleanup);std::fs::remove_dir_all(root).unwrap();
+    let json_root=root.join("json");std::fs::create_dir_all(&json_root).unwrap();let json_gate=json_root.join("gate");let json_cleanup=Gates(vec![json_gate.clone()]);
+    let request=json!({"client":"claude","root":json_root,"log":json_root.join("turn.log"),"home":l.home,"session":"12345678-0000-4000-8000-000000000001","input":"json exactly once","command":[exe().to_string_lossy()],"env":{"COREQ_FAKE_AGENT":"claude","COREQ_FAKE_GATE":json_gate},"optimization":"off","context":{"product":"fixtureq","version":"1"}}).to_string();
+    let first=request.clone();let writer=std::thread::spawn(move||agentq_runtime::cli::turn(&first,None));wait_for(&json_root.join("fake-turn-1.json"));
+    assert!(agentq_runtime::cli::turn(&request,None).unwrap_err().starts_with("session-busy"),"a pinned fresh JSON session is fenced before input");
+    std::fs::write(&json_gate,"").unwrap();assert_eq!(writer.join().unwrap().unwrap()["outcome"],"ok");assert!(!json_root.join("fake-turn-2.json").exists());
+    drop(json_cleanup);drop(stop_cleanup);drop(cleanup);std::fs::remove_dir_all(root).unwrap();
 }
 
 fn native_owner(name:&str,spec:&agent::NativeSpec)->agent::SessionOwner {
@@ -1139,9 +1147,7 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         let d = r.descriptor();
         let root = scratch(&format!("trait-{}", d.name));
         let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
-        let mut l = agent::Launch::new(&root, root.join("worker.log"), "brief", "fixtureq");
-        l.command = vec![std::env::current_exe().unwrap().into()];
-        l.env = vec![("COREQ_FAKE_AGENT".into(), d.name.into())];
+        let mut l = fake_launch(d.name, &root, "brief", &[]);
         l.policy.approval = agent::Approval::Bypass;
         if d.name == "codex" { l.policy.write = agent::Scope::Any; }
         let before = r.running();
