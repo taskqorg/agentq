@@ -30,7 +30,7 @@ fn read_calls(values:&[Value])->(Vec<Call>,Option<u64>,bool) {
 }
 static PROTOCOL: Protocol=Protocol {stream_history:"example-native",native_history:"example-native",history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},
     history_formats:&["example-native"],history_session:|_,_,raw|session(raw),history_normalize:|_,_|("unknown","unknown",Value::Null,vec![],"unsupported-source-shape"),history_validity:|_|json!({"status":"unknown","reason":"envelope-validation-unsupported"}),
-    ends:is_end,start_limit:|_|None,read_calls,final_text:|_|None,
+    ends:is_end,start_limit:|_|None,read_calls,history_usage:|rows|crate::agent::history::live::usage_rows(read_calls,rows),history_context:|_|None,final_text:|_|None,
     turn_ended:|ended,v|ended || is_end(v),
     parse_event:|_,v,out,_| {if let Some(text)=v["answer"].as_str() {out.push(Event::Message {item:None,text:text.into()});}},
     terminal:|_,v,_,_,_|is_end(v).then_some("ok"),assistant_failure:|_|None,permission_mode:|_|None,lifecycle:|_|None,advances:|_|false,

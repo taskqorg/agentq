@@ -36,9 +36,8 @@ pub(super) fn final_text(events: &[Value]) -> Option<String> {
     })
 }
 pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
-    if events.iter().any(|v|matches!(v["type"].as_str(),Some("event_msg"|"token_usage_record"|"session_meta"))) {
-        let text=events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
-        let calls=super::rollout_calls(&text,false);let known=!calls.is_empty();return (calls,None,known);
+    if events.iter().any(|v|matches!(v["type"].as_str(),Some("event_msg"|"token_usage_record"|"session_meta")) || v["method"]=="thread/tokenUsage/updated") {
+        let calls=super::selected_calls(events,false);let known=!calls.is_empty();return (calls,None,known);
     }
     let mut calls = vec![];
     for (index,v) in events.iter().enumerate().filter(|(_,v)| v["type"] == "turn.completed") {

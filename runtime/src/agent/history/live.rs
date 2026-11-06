@@ -58,6 +58,30 @@ pub fn write_statusline(path:&Path,raw:&str)->Res<()> {
     file.write_all(row.as_bytes()).map_err(|e|format!("statusline feed: {e}"))
 }
 
+/// Read-scoped accounting facts; raw rows remain the source of truth.
+pub(crate) struct UsageRevision {pub row:usize,pub call:super::super::Call,pub superseded_at:Option<usize>}
+pub(crate) fn usage_rows(read:fn(&[Value])->(Vec<super::super::Call>,Option<u64>,bool),rows:&[Value])->Vec<UsageRevision> {
+    rows.iter().enumerate().flat_map(|(row,value)|read(std::slice::from_ref(value)).0.into_iter().map(move |call|UsageRevision {row,call,superseded_at:None})).collect()
+}
+pub(super) fn usage_steps(format:&str,events:&[Value],rows:&[Value],offset:u64)->BTreeMap<usize,Vec<Step>> {
+    let mut out=BTreeMap::<usize,Vec<Step>>::new();
+    for fact in (super::super::registry::history_protocol(format).expect("native history protocol").history_usage)(rows) {
+        let event=&events[fact.row];let call=&fact.call;
+        let mut step=super::steps::base_step(event,&rows[fact.row],&json!({"id":format!("usage:{}",call.id.clone().unwrap_or_else(||event["id"].as_str().unwrap_or_default().to_string()))}),StepKind::Usage,call_json(call),0);
+        step.author="system".into();step.data["active"]=json!(true);
+        if let Some(at)=fact.superseded_at {
+            let replaced=&events[at];
+            if event["start"].as_u64().unwrap_or(0)>=offset || replaced["start"].as_u64().unwrap_or(0)<offset {continue;}
+            step.state="superseded".into();step.revision=replaced["start"].as_u64().unwrap_or(0);step.source=replaced.clone();
+            step.origins.push(json!({"source":replaced["source"],"start":replaced["start"],"end":replaced["end"],"sha256":replaced["sha256"]}));
+            for field in ["input","cache_read","cache_write","output","reasoning","model","time","cost_usd","cost_source"] {step.data[field]=Value::Null;step.data["unknown"][field]=json!("superseded by identified native requests in this turn");}
+            step.data["active"]=json!(false);
+        }
+        out.entry(fact.row).or_default().push(step);
+    }
+    out
+}
+
 pub(crate) fn record_steps(format:&str,event:&Value,record:&Value)->Vec<Step> {
     let p=record.get("payload").or(record.get("params")).unwrap_or(record);
     let mut out=Vec::new();
@@ -66,20 +90,15 @@ pub(crate) fn record_steps(format:&str,event:&Value,record:&Value)->Vec<Step> {
         let mut s=super::steps::base_step(event,record,&json!({"id":format!("{}:{tag}",event["id"].as_str().unwrap_or_default())}),kind,data,0);
         s.unknown=None;out.push(s);
     };
-    if p["type"]=="token_count" {
-        let info=&p["info"];add(StepKind::Context,json!({"used":info["last_token_usage"]["total_tokens"],"window":info["model_context_window"],"source":"native-token-count"}),"context");
+    if let Some((used,window))=(super::super::registry::history_protocol(format).expect("native history protocol").history_context)(record) {
+        let mut unknown=BTreeMap::new();if used.is_none(){unknown.insert("used","native field not reported");}if window.is_none(){unknown.insert("window","native field not reported");}
+        add(StepKind::Context,json!({"used":used,"window":window,"source":"native-context","unknown":unknown}),"context");
     }
     if record["type"]=="agentq_statusline" {
         if let Ok((context,windows))=statusline(p) {add(StepKind::Context,serde_json::to_value(context).unwrap(),"context");add(StepKind::Windows,json!(windows),"windows");}
     } else {
         let windows=runtime.log_limits(&record.to_string(),None,None);
         if windows.iter().any(|w|w.used.is_some() || w.resets_at.is_some()) {add(StepKind::Windows,json!(windows),"windows");}
-    }
-    let calls=(super::super::registry::history_protocol(format).expect("native history protocol").read_calls)(std::slice::from_ref(record)).0;
-    let mut usage_steps=Vec::new();
-    for (index,call) in calls.iter().enumerate() {
-        let mut usage=super::steps::base_step(event,record,&json!({"id":format!("usage:{}",call.id.clone().unwrap_or_else(||format!("{}:{index}",event["id"]))) }),StepKind::Usage,call_json(call),index);
-        usage.author="system".into();usage_steps.push(usage);
     }
     let item=p.get("item").unwrap_or(p);
     if matches!(item["type"].as_str(),Some("plan"|"Plan")) || record["method"]=="turn/plan/updated" {
@@ -96,7 +115,6 @@ pub(crate) fn record_steps(format:&str,event:&Value,record:&Value)->Vec<Step> {
         let input:Value=item["arguments"].as_str().and_then(|s|serde_json::from_str(s).ok()).unwrap_or_else(||item["input"].clone());
         add(StepKind::Plan,json!({"items":input["plan"],"explanation":input["explanation"]}),"plan");
     }
-    out.extend(usage_steps);
     let content=record["message"].get("content").unwrap_or(&item["content"]);
     for (index,step) in out.iter_mut().enumerate() {step.part=content.as_array().map_or(0,Vec::len)+index;}
     out

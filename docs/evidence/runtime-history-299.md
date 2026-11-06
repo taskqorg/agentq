@@ -77,3 +77,27 @@ selects the registered runtime and call parser instead of guessing from format
 prefixes. Existing alias/parent-binding regressions remain intact with the resolved
 session checkpoint. Final rebase qualification uses focused history/capture tests,
 offline selftest and pinned lint locally; the full suite belongs to CI.
+
+## Accounting review correction
+
+Native usage selection now sees the complete read prefix, retaining turn context
+and choosing identified Codex requests over legacy snapshots. If a legacy Usage
+step already reached a caller, the next page emits its same ID with a newer
+`superseded` revision, `active:false` and null accounting fields; clients upsert it
+and exclude it from totals. A full-page read emits only the identified request.
+Latest Usage revisions replace missing counters, cost, time and model with explicit
+unknowns rather than inheriting old values through tool-output merging.
+
+Registered native callbacks share app-server usage/context normalization with
+history. Codex native queue capture retains identified requests only for the
+accepted thread and turn, including revisions before terminal freeze, and uses the
+same latest-request selection as history and live data. Foreign thread/turn usage
+cannot enter the frozen report; later appends cannot change the frozen snapshot.
+
+Validation after the review: 31 focused accounting/history/live/steps, queue and
+capture tests passed, plus offline selftest, workflow-pinned contract lint and
+`git diff --check`. These include all three reproduced review assertions, page
+recovery with retirement, authoritative missing fields, and explicit-only/mixed
+native queue requests with foreign records and post-completion revisions.
+Full local suites and new paid/native turns were not run. Native Windows recovery
+and actual sidecar-server termination remain unproved.
