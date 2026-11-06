@@ -20,7 +20,10 @@ fn main() {
     if let Some(file) = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].iter().find_map(|k| std::env::var_os(k)).map(|h| PathBuf::from(h).join("fake-ready.json")).filter(|f| f.is_file()) {
         return fake_ready(&file);
     }
-    if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
+    if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") {
+        if matches!(std::env::args().nth(1).as_deref(),Some("--version"|"auth"|"login")) {return;}
+        return fake(&client);
+    }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
@@ -53,6 +56,7 @@ fn main() {
         ("cli_turn_recovers_its_running_child", cli_turn_recovers_its_running_child),
         ("process_hooks_shape_the_child", process_hooks_shape_the_child),
         ("runtime_trait_exposes_native_seams", runtime_trait_exposes_native_seams),
+        ("preflight_checks_order_and_journals_exact_trust", preflight_checks_order_and_journals_exact_trust),
         ("ready_reads_native_login_and_minimum_version", ready_reads_native_login_and_minimum_version),
         ("host_args_reach_codex_turns_only", host_args_reach_codex_turns_only),
         ("settings_env_reaches_the_session", settings_env_reaches_the_session),
@@ -181,6 +185,10 @@ fn catalogue_and_account_reads_need_no_turn() {
     assert_eq!(rows.iter().filter(|v|v["method"]=="account/read").count(),1);
     // #255 / PM note 6675881959: the legacy API still supplies None and resolves PATH.
     assert_eq!(runtime.catalogue(Some(&root)).unwrap(),models);
+    let mut launch=fake_launch("codex",&root,"",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("COREQ_FAKE_CATALOGUE_PAGES","1".as_ref())]);
+    launch.command=vec![configured.into_os_string()];launch.home=Some(root.clone());launch.env.push(("PATH".into(),empty.into_os_string()));
+    assert_eq!(runtime.catalogue_for(&launch).unwrap(),models,"account-bound catalogue uses the chosen binary and env even off PATH");
+    assert_eq!(runtime.account_limits_for(&launch,1800000000),windows);
     std::env::set_current_dir(cwd).unwrap();
     for (key,value) in saved {unsafe {match value {Some(value)=>std::env::set_var(key,value),None=>std::env::remove_var(key)}}}
 }
@@ -288,6 +296,7 @@ fn fake(client: &str) {
     let record = json!({"args": args, "input": input, "home": std::env::var(home_var).ok(),
         "inherited": std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() || std::env::var("CODEX_THREAD_ID").is_ok() || std::env::var("ANTIGRAVITY_CONVERSATION_ID").is_ok(),
         "extra": std::env::var("FAKE_EXTRA").ok(),
+        "inherited_auth":std::env::var_os("OPENAI_API_KEY").is_some(),"git_prompt":std::env::var("GIT_TERMINAL_PROMPT").ok(),"askpass":std::env::var("GIT_ASKPASS").ok(),
         "optimization": std::env::var("AGENTQ_OPTIMIZATION").ok(), "launcher": std::env::var("AGENTQ_LAUNCHER").ok(), "trace_context": std::env::var("COREQ_TRACE_CONTEXT").ok()});
     std::fs::write(format!("fake-turn-{turn}.json"), record.to_string()).unwrap();
     // A gated turn runs until the test creates the gate file, so the caller can checkpoint and recover it mid-turn.
@@ -520,6 +529,7 @@ fn exe() -> std::ffi::OsString { std::env::current_exe().unwrap().into() }
 fn fake_launch(name: &str, root: &Path, input: &str, env: &[(&str, &std::ffi::OsStr)]) -> agent::Launch {
     let mut l = agent::Launch::new(root, root.join("worker.log"), input, "fixtureq");
     l.command = vec![exe()];
+    for (key,value) in env {if ["CODEX_HOME","CLAUDE_CONFIG_DIR","ANTIGRAVITY_HOME"].contains(key) {std::fs::create_dir_all(Path::new(value)).unwrap();}}
     l.env = std::iter::once(("COREQ_FAKE_AGENT".into(), name.into())).chain(env.iter().map(|(k, v)| (k.into(), v.into()))).collect();
     l
 }
@@ -669,12 +679,12 @@ fn host_args_reach_codex_turns_only() {
     let refused = |l: &agent::Launch, name: &str| agent::runtime(name).unwrap().launch(l).err();
     let mut policy = l.clone();
     policy.policy.write = agent::Scope::Project;
-    assert_eq!(refused(&policy, "codex").as_deref(), Some("host-args require the native policy on codex"));
-    assert_eq!(refused(&l, "claude").as_deref(), Some("host-args unsupported by claude"));
-    assert_eq!(refused(&l, "antigravity").as_deref(), Some("host-args unsupported by antigravity"));
+    assert_eq!(refused(&policy, "codex").as_deref(), Some("host-args require the native policy on codex; next: select a supported policy"));
+    assert_eq!(refused(&l, "claude").as_deref(), Some("host-args unsupported by claude; next: select a supported policy"));
+    assert_eq!(refused(&l, "antigravity").as_deref(), Some("host-args unsupported by antigravity; next: select a supported policy"));
     let mut queue = l.clone();
     queue.mode = agent::Mode::Queue { transcript: root.join("t.jsonl") };
-    assert_eq!(codex.resume(&thread, &queue).err().as_deref(), Some("host-args unsupported by codex"));
+    assert_eq!(codex.resume(&thread, &queue).err().as_deref(), Some("host-args unsupported by codex; next: select a supported policy"));
     assert!(!root.join("native-control.json").exists(), "a refusal starts nothing");
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -733,8 +743,8 @@ fn settings_env_reaches_the_session() {
     assert!(!turn["args"].as_array().unwrap().iter().any(|a| a == "--settings"), "Codex has no settings flag");
     let mut queue = c.clone();
     queue.mode = agent::Mode::Queue { transcript: codex_root.join("t.jsonl") };
-    assert_eq!(codex.resume(&codex.session_id(&run).unwrap(), &queue).err().as_deref(), Some("settings-env unsupported by codex"));
-    assert_eq!(agent::runtime("antigravity").unwrap().launch(&c).err().as_deref(), Some("settings-env unsupported by antigravity"));
+    assert_eq!(codex.resume(&codex.session_id(&run).unwrap(), &queue).err().as_deref(), Some("settings-env unsupported by codex; next: select a supported policy"));
+    assert_eq!(agent::runtime("antigravity").unwrap().launch(&c).err().as_deref(), Some("settings-env unsupported by antigravity; next: select a supported policy"));
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(codex_root).unwrap();
     if let Some(task) = task { unsafe { std::env::set_var("TASKQ_TASK", task); } }
@@ -1231,6 +1241,7 @@ fn json_turns_run_plain_without_the_optimizer() {
     for (client, intent) in [("claude", "off"), ("codex", "inherit"), ("antigravity", "off")] {
         let dir = root.join(client);
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("home")).unwrap();
         let mut request = json!({"client": client, "root": dir, "log": dir.join("turns.log"), "input": "brief", "timeout_s": 30,
             "command": [exe], "env": {"COREQ_FAKE_AGENT": client, "FAKE_EXTRA": "x"}, "home": dir.join("home"),
             "optimization": intent, "store": dir.join("telemetry.db"),
@@ -1541,7 +1552,7 @@ fn agent_turn_command_inherits_its_caller_from_the_environment() {
     let valid = format!("2 {}", json!([trace, trace, caller]));
     for (name, context) in [("valid", valid.as_str()), ("invalid", "2 not-a-context")] {
         let dir = root.join(name);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("home")).unwrap();
         let request = json!({"client": "claude", "root": dir, "log": dir.join("turns.log"), "input": "brief", "timeout_s": 30,
             "command": [exe], "env": {"COREQ_FAKE_AGENT": "claude"}, "home": dir.join("home"), "store": dir.join("telemetry.db"),
             "context": {"product": "fixtureq", "version": "1.0.0", "route": "manager", "account": "default"}});
@@ -1617,6 +1628,7 @@ fn antigravity_wrapped_submission_keeps_prompt_and_tail() {
     std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
     let ag = agent::runtime("antigravity").unwrap();
     let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let mut l = agent::Launch::new(&root, root.join("turn.log"), "first", "fixtureq");
     l.command = vec![exe(), "--wrap".into(), bin.clone().into()];
     l.env = vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("AGENTQ_OPTIMIZATION".into(),"inherit".into()),("ANTIGRAVITY_HOME".into(),home.clone().into())];
@@ -1642,6 +1654,7 @@ fn antigravity_native_submission_tails_and_resumes() {
     std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
     let ag = agent::runtime("antigravity").unwrap();
     let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let mut l = agent::Launch::new(&root, root.join("turns.log"), "first", "fixtureq");
     l.command = vec![bin.clone().into()];
     l.env = vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("ANTIGRAVITY_HOME".into(),home.clone().into())];
@@ -1784,7 +1797,7 @@ fn fake_ready(file: &Path) {
     let key = if args == ["--version"] { "version" } else { "status" };
     if key == "status" { assert_eq!(args, v["expect"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect::<Vec<_>>()); }
     print!("{}", v[key].as_str().unwrap_or(""));
-    std::process::exit(v["code"].as_i64().unwrap_or(0) as i32);
+    std::process::exit(if key=="status" {v["status_code"].as_i64().or_else(||v["code"].as_i64()).unwrap_or(0)} else {v["code"].as_i64().unwrap_or(0)} as i32);
 }
 
 // pilotq#363 / taskq#2324: `ready` reads the native login status and minimum version through the trait, so products keep
@@ -1793,7 +1806,7 @@ fn ready_reads_native_login_and_minimum_version() {
     let home = std::env::temp_dir().join(format!("agentq-ready-{}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
     let claude_status = ["auth", "status", "--json"];
-    let codex_status = ["-c", "forced_login_method=\"chatgpt\"", "login", "status"];
+    let codex_status = ["login", "status"];
     let cases: &[(&str, &[&str], &str, &str, &str, &str)] = &[
         ("claude", &claude_status, "2.1.5 (Claude Code)", r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#, "ok", "ok"),
         ("claude", &claude_status, "2.0.9 (Claude Code)", r#"{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}"#, "outdated", "api-key"),
@@ -1810,4 +1823,65 @@ fn ready_reads_native_login_and_minimum_version() {
     let r = agent::runtime("codex").unwrap().ready(Some(&home.join("absent")), Some(&home));
     assert_eq!((r.install.state, r.login.state), ("missing", "unknown"));
     std::fs::remove_dir_all(&home).unwrap();
+}
+
+
+// M12.15/M12.16: blocked readiness never spawns work; exact trust requires explicit, journaled authority.
+fn preflight_checks_order_and_journals_exact_trust() {
+    let root=scratch("preflight");let home=root.join("account");std::fs::create_dir_all(&home).unwrap();
+    let runtime=agent::runtime("claude").unwrap();
+    std::fs::write(home.join("fake-ready.json"),json!({"version":"2.1.5","status":"{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\"}","expect":["auth","status","--json"]}).to_string()).unwrap();
+    let file=home.join(".claude.json");std::fs::write(&file,r#"{"foreign":{"preserve":true},"projects":{}}"#).unwrap();
+    let mut launch=fake_launch("claude",&root,"never submitted",&[("CLAUDE_CONFIG_DIR",home.as_os_str())]);
+    let report=runtime.preflight(&launch,&agent::Repair::default());
+    assert_eq!(report.checks.iter().map(|c|c.check.as_str()).collect::<Vec<_>>(),["client","account","capacity","workspace","permissions","inputs","storage","evidence"]);
+    assert!(runtime.launch(&launch).is_err());
+    assert_eq!(report.checks[3].cause.as_deref(),Some("workspace-untrusted"));
+    assert!(report.permit(agent::ReadinessMode::Continue).is_err());
+    assert!(!root.join("fake-turn-1.json").exists(),"blocked preflight never sends input");
+    #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(&file,std::fs::Permissions::from_mode(0o600)).unwrap();}
+    let before=std::fs::read(&file).unwrap();
+    let repair=agent::Repair {workspace:true,hooks:false,journal:Some(root.join("owned.json"))};
+    let report=runtime.preflight(&launch,&repair);
+    assert_eq!(report.checks[3].state,"repaired");
+    #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode()&0o777,0o600);}
+    let config:Value=serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();assert_eq!(config["foreign"]["preserve"],true);
+    let journal:Vec<Value>=serde_json::from_slice(&std::fs::read(repair.journal.as_ref().unwrap()).unwrap()).unwrap();assert!(journal[0]["before"].is_null());
+    assert!(!String::from_utf8(before).unwrap().is_empty());
+    assert_eq!(journal[0]["after"],true);
+    assert!(!journal[0].to_string().contains("foreign"),"trust journal contains no unrelated account config");
+    let custom=home.join(".claude-custom-oauth.json");std::fs::write(&custom,"{}").unwrap();
+    launch.env.push(("CLAUDE_CODE_CUSTOM_OAUTH_URL".into(),"https://fixture.invalid".into()));
+    assert_eq!(runtime.preflight(&launch,&agent::Repair::default()).checks[3].cause.as_deref(),Some("workspace-untrusted"));
+    assert_eq!(runtime.preflight(&launch,&repair).checks[3].state,"repaired");
+    let custom_config:Value=serde_json::from_slice(&std::fs::read(&custom).unwrap()).unwrap();
+    assert!(custom_config["projects"].as_object().unwrap().values().any(|p|p["hasTrustDialogAccepted"]==true));
+    launch.env.pop();
+    std::fs::write(home.join("fake-ready.json"),json!({"version":"2.1.5","status":"{\"loggedIn\":false}","expect":["auth","status","--json"],"status_code":1}).to_string()).unwrap();
+    assert_eq!(runtime.preflight(&launch,&agent::Repair::default()).checks[1].cause.as_deref(),Some("login-required"),"native auth status exit 1 is a known refusal, not an unknown probe");
+    launch.home=Some(root.join("missing"));
+    assert_eq!(runtime.preflight(&launch,&agent::Repair::default()).checks[1].cause.as_deref(),Some("account-home-missing"));
+    launch.home=None;
+    std::fs::remove_file(home.join("fake-ready.json")).unwrap();
+    let unknown=runtime.preflight(&launch,&agent::Repair::default());
+    assert!(unknown.permit(agent::ReadinessMode::Continue).is_ok());
+    assert!(unknown.permit(agent::ReadinessMode::Strict).is_err());
+    launch.env.push(("COREQ_FAKE_GATE".into(),root.join("gate").into()));
+    let mut secret=launch.clone();secret.settings_env=vec![("ANTHROPIC_API_KEY".into(),"invented-caller-key".into())];
+    assert!(runtime.launch(&secret).err().is_some_and(|e|e.starts_with("secret-in-argv")));
+    let mut bypass=fake_launch("codex",&root,"never submitted",&[]);bypass.host_args=vec!["--dangerously-bypass-hook-trust".into()];
+    assert!(agent::runtime("codex").unwrap().launch(&bypass).err().is_some_and(|e|e.starts_with("hook-trust-bypass-refused")));
+    let inherited=std::env::var_os("OPENAI_API_KEY");
+    unsafe {std::env::set_var("OPENAI_API_KEY","invented-parent-key");}
+    launch.env.push(("GIT_TERMINAL_PROMPT".into(),"1".into()));
+    let mut run=runtime.launch(&launch).unwrap();
+    unsafe {if let Some(value)=inherited {std::env::set_var("OPENAI_API_KEY",value);} else {std::env::remove_var("OPENAI_API_KEY");}}
+    assert_eq!(runtime.observe(&mut run).phase,"starting");
+    append(&launch.log,&[json!({"type":"assistant","message":{"content":[{"type":"text","text":"native first record"}]}})]);
+    assert_eq!(runtime.observe(&mut run).phase,"started","a native record proves startup even before a session ID");
+    std::fs::write(root.join("gate"),b"continue").unwrap();finish(runtime,&mut run);
+    let seen=record(&root,1);
+    assert_eq!(seen["inherited_auth"],false);
+    assert_eq!(seen["git_prompt"],"0");assert_eq!(seen["askpass"],"");
+    std::fs::remove_dir_all(root).unwrap();
 }

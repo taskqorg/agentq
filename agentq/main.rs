@@ -32,7 +32,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROJECT: &str = "host";
 const PASS: u64 = 30;
 const UPDATE_EVERY: u64 = 3600;
-const USAGE: &str = "agentq status [--json] | disable|enable [agent] [--dry-run] | agent turn | agent history | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
+const USAGE: &str = "agentq status [--json] | disable|enable [agent] [--dry-run] | agent turn | agent preflight [--repair] | agent history | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -94,6 +94,14 @@ fn main() {
         ["agent", "history"] => match std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string()).and_then(|s| agentq_runtime::agent::history::sessions::request(&s)) {
             Ok(v) => println_code(&v.to_string()),
             Err(e) => fail(&e, "provide runtime, session and bytes; select a source when ambiguous"),
+        },
+        ["agent", "preflight", rest @ ..] if rest.is_empty() || rest == ["--repair"] => match std::io::read_to_string(std::io::stdin()).map_err(|e|e.to_string())
+            .and_then(|s| {
+                let _lock=if rest.is_empty() {None} else {Some(executor::lock(&t.install.join("data"))?)};
+                agentq_runtime::cli::preflight(&s,!rest.is_empty(),Some(&t.install.join("data/owned.json")))
+            }) {
+            Ok(v)=>{println!("{v}");if v["allowed"]==true {0} else {1}},
+            Err(e)=>fail(&e,"send one JSON launch request on stdin"),
         },
         ["agent", "turn"] => match std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string()).and_then(|s| agentq_runtime::cli::turn(&s, Some(&t.install))) {
             Ok(v) => println_code(&v.to_string()),
@@ -244,6 +252,12 @@ fn doctor(t: &Tool) -> i32 {
         let hooks = p["hooks"].as_str().unwrap_or("unknown");
         let good = hooks == "registered" || (hooks == "absent" && p["owned"] == false);
         line(good, format!("hooks: antigravity {hooks}{}", if good { "" } else { "; run `agentq onboard --yes antigravity`" }));
+    }
+    for profile in report["configuration"]["profiles"].as_array().into_iter().flatten().filter(|p|p["integration"]["desired"]!="disabled") {
+        let trust=&profile["hook_trust"];
+        if !trust.is_null() {
+            line(matches!(trust["state"].as_str(),Some("ok"|"repaired")),format!("hook trust: {} {}; Next: {}",profile["kind"].as_str().unwrap_or("unknown"),trust["state"].as_str().unwrap_or("unknown"),trust["next"].as_str().unwrap_or("agentq agent preflight --repair")));
+        }
     }
     let owned = std::fs::read_to_string(journal(t)).ok().and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok()).map_or(0, |j| j.len());
     line(true, format!("owned edits: {owned}"));
@@ -979,6 +993,21 @@ mod tests {
         assert!(onboard::load(&journal(&t)).is_empty());
         assert_eq!(onboard::retirement_state(&journal(&t),serde_json::json!({"state":"conflict"}))["state"],"retired");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // Native #284 qualification only: explicit private temp fixture, no install or service lifecycle.
+    #[test]
+    #[ignore]
+    fn native_preflight_hook_fixture() {
+        let root=PathBuf::from(std::env::var_os("AGENTQ_QUAL_ROOT").expect("set AGENTQ_QUAL_ROOT to the private temp fixture")).canonicalize().unwrap();
+        assert!(root.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+        let home=root.join("codex");let install=root.join("install with space");let exe=install.join(format!("agentq{}",std::env::consts::EXE_SUFFIX));
+        assert!(home.is_dir() && exe.is_file());
+        let _lock=executor::lock(&install.join("data")).unwrap();
+        let lines=onboard::setup(&onboard::wants("codex",&home,Path::new("unused"),&exe),&install.join("data/owned.json")).unwrap();
+        for line in lines {println!("{line}");}
+        let check=agentq_runtime::agent::registry::hook_trust("codex",&home,Some(&install.join("data/owned.json")),false).unwrap();
+        assert_eq!(check.state,"ok","{check:?}");
     }
 
 }

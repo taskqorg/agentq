@@ -28,6 +28,36 @@ fn strings(v: &Value, k: &str) -> Res<Vec<String>> {
     }
 }
 
+/// Read launch evidence without a model call. Repair requires the caller's existing ownership journal.
+pub fn preflight(request: &str, repair: bool, journal: Option<&Path>) -> Res<Value> {
+    let v:Value=serde_json::from_str(request).map_err(|e|format!("invalid request: {e}"))?;
+    let runtime=agent::runtime(text(&v,"client")?).ok_or("unknown client")?;
+    let launch=preflight_launch(&v)?;
+    let repair=agent::Repair {workspace:repair,hooks:repair,journal:journal.map(Path::to_path_buf)};
+    let mut readiness=runtime.preflight(&launch,&repair);
+    native_arguments_readiness(&mut readiness,&v)?;
+    Ok(json!({"readiness":readiness,"allowed":readiness.permit(launch.readiness).is_ok()}))
+}
+
+fn native_arguments_readiness(readiness: &mut agent::Readiness,v:&Value)->Res<()> {
+    if !strings(v,"args")?.is_empty() {
+        readiness.checks[4]=agent::LaunchCheck {check:"permissions".into(),state:"unknown".into(),cause:Some("native-policy-unchecked".into()),detail:"Native arguments remain caller-owned".into(),next:"use Runtime::launch for an abstract policy".into()};
+    }
+    Ok(())
+}
+
+fn preflight_launch(v: &Value) -> Res<agent::Launch> {
+    let mut launch=agent::Launch::new(path(v,"root")?.ok_or("root requires an absolute path")?,path(v,"log")?.ok_or("log requires an absolute path")?,v["input"].as_str().unwrap_or(""),"agentq");
+    if !v["policy"].is_null() {launch.policy=serde_json::from_value(v["policy"].clone()).map_err(|e|format!("invalid policy: {e}"))?;}
+    launch.home=path(v,"home")?;launch.store=path(v,"store")?;
+    launch.model=v["model"].as_str().map(String::from);
+    launch.command=strings(v,"command")?.into_iter().map(OsString::from).collect();
+    launch.env=match &v["env"] {Value::Null=>vec![],Value::Object(env)=>env.iter().map(|(k,v)|Ok((k.into(),OsString::from(v.as_str().ok_or("env values require strings")?)))).collect::<Res<_>>()?,_=>return Err("env requires an object".into())};
+    launch.readiness=match v["readiness"].as_str() {None|Some("continue")=>agent::ReadinessMode::Continue,Some("strict")=>agent::ReadinessMode::Strict,_=>return Err("readiness requires continue or strict".into())};
+    launch.mcp=path(v,"mcp")?;launch.instructions=path(v,"instructions")?;
+    Ok(launch)
+}
+
 /// Run one turn from `request` and return its JSON report. A request error is `Err`; a failed turn is a report.
 /// `install` is the AgentQ installation the optimization state is read from (None: the default one).
 pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
@@ -54,15 +84,22 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     // The caller's base command (a sandbox wrapper or another executable), else the client's own executable.
     let base = match strings(&v, "command")?.split_first() {
         Some((exe, rest)) => { let mut c = Command::new(exe); c.args(rest); c }
-        None => Command::new(agent::executable(client)?),
+        None => Command::new(agent::runtime(client.code()).ok_or("unknown runtime")?.executable(env.iter().rev().find(|(k,_)|k=="PATH").map(|(_,v)|v.as_os_str()))?),
     };
     let mut spec = Spec { client, root, session, resume, args: strings(&v, "args")?.into_iter().map(OsString::from).collect(), home: path(&v, "home")?, env };
+    agent::registry::validate_native_args(client,&spec.args)?;
     let optimization = optimization::prepare(intent, ctx.product, &mut spec, install.map(Path::to_path_buf).or_else(optimization::install_root).as_deref());
+    let launch=preflight_launch(&v)?;
+    if launch.policy!=agent::Policy::default() {return Err("native JSON turn arguments require the default policy; use Runtime::launch for abstract policies".into());}
+    let mut readiness=agent::runtime(client.code()).ok_or("unknown runtime")?.preflight(&launch,&agent::Repair::default());
+    native_arguments_readiness(&mut readiness,&v)?;
+    readiness.permit(launch.readiness)?;
     let report = agent::with_environment_caller(|| match &store {
-        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?),
-        None => { let mut t = agent::Turn::start(base, &spec, &log, input, &agent::Process::default())?; t.wait(deadline)?; Ok(t.report()) }
+        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?, readiness.clone()),
+        None => { let mut t = agent::Turn::start(base, &spec, &log, input, &agent::Process::default())?.prepared(readiness.clone()); t.wait(deadline)?; Ok(t.report()) }
     })?;
     let mut out = report_json(&report);
+    out["readiness"]=json!(readiness);
     out["recorded"] = match (&store, &report.recorded) { (None, _) => json!("not-requested"), (Some(_), Ok(())) => json!("ok"), (Some(_), Err(e)) => json!(e) };
     out["optimization"] = optimization.json();
     Ok(out)
@@ -71,7 +108,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
 /// The report as JSON: codes, numbers and the final text; every null in `usage` and `limit` has its `unknown` reason.
 pub fn report_json(r: &Report) -> Value {
     let u = &r.usage;
-    json!({"schema": 1, "session": r.session, "outcome": r.outcome, "error": r.error, "text": r.text, "exit": r.exit,
+    json!({"schema": 1, "readiness": r.readiness, "session": r.session, "outcome": r.outcome, "error": r.error, "text": r.text, "exit": r.exit,
         "started_ms": r.started_ms, "duration_us": r.duration_us,
         "usage": {"calls": u.calls, "input": u.input, "cache_read": u.cache_read, "cache_write": u.cache_write, "output": u.output, "reasoning": u.reasoning, "model": u.model, "unknown": u.unknown},
         "process": {"user_cpu_us": r.process.user_cpu_us, "system_cpu_us": r.process.system_cpu_us, "peak_rss_bytes": r.process.peak_rss_bytes, "unknown": r.process.unknown},

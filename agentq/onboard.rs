@@ -43,8 +43,15 @@ pub fn setup_ready(agents: &[&str]) -> Result<(),String> {
 /// Native setup checks every selected client before the first journal or profile write.
 pub fn setup(wants: &[Want], journal: &Path) -> Result<Vec<String>,String> {
     let agents: std::collections::BTreeSet<_>=wants.iter().map(|w|w.agent.as_str()).collect();
-    setup_ready(&agents.into_iter().collect::<Vec<_>>())?;
-    apply(wants,journal)
+    setup_ready(&agents.iter().copied().collect::<Vec<_>>())?;
+    let mut lines=apply(wants,journal)?;
+    for agent in agents {
+        let home=wants.iter().filter(|w|w.agent==agent).find_map(|w|w.file.parent());
+        if let Some(check)=home.and_then(|h|registry::hook_trust(agent,h,Some(journal),true)) {
+            lines.push(format!("hook trust: {agent}: {}; next: {}",check.state,check.next));
+        }
+    }
+    Ok(lines)
 }
 
 pub fn claude_json() -> PathBuf { registry::claude_json() }
@@ -80,9 +87,37 @@ fn read_config(path: &Path) -> Result<Option<String>, String> {
 
 /// File by file: a conflict leaves that file untouched; every edit is journaled before the write. Repeat is safe.
 pub fn apply(wants: &[Want], journal: &Path) -> Result<Vec<String>, String> {
-    // An owned plugin file still holding the bytes this journal wrote follows the release; journal first.
     let mut j = load(journal);
     let mut out = vec![];
+    // Native hook spelling changes migrate only an exact unchanged journal-owned entry.
+    for want in wants.iter().filter(|w|w.previous.is_some()) {
+        let previous=want.previous.as_ref().expect("filtered");
+        if previous==&want.value {continue;}
+        let Some(mut text)=read_config(&want.file)? else {continue};
+        let mut doc:Value=serde_json::from_str(&text).map_err(|_|"hook config unreadable")?;
+        let Some(rows)=want.key.iter().try_fold(&mut doc,|v,k|v.get_mut(k)).and_then(Value::as_array_mut) else {continue};
+        let Some(owned)=j.iter_mut().find_map(|e| {
+            if e["file"]!=want.file.display().to_string() || !(e["agent"].is_null() || e["agent"]==want.agent) {return None;}
+            let keys:Vec<_>=e["key"].as_array()?.iter().map(Value::as_str).collect::<Option<_>>()?;
+            if !want.key.iter().map(String::as_str).collect::<Vec<_>>().starts_with(&keys) {return None;}
+            if e["kind"]=="append" && keys.len()==want.key.len() {return (e["after"]==*previous).then(||&mut e["after"]);}
+            if e["kind"]!="set" {return None;}
+            let offset=keys.len();
+            let mut after=&mut e["after"];
+            for key in &want.key[offset..] {after=after.get_mut(key)?;}
+            let rows=after.as_array_mut()?;
+            if rows.iter().filter(|v|*v==previous).count()!=1 {return None;}
+            rows.iter_mut().find(|v|*v==previous)
+        }) else {continue};
+        let matches:Vec<_>=rows.iter().enumerate().filter_map(|(n,v)|(v==previous).then_some(n)).collect();
+        if matches.len()!=1 {continue;}
+        rows[matches[0]]=want.value.clone();
+        *owned=want.value.clone();save(journal,&j)?;
+        text=serde_json::to_string_pretty(&doc).map_err(|e|e.to_string())?;
+        write_atomic(&want.file,&text)?;
+        out.push(format!("edited: {} (owned hook command)",want.file.display()));
+    }
+    // An owned plugin file still holding the bytes this journal wrote follows the release; journal first.
     for w in wants.iter().filter(|w| w.key == ["$file"]) {
         let (Some(old), Some(wanted)) = (read_config(&w.file)?, w.value.as_str()) else { continue };
         let file = w.file.display().to_string();
@@ -268,7 +303,7 @@ fn retire_with(journal: &Path, agents: &[&str], clients: &[crate::profiles::Clie
     if let Some(text) = read_config(journal)? {
         let old: Vec<Value> = serde_json::from_str(&text).map_err(|_| "owned.json unreadable")?;
         if old.iter().any(|e| !e["file"].is_string() || !e["key"].as_array().is_some_and(|k| k.iter().all(Value::is_string))
-            || !matches!(e["kind"].as_str(), Some("set" | "append" | "text" | "replace" | "file")) || e.get("after").is_none()) {
+            || !matches!(e["kind"].as_str(), Some("set" | "append" | "text" | "replace" | "file" | "native-config" | "trust")) || e.get("after").is_none()) {
             return Err("owned.json unreadable".into());
         }
         for e in &old { split_retired(e.clone(), &mut entries); }
@@ -507,6 +542,13 @@ pub fn restore_where(journal: &Path, dry: bool, forget: bool, pick: &dyn Fn(usiz
         }
         let f = PathBuf::from(e["file"].as_str().unwrap_or_default());
         let what = format!("{} {}", f.display(), e["key"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("."));
+        if matches!(e["kind"].as_str(),Some("native-config"|"trust")) {
+            match registry::restore_preparation(e,dry) {
+                Ok(())=>{out.push(format!("{}: {what}",if dry {"would restore"} else {"restored"}));done.push(i);}
+                Err(error)=>out.push(format!("conflict: {what}: {error}; kept")),
+            }
+            continue;
+        }
         let current = seen.get(&f).cloned().or_else(|| std::fs::read_to_string(&f).ok());
         let Some(mut text) = current.and_then(|t| unplace(&t, e)) else {
             out.push(format!("conflict: {what} changed since onboard; kept"));
@@ -608,7 +650,8 @@ fn unplace(text: &str, e: &Value) -> Option<String> {
         let i = a.iter().position(|v| v == after)?;
         a.remove(i);
     } else if parent.get(*last) == Some(after) {
-        parent.shift_remove(*last);
+        if e["kind"]=="trust" && !e["before"].is_null() {parent.insert((*last).into(),e["before"].clone());}
+        else {parent.shift_remove(*last);}
     } else {
         return None;
     }
@@ -972,7 +1015,7 @@ mod tests {
         let native = "model = \"native\"\n";
         std::fs::write(&file, native).unwrap();
         let journal = root.join("owned.json");
-        let w = |key: &[&str], value: Value| Want { file:file.clone(),key:key.iter().map(|k| k.to_string()).collect(),value,append:false,routing:Some("codex".into()),agent:"codex".into(),instruction:false };
+        let w = |key: &[&str], value: Value| Want { file:file.clone(),key:key.iter().map(|k| k.to_string()).collect(),value,previous:None,append:false,routing:Some("codex".into()),agent:"codex".into(),instruction:false };
         let mut wants = vec![w(&["model_provider"], json!("agentq")), w(&["model_providers","agentq"], json!({"name":"AgentQ","base_url":"http://127.0.0.1:41234/v1","wire_api":"responses","requires_openai_auth":true,"supports_websockets":true}))];
         wants.extend(super::wants("codex", &root, &root.join("unused.json"), &root.join("agentq")));
         apply(&wants, &journal).unwrap();
@@ -1090,6 +1133,42 @@ mod tests {
         let journal=root.join("owned.json");
         assert!(setup(&requests,&journal).unwrap_err().contains("codex"));
         assert!(!journal.exists() && !root.join("hooks.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // M12.16: restore only our trust leaf; a later trust change is a conflict and foreign fields survive.
+    #[test]
+    fn preparation_restore_keeps_foreign_configuration_and_later_trust() {
+        let root=std::env::temp_dir().join(format!("agentq-trust-restore-{}",crate::resource::new_id()));
+        std::fs::create_dir_all(&root).unwrap();let file=root.join(".claude.json");let journal=root.join("owned.json");
+        let doc=json!({"projects":{"workspace":{"hasTrustDialogAccepted":true,"foreign":7}}});
+        std::fs::write(&file,doc.to_string()).unwrap();
+        let entry=json!({"file":file,"agent":"claude","kind":"trust","key":["projects","workspace","hasTrustDialogAccepted"],"before":false,"after":true});
+        std::fs::write(&journal,json!([entry]).to_string()).unwrap();
+        assert!(restore_where(&journal,false,false,&|_,_|true).unwrap()[0].starts_with("restored:"));
+        let restored:Value=serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(restored["projects"]["workspace"],json!({"hasTrustDialogAccepted":false,"foreign":7}));
+        assert!(restore_where(&journal,false,false,&|_,_|true).unwrap()[0].starts_with("conflict:"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hook_migration_requires_an_exact_owned_value() {
+        let root=std::env::temp_dir().join(format!("agentq-hook-migrate-{}",crate::resource::new_id()));std::fs::create_dir_all(&root).unwrap();
+        let journal=root.join("owned.json");let mut wants=wants("codex",&root,Path::new("unused"),Path::new("/agentq"));
+        let old=wants[0].value.clone();wants[0].previous=None;
+        apply(&wants,&journal).unwrap();
+        wants.truncate(1);wants[0].previous=Some(old.clone());wants[0].value["hooks"][0]["command"]=json!("native spelling");
+        let file=root.join("hooks.json");let mut doc:Value=serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        doc["foreign"]=json!({"preserve":true});std::fs::write(&file,doc.to_string()).unwrap();
+        apply(&wants,&journal).unwrap();
+        let doc:Value=serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();assert_eq!(doc["foreign"]["preserve"],true);
+        assert_eq!(doc["hooks"]["SessionStart"],json!([wants[0].value.clone()]));
+        assert!(serde_json::to_string(&load(&journal)).unwrap().contains("native spelling"));
+        // An unchanged foreign group with the old spelling has no receipt and stays untouched.
+        std::fs::write(&file,json!({"hooks":{"SessionStart":[old.clone()]}}).to_string()).unwrap();std::fs::remove_file(&journal).unwrap();
+        apply(&wants,&journal).unwrap();
+        let doc:Value=serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();assert_eq!(doc["hooks"]["SessionStart"][0],old);
         std::fs::remove_dir_all(root).unwrap();
     }
 

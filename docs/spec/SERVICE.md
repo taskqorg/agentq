@@ -54,7 +54,7 @@ agentq runs these external tools on a host ([specq host requirements](https://gi
 | Tool | Minimum | Needed by | Platforms |
 |---|---|---|---|
 | `curl` | 7.55.1 | release downloads, Langfuse export, DashQ enrollment and delivery | all |
-| Windows PowerShell | 5.1 | process inventory, service registration check, user PATH | Windows |
+| Windows PowerShell | 5.1 | process inventory, service registration check, user PATH, Codex hook paths containing spaces | Windows |
 | OS components | supplied by the OS release | service unit, process inventory, connection count, host name, hidden key input and protected native launch | macOS `launchctl ps id hostname stty sandbox-exec`; Linux `systemctl ps id hostname stty`; Windows `schtasks taskkill hostname whoami icacls` |
 | `security`, `secret-tool` (optional) | none | Langfuse key storage; when absent, the `data/langfuse` file | macOS, Linux |
 

@@ -10,5 +10,5 @@ pub(crate) fn report(client: Client, text: &str, events: &[Value], rollout: Opti
     Report {session:session_of(client,text), usage:sum_usage(&calls,count,known), calls, process:ProcessUse::default(),
         limit:snapshot(client,events,rollout), limits:limits::read(client,events,rollout), reached:limit_reached(client,events),
         background_job:!live_background.is_empty(),live_background,outcome:status.0,error:status.1,detail:status.2,
-        text:(protocol(client).final_text)(events),exit:None,started_ms:unix_ms(),duration_us:0,recorded:Ok(())}
+        text:(protocol(client).final_text)(events),exit:None,started_ms:unix_ms(),duration_us:0,readiness:Readiness::default(),recorded:Ok(())}
 }

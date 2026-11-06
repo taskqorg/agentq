@@ -7,6 +7,9 @@ use super::app::{AppServer, AppSession};
 use super::protected::ProtectedAppServer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::process::Output;
+#[path = "preflight.rs"]
+mod preflight;
+pub use preflight::{Readiness, ReadinessMode, LaunchCheck, Repair};
 
 /// The only runtime metadata a caller reads. `name` is an opaque ID; `label` and `brand` are for people.
 #[derive(Debug, PartialEq, Eq)]
@@ -30,21 +33,26 @@ impl Descriptor {
 }
 
 /// Filesystem scope of a policy part; `Native` keeps the runtime's own default.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all="lowercase")]
 pub enum Scope { #[default] Native, None, Project, Any }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all="lowercase")]
 pub enum Network { #[default] Native, On, Off }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all="lowercase")]
 pub enum Approval { #[default] Native, Plan, Edits, Auto, /** Never prompt; a request that needs approval is denied. */ Deny, Bypass }
 
 /// The runtime's own shell and web tools.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all="lowercase")]
 pub enum Builtin { #[default] Native, On, Off }
 
 /// Extra writable folders beside the workspace; every path is absolute.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all="lowercase")]
 pub enum Roots {
     /// The runtime's configured roots.
     #[default]
@@ -56,7 +64,8 @@ pub enum Roots {
 }
 
 /// Abstract permissions. The adapter maps each part to native flags or refuses the launch.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Policy {
     pub read: Scope,
     pub write: Scope,
@@ -147,6 +156,10 @@ pub struct Launch {
     pub host_args: Vec<OsString>,
     /// Session environment (capability `settings-env`). A Claude launch puts it in argv: never secrets; use `env` for those.
     pub settings_env: Vec<(String, String)>,
+    /// Unknown probes continue by default; strict refuses them.
+    pub readiness: ReadinessMode,
+    /// Caller telemetry store checked before work; None means no store was requested.
+    pub store: Option<PathBuf>,
 }
 
 /// How a run reaches the runtime; every mode but `Turn` needs the descriptor capability of the same name.
@@ -174,7 +187,7 @@ impl Launch {
     pub fn new(root: impl Into<PathBuf>, log: impl Into<PathBuf>, input: impl Into<String>, product: impl Into<String>) -> Self {
         Launch { root: root.into(), log: log.into(), input: input.into(), policy: Policy::default(), model: None, effort: None, compact_hook: None,
             env: vec![], command: vec![], optimization: Intent::Inherit, product: product.into(), install: None, accounts: None,
-            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![] }
+            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![], readiness: ReadinessMode::default(), store: None }
     }
 }
 
@@ -218,6 +231,8 @@ pub enum State { Running, Finished, Failed, Unknown }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Observation {
     pub state: State,
+    pub phase: &'static str,
+    pub starting_ms: u64,
     /// Why `state` reads `unknown` when the poll failed.
     pub error: Option<String>,
     pub session: Option<String>,
@@ -300,6 +315,8 @@ pub struct Run {
     deadline: Option<Instant>,
     /// The launch requested Claude Remote Control (`title`).
     remote: bool,
+    readiness: Readiness,
+    starting: Instant,
 }
 
 enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>) }
@@ -324,6 +341,7 @@ struct Native {
 
 impl Run {
     fn restored(mut self, saved: &Value) -> Res<Self> {
+        if let Some(value)=saved.get("readiness") {self.readiness=serde_json::from_value(value.clone()).map_err(|_|"run readiness checkpoint invalid")?;}
         if let Some(frozen)=saved.get("frozen") { self.frozen=Some(super::Frozen::restore(frozen)?); }
         if let Some(progress)=saved.get("progress") { self.progress=progress.as_u64().ok_or("run progress checkpoint invalid")?; }
         if let Some(events)=saved.get("events") { self.events=serde_json::from_value(events.clone()).map_err(|_|"run event checkpoint invalid")?; }
@@ -338,6 +356,7 @@ impl Run {
         Ok(self)
     }
     /// The descriptor name of the runtime that owns this run.
+    pub fn readiness(&self) -> &Readiness { &self.readiness }
     pub fn runtime(&self) -> &'static str { self.runtime }
     /// The optimization state configured at launch, never proof of compression.
     pub fn optimization(&self) -> &Optimization { &self.optimization }
@@ -355,6 +374,9 @@ impl Run {
             // Each app-server turn records once under its native thread and turn identity.
             Body::App(a) => a.session.snapshot(ctx)?.ok_or("running")?,
         };
+        let mut saved = frozen.save();
+        saved["records"][0]["observation"]["counts"] = self.readiness.metadata();
+        let frozen = super::Frozen::restore(&saved)?;
         self.frozen = Some(frozen.clone());
         Ok(frozen)
     }
@@ -366,6 +388,7 @@ impl Run {
             Body::Native(n) => n.report.clone(),
             Body::App(a) => a.session.report(),
         }.ok_or("running")?;
+        r.readiness = Some(self.readiness.clone());
         r.recorded = self.snapshot(ctx).and_then(|f| f.append(store));
         self.recorded = r.recorded.is_ok();
         Ok(r)
@@ -633,6 +656,9 @@ pub trait Runtime: Send + Sync {
     fn history(&self, session: &str, home: Option<&Path>, source: Option<&Path>, checkpoint: Option<&Value>) -> Res<super::history::sessions::Session> {
         super::history::sessions::open(self.descriptor().name, session, home, source, checkpoint)
     }
+    fn preflight(&self, launch: &Launch, repair: &Repair) -> Readiness {
+        let _ = (launch, repair); Readiness::unsupported()
+    }
     fn launch(&self, launch: &Launch) -> Res<Run>;
     fn resume(&self, session: &str, launch: &Launch) -> Res<Run>;
     /// Start the next turn of a session run with exactly `parts`, once; see `Failure` for refusals.
@@ -667,6 +693,11 @@ pub trait Runtime: Send + Sync {
     fn observe(&self, run: &mut Run) -> Observation;
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause>;
     fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready;
+    /// Account-bound probes use the same home, environment and executable as a launch.
+    fn ready_for(&self, _launch: &Launch) -> Ready {let unknown=||Check {state:"unknown",detail:"context probe unsupported".into()};Ready {install:unknown(),version:unknown(),login:unknown()}}
+    fn catalogue_for(&self, _launch: &Launch) -> Res<Vec<Model>> {Err("catalogue context unsupported".into())}
+    fn account_limits_for(&self, _launch: &Launch, _now: i64) -> Vec<Window> {super::limits::unknown("context-probe-unsupported")}
+
     fn quota(&self, accounts: &Accounts, now: i64) -> Quota;
     fn running(&self) -> usize;
     fn protected_paths(&self, home: Option<&Path>) -> Vec<PathBuf>;
@@ -742,7 +773,8 @@ struct NativeOps {
     protocol: &'static registry::Protocol,
     home_var: &'static str,
     alternate_home_var: Option<&'static str>,
-    session_var: &'static str,
+    session_vars: &'static [&'static str],
+    auth_vars: &'static [&'static str],
     home: fn() -> Option<PathBuf>,
     executable: fn(&OsStr) -> Res<PathBuf>,
     new_session: fn() -> String,
@@ -751,7 +783,12 @@ struct NativeOps {
     extras: fn(&Policy) -> Vec<OsString>,
     environment: fn(&Launch, &mut Spec),
     settings: fn(&Launch, &mut Spec),
-    login: fn(&Path, Option<&Path>) -> Check,
+    login: fn(Command) -> Check,
+    preparation: fn(&Launch, &Repair) -> (LaunchCheck, LaunchCheck),
+    restore_preparation: Option<fn(&Value, bool) -> Res<()>>,
+    hook_trust: bool,
+    limits_for: fn(&Launch, i64) -> Vec<Window>,
+    validate: fn(&[OsString], &[(String,String)], &Policy) -> Res<()>,
     protected: fn(PathBuf) -> Vec<PathBuf>,
     refusal: fn(&str) -> Option<Cause>,
     transcript: fn(&str, Option<&Path>) -> Option<PathBuf>,
@@ -797,6 +834,18 @@ impl Adapter {
         Spec { client: self.client, root: s.root.clone(), session: s.session.clone(), resume: s.resume, args: s.args.clone(), home: s.home.clone(), env: s.env.clone() }
     }
 
+    fn seam_readiness(&self, command: &Command, spec: &NativeSpec, log: Option<&Path>, input: &str) -> Res<Readiness> {
+        (self.ops.validate)(&spec.args,&[],&Policy::default())?;
+        let mut launch=Launch::new(&spec.root,log.map(Path::to_path_buf).unwrap_or_else(||spec.root.join(".agentq-preflight-log")),input,"agentq");
+        launch.home=spec.home.clone();
+        launch.command=std::iter::once(command.get_program().to_os_string()).chain(command.get_args().map(OsStr::to_os_string)).collect();
+        launch.env=command.get_envs().filter_map(|(k,v)|v.map(|v|(k.to_os_string(),v.to_os_string()))).chain(spec.env.iter().cloned()).collect();
+        let mut readiness=self.preflight(&launch,&Repair::default());
+        if !spec.args.is_empty() {readiness.checks[4]=LaunchCheck::new("permissions","unknown",Some("native-policy-unchecked"),"Native arguments remain caller-owned","use Runtime::launch for an abstract policy");}
+        readiness.permit(ReadinessMode::Continue)?;
+        Ok(readiness)
+    }
+
     fn needs(&self, capability: &str) -> Res<()> {
         if self.descriptor.has(capability) { Ok(()) } else { Err(format!("{capability} unsupported by {}", self.descriptor.name)) }
     }
@@ -818,6 +867,7 @@ impl Adapter {
 
     /// The child spec for `l`: mapped policy, then the launch's optimization intent.
     fn spec(&self, l: &Launch, session: String, resume: bool) -> Res<(Spec, Optimization)> {
+        (self.ops.validate)(&l.command.iter().skip(1).chain(l.host_args.iter()).cloned().collect::<Vec<_>>(),&l.settings_env,&l.policy)?;
         let name = self.descriptor.name;
         let app = matches!(l.mode, Mode::AppServer { .. }) || self.descriptor.has("app-server") && automatic(l);
         for (capability, set) in [("mcp-config", l.mcp.is_some()), ("instructions-file", l.instructions.is_some()), ("turn-parts", !l.parts.is_empty()),
@@ -845,21 +895,22 @@ impl Adapter {
     fn run(&'static self, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
         self.live.fetch_add(1, Ordering::SeqCst);
         Run { runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
-            remote: l.title.is_some() }
+            remote: l.title.is_some(), readiness: Readiness::default(), starting: Instant::now() }
+    }
+
+    fn checked_run(&'static self, readiness: &Readiness, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
+        let mut run = self.run(body, progress, optimization, l); run.readiness = readiness.clone(); run
     }
 
     fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {
         let name = self.descriptor.name;
         if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability())); }
         if matches!(l.mode, Mode::AppServer { .. }) { return Err("app-server requires explicit protected host; state needs in Launch".into()); }
-        if let Some(accounts) = &l.accounts {
-            let now = (unix_ms() / 1000).max(0);
-            let q = self.quota(accounts, now);
-            if q.off || !q.free { return Err("quota-exhausted".into()); }
-        }
+        let readiness = self.preflight(l, &Repair::default());
+        readiness.permit(l.readiness)?;
         if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
-        let command = base(&l.command, self.client)?;
+        let command = preflight::launch_base(self,l)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
             job_id, job: None, attached, fault, report: None, launcher }));
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
@@ -870,15 +921,15 @@ impl Adapter {
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
                     let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
                     let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l)?;
-                    return Ok(self.run(Body::App(Box::new(app)), 0, optimization, l));
+                    return Ok(self.checked_run(&readiness, Body::App(Box::new(app)), 0, optimization, l));
                 }
                 let input = if l.parts.is_empty() { l.input.clone() } else { stream_message(&l.parts)? };
                 let baseline = if spec.resume {
                     (self.ops.transcript)(&spec.session, spec_home(&spec).as_deref()).map(|p|std::fs::metadata(&p).map(|m|(p,m.len())).map_err(|_|"rollout baseline unreadable")) .transpose()?
                 } else {None};
-                let turn = Turn::start(command, &spec, &l.log, &input, &l.process)?;
+                let turn = Turn::start(command, &spec, &l.log, &input, &l.process)?.prepared(readiness.clone());
                 let start = turn.start;
-                let mut run = self.run(Body::Turn(turn), start, optimization, l); run.rollout_progress = baseline; Ok(run)
+                let mut run = self.checked_run(&readiness, Body::Turn(turn), start, optimization, l); run.rollout_progress = baseline; Ok(run)
             }
             Mode::Background => {
                 // A new job's transcript is unknown until discovery; the alias path does not exist.
@@ -890,20 +941,20 @@ impl Adapter {
                     Err(e) => (None, uncertain("background launcher", &e.class())),
                 };
                 let start = turn.start();
-                Ok(self.run(native(turn, false, job_id, spec.resume, fault, Some(exchange)), start, optimization, l))
+                Ok(self.checked_run(&readiness, native(turn, false, job_id, spec.resume, fault, Some(exchange)), start, optimization, l))
             }
             Mode::Queue { transcript } => {
                 if !spec.resume { return Err("queue requires the session of a running desktop thread".into()); }
                 let turn = NativeTurn::before(&spec, transcript, &l.input)?;
                 let fault = (self.ops.app_queue)(command, &spec, &l.input, Duration::from_secs(30)).err().and_then(|e| uncertain("queue", &e));
                 let start = turn.start();
-                Ok(self.run(native(turn, true, None, true, fault, None), start, optimization, l))
+                Ok(self.checked_run(&readiness, native(turn, true, None, true, fault, None), start, optimization, l))
             }
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
                 let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
                 let app = App::open(&spec, Transport::Plain(server), initialize, thread, l)?;
-                Ok(self.run(Body::App(Box::new(app)), 0, optimization, l))
+                Ok(self.checked_run(&readiness, Body::App(Box::new(app)), 0, optimization, l))
             }
         }
     }
@@ -911,6 +962,8 @@ impl Adapter {
 
 impl Runtime for Adapter {
     fn descriptor(&self) -> &Descriptor { &self.descriptor }
+
+    fn preflight(&self, launch: &Launch, repair: &Repair) -> Readiness { preflight::check(self, launch, repair) }
 
     fn launch(&self, launch: &Launch) -> Res<Run> { table(self.client).start(launch, None) }
 
@@ -1013,12 +1066,14 @@ impl Runtime for Adapter {
     }
 
     fn report(&self, run: &Run) -> Res<Report> {
-        match &self.own(run)?.body {
+        let mut report = match &self.own(run)?.body {
             Body::Turn(t) if t.exit.is_some() => Ok(t.report()),
             Body::Native(n) if n.report.is_some() => Ok(n.report.clone().expect("report")),
-            Body::App(a) => a.session.report().ok_or_else(|| "running".into()),
+            Body::App(a) => a.session.report().ok_or_else(|| String::from("running")),
             _ => Err("running".into()),
-        }
+        }?;
+        report.readiness = Some(run.readiness.clone());
+        Ok(report)
     }
 
     fn progress(&self, run: &mut Run) -> Res<Vec<Event>> {
@@ -1065,7 +1120,16 @@ impl Runtime for Adapter {
     fn observe(&self, run: &mut Run) -> Observation {
         let (state, error) = match self.poll(run) { Ok(s) => (s, None), Err(e) => (State::Unknown, Some(e)) };
         let (url, cause, detail) = match self.link(run) { Ok(u) => (Some(u), None, None), Err((c, d)) => (None, Some(c), d) };
-        Observation { state, error, session: self.session_id(run), url, cause, detail }
+        let session = self.session_id(run);
+        let proven = match &run.body {
+            Body::Turn(t) => {
+                let text=read_from(&t.log,t.start).unwrap_or_default();
+                session_of(self.client,&text).is_some() || self.log_records(&text).iter().any(|r|r.lifecycle.is_some() || r.events.iter().any(|e|!matches!(e,Event::Activity|Event::Unsupported{..})))
+            },
+            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(),
+        };
+        Observation { state, phase: if state != State::Running { state.code() } else if proven { "started" } else { "starting" },
+            starting_ms: run.starting.elapsed().as_millis().min(u64::MAX as u128) as u64, error, session, url, cause, detail }
     }
 
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause> {
@@ -1079,41 +1143,14 @@ impl Runtime for Adapter {
     }
 
     fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready {
-        let check = |state, detail: &str| Check { state, detail: detail.into() };
-        let exe = match executable {
-            Some(p) if p.is_absolute() || p.components().count() > 1 => Ok(p.to_path_buf()),
-            Some(p) => Ok(which_in(&p.to_string_lossy(), &std::env::var_os("PATH").unwrap_or_default())),
-            None => self::executable(self.client),
-        };
-        let run = |exe: &Path, args: &[&str], budget| {
-            let mut c = Command::new(exe);
-            c.args(args);
-            if let Some(h) = home { c.env(self.client.home_var(), h); }
-            crate::quiet(&mut c);
-            crate::process::output("agent.ready", &mut c, Duration::from_secs(budget))
-        };
-        let exe = match exe {
-            Ok(exe) if exe.is_absolute() && exe.is_file() => exe,
-            Ok(exe) => return Ready { install: check("missing", &format!("{} not found", exe.display())), version: check("unknown", "not installed"),
-                login: check("unknown", "not installed") },
-            Err(e) => return Ready { install: check("unknown", &e), version: check("unknown", "executable unknown"), login: check("unknown", "executable unknown") },
-        };
-        let minimum = self.descriptor.minimum;
-        let version = match run(&exe, &["--version"], 5) {
-            Ok(o) => match String::from_utf8_lossy(&o.stdout).lines().next().map(str::trim).filter(|s| !s.is_empty()) {
-                None => check("unknown", "version not reported"),
-                Some(v) if minimum.is_empty() => check("ok", v),
-                Some(v) => match (version_parts(v), version_parts(minimum)) {
-                    (Some(have), Some(need)) if have < need => check("outdated", &format!("{v} is below {minimum}")),
-                    (Some(_), _) => check("ok", v),
-                    (None, _) => check("unknown", &format!("{v} is not a version")),
-                },
-            },
-            Err(e) => check("unknown", &e.to_string()),
-        };
-        let login = (self.ops.login)(&exe, home);
-        Ready { install: check("ok", &exe.to_string_lossy()), version, login }
+        let root=std::env::current_dir().unwrap_or_else(|_|std::env::temp_dir());
+        let mut launch=Launch::new(root,std::env::temp_dir().join("unused-ready.log"),"","agentq");
+        launch.home=home.map(Path::to_path_buf);launch.command=executable.map(|p|vec![p.as_os_str().into()]).unwrap_or_default();
+        preflight::ready(self,&launch)
     }
+    fn ready_for(&self, launch: &Launch) -> Ready {preflight::ready(self,launch)}
+    fn catalogue_for(&self, launch: &Launch) -> Res<Vec<Model>> {preflight::catalogue(self,launch)}
+    fn account_limits_for(&self, launch: &Launch, now:i64) -> Vec<Window> {(self.ops.limits_for)(launch,now)}
 
     fn quota(&self, accounts: &Accounts, now: i64) -> Quota {
         Quota { account: accounts.pick(now), free: accounts.active(now).is_some(), off: accounts.off(), hold: accounts.hold(now) }
@@ -1137,6 +1174,7 @@ impl Runtime for Adapter {
             Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
                 "session": n.turn.session(), "resume": n.spec.resume, "job": n.job_id, "attached": n.attached, "fault": n.fault})),
         }?;
+        saved["readiness"]=json!(run.readiness);
         saved["progress"]=json!(run.progress); saved["events"]=json!(run.events); saved["rollout_progress"]=json!(run.rollout_progress);
         if let Some(frozen)=&run.frozen { saved["frozen"]=frozen.save(); }
         Ok(saved)
@@ -1202,14 +1240,16 @@ impl Runtime for Adapter {
         optimization
     }
 
-    fn command(&self, base: Command, spec: &NativeSpec) -> Res<Command> { Ok(command(base, &self.native(spec))) }
+    fn command(&self, base: Command, spec: &NativeSpec) -> Res<Command> {(self.ops.validate)(&spec.args,&[],&Policy::default())?; Ok(command(base, &self.native(spec))) }
 
     fn turn(&self, base: Command, spec: &NativeSpec, log: &Path, input: &str, process: &Process) -> Res<Turn> {
-        Turn::start(base, &self.native(spec), log, input, process)
+        let readiness=self.seam_readiness(&base,spec,Some(log),input)?;
+        Turn::start(base, &self.native(spec), log, input, process).map(|turn|turn.prepared(readiness))
     }
 
     fn background_launch(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Result<Output, crate::process::Failure>> {
         self.needs("background")?;
+        self.seam_readiness(&base,spec,None,reference)?;
         (self.ops.background_launch)(base, &self.native(spec), reference, budget)
     }
 
@@ -1234,6 +1274,7 @@ impl Runtime for Adapter {
 
     fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output> {
         self.needs("app-queue")?;
+        self.seam_readiness(&base,spec,None,reference)?;
         (self.ops.app_queue)(base, &self.native(spec), reference, budget)
     }
 
