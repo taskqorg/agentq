@@ -19,7 +19,7 @@ fn main() {
     let r=agent::runtime("antigravity").unwrap();
     let mut l=Launch::new(&root,root.join("acp.jsonl"),"first","fixtureq");
     l.command=vec![std::env::current_exe().unwrap().into_os_string()];
-    l.home=Some(root.join("account"));
+    l.home=Some(root.join("account"));std::fs::create_dir_all(l.home.as_ref().unwrap()).unwrap();
     l.env=vec![("AGENTQ_FAKE_ACP".into(),"1".into())];
     l.deadline=Some(Instant::now()+Duration::from_secs(20));
     l.model=Some("model-1".into());
@@ -104,6 +104,12 @@ fn main() {
     let mut large_run=r.launch(&large).unwrap();r.cancel(&mut large_run).unwrap();
     while r.poll(&mut large_run).unwrap()==State::Running {std::thread::yield_now();}
     assert_eq!(r.report(&large_run).unwrap().outcome,"cancelled");
+    let mut malformed=l.clone();malformed.log=root.join("malformed.jsonl");malformed.deadline=Some(Instant::now()+Duration::from_secs(20));
+    malformed.env.push(("AGENTQ_FAKE_ACP_BAD_FIELD".into(),"1".into()));
+    let mut invalid=r.launch(&malformed).unwrap();
+    let error=loop {match r.progress(&mut invalid) {Err(error)=>break error,Ok(_)=>std::thread::yield_now()}};
+    assert!(error.contains("ACP payload invalid"));
+    assert!(std::fs::read_to_string(&malformed.log).unwrap().contains("\"text\":17"),"malformed native fields stay in raw evidence");drop(invalid);
     l.deadline=Some(Instant::now()+Duration::from_secs(20));
     l.env.push(("AGENTQ_FAKE_ACP_BAD_VERSION".into(),"1".into()));
     assert!(r.launch(&l).err().unwrap().contains("workspace write defect"));
@@ -146,6 +152,7 @@ fn server() {
             Some("session/set_mode")=>{assert_eq!(v["params"]["modeId"],"accept-edits");reply(&v,json!({}));},
             Some("session/prompt")=>{
                 if std::env::var_os("AGENTQ_FAKE_ACP_EOF").is_some() {return;}
+                if std::env::var_os("AGENTQ_FAKE_ACP_BAD_FIELD").is_some() {update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":17}}));return;}
                 prompt=v["id"].clone();
                 if v["params"]["prompt"][0]["text"]=="second" {continue;}
                 if v["params"]["prompt"][0]["text"]=="linger" {linger=true;emit(json!({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"end_turn"}}));continue;}

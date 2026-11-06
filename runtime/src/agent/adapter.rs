@@ -1017,6 +1017,7 @@ impl Adapter {
         let readiness = self.preflight(l, &Repair::default());
         readiness.permit(l.readiness)?;
         let acp=self.ops.acp;
+        if let Some(config)=acp {super::acp::check_version(config,readiness.checks.iter().find(|c|c.check=="client").ok_or("ACP version check missing")?)?;}
         if session.is_some_and(|s| s.is_empty() || s == "-" || acp.is_none() && !native::plain_id(s)) { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let mut owner_spec=spec.clone();
@@ -1027,7 +1028,7 @@ impl Adapter {
         if let Some(config)=acp {
             if l.mode!=Mode::Turn {return Err("mode unsupported by ACP".into());}
             let mut command=command;command.envs(spec.env.iter().cloned());
-            return Ok(self.run(Body::Acp(Box::new(super::acp::Session::open(command,config,l,session)?)),0,optimization,l));
+            return Ok(self.checked_run(&readiness, Body::Acp(Box::new(super::acp::Session::open(command,config,l,session)?)),0,optimization,l));
         }
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
             job_id, job: None, attached, fault, report: None, launcher }));
@@ -1269,7 +1270,7 @@ impl Runtime for Adapter {
                 let text=read_from(&t.log,t.start).unwrap_or_default();
                 session_of(self.client,&text).is_some() || self.log_records(&text).iter().any(|r|r.lifecycle.is_some() || r.events.iter().any(|e|!matches!(e,Event::Activity|Event::Unsupported{..})))
             },
-            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(),
+            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(), Body::Acp(a)=>!a.session.is_empty(),
         };
         Observation { state, phase: if state != State::Running { state.code() } else if proven { "started" } else { "starting" },
             starting_ms: run.starting.elapsed().as_millis().min(u64::MAX as u128) as u64, owner:run.owner.as_ref().map(SessionOwner::observation).unwrap_or_default(),activity,error, session, url, cause, detail }

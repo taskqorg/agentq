@@ -8,7 +8,7 @@ use super::super::super::events::{string,tool_kind,audit_path,audit_command,nati
 use super::*;
 use super::super::super::limits::{window,unknown,reset,https,token_text,oauth_account};
 
-static ACP: crate::agent::acp::Config=crate::agent::acp::Config {minimum:"1.5.2",args:&["acp"],env:&[],home_var:"GEMINI_HOME",home_arg:Some("--gemini-dir"),modes:&[(Approval::Plan,"plan"),(Approval::Edits,"accept-edits")],rejected_versions:&["1.4.2","1.4.3","1.4.4","1.4.5"],bypass_args:&["--dangerously-skip-permissions"],question_prefixes:&["interaction_"],home:acp_home};
+static ACP: crate::agent::acp::Config=crate::agent::acp::Config {args:&["acp"],env:&[],home_var:"GEMINI_HOME",home_arg:Some("--gemini-dir"),modes:&[(Approval::Plan,"plan"),(Approval::Edits,"accept-edits")],rejected_versions:&["1.4.2","1.4.3","1.4.4","1.4.5"],bypass_args:&["--dangerously-skip-permissions"],question_prefixes:&["interaction_"],home:acp_home};
 static ADAPTER: Adapter = Adapter {client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "1.5.2",
         capabilities: &["history", "turn", "resume", "turn-parts", "turn-deltas", "image-input", "mcp-config", "acp", "account-limits"] } , ops: NativeOps {acp:Some(&ACP),catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),background_stop:|_,_,_,_|Err("background unsupported".into()),background_id:|_|None,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"GEMINI_HOME",alternate_home_var:None,session_vars:&["ANTIGRAVITY_CONVERSATION_ID"],auth_vars:&["GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, preparation, restore_preparation:None, sandbox:None,hook_status:None, limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
 
@@ -415,7 +415,8 @@ impl AntigravityTranscript {
 
 /// The turn's client process: the owned child, or after recovery the child observed by its native identity.
 
-fn prepare_command(mut base:Command,spec:&Spec,text:&str)->Res<(Command,Box<dyn TurnExtension>)> {let home=spec_home(spec); if !is_native_agentapi(&base,spec) {return stdio_command(base,spec,text);}
+fn prepare_command(mut base:Command,spec:&Spec,text:&str)->Res<(Command,Box<dyn TurnExtension>)> {if !is_native_agentapi(&base,spec) {return stdio_command(base,spec,text);}
+    let home=spec_home(spec).map(|h|h.join("antigravity-cli"));
             if std::iter::once(base.get_program()).chain(base.get_args()).any(|arg| Path::new(arg).file_stem().is_some_and(|n| n == "language_server")) {
                 base.arg("agentapi");
             }

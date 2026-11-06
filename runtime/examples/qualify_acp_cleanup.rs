@@ -7,12 +7,12 @@
     let root=std::env::temp_dir().join(format!("agentq-native-cleanup-{}",std::process::id()));
     let work=root.join("workspace");let home=root.join("home");let gemini=home.join(".gemini");std::fs::create_dir_all(&work).unwrap();std::fs::create_dir_all(&gemini).unwrap();
     let runtime=agent::runtime("antigravity").unwrap();let exe=runtime.executable(None).unwrap();
-    let version=Command::new(&exe).arg("--version").output().unwrap();assert!(version.status.success());
     let owned=Arc::new(Mutex::new(Vec::<coreq::process::Identity>::new()));let observed=owned.clone();
     // Empty input refuses after initialize/new, so this cannot submit a model turn.
     let mut launch=Launch::new(&work,root.join("native.jsonl"),"","agentq-qualification");launch.command=vec![exe.into_os_string()];launch.home=Some(gemini.clone());
     launch.deadline=Some(Instant::now()+Duration::from_secs(30));
     launch.env=[("HOME",home.clone()),("USERPROFILE",home.clone()),("APPDATA",home.join("AppData/Roaming")),("LOCALAPPDATA",home.join("AppData/Local")),("GEMINI_HOME",gemini)].into_iter().map(|(k,v)|(k.into(),v.into_os_string())).collect();
+    let version=Command::new(&launch.command[0]).arg("--version").envs(launch.env.iter().cloned()).output().unwrap();assert!(version.status.success());
     launch.process.spawned=Some(Arc::new(move |child|{
         let query=format!("$p=Get-CimInstance Win32_Process; @({}; $p | Where-Object ParentProcessId -eq {} | ForEach-Object ProcessId) | ConvertTo-Json -Compress",child.id(),child.id());
         let output=Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command",&query]).output().map_err(|e|e.to_string())?;

@@ -20,7 +20,7 @@ pub(crate) struct Stdio {
     child:Child,
     input:Option<Pipe<WriteRequest>>,
     bounded:bool,
-    #[cfg(windows)] job:Option<windows_job::Job>,
+    #[cfg(windows)] job:Option<std::sync::Arc<windows_job::Job>>,
     events:Receiver<Res<Value>>,
 }
 
@@ -34,8 +34,20 @@ impl Stdio {
         let mut diagnostics=log.try_clone().map_err(|e|format!("app-server log: {e}"))?;
         crate::telemetry::capture::inherit_context(&mut command);
         command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(log);
+        #[cfg(windows)] let job=if !bounded {Some(std::sync::Arc::new(windows_job::Job::new()?))}else{None};
+        #[cfg(windows)] let owned={
+            let mut owned=process.clone();
+            if let Some(job)=job.clone() {
+                let caller=owned.spawned.clone();
+                owned.spawned=Some(std::sync::Arc::new(move |child|{
+                    let result=caller.as_ref().map_or(Ok(()),|callback|callback(child));
+                    job.attach(child)?;
+                    result
+                }));
+            }owned
+        };
+        #[cfg(windows)] let process=&owned;
         let mut child=process.spawn(command,"app-server")?;
-        #[cfg(windows)] let job=if !bounded {match windows_job::Job::attach(&child) {Ok(job)=>Some(job),Err(error)=>{let _=child.kill();let _=child.wait();return Err(error);}}}else{None};
         let mut stdin=child.stdin.take().ok_or("app-server stdin unavailable")?;
         let stdout=child.stdout.take().ok_or("app-server stdout unavailable")?;
         let (input,writing)=channel::<WriteRequest>(bounded.then_some(1));
@@ -122,7 +134,7 @@ impl Stdio {
     }
 
     /// EOF requests shutdown; observation must never wait for native descendants.
-    pub(crate) fn close_stream(&mut self,_until:Option<Instant>)->Res<()> {self.input.take();Ok(())}
+    pub(crate) fn close_stream(&mut self) {self.input.take();}
 
     /// EOF lets the native server close its MCP children; the owned server is reaped before return.
     pub(crate) fn close(&mut self)->Res<()> {
