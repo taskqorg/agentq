@@ -275,13 +275,19 @@ mod tests {
             l.command=vec![std::env::current_exe().unwrap().into_os_string(),"--exact".into(),format!("{}::structured_server",module_path!().split_once("::").unwrap().1).into(),"--nocapture".into(),"--".into()];
             l.env=vec![("AGENTQ_STRUCTURED_FIXTURE".into(),if runtime.ops.rpc.is_some(){"rpc"}else{"acp"}.into())];
             l.home=Some(work.join("home"));std::fs::create_dir_all(l.home.as_ref().unwrap()).unwrap();l.deadline=Some(Instant::now()+Duration::from_secs(20));l.deltas=true;
+            l.process.configure=Some(std::sync::Arc::new(|command|assert!(command.get_envs().any(|(k,v)|k=="XAI_API_KEY" && v.is_none()),"native spawn retains account cleaning")));
+            assert!(runtime.resume("untracked",&l).err().unwrap().starts_with("session-owner-unknown"));
             let mut blocked=l.clone();blocked.home=Some(work.join("missing-account"));
             let readiness=runtime.preflight(&blocked,&Repair::default());
             assert!(readiness.checks.iter().any(|c|c.check=="account" && c.state=="blocked"));
             assert!(runtime.launch(&blocked).err().unwrap().contains("account-home-missing"));
             let mut run=runtime.launch(&l).unwrap();
+            let native=runtime.session_id(&run).unwrap();
+            assert_eq!(run.owner().unwrap().checkpoint().unwrap()["session"],native,"{name}: owner binds before prompt");
+            assert!(runtime.resume(&native,&l).err().unwrap().starts_with("session-busy"),"{name}: one admitted writer");
             while runtime.poll(&mut run).unwrap()==State::Running {std::thread::yield_now();}
             let report=runtime.report(&run).unwrap();
+            assert_eq!(report.owner.state,"idle","{name}: known native settlement permits finish");
             assert_eq!((report.outcome,report.text.as_deref()),("ok",Some("answer")),"{name}: {report:?}");
             if runtime.ops.rpc.is_some() {
                 assert_eq!((report.usage.input,report.usage.calls),(Some(2),Some(1)));
@@ -347,7 +353,9 @@ mod tests {
             }else{
                 match method {
                     Some("get_state")=>{
-                        let mut state=json!({"sessionFile":std::env::current_dir().unwrap().join("session with spaces.jsonl"),"isStreaming":false,"isCompacting":false,"pendingMessageCount":0});
+                        let args:Vec<_>=std::env::args().collect();
+                        let session=args.windows(2).find(|a|a[0]=="--session").map(|a|std::path::PathBuf::from(&a[1])).unwrap_or_else(||std::env::current_dir().unwrap().join(format!("session {} with spaces.jsonl",std::process::id())));
+                        let mut state=json!({"sessionFile":session,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0});
                         if let Ok(value)=std::env::var("AGENTQ_RPC_PENDING_COUNT") {
                             if value=="missing" {state.as_object_mut().unwrap().remove("pendingMessageCount");}else{state["pendingMessageCount"]=serde_json::from_str(&value).unwrap();}
                         }
@@ -451,7 +459,7 @@ pub(crate) struct Protocol {
     pub snapshot: fn(&[Value],Option<&Path>)->Snapshot,
     pub report: fn(&str,&[Value],Option<&Path>)->Report,
 }
-pub(super) fn structured_session(runtime:&str)->bool {entry(runtime).and_then(|e|e.builtin).is_some_and(|a|a.ops.acp.is_some())}
+pub(super) fn structured_session(runtime:&str)->bool {entry(runtime).and_then(|e|e.builtin).is_some_and(|a|a.ops.acp.is_some() || a.ops.rpc.is_some())}
 pub(crate) fn protocol(client:Client)->&'static Protocol {builtin(client).ops.protocol}
 #[cfg(test)]
 pub(crate) use antigravity::session as antigravity_session;

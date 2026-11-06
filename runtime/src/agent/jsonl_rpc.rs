@@ -33,7 +33,7 @@ pub(super) fn validate_launch(l:&Launch)->Res<()> {
 }
 
 impl Session {
-    pub fn open(mut command:Command,config:&Config,l:&Launch,resume:Option<&str>)->Res<Self> {
+    pub fn open(mut command:Command,config:&Config,l:&Launch,resume:Option<&str>,owner:&SessionOwner)->Res<Self> {
         validate_launch(l)?;
         command.args(config.args).current_dir(&l.root).envs(l.env.iter().cloned());
         if let Some(home)=&l.home {command.env(config.home_var,home);}
@@ -62,6 +62,7 @@ impl Session {
             }
             s.log(&json!({"type":"rpc-replay","message":v,"replay":true}))?;
         }
+        owner.bind(&s.session)?;
         s.prompt=Some(s.request("prompt",json!({"message":l.input}))?);Ok(s)
     }
 
@@ -97,13 +98,13 @@ impl Session {
         }
         Ok(())
     }
-    fn pump(&mut self)->Res<()> {
+    pub(super) fn pump(&mut self)->Res<()> {
         if self.closed.is_some(){return Ok(());}
         loop {match self.server.receive(Instant::now()) {Ok(Some(v))=>self.observe(v)?,Ok(None)=>break,Err(e)=>{self.closed=Some(e);break;}}}
         if let Some(r)=&mut self.report {
-            self.server.close_stream();r.exit=self.server.poll()?;
+            self.server.close_stream();
             if let Some(sampler)=self.sampler.take(){r.process=sampler.usage();}
-            if r.exit.is_none(){r.process.exit_unknown="session-process-running";}
+            self.server.observe_exit(r)?;
             self.closed=Some("terminal".into());
         }Ok(())
     }
@@ -161,14 +162,17 @@ fn normalize(v:&Value)->super::history::Normalized {
 
 #[cfg(test)] mod tests {
     use super::*;
-    fn open(pending:&str)->(PathBuf,Res<Session>) {
+    fn open(pending:&str)->(PathBuf,Res<(Session,SessionOwner)>) {
         let root=crate::scratch("rpc-boundary");
         let mut command=Command::new(std::env::current_exe().unwrap());
         command.args(["--exact","agent::adapter::registry::tests::structured_server","--nocapture","--"])
             .env("AGENTQ_STRUCTURED_FIXTURE","rpc").env("AGENTQ_RPC_PENDING_COUNT",pending);
         let mut launch=Launch::new(&root,root.join("native.jsonl"),"wait","fixtureq");launch.deadline=Some(Instant::now()+Duration::from_secs(20));
-        let result=Session::open(command,&Config{args:&[],home_var:"FIXTURE_HOME",resume_arg:"--session"},&launch,None);
-        (root,result)
+        launch.home=Some(root.clone());
+        let owner=super::adapter::runtime("antigravity").unwrap().session_owner(None,&launch).unwrap();
+        launch.process=owner.process_hooks(&launch.process,false).unwrap();
+        let result=Session::open(command,&Config{args:&[],home_var:"FIXTURE_HOME",resume_arg:"--session"},&launch,None,&owner);
+        (root,result.map(|session|(session,owner)))
     }
     // Unknown queued work cannot authorize another input; this exercises the real get_state/prompt boundary.
     #[test] fn pending_queue_requires_explicit_native_zero() {
@@ -181,7 +185,7 @@ fn normalize(v:&Value)->super::history::Normalized {
     }
     // One pump can receive several settlements: only the first owns messages, progress and accounting.
     #[test] fn first_native_settlement_freezes_turn_and_calls() {
-        let (root,result)=open("0");let mut session=result.unwrap();
+        let (root,result)=open("0");let (mut session,_owner)=result.unwrap();
         session.observe(json!({"type":"agent_start"})).unwrap();
         session.observe(json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"first"}],"stopReason":"stop","usage":{"input":2,"output":1}}})).unwrap();
         session.observe(json!({"type":"agent_settled"})).unwrap();
@@ -194,6 +198,12 @@ fn normalize(v:&Value)->super::history::Normalized {
         assert_eq!((session.messages.len(),session.pending.len()),(1,count));
         let raw=std::fs::read_to_string(&session.path).unwrap();assert!(raw.contains("later") && raw.contains("rpc-after-settlement"));
         assert!(matches!(later.termination,ProcessTermination::Unknown{..}),"a native turn settlement is not process termination");
-        drop(session);std::fs::remove_dir_all(root).unwrap();
+        {
+            session.server.kill().unwrap();session.pump().unwrap();let stopped=session.report().unwrap();
+            assert_eq!((stopped.outcome,stopped.exit),("ok",None));
+            assert_eq!(stopped.termination,ProcessTermination::Observed);
+            assert_eq!(stopped.process.exit_unknown,if cfg!(unix){"signalled"}else{"post-terminal-cleanup"});
+        }
+        drop(session);drop(_owner);std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -942,6 +942,7 @@ impl Adapter {
         let run = self.own_mut(run)?;
         let path = match &mut run.body {
             Body::Acp(a)=>return a.progress(),
+            Body::Rpc(a)=>return a.progress(),
             Body::Turn(t) => { t.sync_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
@@ -965,6 +966,7 @@ impl Adapter {
         let run=self.own_mut(run)?;
         let events=match &mut run.body {
             Body::Acp(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
+            Body::Rpc(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].to_vec();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
             Body::Turn(t)=>{t.sync_transcript()?;let (rows,next)=activity_lines(&t.log,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Native(n) if n.attached=>{let (rows,next)=activity_lines(n.turn.path(),run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
@@ -1066,7 +1068,9 @@ impl Adapter {
         if let Some(config)=self.ops.rpc {
             if l.mode!=Mode::Turn {return Err("mode unsupported by JSONL RPC".into());}
             let command=preflight::command(self,l)?;
-            return Ok(self.checked_run(&readiness, Body::Rpc(Box::new(super::jsonl_rpc::Session::open(command,config,l,session)?)),0,optimization,l));
+            let session=super::jsonl_rpc::Session::open(command,config,l,session,&owner)?;
+            let boundary=session.boundary;
+            let mut run=self.checked_run(&readiness,Body::Rpc(Box::new(session)),boundary,optimization,l);run.owner=Some(owner);return Ok(run);
         }
         let command = preflight::launch_base(self,l)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
