@@ -14,7 +14,7 @@ pub(super) struct Config {
     pub question_prefixes: &'static [&'static str],
 }
 
-pub(super) fn check_version(config:&Config,client:&LaunchCheck)->Res<()> {
+pub(super) fn check_version(config:&Config,client:&Check)->Res<()> {
     if config.rejected_versions.is_empty() {return Ok(());}
     if client.state!="ok" {return Err("ACP version unknown; server not started".into());}
     let have=adapter::version_parts(&client.detail).ok_or("ACP version unknown; server not started")?;

@@ -116,7 +116,7 @@ fn main() {
     l.env.pop();
     for version in ["1.4.2","1.4.3","1.4.4","1.4.5","1.5.1","unknown"] {
         let mut old=l.clone();old.env.push(("AGENTQ_FAKE_ACP_PROBE_VERSION".into(),version.into()));
-        let before=std::fs::metadata(&l.log).unwrap().len();assert!(r.launch(&old).is_err());assert_eq!(std::fs::metadata(&l.log).unwrap().len(),before,"version refused before ACP spawn");
+        let before=std::fs::metadata(&l.log).unwrap().len();assert!(r.preflight(&old,&agent::Repair::default()).checks.iter().any(|c|c.check=="client" && c.state=="blocked"));assert!(r.launch(&old).is_err());assert_eq!(std::fs::metadata(&l.log).unwrap().len(),before,"version refused before ACP spawn");
     }
     l.env.push(("AGENTQ_FAKE_ACP_EOF".into(),"1".into()));
     let mut ended=r.launch(&l).unwrap();

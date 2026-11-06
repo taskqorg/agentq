@@ -1015,7 +1015,6 @@ impl Adapter {
         let readiness = self.preflight(l, &Repair::default());
         readiness.permit(l.readiness)?;
         let acp=self.ops.acp;
-        if let Some(config)=acp {super::acp::check_version(config,readiness.checks.iter().find(|c|c.check=="client").ok_or("ACP version check missing")?)?;}
         if session.is_some_and(|s| s.is_empty() || s == "-" || acp.is_none() && !native::plain_id(s)) { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let mut owner_spec=spec.clone();
