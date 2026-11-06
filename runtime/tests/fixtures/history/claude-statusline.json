@@ -1,0 +1,26 @@
+{
+  "session_id": "fixture-session",
+  "model": {
+    "id": "claude-fable-5",
+    "display_name": "Fable 5"
+  },
+  "context_window": {
+    "total_input_tokens": 19668,
+    "total_output_tokens": 598,
+    "context_window_size": 1000000,
+    "current_usage": {
+      "input_tokens": 2,
+      "output_tokens": 598,
+      "cache_creation_input_tokens": 109,
+      "cache_read_input_tokens": 19557
+    },
+    "used_percentage": 2,
+    "remaining_percentage": 98
+  },
+  "rate_limits": {
+    "seven_day": {
+      "used_percentage": 88,
+      "resets_at": 1900000000
+    }
+  }
+}

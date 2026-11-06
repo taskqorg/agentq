@@ -103,6 +103,11 @@ fn main() {
             Ok(v)=>{println!("{v}");if v["allowed"]==true {0} else {1}},
             Err(e)=>fail(&e,"send one JSON launch request on stdin"),
         },
+        ["agent", "statusline", "--output", path] => match std::io::read_to_string(std::io::stdin()).map_err(|e|e.to_string())
+            .and_then(|raw|agentq_runtime::agent::history::live::write_statusline(Path::new(path),&raw)) {
+            Ok(()) => 0,
+            Err(e) => { eprintln!("Error: {e}\nNext: keep the native statusline and check the caller feed path"); 0 },
+        },
         ["agent", "turn"] => match std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string()).and_then(|s| agentq_runtime::cli::turn(&s, Some(&t.install))) {
             Ok(v) => println_code(&v.to_string()),
             Err(e) => fail(&e, "send one JSON turn request on stdin (docs/spec/RUNTIME.md § JSON command)"),

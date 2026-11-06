@@ -1,12 +1,12 @@
 //! Native locations stay behind the runtime boundary; discovery never launches a client.
 use super::*;
 use std::{path::PathBuf, io::{BufRead, BufReader}};
-use serde::Serialize;
+use serde::{Serialize,Deserialize};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize,Deserialize)]
 pub struct Source { pub id:String, pub native_session:String, pub session: String, pub path: PathBuf, pub format: String, pub parent: Option<String>, pub parent_step: Option<String> }
 
-pub struct Session { history: History, path: PathBuf, runtime:String, parent: Option<String>, parent_step: Option<String>, children:std::collections::BTreeMap<String,String> }
+pub struct Session { resolved:Source,pub(super) history: History, pub(super) path: PathBuf, pub(super) runtime:String, parent: Option<String>, parent_step: Option<String>, children:std::collections::BTreeMap<String,String> }
 impl Session {
     pub fn steps(&mut self, bytes: u64) -> Res<StepPage> {
         let mut page=self.history.steps(&self.path,bytes)?;
@@ -19,9 +19,14 @@ impl Session {
                 }
             }
         }
+        page.checkpoint=self.checkpoint();
         Ok(page)
     }
-    pub fn checkpoint(&self) -> Value {self.history.checkpoint()}
+    pub fn checkpoint(&self) -> Value {
+        let mut checkpoint=self.history.checkpoint();
+        checkpoint["resolved"]=json!({"runtime":self.runtime,"source":self.resolved,"parent":self.parent,"parent_step":self.parent_step,"children":self.children});
+        checkpoint
+    }
     pub fn read_bytes(&self, start:u64, length:u64)->Res<Vec<u8>> {self.history.read_bytes(&self.path,start,length)}
     /// Advisory argv, never launch authority. Source IDs resolve inside the adapter.
     pub fn resume_command(&self, process:super::super::State)->Res<Vec<String>> {
@@ -53,6 +58,7 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
         row.clear();
         if reader.read_line(&mut row).map_err(|e|e.to_string())?==0 {return Ok(None);}
         if !row.ends_with('\n') {return Ok(None);}
+        if row.trim().is_empty() {continue;}
         let v:Value=serde_json::from_str(&row).map_err(|e|format!("history discovery invalid JSON: {e}"))?;
         let id=match runtime {
             "codex" if v["type"]=="session_meta"=>v["payload"]["id"].as_str(),
@@ -109,6 +115,20 @@ fn link_parents(runtime:&str,sources:&mut [Source])->Res<()> {
 
 pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>, saved:Option<&Value>) -> Res<Session> {
     client(runtime)?;
+    if let Some(saved)=saved.filter(|s|s["resolved"].is_object()) {
+        let requested_source=source;
+        let resolved=&saved["resolved"];
+        let source:Source=serde_json::from_value(resolved["source"].clone()).map_err(|_|"history checkpoint source invalid")?;
+        if resolved["runtime"]!=runtime || ![source.id.as_str(),source.session.as_str()].contains(&session) || source.id!=crate::sha256_hex(source.path.to_string_lossy().as_bytes()) {
+            return Err("history checkpoint binding differs".into());
+        }
+        if requested_source.is_some_and(|p|p!=source.path) || !source.path.is_absolute() {return Err("history checkpoint source invalid".into());}
+        let history=History::recover(saved)?;
+        if history.source!=source.path.to_str().ok_or("history source path invalid UTF-8")? || history.session!=source.session || history.native_session!=source.native_session || history.format!=source.format {return Err("history checkpoint binding differs".into());}
+        history.open(&source.path)?;
+        let children=serde_json::from_value(resolved["children"].clone()).map_err(|_|"history checkpoint children invalid")?;
+        return Ok(Session {path:source.path.clone(),resolved:source,history,runtime:runtime.into(),parent:resolved["parent"].as_str().map(String::from),parent_step:resolved["parent_step"].as_str().map(String::from),children});
+    }
     let sources=if source.is_some(){vec![]}else{discover(runtime,home)?};
     let source=if let Some(path)=source {
         let found=identify(runtime,path)?.ok_or("history session identity unavailable")?;
@@ -132,8 +152,8 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
     history.native_session=source.native_session.clone();history.native_parent=if runtime=="claude" && source.parent.is_some(){source.parent.clone()}else{None};
     let children=sources.iter().filter(|s|s.parent.as_ref()==Some(&source.native_session) && (runtime!="claude" || s.path.starts_with(source.path.with_extension(""))))
         .map(|s|(s.native_session.clone(),s.id.clone())).collect();
-    let parent=source.parent.as_ref().and_then(|parent|sources.iter().find(|s|&s.session==parent && (runtime!="claude" || source.path.starts_with(s.path.with_extension(""))))).map(|s|s.id.clone()).or(source.parent);
-    Ok(Session {history,path:source.path,runtime:runtime.into(),parent,parent_step:source.parent_step,children})
+    let parent=source.parent.as_ref().and_then(|parent|sources.iter().find(|s|&s.session==parent && (runtime!="claude" || source.path.starts_with(s.path.with_extension(""))))).map(|s|s.id.clone()).or(source.parent.clone());
+    Ok(Session {resolved:source.clone(),history,path:source.path,runtime:runtime.into(),parent,parent_step:source.parent_step,children})
 }
 
 pub fn resume(runtime:&str, session:&str, state:super::super::State)->Res<Vec<String>> {
@@ -159,6 +179,9 @@ pub fn request(request:&str)->Res<Value> {
     if v["action"]=="list" {return serde_json::to_value(rt.history_sessions(home)?).map_err(|e|e.to_string());}
     let session=v["session"].as_str().ok_or("history session required")?;
     let mut reader=rt.history(session,home,path("source")?,v.get("checkpoint").filter(|v|!v.is_null()))?;
+    if v["action"]=="live" {
+        return serde_json::to_value(reader.live_data(path("statusline")?)?).map_err(|e|e.to_string());
+    }
     if v["action"]=="bytes" {
         let start=v["start"].as_u64().ok_or("history start required")?;
         let length=v["length"].as_u64().ok_or("history length required")?;

@@ -20,9 +20,10 @@ pub(crate) struct Facts { pub run:String, pub format:&'static str, pub path:std:
 impl StopEvent {
     pub fn step(&self)->Step {
         let source=self.last_activity.as_ref().map(|s|s.source.clone()).unwrap_or(Value::Null);
-        Step {id:self.id.clone(),native_id:None,revision:source["end"].as_u64().unwrap_or(0),kind:StepKind::Stop,
-            turn:Turn {id:self.last_activity.as_ref().and_then(|s|s.turn.id.clone()),session:self.session.clone().unwrap_or_default(),unknown:Some("observation only; poll/report retain authority".into())},
+        Step {id:self.id.clone(),native_id:None,revision:source["end"].as_u64().unwrap_or(0),part:0,kind:StepKind::Stop,
+            turn:Turn {id:self.last_activity.as_ref().and_then(|s|s.turn.id.clone()),native_id:self.last_activity.as_ref().and_then(|s|s.turn.native_id.clone()),session:self.session.clone().unwrap_or_default(),unknown:Some("observation only; poll/report retain authority".into())},
             parent:self.last_activity.as_ref().map(|s|s.id.clone()),parent_session:self.session.clone(),author:"system".into(),state:"observed".into(),
+            presentation:self.last_activity.as_ref().map(|s|s.presentation.clone()).unwrap_or(Value::Null),
             data:serde_json::to_value(self).expect("serializable stop observation"),unknown:self.unknown.clone(),
             origins:self.last_activity.as_ref().map(|s|s.origins.clone()).unwrap_or_default(),source}
     }

@@ -595,6 +595,7 @@ fn session_report(text:&str,r:&mut Report) {
 /// The model requests of a Codex rollout, each `token_count` once by its cumulative total. `last_turn` keeps only the
 /// requests after the last `task_started`.
 pub(crate) fn rollout_calls(text: &str, last_turn: bool) -> Vec<Call> {
+    if let Some(events)=rollout_requests(text,last_turn) {return read_calls(&events).0;}
     let (mut events, mut model) = (Vec::<Value>::new(), None::<String>);
     for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         if v["type"] == "turn_context" { model = v["payload"]["model"].as_str().map(String::from); }
@@ -891,4 +892,33 @@ mod preparation_tests {
         std::fs::write(&file,format!("{config}\nnot valid TOML")).unwrap();assert_eq!(hook_status(&root,Some(&journal)).state,"degraded");
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// Prefer identified request usage within each native turn, retaining older legacy-only turns.
+fn rollout_requests(text:&str,last_turn:bool)->Option<Vec<Value>> {
+    let rows:Vec<Value>=text.lines().filter_map(|s|serde_json::from_str(s).ok()).collect();
+    if !rows.iter().any(|v|v["type"]=="token_usage_record"){return None;}
+    let mut current=String::from("unreported-prefix");let mut turns=Vec::new();let mut explicit=std::collections::BTreeSet::new();
+    let mut last_start=0;
+    for (index,row) in rows.iter().enumerate() {
+        let p=&row["payload"];
+        if p["type"]=="task_started" {current=p["turn_id"].as_str().map(String::from).unwrap_or_else(||format!("source-turn-{index}"));last_start=index;}
+        let turn=p["turn_id"].as_str().unwrap_or(&current).to_string();
+        if row["type"]=="token_usage_record" {explicit.insert(turn.clone());}
+        turns.push(turn);
+    }
+    let mut events=Vec::new();let mut model=None::<String>;
+    for (index,row) in rows.iter().enumerate() {
+        let p=&row["payload"];
+        if row["type"]=="turn_context" {model=p["model"].as_str().map(String::from);}
+        if last_turn && index<last_start {continue;}
+        if row["type"]=="token_usage_record" {
+            events.push(json!({"type":"turn.completed","response_id":p["response_id"],"call":true,"usage":p["usage"],"model":model,"timestamp":row["timestamp"]}));
+        } else if p["type"]=="token_count" && !explicit.contains(&turns[index]) && p["info"]["total_token_usage"].is_object() {
+            let before=events.len();
+            append_codex_usage(&mut events,&p["info"]["last_token_usage"],&p["info"]["total_token_usage"],false);
+            if events.len()>before {let last=events.last_mut().unwrap();last["model"]=json!(model);last["timestamp"]=row["timestamp"].clone();}
+        }
+    }
+    Some(events)
 }

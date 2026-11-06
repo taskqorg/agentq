@@ -324,6 +324,10 @@ pub(crate) use codex::rollout_calls as codex_rollout_calls;
 #[cfg(test)]
 pub(crate) use codex::parsing::auth_rejected as codex_auth_rejected;
 
+pub(crate) fn history_runtime(format:&str)->Option<&'static dyn Runtime> {
+    native_entries().filter_map(|e|e.builtin).find(|a|a.ops.protocol.history_formats.contains(&format)).map(|a|a as &dyn Runtime)
+}
+
 pub(crate) fn history_protocol(format:&str)->Option<&'static Protocol> {
     native_entries().filter_map(|e|e.builtin).map(|a|a.ops.protocol).find(|p|p.history_formats.contains(&format))
 }

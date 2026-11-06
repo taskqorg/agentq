@@ -521,6 +521,55 @@ Previously retained TaskQ-shaped checkpoints and receipts are recovery-only evid
 
 The explicit legacy `ProtectedHost::new` API stays available to consumers pinned to the old protocol; the signed independent route never falls back to it. Historical qualification and consumer packets remain in [task 186](../evidence/runtime-186.md) and [task 199](../evidence/runtime-199.md); they do not qualify the independent host. Publication pins, signature/digest and adversarial checks: [independent host evidence](../evidence/runtime-241.md).
 
+## Live run data
+
+Every step exposes neutral `presentation` fields: model, effort, cli_version, sidechain
+and meta. Native model/effort/version context carries forward; native per-record flags
+do not. Absent fields remain null with reasons; no installed CLI version is substituted
+for the version that wrote a transcript. Clients need no native parsing for these facts. Claude attachments are metadata unless
+a typed hook, read-truncation, diagnostics or queued-prompt record applies. Hook
+steps retain success, blocking errors, additional context and stop-hook summaries
+(including hookErrors and preventedContinuation). Queue steps retain native operation
+and prompt text; removal never creates a user message. PR links are link steps.
+Server tool calls are web steps and tool-search results are tool steps.
+
+A session checkpoint carries its resolved source and parent/child associations.
+Recovery validates the same source binding and native prefix, without walking all
+homes or rereading the parent to resolve each page. This is cursor state, not a cache.
+
+History includes context, windows, usage, plan, todo and file-rollup steps, with the
+same shape for live and finished runs. `Session::live_data` derives the latest context,
+all reported windows, model calls with token buckets and cost source, the latest plan
+and todos, and changed files grouped by native turn. Missing fields are null with a
+reason; no plan, cost, token total or file edit is invented from assistant prose.
+
+Native request IDs and each registered runtime call parser deduplicate usage;
+history never chooses accounting or limit parsers by runtime-name prefixes. Rollout
+token_count uses per-call last usage, never accumulated totals added to those calls.
+Reasoning tokens are a reported subset of output. Cost is explicitly native-reported
+or unknown; no pricing table is guessed. File rollups retain the native changes and
+source revisions; repeated delivery replaces a change instead of counting it again.
+Claude uses native promptId when emitted. Without a native turn ID, an explicit
+user/turn-start record supplies a deterministic derived grouping key, while
+`Turn.native_id` remains null with its reason. File rollups never merge edits across
+these turn boundaries. Missing native IDs never become completion evidence.
+
+`agentq agent statusline --output <absolute-path>` accepts Claude's native JSON on
+stdin, appends it to a caller-owned private JSONL feed and emits no terminal text.
+It neither installs itself nor edits a user statusline. A caller may explicitly use
+it in per-launch settings or forward an existing feed. `Session::live_data` optionally
+joins that feed by exact session ID; mismatched sessions refuse. No usage HTTP endpoint
+is polled. Context-window and five-hour/seven-day limit fields are projected only
+when native input supplies them; stale/missing data keeps its source time or unknown.
+
+`agent.turn` and `agent.call` share session and native request identity metadata.
+Reported numeric cost carries its source, with unknown reasons otherwise. History
+content, plan/todo text, file paths, diffs and statusline payloads never enter telemetry.
+This adds no token-producing event path and preserves M6.9 and immutable call IDs.
+Telemetry joins call.parent to turn.span using a hash of the existing immutable turn
+key. Native-reported USD is converted to integer `counts.cost_native_nanousd`, with
+`cost_source_native=1`; missing cost carries `cost_source_unknown=1`. No prices are inferred.
+
 ## Stopped run observation
 
 `Runtime::stop_event(run, bytes)` polls through the existing runtime authority and
@@ -558,6 +607,7 @@ upsert by ID and accept the greatest revision. Derivation replays raw source at 
 time, including before a recovered page boundary; no second history or cache is stored.
 A page coalesces updates per ID and orders them by the last source revision; `origins`
 retains every contributing record's exact range and hash for raw reads.
+The record block index preserves order within a source record; derived facts follow its content blocks.
 Claude replay/metadata records stay raw unknown steps and never replay embedded tools.
 Records without a native identity retain their physical identity. Parent call,
 turn and session IDs are projected only when native data reports them.

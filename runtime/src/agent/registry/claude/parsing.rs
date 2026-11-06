@@ -32,10 +32,11 @@ pub(super) fn final_text(events: &[Value]) -> Option<String> {
 pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
     let mut ids = std::collections::HashSet::new();
     let mut calls = vec![];
-    for v in events {
+    for (index,v) in events.iter().enumerate() {
         if v["type"] != "assistant" {
             continue;
         }
+        if events[index+1..].iter().any(|later|later["type"]=="assistant" && later["message"]["id"]==v["message"]["id"]) {continue;}
         let Some(id) = v["message"]["id"]
             .as_str()
             .filter(|id| ids.insert(id.to_string()))
@@ -49,6 +50,7 @@ pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
             ("ok", "none")
         };
         calls.push(Call {
+            cost_usd:crate::agent::history::live::native_cost(u).or_else(||crate::agent::history::live::native_cost(v)),
             id: Some(id.into()),
             at_ms: v["timestamp"]
                 .as_str()
@@ -58,7 +60,7 @@ pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
             cache_read: u["cache_read_input_tokens"].as_u64(),
             cache_write: u["cache_creation_input_tokens"].as_u64(),
             output: u["output_tokens"].as_u64(),
-            reasoning: None,
+            reasoning: u["output_tokens_details"]["thinking_tokens"].as_u64().or(u["reasoning_tokens"].as_u64()),
             model: v["message"]["model"]
                 .as_str()
                 .or_else(|| v["model"].as_str())
@@ -99,5 +101,7 @@ pub(super) fn classify_report(
     {
         status.2 = Some(detail.into());
     }
-    report(Client::Claude, text, events, rollout, status, live)
+    let mut result=report(Client::Claude, text, events, rollout, status, live);
+    if let Some(cost)=end_index.and_then(|i|crate::agent::history::live::native_cost(&events[i])) {result.usage.cost_usd=Some(cost);}
+    result
 }

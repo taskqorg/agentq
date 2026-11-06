@@ -9,7 +9,7 @@ fn path(name:&str)->std::path::PathBuf {std::env::temp_dir().join(format!("agent
 fn real_completed_items_and_claude_results_are_typed() {
     for (format,raw,expected) in [
         ("codex-rollout",include_str!("fixtures/history/codex-steps.jsonl"),vec![StepKind::Shell,StepKind::Thinking,StepKind::Image,StepKind::Mcp,StepKind::FileChange,StepKind::Compaction]),
-        ("claude-native",include_str!("fixtures/history/claude-steps.jsonl"),vec![StepKind::Thinking,StepKind::Shell]),
+        ("claude-native",include_str!("fixtures/history/claude-steps.jsonl"),vec![StepKind::Thinking,StepKind::Usage,StepKind::Shell]),
     ] {
         let p=path(format);fs::write(&p,raw).unwrap();
         let mut h=History::new(format,"fixture","session").unwrap();
@@ -104,7 +104,7 @@ fn claude_revisions_keep_console_kind_and_ignore_replay_metadata() {
     assert_eq!(shell.data["command"],"printf proof");assert_eq!(shell.data["cwd"],"/fixture");assert_eq!(shell.data["output"],"proof");
     assert!(shell.parent.is_none(),"parentUuid is a message-chain edge, not work ownership");
     assert_eq!(shell.origins.len(),2,"metadata replay cannot revise an executed tool");
-    assert!(page.steps.iter().any(|s|s.kind==StepKind::Unknown && s.source["raw"].as_str().unwrap().contains("api-request-blob")));
+    assert!(page.steps.iter().any(|s|s.kind==StepKind::Metadata && s.source["raw"].as_str().unwrap().contains("api-request-blob")));
     assert!(page.steps.iter().any(|s|s.data["text"]=="exact prompt\n"));
     fs::remove_file(p).unwrap();
 }
@@ -148,14 +148,14 @@ fn codex_spawn_usage_and_code_mode_keep_their_native_meaning() {
     let rows=[json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn","arguments":"{}"}}),
         json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"spawn","output":"{\"agent_id\":\"child\"}"}}),
         json!({"type":"event_msg","payload":{"item":{"type":"SubAgentActivity","id":"spawn","kind":"started","agent_thread_id":"child"}}}),
-        json!({"type":"token_usage_record","payload":{"response_id":"request","usage":{"input_tokens":10},"thread_token_usage":{"input_tokens":100}}}),
+        json!({"type":"token_usage_record","payload":{"response_id":"request","usage":{"input_tokens":10,"cached_input_tokens":0},"thread_token_usage":{"input_tokens":100}}}),
         json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"code","input":"await tools.exec_command(dynamicArgs)"}}),
         json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"code","output":"full console"}})];
     fs::write(&p,rows.iter().map(|v|format!("{v}\n")).collect::<String>()).unwrap();
     let page=History::new("codex-rollout","source","session").unwrap().steps(&p,u64::MAX).unwrap();
     let spawn=page.steps.iter().find(|s|s.native_id.as_deref()==Some("spawn")).unwrap();
     assert_eq!(spawn.kind,StepKind::Subagent);assert_eq!(spawn.data["session"],"child");
-    let usage=page.steps.iter().find(|s|s.kind==StepKind::Usage).unwrap();assert_eq!(usage.data["usage"]["input_tokens"],10);
+    let usage=page.steps.iter().find(|s|s.kind==StepKind::Usage).unwrap();assert_eq!(usage.data["input"],10);
     let code=page.steps.iter().find(|s|s.native_id.as_deref()==Some("code")).unwrap();
     assert_eq!(code.kind,StepKind::Tool);assert_eq!(code.data["code"],"await tools.exec_command(dynamicArgs)");assert_eq!(code.data["output"],"full console");
     assert!(code.data["command"].is_null());assert!(code.data["unknown"]["command"].is_string());
@@ -206,10 +206,10 @@ fn alias_steps_and_subagent_parent_bindings_survive_recovery() {
     fs::write(&p,format!("{}\n",json!({"type":"user","agentId":"child","sessionId":"parent","message":{"content":"child"}}))).unwrap();
     let rt=agent::runtime("claude").unwrap();let mut session=rt.history("parent/agent/child",Some(&root),None,None).unwrap();
     session.steps(1).unwrap();let saved=session.checkpoint();
-    let mut h=History::recover(&saved).unwrap();
+    let mut h=rt.history("parent/agent/child",Some(&root),None,Some(&saved)).unwrap();
     use std::io::Write;
     fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(format!("{}\n",json!({"type":"user","agentId":"child","sessionId":"foreign-parent","message":{"content":"foreign"}})).as_bytes()).unwrap();
-    assert_eq!(h.steps(&p,u64::MAX).unwrap_err(),"history native parent differs");assert_eq!(h.checkpoint(),saved);
+    assert_eq!(h.steps(u64::MAX).unwrap_err(),"history native parent differs");assert_eq!(h.checkpoint(),saved);
     fs::remove_dir_all(root).unwrap();
 }
 
