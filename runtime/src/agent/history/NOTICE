@@ -1,6 +1,13 @@
 Native transcript decoding shapes adapted from Orca:
 https://github.com/stablyai/orca (local source revision 0b93cef44508c0bda503e6a1063cf4bf1eed92be)
 src/main/native-chat/transcript-line-decoders-{claude,codex}.ts
+Additional source layouts and fixtures adapted from:
+src/main/ai-vault/session-scanner-agent-sources.ts
+src/main/ai-vault/session-scanner-{document,log}-agent-fixtures.ts
+src/main/ai-vault/scanners/** (including OpenCode, OpenCode 2 and ZCode schemas)
+src/main/native-chat/transcript-line-decoders-{grok,omp}.ts
+src/main/native-chat/transcript-opencode*.ts
+src/main/acp/fixtures
 Original Rust implementation; no Orca source files were modified.
 
 MIT License

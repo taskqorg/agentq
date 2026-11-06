@@ -20,3 +20,15 @@ block, tool-result and Antigravity artifact URI/quoted argument shapes; identity
 paths, prompt prose and timestamps are scrubbed. pixel.png is the locally generated
 16x16 red test image, not user media. Orca decoder references remain attributed in
 NOTICE; Antigravity's own native bytes establish the additional artifact shape.
+
+`agents.json` adapts Orca's MIT document/log-agent fixtures and native decoder
+contracts for the 21 additional sources (paths in NOTICE). Its SQLite cases are
+built in history_sources.rs, including a WAL and evolving OpenCode 2 ordering.
+These are format fixtures, not native qualification.
+
+`hermes-native.json` (Hermes 0.21.6+509.gf925b01) and `opencode-native.json`
+(OpenCode 1.18.23) contain real SQL row/cell shapes projected from read-only native
+Mac snapshots. All strings except known protocol tags/tool names are replaced;
+IDs retain only consistent invented associations, and all numeric values are zero.
+Paths in map keys are replaced too. Projection JSON is not claimed to be original
+SQLite file bytes; runtime sources retain DB/WAL hashes and exact byte access.

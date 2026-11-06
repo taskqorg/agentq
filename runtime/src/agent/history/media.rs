@@ -147,10 +147,10 @@ fn visit(catalog:&mut MediaCatalog,value:&Value,step:&Step,cwd:Option<&Path>,poi
         Some(name) if super::super::registry::codex_image_kind(name).is_some()=>Some(MediaKind::Image),
         Some("document")=>Some(MediaKind::Document),Some("video"|"input_video")=>Some(MediaKind::Video),Some("audio"|"input_audio")=>Some(MediaKind::Audio),_=>None,
     };
-    let mime=value["source"]["media_type"].as_str().or(value["mime_type"].as_str()).or(value["mime"].as_str()).or(value["file"]["type"].as_str());
+    let mime=value["mimeType"].as_str().or(value["source"]["media_type"].as_str()).or(value["mime_type"].as_str()).or(value["mime"].as_str()).or(value["file"]["type"].as_str());
     let kind=kind.or_else(||mime.filter(|_|tool || native=="file" || pointer.starts_with("/media/")).and_then(|m|if m.starts_with("image/"){Some(MediaKind::Image)}else if m=="application/pdf"{Some(MediaKind::Document)}else{None}));
     let name=value["name"].as_str().or(value["title"].as_str()).or(value["filename"].as_str());
-    let encoded=value["source"]["data"].as_str().filter(|_|value["source"]["type"]=="base64").or(value["file"]["base64"].as_str());
+    let encoded=value["data"].as_str().filter(|_|value["type"]=="image").or(value["source"]["data"].as_str().filter(|_|value["source"]["type"]=="base64")).or(value["file"]["base64"].as_str());
     let url=value["image_url"].as_str().or(value["image_url"]["url"].as_str()).or(value["url"].as_str()).or(value["source"]["url"].as_str()).or(value["uri"].as_str());
     let path=value["path"].as_str().or(value["file_path"].as_str()).or(value["filePath"].as_str()).or(value["savedPath"].as_str()).or(value["saved_path"].as_str()).or(value["source"]["path"].as_str()).or(value["Path"].as_str()).or(value["AbsolutePath"].as_str());
     if let Some(encoded)=encoded.filter(|_|kind.is_some() || tool) {
@@ -194,9 +194,28 @@ fn visit(catalog:&mut MediaCatalog,value:&Value,step:&Step,cwd:Option<&Path>,poi
     }
 }
 
+fn visit_step(catalog:&mut MediaCatalog,record:&Value,step:&Step,cwd:Option<&Path>) {
+    let p=record.get("payload").or(record.get("params")).unwrap_or(record);let item=p.get("item").unwrap_or(p);
+    let content=record["message"]["content"].as_array().or_else(||item["content"].as_array());
+    if let Some(blocks)=content {
+        if let Some(block)=blocks.get(step.part) {
+            visit(catalog,block,step,cwd,&format!("/content/{}",step.part),false);
+            if block["type"]=="tool_result" {visit(catalog,&record["toolUseResult"],step,cwd,"/toolUseResult",true);}
+        }
+    }else{visit(catalog,record,step,cwd,"",false);}
+}
+
 impl super::sessions::Session {
     pub fn media(&self)->Res<MediaCatalog> {
         let mut history=self.history.clone();history.offset=0;history.prefix=crate::sha256_hex(b"");
+        if super::sources::external(&history.format) {
+            let mut catalog=MediaCatalog {items:Vec::new(),backing:BTreeMap::new()};let mut cwd=None::<PathBuf>;
+            for (step,normalized) in super::sources::media_steps(&history,&self.path)? {
+                if let Some(path)=step.source["record"]["cwd"].as_str().filter(|s|Path::new(s).is_absolute()){cwd=Some(path.into());}
+                if step.kind!=StepKind::Metadata{visit_step(&mut catalog,&normalized,&step,cwd.as_deref());}
+            }
+            return Ok(catalog);
+        }
         let steps=history.steps(&self.path,u64::MAX)?.steps;
         let mut catalog=MediaCatalog {items:Vec::new(),backing:BTreeMap::new()};let mut physical=BTreeMap::new();let mut cwd=None::<PathBuf>;
         for step in &steps {
@@ -217,16 +236,8 @@ impl super::sessions::Session {
             let p=v.get("payload").or(v.get("params")).unwrap_or(&v);
             if let Some(path)=v["cwd"].as_str().or(p["cwd"].as_str()).filter(|s|Path::new(s).is_absolute()){cwd=Some(path.into());}
             let event=history.event(&v,raw,start)?;
-            let item=p.get("item").unwrap_or(p);
-            let content=if self.history.format.starts_with("claude-"){v["message"]["content"].as_array()}else{item["content"].as_array()};
             for step in super::steps::decode(&self.history.format,&event,&v) {
-                if step.kind==StepKind::Metadata {continue;}
-                if let Some(blocks)=content {
-                    if let Some(block)=blocks.get(step.part) {
-                        visit(&mut catalog,block,&step,cwd.as_deref(),&format!("/content/{}",step.part),false);
-                        if block["type"]=="tool_result" {visit(&mut catalog,&v["toolUseResult"],&step,cwd.as_deref(),"/toolUseResult",true);}
-                    }
-                }else{visit(&mut catalog,&v,&step,cwd.as_deref(),"",false);}
+                if step.kind!=StepKind::Metadata {visit_step(&mut catalog,&v,&step,cwd.as_deref());}
             }
         }
         if self.history.format.starts_with("codex-") && super::super::native::plain_id(&self.history.native_session) {
