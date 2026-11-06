@@ -7,7 +7,8 @@ use coreq::write_atomic;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-pub const AGENTS: [&str; 4] = ["codex", "claude", "hermes", "antigravity"];
+pub use agentq_runtime::agent::registry::{ONBOARD_AGENTS as AGENTS, Edit as Want};
+use agentq_runtime::agent::registry;
 
 // Conversations retain this provider ID; no base_url lets Codex use its native authenticated endpoint.
 pub const CODEX_DIRECT_PROVIDER: &str = "# agentq: direct OpenAI for saved conversations\n[model_providers.agentq]\nname = \"OpenAI\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nsupports_websockets = true\n";
@@ -20,82 +21,24 @@ fn direct_codex_provider(text: &str) -> bool {
         })
 }
 
-/// One owned edit. `.json`: `value` at `key`, or appended to the array there. `.toml`, `.yaml`: a rendered block at
-/// `key`; a one-part `.toml` key is a top-level `key = value` line. `routing` names the agent of a routing edit.
-pub struct Want {
-    file: PathBuf,
-    key: Vec<String>,
-    value: Value,
-    append: bool,
-    routing: Option<String>,
-    agent: String,
-    instruction: bool,
+pub fn root(agent: &str) -> PathBuf { registry::entry(agent).map(|e|(e.root)()).unwrap_or_default() }
+
+pub fn setup_ready(agents: &[&str]) -> Result<(),String> {
+    for agent in agents {registry::require_cli(agent)?;} Ok(())
 }
 
-impl Want {
-    /// The configuration field this edit serves (CONFIGURATION A3): `routing`, `hooks` or `mcp`.
-    pub fn field(&self) -> &'static str {
-        if self.instruction { return "instructions"; }
-        match (&self.routing, self.key[0].as_str()) {
-            (Some(_), _) => "routing",
-            (None, "hooks") => "hooks",
-            (None, "agentq") if self.agent == "antigravity" => "hooks",
-            (None, "plugins" | "$file") => "plugin",
-            _ => "mcp",
-        }
-    }
+/// Native setup checks every selected client before the first journal or profile write.
+pub fn setup(wants: &[Want], journal: &Path) -> Result<Vec<String>,String> {
+    let agents: std::collections::BTreeSet<_>=wants.iter().map(|w|w.agent.as_str()).collect();
+    setup_ready(&agents.into_iter().collect::<Vec<_>>())?;
+    apply(wants,journal)
 }
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default())
-}
+pub fn claude_json() -> PathBuf { registry::claude_json() }
 
-/// The client's own env, else the default home folder (§ 4).
-pub fn root(agent: &str) -> PathBuf {
-    if agent == "antigravity" {
-        // The runtime adapter owns the Antigravity home lookup; its first protected path is that home.
-        return agentq_runtime::agent::runtime("antigravity").and_then(|r| r.protected_paths(None).into_iter().next())
-            .and_then(|h| h.parent().map(Path::to_path_buf)).unwrap_or_else(|| home().join(".gemini"));
-    }
-    let (var, dir) = match agent {
-        "codex" => ("CODEX_HOME", ".codex"),
-        "claude" => ("CLAUDE_CONFIG_DIR", ".claude"),
-        _ => ("HERMES_HOME", ".hermes"),
-    };
-    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| home().join(dir))
-}
-
-/// Claude Code keeps `.claude.json` in `CLAUDE_CONFIG_DIR` when set, else in the home folder.
-pub fn claude_json() -> PathBuf {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map(|d| PathBuf::from(d).join(".claude.json")).unwrap_or_else(|| home().join(".claude.json"))
-}
-
-pub fn wants(agent: &str, root: &Path, _claude_json: &Path, exe: &Path) -> Vec<Want> {
-    let exe = exe.display().to_string();
-    let hook = |event: &str| json!({"type": "command", "command": format!("\"{exe}\" hook {agent} {event}"), "timeout": 5});
-    let w = |file: PathBuf, key: &[&str], value: Value, append: bool| Want { file, key: key.iter().map(|k| k.to_string()).collect(), value, append, routing: None, agent: agent.into(), instruction: false };
-    match agent {
-        "codex" => vec![
-            w(root.join("hooks.json"), &["hooks", "SessionStart"], json!({"hooks": [hook("SessionStart")]}), true),
-            w(root.join("hooks.json"), &["hooks", "Stop"], json!({"hooks": [hook("Stop")]}), true),
-        ],
-        "claude" => vec![
-            w(root.join("settings.json"), &["hooks", "SessionStart"], json!({"hooks": [hook("SessionStart")]}), true),
-            w(root.join("settings.json"), &["hooks", "Stop"], json!({"hooks": [hook("Stop")]}), true),
-        ],
-        "antigravity" => vec![
-            w(root.join("config/hooks.json"), &["agentq", "enabled"], json!(true), false),
-            // `Stop` takes a flat handler list; Antigravity ignores a matcher on it.
-            w(root.join("config/hooks.json"), &["agentq", "Stop"], hook("Stop"), true),
-        ],
-        // Desktop Chat is MCP-only (CONFIGURATION A1), with its own control identity.
-        "claude-desktop" => vec![],
-        _ => vec![
-            w(root.join("plugins/agentq/__init__.py"), &["$file"], json!(include_str!("../integrations/hermes/__init__.py").replace("@AGENTQ_EXE@", &json!(exe).to_string())), false),
-            w(root.join("plugins/agentq/plugin.yaml"), &["$file"], json!(include_str!("../integrations/hermes/plugin.yaml")), false),
-            w(root.join("config.yaml"), &["plugins", "enabled"], json!("agentq"), true),
-        ],
-    }
+/// Pure journal requests; callers check native presence before applying a new setup.
+pub fn wants(agent: &str, root: &Path, claude_json: &Path, exe: &Path) -> Vec<Want> {
+    registry::entry(agent).map(|e|(e.setup)(root,claude_json,exe)).unwrap_or_default()
 }
 
 pub(crate) fn load(journal: &Path) -> Vec<Value> {
@@ -334,7 +277,7 @@ pub fn migrate(journal: &Path, clients: &[crate::profiles::Client], exe: &Path) 
     let agents: Vec<_> = clients.iter().map(|c| c.agent).collect();
     let mut out = retire_with(journal, &agents, clients)?;
     let entries = load(journal);
-    for c in clients.iter().filter(|c| c.agent == "hermes") {
+    for c in clients {
         let sources: Vec<_> = wants(c.agent, &c.root, Path::new(""), exe).into_iter().filter(|w| w.key == ["$file"]
             && entries.iter().any(|e| e["file"] == w.file.display().to_string() && e["key"] == json!(["$file"]) && e["kind"] == "file")).collect();
         // No activation entries: disabled or unowned integrations cannot be enabled by an update.
@@ -514,7 +457,7 @@ pub fn direct(journal: &Path, agents: &[&str]) -> Result<Vec<String>,String> {
         if !agents.iter().any(|a|e["routing"]==*a) {return true;}
         let Some(file)=e["file"].as_str() else {return true};
         let Some(root)=Path::new(file).parent() else {return true};
-        let Ok(p)=crate::profiles::codex_provider(root) else {return true};
+        let Ok(p)=registry::legacy_provider(e["routing"].as_str().unwrap_or(""),root) else {return true};
         let accept=(e["key"]==json!(["model_providers","agentq"]) && p.present && !p.loopback)
             || (e["key"]==json!(["model_provider"]) && (!p.selected || p.present && !p.loopback));
         if !accept {return true;}
@@ -1107,6 +1050,18 @@ mod tests {
             else {assert!(!file.exists(),"migration must preserve created-file uninstall ownership");}
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn missing_native_cli_refuses_setup_before_any_profile_or_journal_write() {
+        let root=std::env::temp_dir().join(format!("agentq-missing-cli-{}",crate::resource::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let _path=crate::test_support::only_path(&root);
+        let requests=wants("codex",&root,Path::new("unused"),Path::new("/agentq"));
+        let journal=root.join("owned.json");
+        assert!(setup(&requests,&journal).unwrap_err().contains("codex"));
+        assert!(!journal.exists() && !root.join("hooks.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
 }

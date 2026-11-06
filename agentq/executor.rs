@@ -159,7 +159,7 @@ fn write(h: &Host, c: &profiles::Client, field: &str, value: &str) -> Result<(),
         (f, _) => {
             let claude_json = c.files.get(1).cloned().unwrap_or_default();
             let wants: Vec<onboard::Want> = onboard::wants(agent_of(c), &c.root, &claude_json, &h.exe).into_iter().filter(|w| w.field() == f).collect();
-            onboard::apply(&wants, &journal).map_err(|_| "write_failed").and_then(failed)
+            onboard::setup(&wants, &journal).map_err(|e| if e.contains("CLI") {"client_missing"} else {"write_failed"}).and_then(failed)
         }
     }
 }
@@ -449,6 +449,7 @@ mod tests {
     #[test]
     fn hermes_plugin_plan_apply_uses_owned_files_and_preserves_other_plugins() {
         let d = dir("hermes-plugin");
+        let _cli = crate::test_support::native_clis(&d);
         let mut h = host(&d);
         let root = d.join("hermes"); std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("config.yaml"), "plugins:\n  enabled:\n    - other\n").unwrap();
@@ -469,6 +470,7 @@ mod tests {
     #[test]
     fn guards_and_races_keep_files() {
         let d = dir("guards");
+        let _cli = crate::test_support::native_clis(&d);
         let h = host(&d);
         let codex = id(&h, "codex");
         let off = json!([{"profile": codex, "field": "hooks", "value": "registered"}]);
@@ -509,6 +511,7 @@ mod tests {
     #[test]
     fn interrupted_operation_reconciles_without_reapply() {
         let d = dir("crash");
+        let _cli = crate::test_support::native_clis(&d);
         let h = host(&d);
         let (codex, desktop) = (id(&h, "codex"), id(&h, "claude-code"));
         let changes = json!([{"profile": codex, "field": "hooks", "value": "registered"}, {"profile": desktop, "field": "hooks", "value": "registered"}]);

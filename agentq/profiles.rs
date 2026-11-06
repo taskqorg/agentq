@@ -3,90 +3,37 @@
 //!
 //! Per profile `verification` comes from `executor::verification` (CONFIGURATION "Host executor").
 
-use crate::{onboard, resource};
+use crate::resource;
+#[cfg(test)]
+use crate::onboard;
+use agentq_runtime::agent::registry;
 use ring::hmac;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA: u64 = 1;
 /// Kind, display label, client aliases that share its configuration root, supported operations (A1).
-pub const KINDS: [(&str, &str, &[&str], &[&str]); 5] = [
-    ("codex", "Codex", &["codex-cli", "codex-desktop"], &["hooks"]),
-    ("claude-code", "Claude Code", &["claude-code-cli", "claude-desktop-code"], &["hooks"]),
-    ("claude-desktop-chat", "Claude Desktop Chat", &["claude-desktop-chat"], &[]),
-    ("hermes", "Hermes", &["hermes"], &["plugin"]),
-    ("antigravity", "Antigravity", &["agy"], &["hooks"]),
-];
+pub use registry::KINDS;
 
 /// One configuration root and the files whose bytes make its revision.
 #[derive(Clone)]
 pub struct Client {
     pub kind: &'static str,
-    /// The agent key of `compression.agents` and routing (agentq.md § 3, § 5).
+    /// Opaque registration identity used by lifecycle and hooks.
     pub agent: &'static str,
     pub root: PathBuf,
     pub files: Vec<PathBuf>,
 }
 
-fn desktop_root() -> PathBuf {
-    let home = onboard::root("claude").parent().map(Path::to_path_buf).unwrap_or_default();
-    match std::env::consts::OS {
-        "macos" => home.join("Library/Application Support/Claude"),
-        "windows" => std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default().join("Claude"),
-        _ => std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config")).join("Claude"),
-    }
-}
-
 pub fn clients() -> Vec<Client> {
-    let c = |kind, agent, root: PathBuf, files: &[&str]| Client { kind, agent, files: files.iter().map(|f| root.join(f)).collect(), root };
-    let mut code = c("claude-code", "claude", onboard::root("claude"), &["settings.json"]);
-    code.files.push(onboard::claude_json());
-    let mut clients = vec![
-        c("codex", "codex", onboard::root("codex"), &["config.toml", "hooks.json"]),
-        code,
-        c("claude-desktop-chat", "claude-desktop", desktop_root(), &["claude_desktop_config.json"]),
-        c("hermes", "hermes", onboard::root("hermes"), &["config.yaml"]),
-        c("antigravity", "antigravity", onboard::root("antigravity"), &["config/hooks.json"]),
-    ];
-    for c in &mut clients {
-        if !matches!(c.agent, "claude-desktop" | "antigravity") { c.files.push(c.root.join(if c.agent == "claude" { "CLAUDE.md" } else { "AGENTS.md" })); }
-    }
-    clients
+    let mut entries=registry::entries(); entries.sort_by_key(|e|e.profile_order);
+    entries.into_iter().map(|e| { let root=(e.root)(); Client {kind:e.profile.kind,agent:e.name,files:(e.files)(&root),root} }).collect()
 }
 
-pub struct Provider {pub selected:bool,pub present:bool,pub loopback:bool}
-
-pub fn codex_provider(root: &Path) -> Result<Provider,String> {
-    let text = match std::fs::read_to_string(root.join("config.toml")) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Provider {selected:false,present:false,loopback:false}),
-        Err(_) => return Err("unreadable_config".into()),
-    };
-    let mut section = "";
-    let (mut selected, mut loopback, mut present) = (false, false, false);
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') { section = line.split('#').next().unwrap_or("").trim();
-            present |= section == "[model_providers.agentq]"; continue; }
-        let Some((key, value)) = line.split_once('=') else { continue };
-        let value = value.trim().trim_matches(['"', '\'']).split(['"', '\'']).next().unwrap_or("");
-        if section.is_empty() && key.trim() == "model_provider" { selected = value == "agentq"; }
-        if section == "[model_providers.agentq]" && key.trim() == "base_url" {
-            let host = value.split_once("://").map(|(_, s)| s.split('/').next().unwrap_or(""));
-            loopback = host.is_some_and(|s| s == "localhost" || s.starts_with("localhost:") || s.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback()) || s.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback()));
-        }
-    }
-    Ok(Provider {selected,present,loopback})
-}
-
-/// Read-only evidence of a selected legacy provider; no endpoint or credential is exported.
+/// Read-only legacy diagnostics supplied by the selected registrations.
 pub fn legacy_route(clients: &[Client]) -> Value {
-    let Some(c)=clients.iter().find(|c|c.agent=="codex") else {return json!({"state":"absent"})};
-    match codex_provider(&c.root) {
-        Err(_)=>json!({"state":"unknown","reason":"unreadable_config"}),
-        Ok(p) if p.selected && (!p.present || p.loopback)=>json!({"state":"problem","reason":if p.present {"legacy_agentq_route"} else {"legacy_agentq_provider_missing"},"next":"agentq direct"}),
-        Ok(_)=>json!({"state":"absent"}),
-    }
+    clients.iter().filter_map(|c|registry::entry(c.agent).map(|e|(e.diagnose)(&c.root)))
+        .find(|d|d["state"]!="absent").unwrap_or_else(||json!({"state":"absent"}))
 }
 
 fn sign(key: &hmac::Key, parts: &[&[u8]]) -> String {
@@ -129,28 +76,6 @@ fn status_using(clients: &[Client], data: &Path, now: u64, key: &hmac::Key) -> V
     let defaults = json!({});
     let revs: Vec<&[u8]> = profiles.iter().filter_map(|p| p["revision"].as_str()).map(str::as_bytes).collect();
     json!({"schema": SCHEMA, "at": now, "revision": sign(key, &revs), "defaults": defaults, "profiles": profiles})
-}
-
-/// The registered events of native hook entries whose command runs `agentq hook <agent> <event>`.
-fn hooked(doc: &Value, agent: &str, events: &[&str]) -> Vec<bool> {
-    let hooks = &doc[if agent == "antigravity" { "agentq" } else { "hooks" }];
-    events.iter().map(|e| (agent != "antigravity" || hooks["enabled"] != false) && hooks[e].as_array().into_iter().flatten()
-        .filter(|m| agent != "antigravity" || m["matcher"].as_str().is_none_or(|m| matches!(m, "" | "*" | "run_command")))
-        .flat_map(|m| if agent == "antigravity" && *e == "Stop" { vec![m] } else { m["hooks"].as_array().into_iter().flatten().collect() })
-        .any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(&format!(" hook {agent} {e}"))))).collect()
-}
-
-fn hooks_state(h: &[bool]) -> &'static str {
-    match h.iter().filter(|x| **x).count() {
-        0 => "absent",
-        n if n == h.len() => "registered",
-        _ => "partial",
-    }
-}
-
-/// The indented lines of the top-level YAML block `head:`.
-fn yaml_block<'a>(text: &'a str, head: &str) -> Vec<&'a str> {
-    text.lines().skip_while(|l| l.trim_end() != format!("{head}:")).skip(1).take_while(|l| l.trim().is_empty() || l.starts_with([' ', '\t', '-'])).collect()
 }
 
 pub fn profile(c: &Client, data: &Path, journal: &Path, key: &hmac::Key) -> Value {
@@ -198,29 +123,12 @@ pub fn profile(c: &Client, data: &Path, journal: &Path, key: &hmac::Key) -> Valu
             Some(t) => serde_json::from_str(t).ok(),
         })
         .collect();
-    let json_doc = |i: usize| docs[i].clone();
     if c.files.iter().enumerate().any(|(i, f)| f.extension().is_some_and(|e| e == "json") && docs[i].is_none() && !unread(i)) {
         conflicts.push("unparseable_config");
     }
-    let mut overrides = None;
-    let (hooks, plugin, adapter) = match c.kind {
-        "codex" => {
-            if legacy_route(std::slice::from_ref(c))["state"] == "problem" { conflicts.push("legacy_agentq_route"); }
-            overrides = (!unread(0)).then(|| texts[0].as_deref().unwrap_or("").lines().filter(|l| l.trim_start().starts_with("[profiles.")).count());
-            (json_doc(1).map(|d| hooked(&d, "codex", &["SessionStart", "Stop"])).as_deref().map_or("unknown", hooks_state), "unsupported", "hook")
-        }
-        "claude-code" => {
-            let set = |v: &Value| v.as_object().is_some_and(|o| !o.is_empty()) || v.as_array().is_some_and(|a| !a.is_empty());
-            overrides = json_doc(1).map(|d| d["projects"].as_object().into_iter().flatten().filter(|(_, p)| ["mcpServers", "env", "enabledMcpjsonServers"].iter().any(|k| set(&p[*k]))).count());
-            (json_doc(0).map(|d| hooked(&d, "claude", &["SessionStart", "Stop"])).as_deref().map_or("unknown", hooks_state), "unsupported", "hook")
-        }
-        "antigravity" => (json_doc(0).map(|d| hooked(&d, "antigravity", &["Stop"])).as_deref().map_or("unknown", hooks_state), "unsupported", "hook"),
-        "claude-desktop-chat" => ("unsupported", "unsupported", ""),
-        _ => {
-            let plugin = if unread(0) { "unknown" } else if yaml_block(texts[0].as_deref().unwrap_or(""), "plugins").iter().any(|l| l.contains("agentq")) { "enabled" } else { "absent" };
-            ("unsupported", plugin, "plugin")
-        }
-    };
+    let state = registry::profile(c.kind).map(|e|(e.inspect)(&texts,&docs,&unreadable));
+    let (hooks,plugin,adapter,overrides)=state.map(|s|(s.hooks,s.plugin,s.adapter,s.overrides)).unwrap_or(("unknown","unknown","",None));
+    if legacy_route(std::slice::from_ref(c))["state"] == "problem" { conflicts.push("legacy_agentq_route"); }
     let effective = if integration["desired"] == "unknown" { "unknown" }
         else if integration["desired"] == "disabled" { "disabled" }
         else if hooks == "registered" || plugin == "enabled" { "configured" }

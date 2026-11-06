@@ -1,10 +1,11 @@
 //! Claude and Antigravity native hooks; keep permission classification, input fields and command semantics.
 use serde_json::{Value, json};
 use std::path::Path;
+use agentq_runtime::agent::registry::{self,Hook};
 
 
 pub fn default_response(agent: &str, event: &str) -> Value {
-    if agent == "antigravity" && matches!(event, "PreToolUse" | "Stop") { json!({"decision": "allow"}) } else { json!({}) }
+    registry::entry(agent).map(|e|(e.fallback)(event)).unwrap_or_else(||json!({}))
 }
 
 pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Value, String> {
@@ -12,36 +13,24 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
     // The client passes its own environment and working directory to the hook (M6.9, M6.10).
     let launched = || crate::model::launched(|k| std::env::var(k).ok());
     let data = || exe.parent().map(|p| p.join("data")).ok_or("hook launcher has no install root");
-    if agent == "claude" && event == "Stop" {
-        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
-        let started = std::time::Instant::now();
-        let spans = crate::model::observe(&data()?, &v, launched());
-        // The old path and the new records fail independently (M6.11).
-        let records = crate::observe::stop(&data()?, "claude", &v, launched(), started + crate::observe::STOP_PASS);
-        spans.and(records)?;
-        return Ok(empty());
-    }
-    if agent == "hermes" && event == "post_api_request" {
-        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
-        let spans = crate::model::observe_hermes(&data()?, &v, launched(), std::env::current_dir().ok().as_deref());
-        let records = crate::observe::hermes_call(&data()?, &v, launched());
-        spans.and(records)?;
-        return Ok(empty());
-    }
-    if agent == "hermes" && event == "on_session_end" {
-        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
-        crate::observe::hermes_turn_end(&data()?, &v, launched())?;
-        return Ok(empty());
-    }
-    if matches!(agent, "codex" | "antigravity") && event == "Stop" {
-        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
-        crate::observe::stop(&data()?, agent, &v, launched(), std::time::Instant::now() + crate::observe::STOP_PASS)?;
-        return Ok(empty());
-    }
-    if agent == "codex" && event == "SessionStart" {
-        let v: Value = serde_json::from_str(input).map_err(|e| format!("hook JSON: {e}"))?;
-        crate::model::session_start(&data()?, &v, launched(), std::env::current_dir().ok().as_deref())?;
-        return Ok(empty());
+    let action=registry::entry(agent).map(|e|(e.hook)(event)).unwrap_or(Hook::None);
+    if matches!(action,Hook::None) {return Ok(empty());}
+    let v: Value=serde_json::from_str(input).map_err(|e|format!("hook JSON: {e}"))?;
+    match action {
+        Hook::Stop {model} => {
+            let started=std::time::Instant::now();
+            let spans=if model {crate::model::observe(&data()?,&v,launched())} else {Ok(())};
+            // The old path and the new records fail independently (M6.11).
+            let records=crate::observe::stop(&data()?,agent,&v,launched(),started+crate::observe::STOP_PASS);
+            spans.and(records)?;
+        }
+        Hook::ModelCall => {
+            let spans=crate::model::observe_hermes(&data()?,&v,launched(),std::env::current_dir().ok().as_deref());
+            let records=crate::observe::hermes_call(&data()?,&v,launched()); spans.and(records)?;
+        }
+        Hook::TurnEnd => crate::observe::hermes_turn_end(&data()?,&v,launched())?,
+        Hook::SessionStart => crate::model::session_start(&data()?,&v,launched(),std::env::current_dir().ok().as_deref())?,
+        Hook::None => {},
     }
     Ok(empty())
 }

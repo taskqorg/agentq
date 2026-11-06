@@ -327,8 +327,8 @@ impl Run {
         if let Some(value)=saved.get("rollout_progress").filter(|v|!v.is_null()) {
             let (path,offset):(PathBuf,u64)=serde_json::from_value(value.clone()).map_err(|_|"rollout checkpoint invalid")?;
             let Body::Turn(t)=&self.body else {return Err("rollout checkpoint scope differs".into());};
-            let session=t.resumed.clone().or_else(||session_of(Client::Codex,&read_from(&t.log,t.start).unwrap_or_default()));
-            let expected=session.and_then(|s|rollout(&s,t.home.as_deref()));
+            let session=t.resumed.clone().or_else(||session_of(t.client,&read_from(&t.log,t.start).unwrap_or_default()));
+            let expected=session.and_then(|s|(table(t.client).ops.transcript)(&s,t.home.as_deref()));
             if expected.as_ref()!=Some(&path) {return Err("rollout checkpoint scope differs".into());}
             self.rollout_progress=Some((path,offset));
         }
@@ -374,24 +374,6 @@ fn base(command: &[OsString], client: Client) -> Res<Command> {
         Some((exe, rest)) => { let mut c = Command::new(exe); c.args(rest); c }
         None => Command::new(executable(client)?),
     })
-}
-
-/// The Remote Control URL of a `system` `bridge_status` record.
-fn bridge(v: &Value) -> Option<String> {
-    (v["subtype"] == "bridge_status").then(|| v["url"].as_str().filter(|u| native::remote_url(u)).map(String::from)).flatten()
-}
-
-/// Claude's native transcript of `session`: `<home>/projects/<root, each non-alphanumeric character as ->/<session>.jsonl`.
-fn claude_transcript(spec: &Spec, session: &str) -> Res<PathBuf> {
-    let root = spec.root.canonicalize().map_err(|e| format!("project root: {e}"))?;
-    Ok(spec_home(spec).ok_or("no client home")?.join("projects").join(project_dir(&root.to_string_lossy())).join(format!("{session}.jsonl")))
-}
-
-/// Claude's project folder name for a canonical root. Windows canonical paths are verbatim (`\\?\C:\…`); Claude names the
-/// folder from the plain path (`C--…`).
-fn project_dir(root: &str) -> String {
-    let plain = root.strip_prefix(r"\\?\UNC\").map(|p| format!(r"\\{p}")).or_else(|| root.strip_prefix(r"\\?\").map(String::from));
-    plain.as_deref().unwrap_or(root).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 /// The verified background job: the launcher's job ID, else on resume the job of the same session.
@@ -524,12 +506,12 @@ impl App {
         if let Transport::Plain(server) = &transport { session.sample(server.id()); }
         let owned = matches!(transport, Transport::Plain(_));
         let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone() };
-        let opened = app.handshake(initialize, thread, l);
+        let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
     }
 
-    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch) -> Res<()> {
+    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch, descriptor: &Descriptor) -> Res<()> {
         let params = if self.owned { turn_thread(l)? } else { thread_params(l, thread)? };
         let until = reply_deadline(l);
         let request = self.session.initialize(initialize.clone())?;
@@ -539,7 +521,7 @@ impl App {
         let request = self.session.open(params)?;
         self.exchange(request, until)?;
         if !self.session.ready() { return Err("app-server thread not ready".into()); }
-        if !l.parts.is_empty() { self.start(input_items(&table(Client::Codex).descriptor, &l.parts).map_err(|e|e.to_string())?, until)?; }
+        if !l.parts.is_empty() { self.start(input_items(descriptor, &l.parts).map_err(|e|e.to_string())?, until)?; }
         else if !l.input.is_empty() { self.input(&l.input, until)?; }
         Ok(())
     }
@@ -599,7 +581,7 @@ impl Native {
         if !self.attached {
             let Some(job) = discover(self)? else { return Ok(if self.job_id.is_none() && !self.spec.resume { State::Unknown } else { waiting }) };
             if !self.spec.resume {
-                let path = claude_transcript(&self.spec, &job.session)?;
+                let path = (table(self.spec.client).ops.background_transcript)(&self.spec, &job.session)?;
                 self.turn.attach_background(&job, &path)?;
                 self.spec.session = job.session.clone();
             }
@@ -734,142 +716,41 @@ pub struct NativeSpec {
     pub env: Vec<(OsString, OsString)>,
 }
 
-struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize }
+struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize, ops: NativeOps }
 
-static ADAPTERS: [Adapter; 3] = [
-    Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
-        models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
-        capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
-            "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } },
-    Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt", models: &[], minimum: "0.162.0",
-        capabilities: &["turn", "resume", "quota-snapshot", "account-limits", "catalogue", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env", "mcp-config", "instructions-file", "turn-parts", "turn-deltas"] } },
-    Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "",
-        capabilities: &["turn", "resume", "title", "account-limits"] } },
-];
-
-/// Every runtime adapter.
-pub fn runtimes() -> Vec<&'static dyn Runtime> { ADAPTERS.iter().map(|a| a as &dyn Runtime).collect() }
-
-/// The adapter whose descriptor name (or alias) is `name`.
-pub fn runtime(name: &str) -> Option<&'static dyn Runtime> {
-    let client = Client::parse(name)?;
-    ADAPTERS.iter().find(|a| a.client == client).map(|a| a as &dyn Runtime)
+struct NativeOps {
+    home_var: &'static str,
+    alternate_home_var: Option<&'static str>,
+    session_var: &'static str,
+    home: fn() -> Option<PathBuf>,
+    executable: fn(&OsStr) -> Res<PathBuf>,
+    new_session: fn() -> String,
+    args: fn(&Spec) -> Vec<OsString>,
+    mapped: fn(&Launch) -> Res<Vec<OsString>>,
+    extras: fn(&Policy) -> Vec<OsString>,
+    environment: fn(&Launch, &mut Spec),
+    settings: fn(&Launch, &mut Spec),
+    login: fn(&Path, Option<&Path>) -> Check,
+    protected: fn(PathBuf) -> Vec<PathBuf>,
+    refusal: fn(&str) -> Option<Cause>,
+    transcript: fn(&str, Option<&Path>) -> Option<PathBuf>,
+    background_transcript: fn(&Spec, &str) -> Res<PathBuf>,
+    link: fn(&Run) -> Result<String, native::Absence>,
+    session_link: fn(&NativeSpec, Option<&str>) -> Result<String, native::Absence>,
 }
 
-/// The native arguments for `policy`, `model` and `compact_hook`, in the caller-argument position.
-fn mapped(client: Client, name: &str, l: &Launch) -> Res<Vec<OsString>> {
-    let p = &l.policy;
-    let refuse = |part: &str| Err(format!("policy {part} unsupported by {name}"));
-    let mut a: Vec<OsString> = vec![];
-    match client {
-        Client::Claude => {
-            if p.read != Scope::Native { return refuse("read"); }
-            // Full write only without prompts. No write stays refused: MCP servers and project hooks can write whatever the
-            // built-in tools are, so Claude has no flag that enforces it.
-            if !matches!((p.write, p.approval), (Scope::Native, _) | (Scope::Any, Approval::Bypass)) { return refuse("write"); }
-            if p.network != Network::Native { return refuse("network"); }
-            if p.roots != Roots::Native { return refuse("roots"); }
-            if p.unelevated { return refuse("unelevated"); }
-            // `on` is Claude's own default tool set.
-            if p.builtin == Builtin::Off { a.extend(["--tools".into(), "".into()]); }
-            if p.isolated {
-                a.extend(["--strict-mcp-config", "--setting-sources", "project", "--disable-slash-commands", "--system-prompt-snapshot", "off"].map(OsString::from));
-            }
-            let mut tools = p.tools.clone();
-            if tools.as_ref().is_some_and(|t| t.is_empty() || t.iter().any(|t| t.is_empty() || t.starts_with('-'))) { return refuse("tools"); }
-            if let Some(file) = &l.mcp {
-                a.extend(["--mcp-config".into(), file.clone().into_os_string()]);
-                tools.get_or_insert_with(Vec::new).extend(mcp_servers(file)?.into_iter().map(|s| format!("mcp__{s}")));
-            }
-            if let Some(file) = &l.instructions { a.extend(["--append-system-prompt-file".into(), file.clone().into_os_string()]); }
-            if !l.parts.is_empty() { a.extend(["--input-format", "stream-json"].map(OsString::from)); }
-            if l.deltas { a.push("--include-partial-messages".into()); }
-            if let Some(tools) = tools.filter(|t| !t.is_empty()) {
-                a.push("--allowedTools".into());
-                a.extend(tools.iter().map(OsString::from));
-            }
-            let mode = match p.approval { Approval::Native => None, Approval::Plan => Some("plan"), Approval::Edits => Some("acceptEdits"),
-                Approval::Auto => Some("auto"), Approval::Deny => Some("dontAsk"), Approval::Bypass => Some("bypassPermissions") };
-            if let Some(m) = mode { a.extend(["--permission-mode".into(), m.into()]); }
-        }
-        Client::Codex => {
-            if !matches!(p.read, Scope::Native | Scope::Any) { return refuse("read"); }
-            if p.tools.is_some() { return refuse("tools"); }
-            match (p.network, p.write) {
-                (Network::Native, _) | (Network::On, Scope::Project) | (Network::Off, Scope::None | Scope::Project) => {}
-                _ => return refuse("network"),
-            }
-            let c = |a: &mut Vec<OsString>, v: &str| a.extend(["-c".into(), v.into()]);
-            match (p.approval, p.write) {
-                (Approval::Bypass, Scope::Any) => a.push("--dangerously-bypass-approvals-and-sandbox".into()),
-                (Approval::Auto, Scope::Project) => a.push("--full-auto".into()),
-                (Approval::Native | Approval::Deny, w) => {
-                    let sandbox = match w { Scope::Native => None, Scope::None => Some("read-only"), Scope::Project => Some("workspace-write"), Scope::Any => Some("danger-full-access") };
-                    if let Some(s) = sandbox { a.extend(["--sandbox".into(), s.into()]); }
-                    if p.approval == Approval::Deny { c(&mut a, "approval_policy=never"); }
-                }
-                _ => return refuse("approval"),
-            }
-            match (p.network, p.write) {
-                (Network::On, _) => c(&mut a, "sandbox_workspace_write.network_access=true"),
-                (Network::Off, Scope::Project) => c(&mut a, "sandbox_workspace_write.network_access=false"),
-                _ => {}
-            }
-            let roots = match &p.roots {
-                Roots::Native => &[][..],
-                Roots::Exact(r) => { c(&mut a, "sandbox_workspace_write.writable_roots=[]"); r }
-                Roots::Add(r) => r,
-            };
-            if roots.iter().any(|r| !r.is_absolute()) { return refuse("roots"); }
-            for r in roots { a.extend(["--add-dir".into(), r.clone().into_os_string()]); }
-            if p.unelevated { c(&mut a, "windows.sandbox=unelevated"); }
-            a.extend(codex_extras(p));
-        }
-        Client::Antigravity => {
-            for (part, native) in [("read", p.read == Scope::Native), ("write", p.write == Scope::Native), ("network", p.network == Network::Native), ("tools", p.tools.is_none()),
-                ("roots", p.roots == Roots::Native), ("unelevated", !p.unelevated), ("builtin", p.builtin == Builtin::Native), ("isolated", !p.isolated),
-                ("subscription", !p.subscription)] {
-                if !native { return refuse(part); }
-            }
-            match p.approval { Approval::Native => {}, Approval::Bypass => a.push("--dangerously-skip-permissions".into()), _ => return refuse("approval") }
-        }
-    }
-    if let Some(m) = &l.model {
-        if !model_code(m) { return Err("model requires a model code".into()); }
-        if client == Client::Antigravity { a.push(format!("--model={m}").into()); } else { a.extend(["--model".into(), m.into()]); }
-    }
-    if let Some(e) = &l.effort {
-        if client != Client::Codex { return Err(format!("effort unsupported by {name}")); }
-        if e.is_empty() || !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return Err("effort requires a plain word".into()); }
-        a.extend(["-c".into(), format!("model_reasoning_effort={e}").into()]);
-    }
-    if let Some(t) = &l.title {
-        match client {
-            Client::Claude => a.extend(["--name".into(), t.into(), "--remote-control".into(), t.into()]),
-            Client::Antigravity => a.push(format!("--title={t}").into()),
-            Client::Codex => return Err(format!("title unsupported by {name}")),
-        }
-    }
-    if let Some(hook) = &l.compact_hook {
-        if client != Client::Claude { return Err(format!("compact-hook unsupported by {name}")); }
-        // `settings_env` shares one `--settings` with the hook, added once the child environment is final.
-        if l.settings_env.is_empty() { a.extend(["--settings".into(), claude_settings(Some(hook), &[]).into()]); }
-    }
-    Ok(a)
+#[path = "registry/mod.rs"]
+pub mod registry;
+
+/// Every registered worker, in its existing public order.
+pub fn runtimes() -> Vec<&'static dyn Runtime> {
+    let mut entries = registry::entries(); entries.sort_by_key(|e| e.worker_order);
+    entries.into_iter().filter_map(|e| e.runtime).collect()
 }
 
-/// Codex `builtin`, `isolated` and `subscription` flags; `exec` and `app-server` both take them.
-fn codex_extras(p: &Policy) -> Vec<OsString> {
-    let mut a: Vec<&str> = vec![];
-    if p.isolated { for f in ["apps", "plugins", "browser_use", "computer_use", "multi_agent", "image_generation"] { a.extend(["--disable", f]); } }
-    match p.builtin {
-        Builtin::Native => {}
-        Builtin::On => a.extend(["--enable", "shell_tool", "-c", "web_search=\"live\""]),
-        Builtin::Off => a.extend(["--disable", "shell_tool", "-c", "web_search=\"disabled\""]),
-    }
-    if p.subscription { a.extend(["-c", "forced_login_method=\"chatgpt\""]); }
-    a.into_iter().map(OsString::from).collect()
-}
+pub fn runtime(name: &str) -> Option<&'static dyn Runtime> { registry::entry(name)?.runtime }
+
+fn mapped(client: Client, _name: &str, l: &Launch) -> Res<Vec<OsString>> { (table(client).ops.mapped)(l) }
 
 /// Server names of an MCP config file (`mcpServers` keys).
 fn mcp_servers(file: &Path) -> Res<Vec<String>> {
@@ -900,22 +781,8 @@ impl Adapter {
     }
 
     fn link(&self, run: &Run) -> Result<String, native::Absence> {
-        let none = |c| Err((Cause(c), None));
-        let Ok(run) = self.own(run) else { return none("foreign-run") };
-        if !self.descriptor.has("session-url") { return none("no-session-url"); }
-        // An unreadable transcript names its error rather than reading as an unknown session (P2).
-        let text = match &run.body {
-            Body::Turn(t) => read_log(&t.log, t.start).map_err(|e| (Cause("evidence-unreadable"), Some(format!("transcript: {e}"))))?,
-            _ => String::new(),
-        };
-        let Some(session) = self.session_id(run) else { return none("session-unknown") };
-        let (home, job, seen) = match &run.body {
-            Body::Turn(t) => (t.home.clone(), None, text.lines()
-                .filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| bridge(&v)).next_back()),
-            Body::Native(n) => (spec_home(&n.spec), n.job.as_ref().map(|j| j.id.clone()).or_else(|| n.job_id.clone()), n.turn.remote_url().map(String::from)),
-            Body::App(_) => return none("no-session-url"),
-        };
-        native::claude_link(home.as_deref(), &session, job.as_deref(), run.remote, seen)
+        let run = self.own(run).map_err(|_| (Cause("foreign-run"), None))?;
+        (self.ops.link)(run)
     }
 
     fn own<'r>(&self, run: &'r Run) -> Res<&'r Run> {
@@ -931,7 +798,7 @@ impl Adapter {
     /// The child spec for `l`: mapped policy, then the launch's optimization intent.
     fn spec(&self, l: &Launch, session: String, resume: bool) -> Res<(Spec, Optimization)> {
         let name = self.descriptor.name;
-        let app = matches!(l.mode, Mode::AppServer { .. }) || self.client == Client::Codex && automatic(l);
+        let app = matches!(l.mode, Mode::AppServer { .. }) || self.descriptor.has("app-server") && automatic(l);
         for (capability, set) in [("mcp-config", l.mcp.is_some()), ("instructions-file", l.instructions.is_some()), ("turn-parts", !l.parts.is_empty()),
             ("turn-deltas", l.deltas && !app), ("host-args", !l.host_args.is_empty())] {
             if set && (l.mode != Mode::Turn || !self.descriptor.has(capability)) { return Err(format!("{capability} unsupported by {name}")); }
@@ -942,23 +809,15 @@ impl Adapter {
             return Err(format!("settings-env unsupported by {name}"));
         }
         // App-server policy travels as thread parameters; only the Codex extras stay flags.
-        let mut args = if !app { mapped(self.client, name, l)? } else if self.client == Client::Codex { codex_extras(&l.policy) } else { vec![] };
+        let mut args = if !app { mapped(self.client, name, l)? } else if self.descriptor.has("app-server") { (self.ops.extras)(&l.policy) } else { vec![] };
         args.extend(l.host_args.iter().cloned());
-        let mut env = l.env.clone();
-        if self.client != Client::Claude { env.extend(l.settings_env.iter().map(|(k, v)| (k.into(), v.into()))); }
-        if l.policy.subscription && self.client == Client::Claude { env.extend(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].map(|k| (k.into(), OsString::new()))); }
+        let env = l.env.clone();
         let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: l.home.clone(), env };
+        (self.ops.environment)(l, &mut spec);
         // Isolation excludes the user hooks that carry optimization, so it cannot be effective.
         let intent = l.optimization;
         let optimization = optimization::prepare(intent, &l.product, &mut spec, l.install.as_deref());
-        if self.client == Client::Claude && !l.settings_env.is_empty() {
-            // A `--bg` session runs under the Claude daemon, whose environment is not this child's: settings `env` reaches it.
-            let child: Vec<(String, String)> = ["TASKQ_TASK", "AGENTQ_LAUNCHER"].into_iter()
-                .filter_map(|k| child_env(&spec, k).map(|v| (k.into(), v.to_string_lossy().into_owned()))).collect();
-            let mut vars: Vec<(&str, &str)> = l.settings_env.iter().chain(&child).map(|(k, v)| (k.as_str(), v.as_str())).collect();
-            if l.policy.subscription { vars.extend([("ANTHROPIC_API_KEY", ""), ("ANTHROPIC_AUTH_TOKEN", "")]); }
-            spec.args.extend(["--settings".into(), claude_settings(l.compact_hook.as_deref(), &vars).into()]);
-        }
+        (self.ops.settings)(l, &mut spec);
         Ok((spec, optimization))
     }
 
@@ -985,7 +844,7 @@ impl Adapter {
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
         match &l.mode {
             Mode::Turn => {
-                if self.client == Client::Codex && automatic(l) {
+                if self.descriptor.has("app-server") && automatic(l) {
                     turn_thread(l)?;
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
                     let server = AppServer::spawn(app_server_command(command, &spec)?, &l.log, &l.process)?;
@@ -993,8 +852,8 @@ impl Adapter {
                     return Ok(self.run(Body::App(Box::new(app)), 0, optimization, l));
                 }
                 let input = if l.parts.is_empty() { l.input.clone() } else { stream_message(&l.parts)? };
-                let baseline = if self.client == Client::Codex && spec.resume {
-                    rollout(&spec.session, spec_home(&spec).as_deref()).map(|p|std::fs::metadata(&p).map(|m|(p,m.len())).map_err(|_|"rollout baseline unreadable")) .transpose()?
+                let baseline = if spec.resume {
+                    (self.ops.transcript)(&spec.session, spec_home(&spec).as_deref()).map(|p|std::fs::metadata(&p).map(|m|(p,m.len())).map_err(|_|"rollout baseline unreadable")) .transpose()?
                 } else {None};
                 let turn = Turn::start(command, &spec, &l.log, &input, &l.process)?;
                 let start = turn.start;
@@ -1002,7 +861,7 @@ impl Adapter {
             }
             Mode::Background => {
                 // A new job's transcript is unknown until discovery; the alias path does not exist.
-                let turn = NativeTurn::before(&spec, &claude_transcript(&spec, &spec.session)?, &l.input)?;
+                let turn = NativeTurn::before(&spec, &(self.ops.background_transcript)(&spec, &spec.session)?, &l.input)?;
                 let exchange = native::background_launch(command, &spec, &l.input, Duration::from_secs(30))?;
                 let (job_id, fault) = match &exchange {
                     Ok(o) if o.status.success() => (native::background_job_id(&String::from_utf8_lossy(&o.stdout)), None),
@@ -1150,8 +1009,8 @@ impl Runtime for Adapter {
         };
         let (mut values, next) = lines_from(&path, run.progress)?;
         if let Body::Turn(t) = &run.body {
-            if self.client == Client::Codex {
-                if run.rollout_progress.is_none() && t.resumed.is_none() { run.rollout_progress = session_of(self.client, &read_from(&t.log,t.start).unwrap_or_default()).and_then(|s| rollout(&s, t.home.as_deref())).map(|p|(p,0)); }
+            if self.descriptor.has("app-server") {
+                if run.rollout_progress.is_none() && t.resumed.is_none() { run.rollout_progress = session_of(self.client, &read_from(&t.log,t.start).unwrap_or_default()).and_then(|s| (self.ops.transcript)(&s, t.home.as_deref())).map(|p|(p,0)); }
                 if let Some((path, from)) = &mut run.rollout_progress {
                     let (rows, next) = lines_from(path, *from)?; *from = next;
                     values.extend(rows.into_iter().filter(|v| v["payload"]["type"] == "token_count"));
@@ -1230,30 +1089,7 @@ impl Runtime for Adapter {
             },
             Err(e) => check("unknown", &e.to_string()),
         };
-        let status = |args: &[&str]| run(&exe, args, 10).map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)));
-        let login = match self.client {
-            Client::Claude => match status(&["auth", "status", "--json"]) {
-                Ok(out) => match serde_json::from_str::<Value>(out.trim()).ok().or_else(|| out.lines().find_map(|l| serde_json::from_str(l).ok())) {
-                    Some(v) if v["loggedIn"] == false => check("missing", "not logged in"),
-                    Some(v) if v["loggedIn"] == true && v["authMethod"] == "claude.ai" && v["apiProvider"] == "firstParty" => check("ok", "subscription"),
-                    Some(v) if v["loggedIn"] == true => check("api-key", v["authMethod"].as_str().unwrap_or("other login")),
-                    _ => check("unknown", "login status unreadable"),
-                },
-                Err(e) => check("unknown", &e.to_string()),
-            },
-            Client::Codex => match status(&["-c", "forced_login_method=\"chatgpt\"", "login", "status"]) {
-                Ok(out) => {
-                    let plain: String = out.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
-                    if plain.contains("loggedinusingchatgpt") { check("ok", "subscription") }
-                    else if plain.contains("notloggedin") { check("missing", "not logged in") }
-                    else if plain.contains("loggedin") { check("api-key", "not a ChatGPT login") }
-                    else { check("unknown", "login status unreadable") }
-                }
-                Err(e) => check("unknown", &e.to_string()),
-            },
-            // No status command; a keychain or OS credential store may hold the login.
-            Client::Antigravity => check("unknown", "no login status command"),
-        };
+        let login = (self.ops.login)(&exe, home);
         Ready { install: check("ok", &exe.to_string_lossy()), version, login }
     }
 
@@ -1265,14 +1101,7 @@ impl Runtime for Adapter {
 
     fn protected_paths(&self, home: Option<&Path>) -> Vec<PathBuf> {
         let Some(home) = home.map(Path::to_path_buf).or_else(|| base_home(self.client)) else { return vec![] };
-        let mut v = vec![home.clone()];
-        match self.client {
-            // The default `~/.claude` home keeps `~/.claude.json` beside it; `CLAUDE_CONFIG_DIR` keeps it inside.
-            Client::Claude => v.push(if home.file_name().is_some_and(|n| n == ".claude") { home.with_file_name(".claude.json") } else { home.join(".claude.json") }),
-            Client::Antigravity => if let Some(p) = home.parent() { v.push(p.join("config")) },
-            Client::Codex => {}
-        }
-        v
+        (self.ops.protected)(home)
     }
 
     fn home_env(&self, tool: &str, label: &str) -> Vec<(OsString, OsString)> {
@@ -1294,7 +1123,7 @@ impl Runtime for Adapter {
     fn recover(&self, saved: &Value, l: &Launch) -> Res<Run> {
         let me = table(self.client);
         let queue = matches!(l.mode, Mode::Queue { .. });
-        let kind = match l.mode { Mode::Turn if self.client == Client::Codex && automatic(l) => "app", Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
+        let kind = match l.mode { Mode::Turn if self.descriptor.has("app-server") && automatic(l) => "app", Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
         if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["kind"] != kind {
             return Err("run recovery scope differs".into());
         }
@@ -1337,17 +1166,11 @@ impl Runtime for Adapter {
     fn home(&self) -> Option<PathBuf> { base_home(self.client) }
 
     fn session_transcript(&self, session: &str, home: Option<&Path>) -> Option<PathBuf> {
-        (self.client == Client::Codex).then(|| rollout(session, home)).flatten()
+        (self.ops.transcript)(session, home)
     }
 
     fn session_link(&self, spec: &NativeSpec, job: Option<&str>) -> Result<String, (Cause, Option<String>)> {
-        if !self.descriptor.has("session-url") { return Err((Cause("no-session-url"), None)); }
-        let native = self.native(spec);
-        let requested = spec.args.iter().any(|a| a == "--remote-control");
-        // ponytail: whole transcript read; the last bridge_status URL wins, a missing transcript falls to the job and debug log.
-        let seen = claude_transcript(&native, &spec.session).ok().and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|t| t.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| bridge(&v)).next_back());
-        native::claude_link(spec_home(&native).as_deref(), &spec.session, job, requested, seen)
+        (self.ops.session_link)(spec, job)
     }
 
     fn prepare(&self, intent: Intent, product: &str, spec: &mut NativeSpec, install: Option<&Path>) -> Optimization {
@@ -1384,16 +1207,7 @@ impl Runtime for Adapter {
     }
 
     fn launch_refusal(&self, text: &str) -> Option<Cause> {
-        let lower = text.to_ascii_lowercase();
-        let cause = match self.client {
-            Client::Claude if text.contains("Workspace not trusted") => "workspace-untrusted",
-            Client::Claude if text.contains("No conversation found with session ID") => "session-missing",
-            Client::Claude if text.contains("Not logged in") || text.contains("/login") => "login-required",
-            Client::Codex if text.contains("app-server thread/resume refused") => "session-missing",
-            Client::Codex if ["401", "login", "log in"].iter().any(|m| lower.contains(m)) => "login-required",
-            _ => return None,
-        };
-        Some(Cause(cause))
+        (self.ops.refusal)(text)
     }
 
     fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output> {
@@ -1409,16 +1223,16 @@ impl Runtime for Adapter {
 
 /// A protected host frontend opened as a Codex app-server run (`ProtectedAppServer::open`).
 pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
-    let codex = table(Client::Codex);
+    let adapter = registry::app_adapter();
     let Mode::AppServer { initialize, thread } = &l.mode else { return Err("protected open requires mode app-server".into()) };
     if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
-    let (spec, _) = codex.spec(l, session.unwrap_or("-").into(), session.is_some())?;
+    let (spec, _) = adapter.spec(l, session.unwrap_or("-").into(), session.is_some())?;
     let optimization = server.optimization();
     let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l)?;
-    Ok(codex.run(Body::App(Box::new(app)), 0, optimization, l))
+    Ok(adapter.run(Body::App(Box::new(app)), 0, optimization, l))
 }
 
-fn table(client: Client) -> &'static Adapter { ADAPTERS.iter().find(|a| a.client == client).expect("adapter in table") }
+fn table(client: Client) -> &'static Adapter { registry::builtin(client) }
 
 pub(super) fn protected_requests(run: &mut Run) -> Res<Vec<Value>> {
     let Body::App(a) = &mut run.body else { return Err("protected-host-required".into()); };
@@ -1432,6 +1246,9 @@ pub(super) fn protected_reply(run: &mut Run, reply: &Value, until: Instant) -> R
     let Some(Transport::Protected(s)) = &mut a.transport else { return Err("protected-host-required".into()); };
     s.send(reply, until)
 }
+
+#[cfg(test)]
+use registry::project_dir;
 
 #[cfg(test)]
 mod tests {
