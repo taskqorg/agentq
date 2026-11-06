@@ -1,5 +1,9 @@
 # Runtime changelog
 
+## 0.13.3
+
+- Pin CoreQ v0.23.4.
+
 ## 0.13.2
 
 - `Report.exit` and the `exit_code` observation read unknown when the runtime stopped a client that had already ended its turn. They used to report the kill's own code (Windows 1, Unix -1) as the client's exit. The outcome stays as it was.

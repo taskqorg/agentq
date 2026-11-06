@@ -1,6 +1,6 @@
 [package]
 name = "agentq-runtime"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2024"
 publish = false
 description = "Codex, Claude and Antigravity worker runtime with optional AgentQ optimization (agentq.md § 12)"
@@ -10,7 +10,7 @@ name = "agentq_runtime"
 path = "src/lib.rs"
 
 [dependencies]
-coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.0" }
+coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.4" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 ring = "0.17"
