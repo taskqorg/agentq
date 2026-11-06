@@ -113,6 +113,10 @@ impl Session {
         Ok(if self.closed.is_some(){State::Unknown}else{State::Running})
     }
     pub fn report(&self)->Res<Report>{self.report.clone().ok_or_else(||self.closed.clone().unwrap_or_else(||"running".into()))}
+    pub fn stop_facts(&mut self,run:String)->Res<super::history::stop::Facts> {
+        let exit=self.server.poll()?;
+        Ok(super::history::stop::Facts {run,format:"jsonl-rpc",path:self.path.clone(),start:self.boundary,exited:Some(exit.is_some()),native_end:self.report.is_some(),exit,lost_owner:false})
+    }
     pub fn progress(&mut self)->Res<Vec<Event>>{self.pump()?;Ok(std::mem::take(&mut self.pending))}
     pub fn id(&self)->u32{self.server.id()}
     pub fn cancel(&mut self)->Res<bool>{if self.report.is_some(){return Ok(true);}self.request("abort",json!({}))?;Ok(false)}
@@ -133,6 +137,7 @@ pub(super) fn record_events(v:&Value)->Vec<Event> {
 }
 
 pub(super) static PROTOCOL:registry::Protocol=registry::Protocol {
+    stream_history:"jsonl-rpc",native_history:"jsonl-rpc",
     ends:|v|v["type"]=="agent_settled",start_limit:|_|None,read_calls:|_|(vec![],None,false),final_text:|_|None,
     history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},history_formats:&["jsonl-rpc"],
     history_session:|_,v,_|v["data"]["sessionFile"].as_str().map(String::from),history_normalize:|_,v|normalize(v),history_validity:|_|json!({"status":"unknown","reason":"envelope-validation-unsupported"}),

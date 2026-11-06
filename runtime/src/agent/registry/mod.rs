@@ -289,6 +289,10 @@ mod tests {
                 while runtime.poll(&mut lost).unwrap()==State::Running {std::thread::yield_now();}
                 assert_eq!(runtime.poll(&mut lost).unwrap(),State::Unknown);
                 assert!(runtime.report(&lost).unwrap_err().contains("stream ended"));
+                let stop=loop {if let Some(stop)=runtime.stop_event(&mut lost,u64::MAX).unwrap() {break stop;}std::thread::yield_now();};
+                assert_eq!(stop.cause,super::super::super::history::stop::StopCause::ExitWithoutTurnEnd);
+                assert_eq!(stop.exit_code,Some(0));assert_ne!(stop.outcome,"ok");
+                assert_eq!(runtime.stop_event(&mut lost,u64::MAX).unwrap().unwrap().id,stop.id);
                 l.policy.write=Scope::Project;
                 assert!(runtime.launch(&l).err().unwrap().contains("policy unsupported"));
             }
