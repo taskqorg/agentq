@@ -112,7 +112,7 @@ M6.11 applies the runtime records of [RUNTIME.md](RUNTIME.md#observation) to ses
 - Bucket and timestamp use the wall clock, intervals the monotonic clock. When wall and monotonic deltas differ by over 2 s (clock step, suspend), `agentq.resource.clock_step_ms` holds wall − monotonic.
 - dashq shows the newest sample as stale after 900 s (three buckets) and draws a graph only from three or more samples, else says too few samples.
 - A query spans at most 7 days (the queue cap); older history lasts as long as the Langfuse project retains traces. An outage delays samples within the queue caps; they arrive with their source timestamps.
-- A sample is a few file reads or syscalls and one span of about 1 KiB: 288 spans per host per day; a test bounds one sample at 50 ms.
+- A sample is a few file reads or syscalls and one span of about 1 KiB: 288 spans per host per day.
 
 ## Profiling
 

@@ -1016,7 +1016,9 @@ fn lingering_process_is_stopped_after_its_turn_ends() {
     let mut run = codex.launch(&l).unwrap();
     finish(codex, &mut run);
     assert!(started.elapsed() < Duration::from_secs(20), "stopped after its turn ended, not at the deadline");
-    assert_eq!(codex.report(&run).unwrap().outcome, "ok", "the ended turn keeps its outcome");
+    let report = codex.report(&run).unwrap();
+    assert_eq!(report.outcome, "ok", "the ended turn keeps its outcome");
+    assert_eq!(report.exit, None, "the code of our own stop is not the client's exit");
     let _ = std::fs::remove_dir_all(root);
 }
 
