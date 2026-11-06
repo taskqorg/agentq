@@ -37,6 +37,7 @@ fn main() {
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
+        ("typed_log_reads_are_public", typed_log_reads_are_public),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
         ("app_resume_frames_stay_bounded_and_named", app_resume_frames_stay_bounded_and_named),
@@ -845,6 +846,22 @@ fn launcher_output_is_handed_over_once() {
     assert_eq!(codex.launcher_output(&mut run).err(), Some(agent::Cause("no-launcher")));
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(codex_root).unwrap();
+}
+
+// #261 A1/A4: a consumer outside the crate reads job labels and record time through the runtime trait alone.
+// Risk: the types stay private, which forces a caller back to native parsing.
+fn typed_log_reads_are_public() {
+    let claude = agent::runtime("claude").unwrap();
+    let log = [
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"sleep 9","description":"Wait","run_in_background":true}}]}}),
+        json!({"timestamp":"2026-11-06T00:00:00Z","type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"Command running in background with ID: j1."}]}}),
+    ].map(|row| row.to_string()).join("\n");
+    assert_eq!(claude.classify(&log).live_background, ["Bash"]);
+    let records: Vec<agent::LogRecord> = claude.log_records(&log);
+    assert_eq!(records[0].time, agent::RecordTime::Absent);
+    assert_eq!(records[1].line, 1);
+    assert_eq!(records[1].time.observed(0), Err(agent::TimeFault::Future));
+    assert!(matches!(records[1].events[..], [agent::Event::ToolEnd { .. }]));
 }
 
 // #222 A1: Claude's `agents --cwd <root>` lists nothing for a root under `.claude/worktrees`.
