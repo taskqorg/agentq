@@ -1480,6 +1480,8 @@ mod tests {
             }
             // A missing caller-owned executable reaches spawn failure without ever starting a native agent.
             probes.insert("turn",supported(runtime.launch(&launch()).map(|_|())));
+            let mut scoped=launch();scoped.lifetime=Lifetime::StopWithOwner;
+            probes.insert("process-lifetime",supported(runtime.launch(&scoped).map(|_|())));
             probes.insert("resume",supported(runtime.resume("session-1",&launch()).map(|_|())));
             for (capability,mode) in [("background",Mode::Background),("app-queue",Mode::Queue {transcript:root.join("transcript")}),("app-server",Mode::AppServer {initialize:json!({}),thread:json!({})})] {
                 let mut l=launch(); l.mode=mode;

@@ -543,8 +543,8 @@ pub struct Context<'a> {
 
 /// Start, wait and report one turn, then append its `agent.turn` observation to `store`. A failed append is kept in
 /// `Report::recorded` and never changes the turn's result (R30).
-pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness,owner:SessionOwner) -> Res<Report> {
-    let mut turn = Turn::start(base, spec, log, text, &owner.process_hooks(&Process::default(),false)?)?.owned(owner).prepared(readiness);
+pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness,owner:SessionOwner,managed:bool) -> Res<Report> {
+    let mut turn = Turn::start(base, spec, log, text, &owner.process_hooks(&Process::default(),managed)?)?.owned(owner).prepared(readiness);
     turn.wait(deadline)?;
     let mut r = turn.report();
     r.recorded = turn.snapshot(ctx).and_then(|f| f.append(store));

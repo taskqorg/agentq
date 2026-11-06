@@ -718,6 +718,13 @@ fn process_lifetime_and_orphan_cleanup() {
     launch.process.configure=Some(std::sync::Arc::new(|_|{}));assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));assert!(!root.join("fake-turn-1.json").exists());
     launch.process=agent::Process::default();launch.mode=agent::Mode::Background;assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));
     std::fs::remove_dir_all(root).unwrap();
+    let root=scratch("lifetime-json-native");let bin=root.join("bin");std::fs::create_dir_all(&bin).unwrap();let home=root.join("account");std::fs::create_dir_all(&home).unwrap();
+    let native=bin.join(if cfg!(windows) {"claude.exe"} else {"claude"});std::fs::copy(exe(),&native).unwrap();
+    let path=std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+    let request=json!({"client":"claude","root":root,"log":root.join("worker.log"),"home":home,"input":"one JSON native turn","lifetime":"stop-with-owner","env":{"COREQ_FAKE_AGENT":"claude","PATH":path.to_string_lossy()},"context":{"product":"fixtureq","version":"1"}});
+    assert_eq!(agentq_runtime::cli::turn(&request.to_string(),None).unwrap()["outcome"],"ok");
+    let launch=fake_launch("claude",&root,"",&[]);let entry=rt.orphans(&launch).unwrap().remove(0);assert_eq!(entry.lifetime,Some(agent::Lifetime::StopWithOwner));assert!(entry.execution_scope.is_object());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn native_owner(name:&str,spec:&agent::NativeSpec)->agent::SessionOwner {
