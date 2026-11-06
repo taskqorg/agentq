@@ -19,6 +19,15 @@ const READBACK_TIMEOUT:&str="readback unknown: timeout";
 fn refused<T,E:std::fmt::Display>(result:Result<T,E>)->bool {
     match result {Ok(_)=>false,Err(e)=>{let e=e.to_string();assert!(!e.contains(READBACK_TIMEOUT),"{e}");true}}
 }
+/// #274: `retained()` maps every process failure to one text, so only the time spent can show that its 5 s readback cap expired.
+/// Each failure class under that time stops at once. A slower one, counting the adapter hash before the cap starts, also reruns and still fails on the last attempt.
+fn retained_answer(call:impl FnOnce(Instant)->Result<Value,String>)->Value {
+    let start=Instant::now();
+    call(until()).unwrap_or_else(|e|{
+        assert!(!(e.contains("retained recovery unknown")&&start.elapsed()>=Duration::from_secs(5)),"{e}: {READBACK_TIMEOUT}");
+        panic!("{e}")
+    })
+}
 /// A timed-out attempt reached no verdict, and its consumed operation cannot resume, so only that attempt reruns from a new root.
 /// Any other failure stops at once, and a host that always times out still fails on the last attempt.
 fn rerun_after_readback_timeout(scenario:fn()) {
@@ -406,8 +415,8 @@ fn retained_scenario() {
     let host=signed_host(&exe);
     let checkpoint=json!({"slot":{"binding":{"root":root}}}).to_string();let receipt=r#"{ "invented": "retained receipt" }"#;
     std::fs::write(root.join("retained-checkpoint"),&checkpoint).unwrap();std::fs::write(root.join("retained-receipt"),receipt).unwrap();
-    assert_eq!(host.reconcile_retained(&checkpoint,receipt,until()).unwrap()["state"],"unknown");
-    assert_eq!(host.cancel_retained(&checkpoint,receipt,until()).unwrap()["state"],"unknown");
+    assert_eq!(retained_answer(|until|host.reconcile_retained(&checkpoint,receipt,until))["state"],"unknown");
+    assert_eq!(retained_answer(|until|host.cancel_retained(&checkpoint,receipt,until))["state"],"unknown");
     assert!(!root.join("app-input.jsonl").exists());assert!(!root.join("request.json").exists());
     assert_eq!(std::fs::read_to_string(root.join("retained-receipt")).unwrap(),receipt);
     std::fs::remove_dir_all(root).unwrap();
