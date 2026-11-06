@@ -38,6 +38,8 @@ The old wait loop treated a failed process-identity read as exit and immediately
 
 On Windows x86_64, `cargo test --locked -p agentq-runtime --test agent protected_launch_refuses_tampering_and_preserves_native_transport` passed after this repair. The Intel macOS before-failure is confirmed from its job log; an Intel macOS after-pass remains a CI observation, not a Windows claim. The already-pushed branch is not rebased again for unrelated main movement (TaskQ §7.4).
 
+The continuation gate passed on candidate `c0c74fdf6d3388ca5e985a599edade7234447bac`: `cargo test --locked` (121 AgentQ unit tests, 62 runtime unit tests with one live check ignored, all 42 fake-client scenarios, all 22 history tests and the integration/example targets), offline `cargo run --locked -- selftest`, workflow-pinned contract lint (zero errors) and `python tests/runtime_publication.py` (two checks). The full test invocation began before the documentation merge; the candidate's `runtime/src` and `runtime/tests` trees were read back identical to the tested trees. This final evidence update changes no executable input. The contract lint was rerun on the merged contract and passed with a headroom warning. Merge-result CI and Intel macOS after-pass remain unproved locally.
+
 ## Consumer contract and publication
 
 Runtime 0.13.1 adds `validity: {status, reason}` to every history event. Claude records with a non-empty string discriminator have status `valid`, even when their meaning is unsupported; missing or malformed discriminators have status `invalid`. Other transports report `unknown` with a reason. This field proves envelope validity only. Raw bytes, content projections, event IDs, cursor checkpoints and execution APIs retain their existing behavior.
