@@ -26,6 +26,10 @@ After the fix, `cargo test --locked -p agentq-runtime --test history` passed all
 | `python tests/runtime_publication.py` | PASS: both immutable-tag and single-CoreQ-source checks. The example consumer also built in the full gate. |
 | `git diff --check` | PASS. |
 
+After the rebase on `bef051a1b07dd777f919d812f084d9d9432885d2`, with the changelog and version text added, the same gate passed on macOS ARM64: `cargo test --locked` (42 fake-client scenarios, 22 history tests), `cargo run --locked -- selftest`, the pinned contract lint and `tests/runtime_publication.py`.
+
+Release run [42261730122](https://github.com/taskqorg/agentq/actions/runs/42261730122) failed on Intel macOS at `runtime/tests/support/protected.rs:347` (`Running`, expected `Unknown`). This change does not touch that code. The same assertion and cause are tracked in [#274](https://github.com/taskqorg/agentq/issues/274) and fixed by [PR #281](https://github.com/taskqorg/agentq/pull/281), so that failure stays possible here until #281 merges.
+
 No paid native turns, working-profile configuration changes, consumer adoption or host deployment were performed. Cross-platform qualification and merge-result CI remain separate observations for review (R12; TaskQ §7).
 
 ## Consumer contract and publication
