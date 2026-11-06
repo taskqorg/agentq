@@ -168,7 +168,7 @@ impl ProtectedHost {
         let mut command = self.command("launch", &request)?;
         let owner = identity(std::process::id())?;
         if native(&permit(&request)["binding"])? != owner { return Err("protected slot belongs to another consumer incarnation".into()); }
-        // Inherited off wins, exactly as in ordinary runtime launches. No caller environment is forwarded.
+        // Inherited off wins, exactly as in ordinary runtime launches; only validated CoreQ metadata crosses the host.
         let intent = if std::env::var_os(optimization::ENV).is_some_and(|v| v == "off") { Intent::Off } else { intent };
         command.env(optimization::ENV, intent.code());
         let server = AppServer::spawn(command, private_log, &super::Process::default())?;

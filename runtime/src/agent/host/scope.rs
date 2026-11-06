@@ -50,20 +50,6 @@ fn accept(listener:&UnixListener,until:Instant)->Res<UnixStream> {
         Err(_)=>return Err("scope connection unknown; never repeat dispatch".into()),
     }}
 }
-fn xml(text:&str)->String {text.replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;").replace('"',"&quot;").replace('\'',"&apos;")}
-fn plist(label:&str,program:&str,key:&str,root:&str,environment:&Value)->Res<String> {
-    let mut vars=String::new();
-    for (k,v) in environment.as_object().ok_or("scope environment unknown")? {
-        vars.push_str(&format!("<key>{}</key><string>{}</string>",xml(k),xml(v.as_str().ok_or("scope environment invalid")?)));
-    }
-    Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>Program</key><string>{}</string><key>ProgramArguments</key><array><string>{}</string><string>agent</string><string>host</string><string>--action</string><string>scope-run</string><string>--request</string><string>{}</string></array><key>WorkingDirectory</key><string>{}</string><key>EnvironmentVariables</key><dict>{vars}</dict><key>RunAtLoad</key><false/><key>KeepAlive</key><false/><key>LaunchOnlyOnce</key><true/><key>AbandonProcessGroup</key><true/></dict></plist>",xml(label),xml(program),xml(program),xml(key),xml(root)))
-}
-fn environment(home:&Path)->Value {
-    let mut environment=serde_json::Map::new();
-    for name in ["PATH","LANG","LC_ALL","TMPDIR","TERM","AGENTQ_OPTIMIZATION"] {if let Ok(value)=std::env::var(name) {environment.insert(name.into(),json!(value));}}
-    environment.insert("HOME".into(),json!(home));
-    json!(environment)
-}
 fn launchctl(args:&[&str])->Res<String> {
     let out=coreq::process::output("protected.scope.launchctl",std::process::Command::new("/bin/launchctl").args(args).stdin(Stdio::null()),WAIT)
         .map_err(|e|{eprintln!("agentq: `/bin/launchctl {}`: {}",args.first().copied().unwrap_or("unknown"),e.class());"native job command unacknowledged; retain intent, never retry"})?;

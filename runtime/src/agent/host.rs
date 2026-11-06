@@ -8,6 +8,11 @@ const SCHEMA:&str="agentq.app-server/1";
 mod resources;
 #[path="host/permits.rs"]
 mod permits;
+#[cfg(any(test,target_os="macos"))]
+#[path="host/environment.rs"]
+mod environment;
+#[cfg(target_os="macos")]
+use environment::{environment,plist};
 #[derive(Clone,Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
 struct Request {schema:String,permit:Value,policy_revision:u64,account:String,#[serde(default)] preparation:String}
@@ -444,8 +449,9 @@ mod mac {
         resources::within(install,resources::WAIT,|s| {prepared(s,key,r,&p.authority)?;input_gate(s,key,r)})?;
         let mut cmd=std::process::Command::new("/usr/bin/sandbox-exec");
         cmd.args(["-p",&p.access]).arg(&p.bin);
-        cmd.env_clear();for name in ["PATH","LANG","LC_ALL","TMPDIR","TERM"] {if let Some(v)=std::env::var_os(name) {cmd.env(name,v);}}
-        cmd.env("HOME",home);
+        cmd.env_clear();for (name,value) in environment(home).as_object().ok_or("native environment unknown")? {
+            cmd.env(name,value.as_str().ok_or("native environment invalid")?);
+        }
         let mut spec=super::super::Spec{client:super::super::Client::Codex,root:p.root.clone(),session:"-".into(),resume:false,
             args:p.args.iter().map(Into::into).collect(),home:Some(PathBuf::from(p.authority["account_home"].as_str().ok_or("account home unknown")?)),env:vec![]};
         let intent=crate::optimization::Intent::parse(&std::env::var("AGENTQ_OPTIMIZATION").unwrap_or_else(|_|"inherit".into())).ok_or("optimization intent unknown")?;
