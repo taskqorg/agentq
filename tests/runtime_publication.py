@@ -62,9 +62,10 @@ class OneCoreQSource(unittest.TestCase):
                 '[package]\nname = "consumer"\nversion = "0.0.0"\nedition = "2024"\n\n[dependencies]\n'
                 f"agentq-runtime = {{ path = '{(repository / 'runtime').as_posix()}' }}\n"
                 f'coreq = {{ git = "{pin["git"]}", tag = "{pin["tag"]}" }}\n\n[workspace]\n')
-            metadata = subprocess.run([os.environ.get('CARGO', 'cargo'), 'metadata', '--format-version', '1', '--offline'],
-                                      cwd=consumer, check=True, text=True, capture_output=True).stdout
-        sources = {p['source'] for p in json.loads(metadata)['packages'] if p['name'] in ('coreq', 'coreq-instrument')}
+            metadata = subprocess.run([os.environ.get('CARGO', 'cargo'), 'metadata', '--format-version', '1'],
+                                      cwd=consumer, text=True, capture_output=True)
+            self.assertEqual(metadata.returncode, 0, metadata.stderr)
+        sources = {p['source'] for p in json.loads(metadata.stdout)['packages'] if p['name'] in ('coreq', 'coreq-instrument')}
         self.assertEqual(len(sources), 1, sources)
         self.assertIn(f'?tag={pin["tag"]}#', sources.pop())
 
