@@ -39,5 +39,6 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: python tests/hermes_adapter.py
+      - run: python tests/pin_update.py
       - run: cargo test --locked
       - run: cargo run --locked -- selftest

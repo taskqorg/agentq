@@ -1,0 +1,50 @@
+# specq release contract: a new shared tag opens a pin update in each consumer. Each repository calls this on its own schedule.
+name: pin update
+on:
+  workflow_call:
+    inputs:
+      auto_merge:
+        description: Merge through the queue once green. A consumer with a qualified pin passes false, and its contract names why.
+        type: boolean
+        default: true
+    secrets:
+      PIN_APP_KEY:
+        required: true
+permissions:
+  contents: read
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.PIN_APP_ID }}
+          private-key: ${{ secrets.PIN_APP_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app.outputs.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: taskqorg/agentq
+          path: .pin-tool
+          sparse-checkout: scripts/pin_update.py
+      - id: pin
+        run: |
+          name=$(python3 .pin-tool/scripts/pin_update.py)
+          rm -rf .pin-tool
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - if: steps.pin.outputs.name != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          NAME: ${{ steps.pin.outputs.name }}
+          AUTO: ${{ inputs.auto_merge }}
+        run: |
+          git config user.name 'taskqorg-pin-update[bot]'
+          git config user.email 'taskqorg-pin-update[bot]@users.noreply.github.com'
+          git switch -C pin-update
+          git commit -qam "chore(deps): update shared pins to $NAME"
+          git push -f origin pin-update
+          gh pr view pin-update --json state --jq .state 2>/dev/null | grep -q OPEN || gh pr create --head pin-update --title "chore(deps): update shared pins to $NAME" --body 'Automatic pin update (specq release contract). A red check is a real incompatibility: fix it here or in the shared implementation.'
+          gh pr edit pin-update --title "chore(deps): update shared pins to $NAME"
+          if [ "$AUTO" = true ]; then gh pr merge pin-update --auto; fi
