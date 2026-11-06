@@ -3,6 +3,7 @@ pub(super) fn normalize(
     format: &str,
     v: &Value,
 ) -> (&'static str, &'static str, Value, Vec<Value>, &'static str) {
+    if format=="acp" {return crate::agent::acp::normalize(v);}
     let mut author = "unknown";
     let mut kind = "unknown";
     let mut blocks = vec![];
@@ -164,6 +165,7 @@ fn block(format: &str, v: Value) -> Value {
 }
 
 pub(super) fn history_session(format: &str, v: &Value, raw: &str) -> Option<String> {
+    if format=="acp" {return v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str()).map(String::from);}
     session(raw).or_else(|| {
         (if format == "agy-stream" {
             v["step_update"]["conversation_id"].as_str()

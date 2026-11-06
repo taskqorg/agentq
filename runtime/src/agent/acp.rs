@@ -3,6 +3,7 @@ use super::*;
 use super::stdio::Stdio;
 
 pub(super) struct Config {
+    pub minimum: &'static str,
     pub args: &'static [&'static str],
     pub env: &'static [(&'static str, &'static str)],
     pub home_var: &'static str,
@@ -12,6 +13,52 @@ pub(super) struct Config {
     pub bypass_args: &'static [&'static str],
     pub home: fn()->Option<PathBuf>,
     pub question_prefixes: &'static [&'static str],
+}
+
+fn check_version(command:&Command,config:&Config,l:&Launch)->Res<()> {
+    if config.minimum.is_empty() && config.rejected_versions.is_empty() {return Ok(());}
+    let mut probe=Command::new(command.get_program());probe.args(command.get_args()).arg("--version").envs(config.env.iter().copied()).envs(l.env.iter().cloned()).current_dir(&l.root);
+    for (key,value) in command.get_envs() {if let Some(value)=value {probe.env(key,value);}else{probe.env_remove(key);}}
+    if let Some(home)=&l.home {probe.env(config.home_var,home);}
+    let output=if let Some(until)=l.deadline {crate::process::output("agent.version",&mut probe,until.saturating_duration_since(Instant::now())).map_err(|e|format!("ACP version probe: {e}"))?}
+        else {probe.output().map_err(|e|format!("ACP version probe: {e}"))?};
+    if !output.status.success() {return Err("ACP version probe failed; server not started".into());}
+    let text=String::from_utf8_lossy(&output.stdout);
+    let have=adapter::version_parts(&text).ok_or("ACP version unknown; server not started")?;
+    if config.rejected_versions.iter().any(|v|adapter::version_parts(v).as_ref()==Some(&have)) {return Err("ACP server version refused: workspace write defect".into());}
+    if adapter::version_parts(config.minimum).is_some_and(|need|have<need) {return Err(format!("ACP version below minimum {}; server not started",config.minimum));}Ok(())
+}
+
+// These are the protocol fields consumed below; extension fields stay in the raw value.
+#[allow(dead_code)]
+mod wire {
+    use serde::Deserialize;
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")]
+    pub struct Initialize {pub protocol_version:u64,pub agent_info:Option<Info>,#[serde(default)] pub agent_capabilities:Capabilities}
+    #[derive(Deserialize)] pub struct Info {pub version:Option<String>,pub name:Option<String>}
+    #[derive(Default,Deserialize)] #[serde(rename_all="camelCase")]
+    pub struct Capabilities {#[serde(default,alias="load_session")] pub load_session:bool,#[serde(default)] pub prompt_capabilities:PromptCapabilities}
+    #[derive(Default,Deserialize)] pub struct PromptCapabilities {#[serde(default)] pub image:bool}
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")] pub struct Session {pub session_id:Option<String>}
+    #[derive(Deserialize)] pub struct Error {pub code:i64,pub message:String}
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")] pub struct Complete {pub stop_reason:String,pub usage:Option<Usage>}
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")]
+    pub struct Usage {pub input_tokens:Option<u64>,pub output_tokens:Option<u64>,pub cached_read_tokens:Option<u64>,pub cached_write_tokens:Option<u64>,pub thought_tokens:Option<u64>}
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")] pub struct Permission {pub session_id:String,pub tool_call:Tool,pub options:Vec<Choice>}
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")] pub struct Tool {pub tool_call_id:String,pub title:Option<String>,pub kind:Option<String>,pub status:Option<String>}
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")] pub struct Choice {pub option_id:String,pub name:String,pub kind:String}
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")] pub struct Update {pub session_id:String,pub update:Change}
+    #[derive(Deserialize)] #[serde(rename_all="camelCase")] pub struct Change {pub session_update:String,pub tool_call_id:Option<String>,pub kind:Option<String>,pub title:Option<String>,pub status:Option<String>,pub used:Option<u64>,pub size:Option<u64>}
+    #[derive(Deserialize)] pub struct Content {#[serde(rename="type")] pub kind:String,pub text:Option<String>}
+}
+fn checked<T:serde::de::DeserializeOwned>(value:&Value)->Res<T> {serde_json::from_value(value.clone()).map_err(|e|format!("ACP payload invalid: {e}"))}
+fn result_fields(method:&str,value:&Value)->Res<()> {
+    if !value.is_object(){return Err("ACP result must be an object".into());}
+    match method {
+        "initialize"=>{checked::<wire::Initialize>(value)?;},
+        "session/new"|"session/load"=>{checked::<wire::Session>(value)?;},
+        _=>{},
+    }Ok(())
 }
 
 /// Checked envelope; unknown fields and updates remain in the original JSON log.
@@ -29,9 +76,10 @@ fn validate(v: &Value) -> Res<()> {
     }
     if m.method.is_some() {
         if v.get("result").is_some() || v.get("error").is_some() {return Err("ACP request contains a response".into());}
-    } else if m.id.is_none() || (v.get("result").is_some()==v.get("error").is_some()) {
+    } else if (m.id.is_none() && !(v.get("id")==Some(&Value::Null) && v.get("error").is_some())) || (v.get("result").is_some()==v.get("error").is_some()) {
         return Err("ACP response envelope invalid".into());
     }
+    if let Some(error)=v.get("error") {checked::<wire::Error>(error)?;}
     Ok(())
 }
 
@@ -53,6 +101,7 @@ pub(super) struct Session {
     deadline: Option<Instant>,
     sampler: Option<capture::Sampler>,
     question_prefixes: &'static [&'static str],
+    cancelling: bool,
 }
 
 impl Drop for Session {fn drop(&mut self) {let _=self.server.kill();}}
@@ -60,6 +109,7 @@ impl Drop for Session {fn drop(&mut self) {let _=self.server.kill();}}
 impl Session {
     pub fn open(mut command: Command, config: &Config, l: &Launch, resume: Option<&str>) -> Res<Self> {
         validate_launch(config,l)?;
+        check_version(&command,config,l)?;
         command.args(config.args).envs(config.env.iter().copied()).envs(l.env.iter().cloned()).current_dir(&l.root);
         if l.policy.approval==Approval::Bypass {command.args(config.bypass_args);}
         if let Some(home)=&l.home {
@@ -75,7 +125,7 @@ impl Session {
         let server=Stdio::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?;
         let sampler=Some(capture::Sampler::start(server.id()));
         let mut s=Self {server,path:l.log.clone(),boundary,log,session:resume.unwrap_or("").into(),pending:vec![],requests:BTreeMap::new(),serial:0,prompt:None,
-            report:None,text:String::new(),started:Instant::now(),started_ms:unix_ms(),closed:None,deadline:l.deadline,sampler,question_prefixes:config.question_prefixes};
+            report:None,text:String::new(),started:Instant::now(),started_ms:unix_ms(),closed:None,deadline:l.deadline,sampler,question_prefixes:config.question_prefixes,cancelling:false};
         let init=s.exchange("initialize",json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}),false)?;
         if init["protocolVersion"]!=1 {return Err("ACP protocol version unsupported".into());}
         if init["agentInfo"]["version"].as_str().is_some_and(|v|config.rejected_versions.contains(&v)) {return Err("ACP server version refused: workspace write defect".into());}
@@ -109,12 +159,14 @@ impl Session {
         Ok(s)
     }
 
-    fn write(&mut self, v: &Value) -> Res<()> {self.server.send_until(v,self.deadline)}
+    fn write(&mut self, v: &Value) -> Res<()> {
+        self.server.send_until(v,self.deadline)?;
+        writeln!(self.log,"{}",json!({"type":"acp","message":v,"outgoing":true,"replay":false}).to_string()).map_err(|e|format!("ACP transcript: {e}"))
+    }
     fn request(&mut self, method:&str, params:Value)->Res<Value> {
         self.serial=self.serial.checked_add(1).ok_or("ACP request ID overflow")?;
         let request=json!({"jsonrpc":"2.0","id":self.serial,"method":method,"params":params});
         self.write(&request)?;
-        writeln!(self.log,"{}",json!({"type":"acp","message":request,"outgoing":true,"replay":false}).to_string()).map_err(|e|format!("ACP transcript: {e}"))?;
         Ok(request["id"].clone())
     }
     fn log(&mut self,v:&Value,replay:bool)->Res<()> {
@@ -124,10 +176,13 @@ impl Session {
     fn exchange(&mut self,method:&str,params:Value,replay:bool)->Res<Value> {
         let id=self.request(method,params)?;
         loop {
-            let v=self.server.wait(self.deadline)?;validate(&v)?;
+            let v=self.server.wait(self.deadline)?;
+            if let Err(error)=validate(&v) {self.log(&v,replay)?;return Err(error);}
+            if v.get("id")==Some(&Value::Null) {self.log(&v,replay)?;self.pending.push(Event::Metadata{kind:"protocol-error".into(),data:v});continue;}
             if v["id"]==id && v.get("method").is_none() {
                 self.log(&v,replay)?;
                 if let Some(error)=v.get("error") {return Err(format!("ACP {method}: {error}"));}
+                result_fields(method,&v["result"])?;
                 return Ok(v["result"].clone());
             }
             self.observe(v,replay)?;
@@ -148,13 +203,14 @@ impl Session {
             }
         });}
         if prompt.is_empty() || parts.iter().all(|p|matches!(p,Part::Text(t) if t.is_empty())) {return Err("input-empty".into());}
-        self.report=None;self.text.clear();self.started=Instant::now();self.started_ms=unix_ms();
+        self.cancelling=false;self.report=None;self.text.clear();self.started=Instant::now();self.started_ms=unix_ms();
         self.prompt=Some(self.request("session/prompt",json!({"sessionId":self.session,"prompt":prompt}))?);
         self.pending.push(Event::TurnStart);Ok(())
     }
 
     fn observe(&mut self,v:Value,replay:bool)->Res<()> {
-        validate(&v)?;self.log(&v,replay)?;
+        self.log(&v,replay)?;validate(&v)?;
+        if v.get("id")==Some(&Value::Null) {self.pending.push(Event::Metadata{kind:"protocol-error".into(),data:v});return Ok(());}
         if replay {
             if v.get("id").is_some() && v["method"].is_string() {
                 self.write(&json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32601,"message":"Replay cannot request client actions"}}))?;
@@ -166,18 +222,27 @@ impl Session {
                 if method=="session/request_permission" {
                     if v["params"]["sessionId"].as_str()!=Some(self.session.as_str()) {return Err("ACP request session differs".into());}
                     let params=&v["params"];
+                    let permission=checked::<wire::Permission>(params)?;
+                    if permission.options.is_empty() || permission.options.iter().any(|o|o.option_id.is_empty()) {return Err("ACP permission choices invalid".into());}
                     let choices=params["options"].as_array().ok_or("ACP permission choices missing")?.iter().map(|o|Ok(Choice {
                         id:o["optionId"].as_str().ok_or("ACP choice ID missing")?.into(),label:o["name"].as_str().ok_or("ACP choice name missing")?.into(),kind:o["kind"].as_str().ok_or("ACP choice kind missing")?.into(),
                     })).collect::<Res<Vec<_>>>()?;
                     let question=params["toolCall"]["toolCallId"].as_str().is_some_and(|id|self.question_prefixes.iter().any(|prefix|id.starts_with(prefix)));
                     self.requests.insert(v["id"].to_string(),v["params"].clone());
+                    if self.cancelling {self.cancel_requests()?;return Ok(());}
                     self.pending.push(Event::Request{id:v["id"].clone(),kind:if question {RequestKind::Question}else{RequestKind::Approval},prompt:params["toolCall"]["title"].as_str().map(String::from),choices});
                 } else {self.write(&json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32601,"message":"Client method not supported"}}))?;}
                 return Ok(());
             }
             if method=="session/update" {
                 if v["params"]["sessionId"].as_str()!=Some(self.session.as_str()) {return Err("ACP update session differs".into());}
+                let params=checked::<wire::Update>(&v["params"])?;
                 let update=&v["params"]["update"];
+                match params.update.session_update.as_str() {
+                    "agent_message_chunk"|"agent_thought_chunk"|"user_message_chunk"=>{checked::<wire::Content>(&update["content"])?;},
+                    "tool_call"|"tool_call_update"=>{checked::<wire::Tool>(update)?;},
+                    _=>{},
+                }
                 if update["sessionUpdate"]=="agent_message_chunk" {
                     if let Some(text)=update["content"]["text"].as_str() {self.text.push_str(text);}
                 }
@@ -188,12 +253,13 @@ impl Session {
             r.text=(!self.text.is_empty()).then(||self.text.clone());
             if let Some(error)=v.get("error") {r.outcome="failed";r.error="client-error";r.detail=Some(error.to_string());}
             else {
+                checked::<wire::Complete>(&v["result"])?;
                 (r.outcome,r.error)=outcome(&v);
                 let u=&v["result"]["usage"];
                 r.usage=read_usage(u);
             }
             self.pending.push(Event::Message{item:None,text:self.text.clone()});self.pending.push(Event::TurnEnd{outcome:r.outcome});
-            self.prompt=None;self.requests.clear();self.report=Some(r);
+            self.cancel_requests()?;self.prompt=None;self.report=Some(r);
         } else {self.pending.push(Event::Metadata{kind:"response".into(),data:v});}
         Ok(())
     }
@@ -211,6 +277,7 @@ impl Session {
             if let Some(report)=&mut self.report {
                 report.exit=self.server.poll()?;
                 if let Some(sampler)=self.sampler.take() {report.process=sampler.usage();}
+                if report.exit.is_none() {report.process.exit_unknown="session-process-running";}
             }
         }
         Ok(())
@@ -226,7 +293,16 @@ impl Session {
     pub fn id(&self)->u32 {self.server.id()}
     pub fn cancel(&mut self)->Res<bool> {
         if self.report.is_some() {return Ok(true);}
-        self.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.session}}))?;Ok(false)
+        self.cancelling=true;
+        self.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.session}}))?;
+        self.cancel_requests()?;Ok(false)
+    }
+    fn cancel_requests(&mut self)->Res<()> {
+        for key in self.requests.keys().cloned().collect::<Vec<_>>() {
+            let id:Value=serde_json::from_str(&key).map_err(|_|"ACP stored request ID invalid")?;
+            self.control(Control::Reply{id,option:None})?;
+        }
+        Ok(())
     }
     pub fn control(&mut self,control:Control)->Res<()> {
         match control {
@@ -301,4 +377,33 @@ pub(super) fn read_report(_: &str,events:&[Value],_:Option<&Path>)->Report {
         let m=&end["message"];(r.outcome,r.error)=outcome(m);r.usage=read_usage(&m["result"]["usage"]);
         r.detail=m.get("error").map(Value::to_string);
     }r
+}
+
+pub(super) fn normalize(v:&Value)->super::history::Normalized {
+    if v["replay"]==true {return ("system","replay",Value::Null,vec![],"none");}
+    let m=&v["message"];let u=&m["params"]["update"];let item=u["toolCallId"].clone();
+    match u["sessionUpdate"].as_str() {
+        Some("agent_message_chunk"|"agent_thought_chunk"|"user_message_chunk")=>(if u["sessionUpdate"]=="user_message_chunk" {"user"}else{"assistant"},if u["sessionUpdate"]=="agent_thought_chunk" {"thinking"}else{"message"},item,vec![u["content"].clone()],"none"),
+        Some("tool_call"|"tool_call_update")=>("tool","tool",item,vec![u.clone()],"none"),
+        Some("usage_update")=>("system","usage",item,vec![u.clone()],"none"),
+        _ if m["method"]=="session/request_permission"=>("system","approval",m["id"].clone(),vec![m["params"].clone()],"none"),
+        _=>("unknown","unknown",item,vec![],"unsupported-source-shape"),
+    }
+}
+
+#[cfg(test)] mod wire_tests {
+    use super::*;
+    #[test] fn consumed_protocol_fields_are_checked() {
+        assert!(validate(&json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}})).is_ok());
+        assert!(validate(&json!({"jsonrpc":"2.0","id":null,"result":{}})).is_err());
+        assert!(validate(&json!({"jsonrpc":"2.0","id":null,"error":{"code":"bad","message":"x"}})).is_err());
+        for malformed in [json!({"protocolVersion":"1"}),json!({"protocolVersion":1,"agentCapabilities":{"loadSession":"yes"}}),json!({"protocolVersion":1,"agentInfo":{"version":4}}),json!({"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":1}}})] {assert!(result_fields("initialize",&malformed).is_err());}
+        assert!(result_fields("session/new",&json!({"sessionId":3})).is_err());
+        assert!(checked::<wire::Complete>(&json!({"stopReason":true})).is_err());
+        assert!(checked::<wire::Complete>(&json!({"stopReason":"end_turn","usage":{"inputTokens":"17"}})).is_err());
+        assert!(checked::<wire::Update>(&json!({"sessionId":"s","update":{"sessionUpdate":"usage_update","used":"1"}})).is_err());
+        assert!(checked::<wire::Content>(&json!({"type":"text","text":false})).is_err());
+        assert!(checked::<wire::Permission>(&json!({"sessionId":"s","toolCall":{"toolCallId":5},"options":[]})).is_err());
+        assert!(checked::<wire::Initialize>(&json!({"protocolVersion":1,"future":{"preserved":true}})).is_ok());
+    }
 }

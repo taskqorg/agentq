@@ -157,7 +157,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - R14: ordered worker preflight and owned repairs (§12); native qualification remains separate.
 
 ## 12. Agent runtime
-- **M12.1** `agentq-runtime` (folder `runtime/`, Rust library `agentq_runtime`) starts, resumes, cancels and observes Codex CLI, Claude Code and Antigravity (`antigravity`) turns: CLI and `agentapi` turns, Claude background jobs, Codex app and app-server sessions, Remote Control, session recovery, dynamic tools, private drafts, the model catalogue and account selection.
+- **M12.1** `agentq-runtime` (folder `runtime/`, Rust library `agentq_runtime`) starts, resumes, cancels and observes Codex CLI, Claude Code and Antigravity (`antigravity`) turns: CLI and ACP turns, Claude background jobs, Codex app and app-server sessions, Remote Control, session recovery, dynamic tools, private drafts, the model catalogue and account selection.
 - **M12.2** It depends only on CoreQ primitives (process, telemetry store, `quiet`); never on TaskQ, PilotQ or the optimizer modules of `agentq`. CoreQ never depends on it.
 - **M12.3** A plain turn needs no service, engine, MCP server or installation; the library and `agentq agent turn` never write the installation. Callers keep grants, permissions, model, effort, input files, storage, process ownership, stop authority and UI.
 - **M12.4** Each finished turn appends exactly one attributable `agent.turn` observation to the caller's CoreQ store; recovery and repeated observation never count it twice. The child gets `AGENTQ_LAUNCHER` unless `TASKQ_TASK` or `AGENTQ_LAUNCHER` is set, so § 6 M6.9 holds.

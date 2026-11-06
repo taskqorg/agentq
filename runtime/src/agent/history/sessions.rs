@@ -60,7 +60,7 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
         if !row.ends_with('\n') {return Ok(None);}
         if row.trim().is_empty() {continue;}
         let v:Value=serde_json::from_str(&row).map_err(|e|format!("history discovery invalid JSON: {e}"))?;
-        let acp=runtime=="antigravity" && v["type"]=="acp";
+        let acp=v["type"]=="acp";
         let format=if acp {"acp"}else{format};
         let id=if acp {v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str())}else{match runtime {
             "codex" if v["type"]=="session_meta"=>v["payload"]["id"].as_str(),
@@ -77,7 +77,7 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
 fn discover(runtime:&str, home:Option<&Path>) -> Res<Vec<Source>> {
     let client=client(runtime)?;
     let home=home.map(Path::to_path_buf).or_else(||super::super::base_home(client)).ok_or("history home unknown")?;
-    let root=home.join(match runtime {"codex"=>"sessions","claude"=>"projects",_=>"brain"});
+    let root=home.join(match runtime {"codex"=>"sessions","claude"=>"projects",_=>"antigravity-cli/brain"});
     let mut paths=Vec::new();walk(&root,&mut paths)?;paths.sort();
     let mut sources=Vec::new();
     for path in paths {

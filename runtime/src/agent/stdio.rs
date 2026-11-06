@@ -1,5 +1,6 @@
 //! Shared owned JSONL process transport; protocol state belongs to adapters.
 use super::*;
+#[cfg(windows)] mod windows_job;
 use std::sync::mpsc::{self, Receiver, SyncSender, RecvTimeoutError};
 
 enum Pipe<T> {Bounded(SyncSender<T>),Stream(mpsc::Sender<T>)}
@@ -19,6 +20,7 @@ pub(crate) struct Stdio {
     child:Child,
     input:Option<Pipe<WriteRequest>>,
     bounded:bool,
+    #[cfg(windows)] job:Option<windows_job::Job>,
     events:Receiver<Res<Value>>,
 }
 
@@ -33,6 +35,7 @@ impl Stdio {
         crate::telemetry::capture::inherit_context(&mut command);
         command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(log);
         let mut child=process.spawn(command,"app-server")?;
+        #[cfg(windows)] let job=if !bounded {match windows_job::Job::attach(&child) {Ok(job)=>Some(job),Err(error)=>{let _=child.kill();let _=child.wait();return Err(error);}}}else{None};
         let mut stdin=child.stdin.take().ok_or("app-server stdin unavailable")?;
         let stdout=child.stdout.take().ok_or("app-server stdout unavailable")?;
         let (input,writing)=channel::<WriteRequest>(bounded.then_some(1));
@@ -69,7 +72,7 @@ impl Stdio {
                 if output.send(event).is_err() || failed {break;}
             }
         });
-        Ok(Self {child,input:Some(input),events,bounded})
+        Ok(Self {child,input:Some(input),events,bounded,#[cfg(windows)] job})
     }
 
     pub fn id(&self)->u32 {self.child.id()}
@@ -109,25 +112,17 @@ impl Stdio {
 
     pub fn poll(&mut self)->Res<Option<i32>> {self.child.try_wait().map(|s|s.map(|s|s.code().unwrap_or(-1))).map_err(|e|format!("app-server wait: {e}"))}
 
-    /// Stop only this directly owned child. Consumer process-group/native-turn authority remains with the caller.
+    /// Stop the owned server (and its Windows job); caller authority outside that scope stays unchanged.
     pub fn kill(&mut self)->Res<()> {
+        #[cfg(windows)] if let Some(job)=&self.job {job.kill()?;}
         if self.poll()?.is_some() {return Ok(());}
         self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))?;
         self.child.wait().map_err(|e|format!("app-server reap unconfirmed: {e}"))?;
         Ok(())
     }
 
-    /// Native stream EOF requests shutdown; only the caller may bound cleanup.
-    pub(crate) fn close_stream(&mut self,until:Option<Instant>)->Res<()> {
-        self.input.take();
-        if let Some(until)=until {
-            while self.poll()?.is_none() {
-                if Instant::now()>=until {self.kill()?;return Err("native shutdown caller deadline; cleanup interrupted".into());}
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        } else {self.child.wait().map_err(|e|format!("native reap: {e}"))?;}
-        Ok(())
-    }
+    /// EOF requests shutdown; observation must never wait for native descendants.
+    pub(crate) fn close_stream(&mut self,_until:Option<Instant>)->Res<()> {self.input.take();Ok(())}
 
     /// EOF lets the native server close its MCP children; the owned server is reaped before return.
     pub(crate) fn close(&mut self)->Res<()> {

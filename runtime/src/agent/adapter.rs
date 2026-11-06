@@ -289,7 +289,7 @@ impl State {
 pub struct Check { pub state: &'static str, pub detail: String }
 
 /// Numeric parts of the first dotted version token of `s`: `codex-cli 0.162.0` and `2.1.5 (Claude Code)` read alike.
-fn version_parts(s: &str) -> Option<Vec<u64>> {
+pub(super) fn version_parts(s: &str) -> Option<Vec<u64>> {
     s.split(|c: char| c.is_whitespace() || c == '(').find_map(|t| {
         let v: Option<Vec<u64>> = t.trim_start_matches('v').split('.').map(|p| p.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).collect();
         v.filter(|v| v.len() >= 2)
