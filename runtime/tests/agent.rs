@@ -1602,7 +1602,8 @@ fn wait_for(path: &Path) {
 fn cli_turn_recovers_its_running_child() {
     use agent::State::{Finished, Running};
     unsafe { std::env::remove_var("TASKQ_TASK"); std::env::remove_var("AGENTQ_LAUNCHER"); std::env::remove_var("AGENTQ_OPTIMIZATION"); }
-    for r in agent::runtimes() {
+    // Stateful ACP sessions explicitly refuse process checkpoints; their next turn is session/load.
+    for r in agent::runtimes().into_iter().filter(|r|!r.descriptor().has("acp")) {
         let name = r.descriptor().name;
         let root = scratch(&format!("turn-recover-{name}"));
         let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();

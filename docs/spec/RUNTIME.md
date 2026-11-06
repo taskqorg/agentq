@@ -36,6 +36,8 @@ Antigravity uses the installed `agy acp`; there is no downloaded server or manag
 
 The existing stream and agentapi native seams remain available until ACP has side-by-side task, tools, resume, cancellation, usage and history proof on macOS and Windows. Agentapi remains a compatibility seam, not a fallback after an uncertain ACP input. Authentication uses the separate login flow; launch never starts interactive sign-in. A missing login or native-platform proof remains an explicit qualification gap.
 
+ACP owns a stateful stdio connection. A process checkpoint reads `no-checkpoint`; recovery never recreates that connection or resubmits its prompt. A later explicit resume uses `session/load`. The retained stateless CLI seam keeps its process-identity recovery contract.
+
 ## Runtime trait
 
 M12.9/M12.10 apply the [specq agent-runtime rule](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md). The public surface is `agent::Runtime`, `agent::Descriptor`, `agent::Policy`, `agent::Launch`, `agent::Run` and the runtime-neutral `Event`, `Window`, `Report`, `Usage`, `Snapshot`, `Accounts`, `Context` and `history` types. `agent::runtimes()` lists every adapter; `agent::runtime(name)` finds one by descriptor name (alias `agy` selects `antigravity`). Callers treat names and session IDs as opaque data.
