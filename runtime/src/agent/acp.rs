@@ -190,8 +190,7 @@ impl Session {
             else {
                 (r.outcome,r.error)=outcome(&v);
                 let u=&v["result"]["usage"];
-                r.usage=Usage{input:u["inputTokens"].as_u64(),output:u["outputTokens"].as_u64(),cache_read:u["cachedReadTokens"].as_u64(),cache_write:u["cachedWriteTokens"].as_u64(),reasoning:u["thoughtTokens"].as_u64(),
-                    unknown:(!u.is_object()).then_some("not-reported"),..Usage::default()};
+                r.usage=read_usage(u);
             }
             self.pending.push(Event::Message{item:None,text:self.text.clone()});self.pending.push(Event::TurnEnd{outcome:r.outcome});
             self.prompt=None;self.requests.clear();self.report=Some(r);
@@ -282,4 +281,24 @@ pub(super) fn update_events(u:&Value)->Vec<Event> {
         Some("usage_update")=>vec![Event::Context{used:u["used"].as_u64(),window:u["size"].as_u64()}],
         _=>vec![Event::Metadata{kind:u["sessionUpdate"].as_str().unwrap_or("unknown").into(),data:u.clone()}],
     }
+}
+
+
+fn read_usage(u:&Value)->Usage {
+    let mut usage=Usage{input:u["inputTokens"].as_u64(),output:u["outputTokens"].as_u64(),cache_read:u["cachedReadTokens"].as_u64(),cache_write:u["cachedWriteTokens"].as_u64(),reasoning:u["thoughtTokens"].as_u64(),..Usage::default()};
+    usage.unknown=(usage.input.is_none() && usage.output.is_none() && usage.cache_read.is_none() && usage.cache_write.is_none() && usage.reasoning.is_none()).then_some("not-reported");usage
+}
+
+pub(super) fn read_report(_: &str,events:&[Value],_:Option<&Path>)->Report {
+    let mut r=Report::empty();
+    r.session=events.iter().rev().find_map(|v|v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str()).map(String::from));
+    let start=events.iter().rposition(|v|v["outgoing"]==true && v["message"]["method"]=="session/prompt").unwrap_or(0);
+    let current=&events[start..];
+    let chunks:Vec<_>=current.iter().filter(|v|v["replay"]!=true && v["outgoing"]!=true && v["message"]["params"]["update"]["sessionUpdate"]=="agent_message_chunk")
+        .filter_map(|v|v["message"]["params"]["update"]["content"]["text"].as_str()).collect();
+    r.text=(!chunks.is_empty()).then(||chunks.concat());
+    if let Some(end)=current.iter().rev().find(|v|v["terminal"]==true && v["replay"]!=true) {
+        let m=&end["message"];(r.outcome,r.error)=outcome(m);r.usage=read_usage(&m["result"]["usage"]);
+        r.detail=m.get("error").map(Value::to_string);
+    }r
 }

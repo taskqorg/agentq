@@ -38,6 +38,8 @@ fn main() {
     assert!(seen.iter().any(|e|matches!(e,Event::Metadata{kind,..} if kind=="future_update")));
     assert!(r.progress(&mut run).unwrap().is_empty());
     assert!(r.control(&mut run,Control::Reply{id:json!("permission-1"),option:Some("once".into())}).is_err());
+    let classified=r.classify(&std::fs::read_to_string(&l.log).unwrap());
+    assert_eq!((classified.outcome,classified.text.as_deref(),classified.usage.input),("ok",Some("answer"),Some(17)));
     l.input="second".into();
     let mut resumed=r.resume("session-1",&l).unwrap();
     r.cancel(&mut resumed).unwrap();
