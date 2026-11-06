@@ -271,7 +271,7 @@ Binding detail of M12.15–M12.17 and PRODUCT R14. `ready` and `quota` remain av
 
 | Order | Check | Passes when | Blocked cause |
 |---|---|---|---|
-| 1 | Client | Executable resolves and version meets the descriptor `minimum` | `client-missing`, `client-outdated` |
+| 1 | Client | Executable resolves and version meets the descriptor `minimum`; ACP releases with known workspace-write defects also require a verified safe version | `client-missing`, `client-outdated`, `client-version-refused`, `client-version-unverified` |
 | 2 | Account | The requested home exists and belongs to this account; native login status reads ok. There is never a fallback to another account | `account-home-missing`, `login-required` |
 | 3 | Capacity | `quota` picks an account, or the caller set no accounts | `quota-exhausted`, with the hold end |
 | 4 | Workspace | Root is an existing folder; writable when `Policy` needs writes; native effective trust covers the requested path, including its ancestor and worktree rules | `workspace-missing`, `workspace-unwritable`, `workspace-untrusted` |
@@ -302,7 +302,7 @@ Codex probes native sandbox startup by running a no-op command through `codex sa
 
 ### Cost
 
-Preflight makes no model call and costs no tokens. It adds no new timeout, cache or budget: each check runs once per launch, and native probes keep their existing limits (`--version` 5 s, login 10 s). A probe that ends without an answer reads `unknown`. A check is read-only unless `Repair` allows it. Limits and caches join only when telemetry shows a real problem.
+Preflight makes no model call and costs no tokens. It adds no new timeout, cache or budget: each check runs once per launch, and native probes keep their existing limits (`--version` 5 s, login 10 s). A probe that ends without an answer reads `unknown`; the mandatory ACP safe-version guard maps an unverified version to a blocked client check before spawn. A check is read-only unless `Repair` allows it. Limits and caches join only when telemetry shows a real problem.
 
 ### Repair
 

@@ -129,10 +129,17 @@ pub(super) fn check(adapter: &Adapter, l: &Launch, repair: &Repair) -> Readiness
     let row = |check: &str, state: &str, cause: Option<&str>, detail: &str, next: &str| LaunchCheck::new(check,state,cause,detail,next);
     let native=self::ready(adapter,l);
     let ready=if native.install.state=="missing" {None} else {Some(native.version.state=="ok")};
-    let (client_state,client_cause)=match (native.install.state,native.version.state) {
+    let (mut client_state,mut client_cause)=match (native.install.state,native.version.state) {
         ("missing",_) => ("blocked",Some("client-missing")),(_,"outdated") => ("blocked",Some("client-outdated")),("ok","ok") => ("ok",None),_ => ("unknown",Some("client-probe-failed")),
     };
-    checks.push(row("client",client_state,client_cause,if native.install.state=="missing" {&native.install.detail} else {&native.version.detail},"install or update the requested CLI"));
+    let mut client_detail=if native.install.state=="missing" {native.install.detail.clone()}else{native.version.detail.clone()};
+    if native.install.state=="ok" && native.version.state!="outdated" && explicit.as_ref().is_none_or(|h|h.is_dir()) {
+        if let Some(error)=adapter.ops.acp.and_then(|config|super::super::acp::check_version(config,&native.version).err()) {
+            client_state="blocked";client_cause=Some(if native.version.state=="ok" {"client-version-refused"}else{"client-version-unverified"});
+            client_detail=format!("{error}: {}",native.version.detail);
+        }
+    }
+    checks.push(row("client",client_state,client_cause,&client_detail,"install or update the requested CLI"));
     if selected_home.as_ref().is_some_and(|h|!h.is_dir()) && explicit.is_some() {
         checks.push(row("account","blocked",Some("account-home-missing"),"Requested account home is missing","create or select that account home"));
     } else if l.home.as_ref().zip(spec(adapter,l).env.into_iter().rev().find(|(k,_)|k==adapter.client.home_var())).is_some_and(|(h,(_,v))| h!=Path::new(&v)) {
