@@ -522,6 +522,9 @@ fn fake_launch(name: &str, root: &Path, input: &str, env: &[(&str, &std::ffi::Os
     l
 }
 
+/// A client that ended its turn exits by itself or is stopped by the runtime first. Both are healthy, and a real nonzero exit still fails here.
+fn assert_exit_or_stopped(exit: Option<i32>) { assert!(matches!(exit, Some(0) | None), "{exit:?}"); }
+
 fn finish(r: &dyn agent::Runtime, run: &mut agent::Run) -> agent::State {
     let until = Instant::now() + Duration::from_secs(30);
     loop {
@@ -940,7 +943,8 @@ fn claude_starts_and_resumes_one_session() {
     finish(claude, &mut run);
     let first = run.record(&ctx, &store).unwrap();
     let session = claude.session_id(&run).expect("caller-chosen session");
-    assert_eq!((first.outcome, first.session.as_deref(), first.text.as_deref(), first.exit), ("ok", Some(session.as_str()), Some("turn 1"), Some(0)));
+    assert_eq!((first.outcome, first.session.as_deref(), first.text.as_deref()), ("ok", Some(session.as_str()), Some("turn 1")));
+    assert_exit_or_stopped(first.exit);
     first.recorded.as_ref().unwrap();
     let r = record(&root, 1);
     assert_eq!((r["input"].as_str(), r["inherited"].as_bool(), r["extra"].as_str()), (Some("brief"), Some(false), Some("x")), "stdin brief, no parent session, caller env");
@@ -960,7 +964,9 @@ fn claude_starts_and_resumes_one_session() {
     assert_eq!((o["limit_used_percent"].as_u64(), o["limit_resets_at"].as_u64(), o["limit_window"].as_str()), (Some(25), Some(1792386000), Some("five_hour")));
     assert!(o["duration_us"].as_u64().is_some());
     // A2, A3: a real child turn through `Run::record`. Risk: the fields exist in unit tests but never reach the store.
-    assert_eq!((o["schema"].as_u64(), o["exit_code"].as_u64(), o["session_id"].as_str().is_some()), (Some(1), Some(0), true));
+    assert_eq!((o["schema"].as_u64(), o["session_id"].as_str().is_some()), (Some(1), true));
+    assert_exit_or_stopped(o["exit_code"].as_i64().map(|c| c as i32));
+    assert!(o["exit_code"].is_u64() || o["unknown"]["exit_code"].is_string(), "{o}");
     let measured = o["peak_rss_bytes"].as_u64().is_some() && o["user_cpu_us"].as_u64().is_some() && o["system_cpu_us"].as_u64().is_some();
     assert!(measured || o["unknown"]["peak_rss_bytes"] == "not-sampled", "{o}");
     let calls: Vec<_> = records(&store).into_iter().filter(|r| r["kind"] == "agent.call").collect();
@@ -1016,7 +1022,9 @@ fn lingering_process_is_stopped_after_its_turn_ends() {
     let mut run = codex.launch(&l).unwrap();
     finish(codex, &mut run);
     assert!(started.elapsed() < Duration::from_secs(20), "stopped after its turn ended, not at the deadline");
-    assert_eq!(codex.report(&run).unwrap().outcome, "ok", "the ended turn keeps its outcome");
+    let report = codex.report(&run).unwrap();
+    assert_eq!(report.outcome, "ok", "the ended turn keeps its outcome");
+    assert_eq!(report.exit, None, "the code of our own stop is not the client's exit");
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1131,7 +1139,7 @@ fn cli_turn_recovers_its_running_child() {
         let report = cold.record(&ctx, &store).unwrap();
         assert_eq!((report.outcome, report.text.as_deref()), ("ok", Some("turn 1")), "{name}");
         // A re-executed Unix parent reaps its own child and reads the code; elsewhere an unobserved exit stays unknown.
-        assert_eq!(report.exit, if cfg!(unix) { Some(0) } else { None }, "{name}");
+        if cfg!(unix) { assert_exit_or_stopped(report.exit); } else { assert_eq!(report.exit, None, "{name}"); }
         assert!(r.session_id(&cold).is_some() && !root.join("fake-turn-2.json").exists(), "{name}: recovery made no native call");
         assert_eq!(observations(&store).len(), 1, "{name}: one observation");
         assert_eq!(r.checkpoint(&cold).unwrap_err(), agent::Cause("turn-ended"));
@@ -1397,7 +1405,8 @@ fn snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart() {
     restored.append(&store).unwrap();
     assert_eq!(records(&store), stored, "a restart counts nothing twice");
     let turn = stored.iter().find(|o| o["kind"] == "agent.turn").unwrap();
-    assert_eq!((turn["input_tokens"].as_u64(), turn["outcome"].as_str(), turn["exit_code"].as_u64()), (Some(2), Some("ok"), Some(0)));
+    assert_eq!((turn["input_tokens"].as_u64(), turn["outcome"].as_str()), (Some(2), Some("ok")));
+    assert_exit_or_stopped(turn["exit_code"].as_i64().map(|c| c as i32));
     assert!(turn["duration_us"].as_u64().is_some());
     for row in &stored {
         assert_eq!((row["project"].as_str(), row["task"].as_u64(), row["attempt"].as_u64(), row["actor"].as_str(), row["entry"].as_u64()),

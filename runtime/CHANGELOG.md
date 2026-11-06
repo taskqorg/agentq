@@ -1,5 +1,9 @@
 # Runtime changelog
 
+## 0.13.2
+
+- `Report.exit` and the `exit_code` observation read unknown when the runtime stopped a client that had already ended its turn. They used to report the kill's own code (Windows 1, Unix -1) as the client's exit. The outcome stays as it was.
+
 ## 0.13.1
 
 - `History` events add `validity: {status, reason}`. Claude records with a non-empty string `type` are `valid`, including unsupported metadata such as `file-history-snapshot`. Missing or malformed discriminators are `invalid`. Other transports report `unknown`. A consumer can skip valid metadata and refuse invalid envelopes without parsing native JSON. See [task #288 evidence](../docs/evidence/runtime-288.md).
