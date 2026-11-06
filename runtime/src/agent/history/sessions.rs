@@ -60,12 +60,14 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
         if !row.ends_with('\n') {return Ok(None);}
         if row.trim().is_empty() {continue;}
         let v:Value=serde_json::from_str(&row).map_err(|e|format!("history discovery invalid JSON: {e}"))?;
-        let id=match runtime {
+        let acp=runtime=="antigravity" && v["type"]=="acp";
+        let format=if acp {"acp"}else{format};
+        let id=if acp {v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str())}else{match runtime {
             "codex" if v["type"]=="session_meta"=>v["payload"]["id"].as_str(),
             "claude"=>v["agentId"].as_str().or(v["sessionId"].as_str()).or(v["session_id"].as_str()),
             "antigravity"=>path.parent().and_then(Path::parent).and_then(Path::parent).and_then(Path::file_name).and_then(|s|s.to_str()),
             _=>None,
-        };
+        }};
         if let Some(id)=id {
             return Ok(Some(Source {id:crate::sha256_hex(path.to_string_lossy().as_bytes()),native_session:id.into(),session:if runtime=="claude" && v["agentId"].is_string() {format!("{}/agent/{id}",v["sessionId"].as_str().unwrap_or("unreported"))}else{id.into()},path:path.into(),format:format.into(),parent:if runtime=="claude" && v["agentId"].is_string() {v["sessionId"].as_str().map(String::from)}else{v["payload"]["forked_from_id"].as_str().or(v.pointer("/payload/source/subagent/thread_spawn/parent_thread_id").and_then(Value::as_str)).map(String::from)},parent_step:None}));
         }
