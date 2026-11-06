@@ -8,15 +8,20 @@ fn header(t:&str)->Value{json!({"type":"event_msg","payload":{"type":"task_start
 fn legacy()->Value{json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2,"total_tokens":12},"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2,"total_tokens":12},"model_context_window":1000}}})}
 #[test]
 fn retirement_in_second_turn_does_not_remove_first_turn_usage() {
- let path=path("two-turns");append(&path,&[header("t1"),legacy()]);
+ for late in [false,true] {
+ let path=path(if late{"two-turns-late"}else{"two-turns-same-page"});append(&path,&[json!({"type":"session_meta","payload":{"id":"session"}}),header("t1"),legacy()]);
  let mut h=History::new("codex-rollout","source","session").unwrap();let first=h.steps(&path,u64::MAX).unwrap();
  let mut client=BTreeMap::<String,Step>::new();for s in first.steps{client.insert(s.id.clone(),s);}
- append(&path,&[header("t2"),legacy()]);h=History::recover(&first.checkpoint).unwrap();let second=h.steps(&path,u64::MAX).unwrap();for s in second.steps{client.insert(s.id.clone(),s);}
- append(&path,&[json!({"type":"token_usage_record","payload":{"thread_id":"session","turn_id":"t2","response_id":"r2","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":1}}})]);
+ let request=json!({"type":"token_usage_record","payload":{"thread_id":"session","turn_id":"t2","response_id":"r2","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":1}}});
+ append(&path,&[header("t2"),legacy()]);if !late{append(&path,&[request.clone()]);}
+ h=History::recover(&first.checkpoint).unwrap();let second=h.steps(&path,u64::MAX).unwrap();for s in second.steps{client.insert(s.id.clone(),s);}
+ if late{append(&path,&[request]);}
  h=History::recover(&second.checkpoint).unwrap();let third=h.steps(&path,u64::MAX).unwrap();for s in third.steps{client.insert(s.id.clone(),s);}
  let count=|s:&&Step|s.kind==StepKind::Usage && s.data["active"]!=false;
  let paged=client.values().filter(count).count();let fresh=History::new("codex-rollout","source","session").unwrap().steps(&path,u64::MAX).unwrap().steps.iter().filter(count).count();
- println!("TWO_TURN_USAGE paged={paged} fresh={fresh}");assert_eq!(paged,fresh,"an inactive revision for t2 cannot retire t1");assert_eq!(fresh,2);fs::remove_file(path).unwrap();
+ assert_eq!(paged,fresh,"an inactive revision for t2 cannot retire t1");assert_eq!(fresh,2);
+ let live=agent::runtime("codex").unwrap().history("session",None,Some(&path),None).unwrap().live_data(None).unwrap();assert_eq!(live.calls.len(),fresh);fs::remove_file(path).unwrap();
+ }
 }
 #[test]
 fn live_context_uses_reported_native_context() {
