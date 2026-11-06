@@ -168,6 +168,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
   AgentQ verifies the adapter’s pinned SHA-256 and dedicated Ed25519 signature on macOS and Windows; private keys stay outside the repository. This provides neither macOS signature checks nor TCC grants. Detail: [RUNTIME.md](docs/spec/RUNTIME.md#protected-app-server).
 - **M12.9** Callers reach runtimes only through the `agent::Runtime` trait and its `Descriptor` data ([specq agent runtimes](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md)). Per-runtime adapters own every Claude, Codex and Antigravity flag, file, environment, session format, quota and login source; client identity, native transports and native parsers are private.
   Registered protocol callbacks select native interpretation; shared code owns runtime-neutral process, record and recovery mechanics.
+  Consumer adoption follows the completed runtime contract; source API changes add no compatibility paths or consumer opt-outs.
   Read-only log events, background-job evidence, exhausted windows and account identity stay inside the adapters.
   Callers state needs in `Launch` and read typed events; the adapter chooses the transport ([one run path](docs/spec/RUNTIME.md#one-run-path)).
 - The registry is the sole catalog for runtime descriptors and aliases, native policy/login methods, configuration roots and files, setup edits, hook actions and profile inspection. Each native client owns one module; Desktop Chat has its own integration-only entry.

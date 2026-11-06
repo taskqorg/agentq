@@ -6,7 +6,7 @@
 
 - Add `Window.rejected: Option<bool>` for independent native rejection status; utilization never invents it. Claude unified-window siblings identify the top-level binding rejection. Old serialized windows read absent rejection as unknown. Exhaustive window constructors must add `rejected`.
 - `Report.detail` retains Claude terminal result subtypes and Codex failed-turn messages, preserving typed outcome/error and `Report.reached`.
-- Add `Runtime::account_limits_with_executable(home, executable, now)`; Codex uses the supplied executable with the same read-only credential guards as the existing method. The old method retains native lookup; other runtimes ignore this override. A default preserves third-party trait implementations.
+- Add `Runtime::account_limits_with_executable(home, executable, now)`; Codex uses the supplied executable with the same read-only credential guards as the existing method. The old method retains native lookup; other runtimes ignore this override. Consumer-defined `Runtime` implementations must implement this required method; no compatibility default discards the executable.
 - Add `History::with_native_session_alias` for caller-validated copied Claude jobs. The alias is explicit and checkpointed; records with any other session ID still fail, as do source replacement and prefix changes. Aliased events retain caller session and expose the original native session. No alias is inferred from filenames.
 - Native start-limit, terminal, call/usage and history parsers now live behind per-runtime protocol callbacks; shared report assembly interprets no native record types. No native flags, limits, admission policy or execution behavior change.
 

@@ -2,12 +2,16 @@
 
 Contract: [runtime](../spec/RUNTIME.md), supporting [TaskQ #2448](https://github.com/taskqorg/taskq/issues/2448) and the parser follow-up to [AgentQ #312](https://github.com/taskqorg/agentq/pull/312). Runtime version: 0.14.0.
 
-## API and compatibility
+## API and consumer changes
 
 - `Window.rejected` records native rejection independently of `exhausted`. A Claude named top-level rejection marks its unified binding window; siblings without their own explicit status read false. Missing status without binding evidence, Codex utilization and old serialized windows read unknown. `Report.reached` retains pre-work refusal/reset behavior.
 - `Report.detail` retains Claude terminal result subtypes and Codex failed-turn messages, including app-server failures. Typed errors, admission and terminal outcomes are unchanged. A terminal detail supersedes an earlier assistant failure detail without changing its typed error.
-- `account_limits_with_executable(home, executable, now)` uses the configured Codex executable with the existing credential-before/after guard. The old API keeps native lookup. Other runtime adapters ignore this override; third-party trait implementations retain a default delegating to their old read.
+- `account_limits_with_executable(home, executable, now)` uses the configured Codex executable with the existing credential-before/after guard. The old API keeps native lookup. Other native runtime adapters explicitly ignore this Codex-only override. Consumer-defined `Runtime` implementations must implement this required operation; there is no default silently delegating to the old read.
 - `History::with_native_session_alias(format, source, session, native_session)` explicitly binds one caller-validated Claude copy relationship before observation. Checkpoints retain that alias. Records naming the bound session or its alias are accepted; any third identity fails without advancing. Aliased records retain the caller session, expose the original `native_session`, and report `session_binding: "alias"`. Raw records and event IDs retain their source binding. Without the explicit alias, the same mismatch still fails. File replacement, truncation, prefix validation and forward/backward bounds are unchanged.
+
+Owner adoption rule: no live workers run during this refactor; consumers adopt the completed API at its end. No consumer compatibility paths or opt-outs are added.
+
+Consumers must implement `account_limits_with_executable` in custom runtime implementations, pass their configured Codex executable when reading account quotas, add `Window.rejected` to exhaustive constructors, and handle explicit history `session_binding: "alias"` when using a validated copied session. Missing native rejection remains unknown as part of the observation contract.
 
 The caller must validate the copy relationship, such as TaskQ's hand-in/job binding; neither filenames nor native history alone authorize job adoption, input, cancellation or completion. Exhaustive Rust `Window` constructors must add `rejected`; old serialized windows remain readable. History consumers must handle the new explicit `alias` binding value.
 

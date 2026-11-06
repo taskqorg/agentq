@@ -646,9 +646,7 @@ pub trait Runtime: Send + Sync {
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window>;
     fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window>;
     /// Read account quotas using the caller-configured native executable when supported.
-    fn account_limits_with_executable(&self, home: Option<&Path>, executable: Option<&Path>, now: i64) -> Vec<Window> {
-        let _=executable; self.account_limits(home,now)
-    }
+    fn account_limits_with_executable(&self, home: Option<&Path>, executable: Option<&Path>, now: i64) -> Vec<Window>;
     /// Native events from complete JSONL log records, without a run or native process.
     fn log_events(&self, log: &str) -> Vec<Event>;
     /// log_events per source record, with native time, assistant failure, lifecycle label and saved permission mode.
