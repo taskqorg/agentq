@@ -43,9 +43,10 @@ fn line(reader:&mut BufReader<UnixStream>,limit:usize)->Res<String> {
     if bytes.len()>limit||bytes.last()!=Some(&b'\n') {return Err("scope binding exceeds deadline/size or is incomplete".into());}
     String::from_utf8(bytes).map_err(|_|"invalid scope binding encoding".into())
 }
-fn accept(listener:&UnixListener,until:Instant)->Res<UnixStream> {
+pub(super) fn accept(listener:&UnixListener,until:Instant)->Res<UnixStream> {
     loop {match listener.accept() {
-        Ok((s,_))=>{socket_deadlines(&s)?;return Ok(s);},
+        // Darwin accept inherits O_NONBLOCK; deadlines bound the blocking stream (#266).
+        Ok((s,_))=>{s.set_nonblocking(false).map_err(|_|"scope transport mode unavailable")?;socket_deadlines(&s)?;return Ok(s);},
         Err(e) if e.kind()==io::ErrorKind::WouldBlock&&Instant::now()<until=>std::thread::sleep(Duration::from_millis(10)),
         Err(_)=>return Err("scope connection unknown; never repeat dispatch".into()),
     }}
@@ -108,7 +109,7 @@ pub(super) fn launch(install:&Path,home:&Path,r:&Request,key:&str)->Res<()> {
     errors.set_read_timeout(None).map_err(|_|"scope stderr stream unavailable")?;
     let stderr=std::thread::spawn(move||io::copy(&mut &errors,&mut io::stderr().lock()));
     output.get_ref().set_read_timeout(None).map_err(|_|"scope stdout stream unavailable")?;
-    io::copy(&mut output,&mut io::stdout().lock()).map_err(|_|"native stdout interrupted; retain scope")?;
+    io::copy(&mut output,&mut io::stdout().lock()).map_err(|e|{eprintln!("agentq: native stdout copy: {e}");"native stdout interrupted; retain scope"})?;
     stderr.join().map_err(|_|"native stderr interrupted")?.map_err(|_|"native stderr delivery unknown")?;
     let ended=record(install,r,key)?;
     if ended["native_ok"]==true {Ok(())}else{Err("native stream ended without a successful root outcome; reconcile original scope".into())}

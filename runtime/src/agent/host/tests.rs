@@ -211,3 +211,21 @@ fn protected_retained_lost_cleanup_ack_never_retries() {
     assert_eq!(outcome["state"],"unknown");assert_eq!(outcome["reason"],"retained cleanup unacknowledged; never repeat");
     assert_eq!(fs::read(f.root.join("operations.json")).unwrap(),before,"lost acknowledgment never rewrites receipt or consumes cleanup twice");
 }
+
+// #266: Darwin accept inherits O_NONBLOCK from the bounded listener, so an idle native stream ended the frontend with EAGAIN.
+// Risk: the frontend loses native stdout before initialize while the scope stays retained.
+#[cfg(target_os="macos")]
+#[test]
+fn protected_scope_stream_waits_for_idle_native_output() {
+    use std::{io::{Read,Write},os::unix::net::{UnixListener,UnixStream},time::{Duration,Instant}};
+    let root=Path::new("/tmp").join(format!("aq-{}",&random_id().unwrap()[..16]));fs::create_dir(&root).unwrap(); // Short path: SUN_LEN.
+    let listener=UnixListener::bind(root.join("io")).unwrap();listener.set_nonblocking(true).unwrap();
+    let mut peer=UnixStream::connect(root.join("io")).unwrap();
+    let mut stream=scope::accept(&listener,Instant::now()+Duration::from_secs(5)).unwrap();
+    stream.set_read_timeout(None).unwrap();
+    let writer=std::thread::spawn(move||{std::thread::sleep(Duration::from_millis(200));peer.write_all(b"native").unwrap();});
+    let mut bytes=Vec::new();
+    let copied=std::io::copy(&mut (&mut stream).take(6),&mut bytes);
+    writer.join().unwrap();fs::remove_dir_all(&root).unwrap();
+    assert_eq!(copied.map_err(|e|e.raw_os_error()),Ok(6));assert_eq!(bytes,b"native");
+}
