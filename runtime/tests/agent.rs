@@ -23,7 +23,6 @@ fn main() {
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") { return fake(&client); }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
-        ("probe_identity_exit_window", probe_identity_exit_window),
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("quota_account_read_guards_credentials", quota_account_read_guards_credentials),
         ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
@@ -74,34 +73,6 @@ fn main() {
         println!("test {name} ... ok");
     }
     println!("test result: ok. {} passed", selected.len());
-}
-
-// #274 temporary probe, removed before hand-in: can process identity read gone before try_wait sees the exit?
-fn probe_identity_exit_window() {
-    let (mut reaped,mut none,mut err,mut none_running,mut err_running,mut max_us)=(0u32,0u32,0u32,0u32,0u32,0u128);
-    let rounds=if cfg!(windows) {300} else {3000};
-    for _ in 0..rounds {
-        let mut c=if cfg!(windows) {let mut c=Command::new("cmd");c.args(["/c","exit"]);c} else {Command::new("/usr/bin/true")};
-        let mut c=c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
-        let id=c.id();
-        let seen=loop {
-            match coreq::process::identity(id) {
-                Ok(Some(_))=>if c.try_wait().unwrap().is_some() {break 0;},
-                Ok(None)=>break 1,
-                Err(_)=>break 2,
-            }
-        };
-        if seen==0 {reaped+=1;continue;}
-        let gone=Instant::now();
-        let first=c.try_wait().unwrap();
-        if seen==1 {none+=1;} else {err+=1;}
-        if first.is_none() {
-            if seen==1 {none_running+=1;} else {err_running+=1;}
-            while c.try_wait().unwrap().is_none() {}
-            max_us=max_us.max(gone.elapsed().as_micros());
-        }
-    }
-    println!("probe #274 {}: rounds={rounds} reaped_while_present={reaped} identity_none={none} identity_err={err} none_then_try_wait_running={none_running} err_then_try_wait_running={err_running} max_window_us={max_us}",std::env::consts::OS);
 }
 
 fn append(path:&Path, events:&[Value]) {
