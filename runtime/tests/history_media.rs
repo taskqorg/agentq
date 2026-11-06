@@ -17,7 +17,7 @@ fn inline_media_are_decoded_once_by_hash_and_nested_results_are_not_lost() {
         json!({"type":"user","sessionId":"session","message":{"content":[{"type":"image","source":{"type":"base64","data":"bad="}}]}})];
     source(&root,"claude",&rows);
     let session=agent::runtime("claude").unwrap().history("session",Some(&root),None,None).unwrap();let media=session.media().unwrap();
-    let images:Vec<_>=media.items.iter().filter(|m|m.kind==Some(MediaKind::Image) && m.sha256.is_some()).collect();assert_eq!(images.len(),3);
+    let images:Vec<_>=media.items.iter().filter(|m|m.kind==Some(MediaKind::Image) && m.sha256.is_some()).collect();assert_eq!(images.len(),3,"{:?}",media.items);
     assert!(images.iter().all(|m|m.sha256==images[0].sha256));
     assert_eq!(media.read(images[0].sha256.as_ref().unwrap(),1,3).unwrap(),b"PNG");
     assert!(media.read(images[0].sha256.as_ref().unwrap(),7,2).is_err());assert!(media.read("/not/referenced",0,1).is_err());

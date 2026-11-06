@@ -890,7 +890,7 @@ or missing reasons. Claude image/document and nested tool-result blocks, Codex
 input_image/local_image/ImageView/generated assets and Antigravity brain artifact
 references are supported. Codex generated_images/<native-session> and the selected
 Antigravity brain directory are additional native session sources. Structured tool/file-change path references are inspected;
-assistant prose and filename extensions never establish media. Video and audio
+Only recognized native media blocks and structured tool/file-result fields authorize references; JSON in assistant/user prose or arbitrary nested objects does not. Each physical source revision is inspected and linked to its logical step, so completion cannot discard earlier references. Implicit generated-asset discovery rejects symlinked roots and ancestors, and rechecks the anchored session directory on reads. Assistant prose and filename extensions never establish media. Video and audio
 classification requires a real file signature. URLs are retained without fetching.
 
 The catalog decodes inline base64 once per read, deduplicates backing bytes by hash,

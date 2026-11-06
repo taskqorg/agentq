@@ -63,3 +63,26 @@ setup. Fixture paths are now substituted as parsed values; nested quoted native 
 arguments are JSON-encoded once more and artifact URIs use the platform form. The
 native reader is unchanged by this fixture correction. Rebased main #309 also fixes
 the separate cleanup-exit provenance failure observed on macOS.
+
+## Source-authority review corrections
+
+Media discovery now traverses recognized native containers and tool-result fields;
+it does not decode assistant/user prose or arbitrary JSON subtrees into file
+references. Each contributing physical source revision is hash-checked from one
+validated native stream and decoded with its own logical step identity. An
+ImageView completion without a path therefore retains the started revision's
+reference and exact origin, without repeatedly reopening or hashing the transcript.
+
+Implicit generated-asset discovery anchors the selected native directory, refuses
+symlinked roots/ancestors, and rechecks that anchor before and after file hashing
+and range reads. Replacing a catalogued session directory with a symlink refuses
+rather than reading another session. Explicit native references still use the
+same content hash and full caller-selected byte ranges; URLs remain unfetched.
+
+Focused regressions reproduce the three review findings and additionally cover
+symlinked ancestors, replacement after catalog creation, text-shaped JSON and
+arbitrary nested objects. Eight media tests and 16 native event tests pass, plus
+offline selftest, workflow-pinned lint and diff check. Accounting's five focused
+regressions also pass after the stack rebase. No full local suite, paid/native turn
+or working configuration change was made; Windows/WSL, native audio/video playback,
+archive retention and viewer end-to-end behavior remain unproved.
