@@ -2,13 +2,14 @@
 
 ## 0.11.0
 
-- Add `Report.live_background` (also in the JSON turn report): one bounded description or fixed tool label per live Claude job, oldest first. Commands, arguments and task IDs stay inside the adapter. `Report.background_job` is true exactly when this list is not empty.
+- Add `Report.live_background` (also in the JSON turn report): one fixed `Bash` or `Monitor` label per live Claude job, oldest first. Descriptions, commands, arguments and task IDs stay inside the adapter. Equal labels remain separate entries. `Report.background_job` is true exactly when this list is not empty.
 - A tool-use record no longer counts as a live job. A job needs a non-error result naming its native task, in structured fields or in the text `with ID: <id>` or `(task <id>`. A foreground Bash call that the client moved to the background counts through its structured `backgroundTaskId`.
 - Terminal notifications now also close jobs from `queue-operation` content, `queued_command` attachments and `system` `task_notification` records, by task ID or tool-use ID. The statuses `error`, `timeout` and `expired` are terminal.
 - A TaskStop, KillShell or KillBash call now takes its job out of the live list before its result arrives; a failed result restores it. This intentionally changes the 0.9.0 behavior, where only a successful result closed the job.
 - A `system` `init` record clears earlier jobs. A caller that marks its own turns in the log passes only the records after its last marker.
 - Add `Runtime::log_records(log)`: `LogRecord { line, time, events }` per source record, with `RecordTime` separating absent, null, malformed and valid native time, and `RecordTime::observed(now)` adding future time against the caller's clock.
 - Add `Event::TurnStart`, `Event::Progress` and `Event::Unsupported { reason }`, and the `TurnEnd` outcome `unknown`. Consumers with exhaustive event matches must handle them. `Progress` appears only in `log_records`; a live stream keeps `Activity` for those records. `Activity` itself proves no progress.
+- Claude assistant text emits one `Message` per text block in native order with tool blocks. Repeated blocks remain deduplicated, and the aggregate final result remains suppressed. Log-only repeated or user text progress keeps block order too. Null, malformed or empty text and unknown Codex item or Antigravity step types prove no progress.
 - Codex rollout tool calls, their outputs, `message`, `reasoning`, `task_complete` and `turn_aborted`, Claude `turn_duration`, and the Antigravity tool state `FAILED` now produce typed events. `ToolStart.timeout_ms` also reads `timeout_seconds`, and treats zero as absent.
 
 `Report.outcome`, quotas, account identity, exec launch and resume, and protected app-server behavior are unchanged. Consumers implementing `Runtime` must implement `log_records`.

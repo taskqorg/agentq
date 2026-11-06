@@ -853,7 +853,7 @@ fn typed_log_reads_are_public() {
         json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"sleep 9","description":"Wait","run_in_background":true}}]}}),
         json!({"timestamp":"2026-11-06T00:00:00Z","type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"Command running in background with ID: j1."}]}}),
     ].map(|row| row.to_string()).join("\n");
-    assert_eq!(claude.classify(&log).live_background, ["Wait"]);
+    assert_eq!(claude.classify(&log).live_background, ["Bash"]);
     let records: Vec<agent::LogRecord> = claude.log_records(&log);
     assert_eq!(records[0].time, agent::RecordTime::Absent);
     assert_eq!(records[1].line, 1);

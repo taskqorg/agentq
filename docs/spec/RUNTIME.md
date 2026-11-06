@@ -123,18 +123,18 @@ The returned `Run` behaves the same in both forms: `poll`, `report`, `progress`,
 | `Event` | Meaning | Claude | Codex app-server | Codex `exec` |
 |---|---|---|---|---|
 | `Text { item, delta }` | Live text, only with `Launch.deltas` | `text_delta` partial record | `item/agentMessage/delta` | absent |
-| `Message { item, text }` | One complete assistant message | `assistant` text block | `item/completed` `agentMessage` | `item.completed` `agent_message` |
+| `Message { item, text }` | One complete assistant text block or native message | `assistant` text block, in native block order | `item/completed` `agentMessage` | `item.completed` `agent_message` |
 | `ToolStart { id, kind, name, detail, timeout_ms }` | A tool began | `assistant` `tool_use` | `item/started` tool item | `item.started` tool item, rollout `function_call` or `custom_tool_call` |
 | `ToolEnd { id, status }` | A tool ended | `user` `tool_result` | `item/completed` tool item | `item.completed` tool item, rollout `function_call_output` or `custom_tool_call_output` |
 | `Quota(Vec<Window>)` | Windows just reported | `rate_limit_event` | `account/rateLimits/updated` | rollout `token_count` |
 | `Context { used, window }` | Context use of the last model call | `assistant` usage and session window | `thread/tokenUsage/updated` | rollout `token_count` |
 | `TurnStart` | A turn boundary: pending tools and earlier progress no longer apply | `system` `init` | `turn/started` | `turn.started` |
-| `Progress` | `log_records` only: a supported record proved work advanced without a payload to report. A live stream keeps `Activity` for these records | `user` text block, repeated `assistant` text | `item/completed` non-tool item | `item.completed` non-tool item, rollout `message` or `reasoning` |
+| `Progress` | `log_records` only: a supported record proved work advanced without a payload to report. A live stream keeps `Activity` for these records | nonempty string `user` text block, repeated `assistant` text | `item/completed` known non-tool item | `item.completed` known non-tool item, rollout `message` or `reasoning` |
 | `Unsupported { reason }` | A record the adapter recognizes but cannot read; the observation stays unknown | none | `turn/completed` with an unknown status | none |
 | `TurnEnd { outcome }` | Native terminal evidence (`ok`, `failed`, `cancelled`, `refused` or `unknown`); never process or descendant completion | `result`; `system` `turn_duration` reads `unknown` | `turn/completed` | `turn.completed`, `turn.failed`, `turn.cancelled`, rollout `task_complete` and `turn_aborted` |
 | `Activity` | Any other native record, so inactivity watches stay correct; it proves no progress | every other record | every other notification | every other record |
 
-Antigravity maps `init` to `TurnStart`, a non-tool `step_update` in state `DONE` to `Progress` in `log_records`, and the other `step_update` and `result` records to the events they name. A tool step in an unknown state or a `result` with an unknown status reads `Unsupported`; everything else reads `Activity`. Native terminal records also emit `TurnEnd`; `poll` and `report` remain the run-completion authority. Antigravity sidecar tool-bearing planner records do not end a turn. Live app-server terminal events require the run's accepted native thread and turn IDs; a run-free reader describes the supplied records only. An unknown tool `kind` reads `Other`; known kinds are `Shell`, `Mcp` and `Web`.
+Antigravity maps `init` to `TurnStart`, a known non-tool `step_update` (`user_input`, `agent_response`, `system_message` or `checkpoint`) in state `DONE` to `Progress` in `log_records`, and the other `step_update` and `result` records to the events they name. A tool step in an unknown state or a `result` with an unknown status reads `Unsupported`; everything else reads `Activity`. Native terminal records also emit `TurnEnd`; `poll` and `report` remain the run-completion authority. Antigravity sidecar tool-bearing planner records do not end a turn. Live app-server terminal events require the run's accepted native thread and turn IDs; a run-free reader describes the supplied records only. An unknown tool `kind` reads `Other`; known kinds are `Shell`, `Mcp` and `Web`.
 
 `ToolStart.timeout_ms` reads `timeout_ms`, `timeoutMs`, `TimeoutMs` or `timeout` in milliseconds and `timeout_seconds` in seconds. A rollout call reads them from its `arguments` JSON and exports nothing else of it. Zero or an unreadable value is absent.
 
@@ -144,7 +144,7 @@ Consumers matching every `ToolStart` field must add `timeout_ms` or use `..`; ex
 
 App-server context notifications require a non-empty thread ID matching the run's owned native thread. Foreign or missing thread IDs yield activity only, without changing or invalidating context. Missing owned-thread measurements remain unknown. Exec rollout context comes only from the run's owned session file.
 
-Codex emits tool events only for native tool items. Compaction, non-tool items and unknown future item types remain `Activity`, on both exec and app-server paths.
+Codex emits tool events only for native tool items. Compaction, non-tool items and unknown future item types remain `Activity` in live events, on both exec and app-server paths. In `log_records`, completed `agentMessage`/`agent_message`, `userMessage`/`user_message`, `reasoning`, `plan`, `todo_list` and `contextCompaction`/`context_compaction` items can prove progress. Missing or unknown item types prove none.
 
 Antigravity sidecar tool calls and responses map to `ToolStart` and `ToolEnd`. Neither Antigravity source reports context capacity or quota events; these stay absent. Requesting live text through `Launch.deltas` is unsupported on Antigravity. Native `agy` text deltas without that request remain activity. No synthetic context or quota is emitted.
 
@@ -264,7 +264,7 @@ A rejected Claude `rate_limit_event` before work also returns `Report::reached`,
 - **End.** A terminal notification ends the job matching its task ID or tool-use ID, read from `queue-operation` content, `queued_command` attachments, `system` `task_notification` records and user text. Terminal statuses are `completed`, `failed`, `killed`, `stopped`, `cancelled`, `error`, `timeout` and `expired`. Notification-like text in tool output, prompt snapshots or request records closes nothing.
 - **Stop.** A TaskStop, KillShell or KillBash call naming a job takes it out of the live list at once, because a stopping job gives a caller nothing to continue. A failed stop result restores it; a successful one ends it.
 - **Turn boundary.** A `system` `init` record clears earlier jobs, because the list describes what the last turn left running. A caller that marks its own turns in the log passes only the records after its last marker.
-- **Label.** A label is the `description` input cut to 80 characters, or the fixed tool name `Bash` or `Monitor`. The tool name replaces a description that is empty, holds control characters, a URL or credential-like words, or overlaps the raw command. Commands, arguments and task IDs never appear.
+- **Label.** Each job uses the fixed tool name `Bash` or `Monitor` (A1). Descriptions are untrusted and may copy private argument fragments, so they stay inside the adapter with commands, arguments and task IDs. Equal labels still occupy separate list entries.
 
 ## Limit snapshot
 

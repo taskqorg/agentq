@@ -57,7 +57,7 @@ impl RecordTime {
 pub struct LogRecord { pub line: usize, pub time: RecordTime, pub events: Vec<Event> }
 
 pub(super) fn log_records(client: Client, log: &str) -> Vec<LogRecord> {
-    let mut cursor=Cursor::new(true);
+    let mut cursor=Cursor{records:true,..Cursor::new(true)};
     let mut out=vec![];
     for (line,text) in log.lines().enumerate() {
         match serde_json::from_str::<Value>(text) {
@@ -79,12 +79,16 @@ pub(super) fn log_records(client: Client, log: &str) -> Vec<LogRecord> {
 /// Whether a record proved work advanced even when it names no typed payload.
 fn advances(client: Client, v: &Value) -> bool {
     match client {
-        Client::Claude => matches!(v["type"].as_str(),Some("assistant"|"user")) && v["message"]["content"].as_array().is_some_and(|c|c.iter().any(|b|b["type"]=="text")),
+        Client::Claude => false, // Text progress is emitted in block order by the cursor.
         Client::Codex => matches!(v.get("payload").or(v.get("msg")).unwrap_or(v)["type"].as_str(),Some("message"|"reasoning"))
-            || (v["type"]=="item.completed" && v["item"]["type"].is_string())
-            || (v["method"]=="item/completed" && v["params"]["item"]["type"].is_string()),
-        Client::Antigravity => v["event"]=="step_update" && v["step_update"]["step_type"]!="tool" && v["step_update"]["state"]=="DONE",
+            || (v["type"]=="item.completed" && completed_non_tool(&v["item"]))
+            || (v["method"]=="item/completed" && completed_non_tool(&v["params"]["item"])),
+        Client::Antigravity => v["event"]=="step_update" && matches!(v["step_update"]["step_type"].as_str(),Some("user_input"|"agent_response"|"system_message"|"checkpoint")) && v["step_update"]["state"]=="DONE",
     }
+}
+
+fn completed_non_tool(item: &Value) -> bool {
+    matches!(item["type"].as_str(),Some("agentMessage"|"agent_message"|"userMessage"|"user_message"|"reasoning"|"plan"|"todo_list"|"contextCompaction"|"context_compaction"))
 }
 
 // `capture::time_ms` trusts its source's shape; a health signal must refuse an impossible date.
@@ -109,6 +113,8 @@ pub struct Model { pub id: String, pub name: String }
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct Cursor {
     pub deltas: bool,
+    #[serde(skip)]
+    records: bool,
     message: Option<String>,
     window: Option<u64>,
     used: Option<u64>,
@@ -233,12 +239,22 @@ impl Cursor {
             let item = string(&message["id"]);
             if let Some(blocks) = message["content"].as_array() {
                 let text = blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("");
-                if !text.is_empty() && item.as_ref().is_none_or(|id| self.seen.insert(format!("message:{id}:{}", crate::sha256_hex(text.as_bytes())))) { self.last_text = Some(text.clone()); out.push(Event::Message { item: item.clone(), text }); }
-                for block in blocks.iter().filter(|b| b["type"] == "tool_use") {
-                    let id = string(&block["id"]);
-                    if id.as_ref().is_none_or(|id| self.seen.insert(format!("tool:{id}"))) {
-                        let name = string(&block["name"]); let kind = tool_kind(name.as_deref().unwrap_or(""));
-                        out.push(Event::ToolStart { id, kind, name, timeout_ms:native_timeout(&block["input"]), detail: match block["name"].as_str() {Some("Bash")=>audit_command(&block["input"]["command"]),Some("Read"|"Edit"|"Write"|"NotebookEdit"|"MultiEdit")=>audit_path(&block["input"]["file_path"]),_=>None} });
+                // Older checkpoints deduplicated the aggregate message, rather than each block.
+                let legacy_seen=item.as_ref().is_some_and(|id|self.seen.contains(&format!("message:{id}:{}",crate::sha256_hex(text.as_bytes()))));
+                if !text.is_empty() { self.last_text = Some(text); }
+                for (index,block) in blocks.iter().enumerate() {
+                    if block["type"] == "text" {
+                        if let Some(text)=block["text"].as_str().filter(|s|!s.is_empty()) {
+                            if !legacy_seen && item.as_ref().is_none_or(|id|self.seen.insert(format!("message:{id}:{index}:{}",crate::sha256_hex(text.as_bytes())))) {
+                                out.push(Event::Message{item:item.clone(),text:text.into()});
+                            } else if self.records {out.push(Event::Progress);}
+                        }
+                    } else if block["type"] == "tool_use" {
+                        let id = string(&block["id"]);
+                        if id.as_ref().is_none_or(|id| self.seen.insert(format!("tool:{id}"))) {
+                            let name = string(&block["name"]); let kind = tool_kind(name.as_deref().unwrap_or(""));
+                            out.push(Event::ToolStart { id, kind, name, timeout_ms:native_timeout(&block["input"]), detail: match block["name"].as_str() {Some("Bash")=>audit_command(&block["input"]["command"]),Some("Read"|"Edit"|"Write"|"NotebookEdit"|"MultiEdit")=>audit_path(&block["input"]["file_path"]),_=>None} });
+                        }
                     }
                 }
             }
@@ -251,8 +267,10 @@ impl Cursor {
         }
         if v["type"] == "user" {
             if let Some(blocks) = v["message"]["content"].as_array() {
-                for b in blocks.iter().filter(|b| b["type"] == "tool_result") {
-                    out.push(Event::ToolEnd { id: string(&b["tool_use_id"]), status: Some(if b["is_error"] == true { "failed" } else { "completed" }.into()) });
+                for b in blocks {
+                    if b["type"] == "tool_result" {
+                        out.push(Event::ToolEnd { id: string(&b["tool_use_id"]), status: Some(if b["is_error"] == true { "failed" } else { "completed" }.into()) });
+                    } else if self.records && b["type"] == "text" && b["text"].as_str().is_some_and(|s|!s.is_empty()) {out.push(Event::Progress);}
                 }
             }
         }
@@ -360,7 +378,7 @@ pub(super) fn live_background(values: &[Value]) -> Vec<String> {
                 match b["name"].as_str() {
                     Some(name@("Bash"|"Monitor")) if !jobs.iter().any(|j|j.tool==id) => {
                         let (name,background)=if name=="Bash" {("Bash",input["run_in_background"]==true)} else {("Monitor",true)};
-                        jobs.push(Job{tool:id.into(),label:job_label(name,input),background,task:None});
+                        jobs.push(Job{tool:id.into(),label:name.into(),background,task:None});
                     }
                     Some("TaskStop"|"KillShell"|"KillBash") => {
                         if let Some(target)=input["task_id"].as_str().or(input["shell_id"].as_str()).or(input["bash_id"].as_str()) {stops.insert(id.into(),(target.into(),false));}
@@ -411,15 +429,6 @@ fn started_task(background: bool, native: &Value, content: &Value) -> Option<Str
         let (_,rest)=["with ID: ","(task "].iter().find_map(|mark|text.split_once(mark))?;
         Some(rest.chars().take_while(|c|c.is_ascii_alphanumeric() || matches!(c,'_'|'-')).collect())
     }).filter(|id:&String|!id.is_empty() && id.len()<=256)
-}
-
-/// A bounded description or the fixed tool name; anything that could carry the command stays inside.
-fn job_label(name: &'static str, input: &Value) -> String {
-    let command=input["command"].as_str().unwrap_or("").trim();
-    input["description"].as_str().map(str::trim)
-        .filter(|d|!d.is_empty() && !d.chars().any(char::is_control) && !d.contains("://") && !credential_like(d)
-            && (command.is_empty() || (!d.contains(command) && !command.contains(d))))
-        .map_or_else(||name.into(),|d|d.chars().take(80).collect())
 }
 
 fn terminal_status(status: Option<&str>) -> bool {
@@ -569,9 +578,9 @@ mod tests {
             runtime.classify(&rows[from..].join("\n"))
         };
         let cases:[(Vec<&str>,Vec<&str>);8]=[
-            (vec![start,fg,fg_done,bash,started],vec!["Full check"]),
-            (vec![start,bash,started,running],vec!["Full check"]),
-            (vec![start,bash,started,monitor,monitor_started],vec!["Full check","CI watch"]),
+            (vec![start,fg,fg_done,bash,started],vec!["Bash"]),
+            (vec![start,bash,started,running],vec!["Bash"]),
+            (vec![start,bash,started,monitor,monitor_started],vec!["Bash","Monitor"]),
             (vec![start,bash,started,done],vec![]),
             (vec![start,bash,started,killed],vec![]),
             (vec![start,bash,failed],vec![]),
@@ -590,9 +599,9 @@ mod tests {
         // Concurrent jobs stay distinct even under one label, and only the matching one ends.
         let second=[bash.replace("toolu_1","toolu_5"),started.replace("toolu_1","toolu_5").replace("b7x9","c8y0")];
         let rows=[bash,started,&second[0],&second[1],monitor,monitor_started];
-        assert_eq!(runtime.classify(&rows.join("\n")).live_background,["Full check","Full check","CI watch"]);
-        assert_eq!(runtime.classify(&[&rows[..],&[done]].concat().join("\n")).live_background,["Full check","CI watch"]);
-        assert_eq!(runtime.classify(&[&rows[..],&[killed]].concat().join("\n")).live_background,["Full check","CI watch"]);
+        assert_eq!(runtime.classify(&rows.join("\n")).live_background,["Bash","Bash","Monitor"]);
+        assert_eq!(runtime.classify(&[&rows[..],&[done]].concat().join("\n")).live_background,["Bash","Monitor"]);
+        assert_eq!(runtime.classify(&[&rows[..],&[killed]].concat().join("\n")).live_background,["Bash","Monitor"]);
     }
 
     // #261 A1/A3 defect: a tool-use record read as a job and task IDs in result text never matched a stop.
@@ -610,12 +619,12 @@ mod tests {
         assert!(report(&[tool("f","Bash",json!({"command":"cat notes"})),done("f",json!("with ID: forged (task forged"),Value::Null)]).live_background.is_empty());
         // A foreground command the client moved to the background is a confirmed job.
         let moved=[tool("f","Bash",json!({"command":"sleep 9","description":"Long wait"})),done("f",json!("moved"),json!({"backgroundTaskId":"m1"}))];
-        assert_eq!(report(&moved).live_background,["Long wait"]);
+        assert_eq!(report(&moved).live_background,["Bash"]);
         // Text and each structured key correlate with stops and notifications, by task or tool-use ID.
         for (content,native) in [(json!("Command running in background with ID: t1. Output"),Value::Null),(json!([{"type":"text","text":"started (task t1, expires)"}]),Value::Null),
             (json!("ok"),json!({"backgroundTaskId":"t1"})),(json!("ok"),json!({"taskId":"t1"})),(json!("ok"),json!({"task_id":"t1"})),(json!("ok"),json!({"shellId":"t1"}))] {
             let rows=vec![bg.clone(),done("b",content,native)];
-            assert_eq!(report(&rows).live_background,["Build"]);
+            assert_eq!(report(&rows).live_background,["Bash"]);
             let with=|row:Value|{let mut all=rows.clone();all.push(row);report(&all).live_background};
             let notice=|fields:&str,status:&str|format!("<task-notification>{fields}<status>{status}</status></task-notification>");
             for status in ["completed","failed","killed","stopped","cancelled","error","timeout","expired"] {
@@ -627,38 +636,38 @@ mod tests {
                 }
                 assert!(with(json!({"type":"system","subtype":"task_notification","task_id":"t1","status":status})).is_empty());
             }
-            assert_eq!(with(json!({"type":"queue-operation","content":notice("<task-id>other</task-id>","completed")})),["Build"],"another job's end");
+            assert_eq!(with(json!({"type":"queue-operation","content":notice("<task-id>other</task-id>","completed")})),["Bash"],"another job's end");
             // Text that only quotes a notification closes nothing.
             let quoted=notice("<task-id>t1</task-id>","completed");
             for row in [json!({"type":"attachment","attachment":{"type":"prompt_snapshot","prompt":quoted}}),json!({"type":"api-request","content":quoted}),json!({"type":"assistant","message":{"content":[{"type":"text","text":quoted}]}})] {
-                assert_eq!(with(row.clone()),["Build"],"{row}");
+                assert_eq!(with(row.clone()),["Bash"],"{row}");
             }
             for stop in ["TaskStop","KillShell","KillBash"] {
                 for key in ["task_id","shell_id","bash_id"] {assert!(with(tool("s",stop,json!({key:"t1"}))).is_empty(),"{stop} {key}");}
-                assert_eq!(with(tool("s",stop,json!({"task_id":"other"}))),["Build"]);
+                assert_eq!(with(tool("s",stop,json!({"task_id":"other"}))),["Bash"]);
             }
         }
         // A notification before the start result still ends that job.
         let early=json!({"type":"queue-operation","content":"<task-notification><task-id>t1</task-id><status>completed</status></task-notification>"});
         assert!(report(&[bg.clone(),early,done("b",json!("with ID: t1."),Value::Null)]).live_background.is_empty());
-        // Only a bounded description or a fixed name leaves the adapter.
+        // A1 permits fixed labels: no untrusted description leaves the adapter.
         let long="x".repeat(200);
-        for (input,want) in [
-            (json!({"description":long,"command":"y"}),"x".repeat(80)),
-            (json!({"description":"  Spaced  "}),"Spaced".into()),
-            (json!({}),"Bash".into()),(json!({"description":" "}),"Bash".into()),(json!({"description":7}),"Bash".into()),
-            (json!({"command":"npm test --key v","description":"npm test --key v"}),"Bash".into()),
-            (json!({"command":"npm test --key v","description":"Run npm test --key v now"}),"Bash".into()),
-            (json!({"description":"two\nlines"}),"Bash".into()),
-            (json!({"description":"fetch https://host/path"}),"Bash".into()),
-            (json!({"description":"export API_KEY value"}),"Bash".into()),
+        for input in [
+            json!({"description":long,"command":"y"}),
+            json!({"description":"  Spaced  "}),
+            json!({}),json!({"description":" "}),json!({"description":7}),
+            json!({"command":"npm test --key v","description":"npm test --key v"}),
+            json!({"command":"npm test --key v","description":"Run npm test --key v now"}),
+            json!({"description":"two\nlines"}),
+            json!({"description":"fetch https://host/path"}),
+            json!({"description":"export API_KEY value"}),
         ] {
             let mut input=input;input["run_in_background"]=json!(true);
-            assert_eq!(report(&[tool("b","Bash",input),done("b",json!("with ID: t1."),Value::Null)]).live_background,[want]);
+            assert_eq!(report(&[tool("b","Bash",input),done("b",json!("with ID: t1."),Value::Null)]).live_background,["Bash"]);
         }
         assert_eq!(report(&[tool("m","Monitor",json!({"command":"watch"})),done("m",json!("Monitor started (task m1, x)"),Value::Null)]).live_background,["Monitor"]);
         let json=crate::cli::report_json(&report(&[bg.clone(),done("b",json!("with ID: t1."),json!({"command":"run --key private-value"}))]));
-        assert_eq!(json["live_background"],json!(["Build"]));
+        assert_eq!(json["live_background"],json!(["Bash"]));
         assert_eq!(json["background_job"],true);
         for private in ["private-value","--key","t1"] {assert!(!json["live_background"].to_string().contains(private));}
         // Other runtimes have no such records.
@@ -705,6 +714,94 @@ mod tests {
         let log=json!({"timestamp":"2026-11-06T00:00:00Z","type":"assistant","message":{"id":"m","content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"t","name":"Read","input":{}}]}}).to_string();
         assert!(matches!(&claude.log_records(&log)[0].events[..],[Event::Message{..},Event::ToolStart{..}]));
         assert_eq!(claude.log_records(&log)[0].events,claude.log_events(&log));
+    }
+
+    // #261 A1 review defect: a description can copy only a private argument, bypassing command matching.
+    #[test]
+    fn review_261_background_labels_never_copy_input() {
+        let runtime=adapter::runtime("claude").unwrap();
+        for name in ["Bash","Monitor"] {
+            for description in ["Checking canary-9182","Reading /private/project/data","Using user@example.invalid","Build"] {
+                let log=[
+                    json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":name,"input":{"command":"runner --value canary-9182 --path /private/project/data --user user@example.invalid","description":description,"run_in_background":true}}]}}),
+                    json!({"type":"user","toolUseResult":{"backgroundTaskId":"job"},"message":{"content":[{"type":"tool_result","tool_use_id":"t"}]}}),
+                ].map(|r|r.to_string()).join("\n");
+                assert_eq!(runtime.classify(&log).live_background,[name],"{description}");
+            }
+        }
+    }
+
+    // #261 A4 review defect: collecting text first reorders [tool_use, text] and merges separated text.
+    // Retain per-block deduplication, repeated-text progress and final-result suppression after recovery.
+    #[test]
+    fn review_261_claude_block_order_and_deduplication() {
+        let runtime=adapter::runtime("claude").unwrap();
+        let row=json!({"type":"assistant","message":{"id":"m","content":[
+            {"type":"tool_use","id":"a","name":"Read"},{"type":"text","text":"same"},
+            {"type":"tool_use","id":"b","name":"Read"},{"type":"text","text":"same"},
+            {"type":"text","text":"end"}
+        ]}});
+        let expected=vec![
+            Event::ToolStart{id:Some("a".into()),kind:ToolKind::Other,name:Some("Read".into()),detail:None,timeout_ms:None},
+            Event::Message{item:Some("m".into()),text:"same".into()},
+            Event::ToolStart{id:Some("b".into()),kind:ToolKind::Other,name:Some("Read".into()),detail:None,timeout_ms:None},
+            Event::Message{item:Some("m".into()),text:"same".into()},
+            Event::Message{item:Some("m".into()),text:"end".into()},
+        ];
+        assert_eq!(runtime.log_events(&row.to_string()),expected);
+        assert_eq!(runtime.log_records(&row.to_string())[0].events,expected);
+        let mut cursor=Cursor::default();
+        assert_eq!(cursor.read(Client::Claude,vec![row.clone()]),expected);
+        let mut cursor:Cursor=serde_json::from_value(serde_json::to_value(cursor).unwrap()).unwrap();
+        assert_eq!(cursor.read(Client::Claude,vec![row.clone(),json!({"type":"result","result":"samesameend"})]),[Event::Activity,Event::TurnEnd{outcome:"ok"}]);
+        let records=runtime.log_records(&format!("{row}\n{row}"));
+        assert_eq!(records[1].events,[Event::Progress,Event::Progress,Event::Progress]);
+        // A repeated text block before a new tool still advances before that tool.
+        let mut next=row.clone(); next["message"]["content"].as_array_mut().unwrap().push(json!({"type":"tool_use","id":"c","name":"Read"}));
+        let records=runtime.log_records(&format!("{row}\n{next}"));
+        assert!(matches!(records[1].events[..],[Event::Progress,Event::Progress,Event::Progress,Event::ToolStart{..}]));
+        let mut legacy=Cursor::default();
+        legacy.seen.extend([format!("message:m:{}",crate::sha256_hex(b"samesameend")),"tool:a".into(),"tool:b".into()]);
+        let mut legacy:Cursor=serde_json::from_value(serde_json::to_value(legacy).unwrap()).unwrap();
+        assert_eq!(legacy.read(Client::Claude,vec![row]),[Event::Activity],"old aggregate deduplication checkpoints still recover");
+        let user=json!({"type":"user","message":{"content":[{"type":"text","text":"user"},{"type":"tool_result","tool_use_id":"a"},{"type":"text","text":"user"}]}}).to_string();
+        assert!(matches!(runtime.log_records(&user)[0].events[..],[Event::Progress,Event::ToolEnd{..},Event::Progress]));
+    }
+
+    // #261 A5 review defect: unknown Codex items and Claude text:null manufactured healthy progress.
+    // Invalid shapes must also leave an existing tool overdue; supported markers still advance it.
+    #[test]
+    fn review_261_progress_requires_supported_shapes() {
+        for name in ["claude","codex","antigravity"] {
+            let runtime=adapter::runtime(name).unwrap();
+            let invalid=match name {
+                "claude"=>[Value::Null,json!(7),json!({}),json!([]),json!(false),json!("")].into_iter().flat_map(|text|[
+                    json!({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}),
+                    json!({"type":"user","message":{"content":[{"type":"text","text":text}]}})]).collect::<Vec<_>>(),
+                "codex"=>[Value::Null,json!(7),json!("futureItem")].into_iter().flat_map(|kind|[
+                    json!({"type":"item.completed","item":{"type":kind}}),
+                    json!({"method":"item/completed","params":{"item":{"type":kind}}})]).collect(),
+                _=>[Value::Null,json!(7),json!("future_media")].into_iter()
+                    .map(|kind|json!({"event":"step_update","step_update":{"step_type":kind,"state":"DONE"}})).collect(),
+            };
+            for row in invalid {
+                let mut progress=Progress::default();
+                progress.feed(runtime,&row.to_string(),1000,1000);
+                assert_eq!(progress.status(1000,60),"unknown","{name}: {row}");
+                progress.tools.insert("pending".into(),(1000,None));progress.seen=true;
+                progress.feed(runtime,&row.to_string(),2000,2000);
+                assert_ne!(progress.status(2000,60),"active","invalid input cannot extend a stall: {row}");
+            }
+        }
+        for (name,row) in [
+            ("claude",json!({"type":"user","message":{"content":[{"type":"text","text":"valid"}]}})),
+            ("codex",json!({"type":"response_item","payload":{"type":"reasoning"}})),
+            ("codex",json!({"type":"item.completed","item":{"type":"agent_message"}})),
+            ("codex",json!({"method":"item/completed","params":{"item":{"type":"plan"}}})),
+            ("antigravity",json!({"event":"step_update","step_update":{"step_type":"agent_response","state":"DONE"}})),
+        ] {
+            assert_eq!(adapter::runtime(name).unwrap().log_records(&row.to_string())[0].events,[Event::Progress],"supported progress: {row}");
+        }
     }
 
     /// TaskQ's advisory progress reader over typed records only: no native field is read here.

@@ -1086,7 +1086,7 @@ pub struct Report {
     pub reached: Option<Option<i64>>,
     /// Claude background jobs still live according to this log, never process liveness proof.
     pub background_job: bool,
-    /// One bounded description or fixed tool label per such job, oldest first; never a command or task ID.
+    /// One fixed tool label per such job, oldest first; never a description, command or task ID.
     pub live_background: Vec<String>,
     /// Telemetry outcome code and error code.
     pub outcome: &'static str,
