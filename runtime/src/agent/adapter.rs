@@ -24,6 +24,9 @@ pub struct Descriptor {
 
 impl Descriptor {
     pub fn has(&self, capability: &str) -> bool { self.capabilities.contains(&capability) }
+    pub fn history_resume(&self, session: &str, process: State) -> Res<Vec<String>> {
+        super::history::sessions::resume(self.name, session, process)
+    }
 }
 
 /// Filesystem scope of a policy part; `Native` keeps the runtime's own default.
@@ -624,6 +627,12 @@ fn input_items(descriptor: &Descriptor, parts: &[Part]) -> Result<Value, Failure
 /// The one trait every runtime adapter implements (specq agent-runtimes § Runtime trait).
 pub trait Runtime: Send + Sync {
     fn descriptor(&self) -> &Descriptor;
+    fn history_sessions(&self, home: Option<&Path>) -> Res<Vec<super::history::sessions::Source>> {
+        super::history::sessions::list(self.descriptor().name, home)
+    }
+    fn history(&self, session: &str, home: Option<&Path>, source: Option<&Path>, checkpoint: Option<&Value>) -> Res<super::history::sessions::Session> {
+        super::history::sessions::open(self.descriptor().name, session, home, source, checkpoint)
+    }
     fn launch(&self, launch: &Launch) -> Res<Run>;
     fn resume(&self, session: &str, launch: &Launch) -> Res<Run>;
     /// Start the next turn of a session run with exactly `parts`, once; see `Failure` for refusals.
@@ -1319,6 +1328,7 @@ mod tests {
             let quotas=concat!(r#"{"type":"rate_limit_event","rate_limit_info":{"rateLimitType":"five_hour","utilization":0.5,"resetsAt":9999999999}}"#,"\n",
                 r#"{"type":"event_msg","payload":{"rate_limits":{"primary":{"used_percent":50,"window_minutes":300,"resets_at":9999999999}}}}"#);
             probes.insert("quota-snapshot",runtime.log_limits(quotas,None,Some(&root)).iter().any(|w|w.used.is_some()));
+            probes.insert("history",runtime.history_sessions(Some(&root.join("empty-history"))).is_ok());
             // Empty PATH and an isolated home avoid live clients and account credentials.
             let windows=registry::with_test_path(&root,||runtime.account_limits(Some(&root),0));
             probes.insert("account-limits",!windows.is_empty() && windows.iter().all(|w|w.unknown.as_deref().is_none_or(|s|!s.contains("unsupported"))));

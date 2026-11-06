@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 static ADAPTER: Adapter = Adapter {client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
-        capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
+        capabilities: &["history", "turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
             "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } , ops: NativeOps {catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:background_launch,background_jobs:background_jobs,background_job:BackgroundJob::read,background_stop:background_stop,background_id:background_job_id,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"CLAUDE_CONFIG_DIR",alternate_home_var:None,session_var:"CLAUDE_CODE_SESSION_ID",home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, protected, refusal, transcript, background_transcript, link, session_link } };
 
 pub(super) const ENTRY: Entry = Entry { name:"claude", aliases:&[], order:1, profile_order:1, worker_order:0, onboard:true,
