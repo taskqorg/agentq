@@ -302,6 +302,7 @@ impl Drop for Live { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst);
 
 /// One running or finished run. Opaque: operate on it through its `Runtime`.
 pub struct Run {
+    stop_id: String,
     runtime: &'static str,
     body: Body,
     optimization: Optimization,
@@ -340,7 +341,19 @@ struct Native {
 }
 
 impl Run {
+    pub(crate) fn stop_facts(&mut self) -> Res<super::history::stop::Facts> {
+        use super::history::stop::Facts;
+        Ok(match &mut self.body {
+            Body::Turn(t) => Facts {run:self.stop_id.clone(),format:protocol(t.client).stream_history,path:t.log.clone(),start:t.start,exited:Some(t.has_exited()),native_end:t.ended,exit:if t.exit_unknown {None}else{t.exit},lost_owner:t.exit_unknown && !(t.ended && t.stopping)},
+            Body::Native(n) => Facts {run:self.stop_id.clone(),format:protocol(n.spec.client).native_history,path:n.turn.path().into(),start:0,exited:None,native_end:n.report.is_some(),exit:None,lost_owner:false},
+            Body::App(a) => {
+                let exit=if a.owned {a.transport.as_mut().map(Transport::exit).transpose()?.flatten()}else{None};
+                Facts {run:self.stop_id.clone(),format:"codex-app-server",path:PathBuf::new(),start:0,exited:if a.owned {Some(exit.is_some())}else{None},native_end:a.session.report().is_some(),exit,lost_owner:a.closed.is_some() && exit.is_none()}
+            },
+        })
+    }
     fn restored(mut self, saved: &Value) -> Res<Self> {
+        self.stop_id=saved["stop_id"].as_str().filter(|s|native::plain_id(s)).ok_or("run stop identity invalid")?.into();
         if let Some(value)=saved.get("readiness") {self.readiness=serde_json::from_value(value.clone()).map_err(|_|"run readiness checkpoint invalid")?;}
         if let Some(frozen)=saved.get("frozen") { self.frozen=Some(super::Frozen::restore(frozen)?); }
         if let Some(progress)=saved.get("progress") { self.progress=progress.as_u64().ok_or("run progress checkpoint invalid")?; }
@@ -650,6 +663,7 @@ fn input_items(descriptor: &Descriptor, parts: &[Part]) -> Result<Value, Failure
 /// The one trait every runtime adapter implements (specq agent-runtimes § Runtime trait).
 pub trait Runtime: Send + Sync {
     fn descriptor(&self) -> &Descriptor;
+    fn stop_event(&self, _run: &mut Run, _bytes: u64) -> Res<Option<super::history::stop::StopEvent>> { Err("stop observation unsupported by this runtime".into()) }
     fn history_sessions(&self, home: Option<&Path>) -> Res<Vec<super::history::sessions::Source>> {
         super::history::sessions::list(self.descriptor().name, home)
     }
@@ -895,7 +909,7 @@ impl Adapter {
 
     fn run(&'static self, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
         self.live.fetch_add(1, Ordering::SeqCst);
-        Run { runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
+        Run { stop_id: crate::incident::uuid(), runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
             remote: l.title.is_some(), readiness: Readiness::default(), starting: Instant::now() }
     }
 
@@ -962,6 +976,9 @@ impl Adapter {
 }
 
 impl Runtime for Adapter {
+    fn stop_event(&self, run: &mut Run, bytes: u64) -> Res<Option<super::history::stop::StopEvent>> {
+        super::history::stop::observe(self, run, bytes)
+    }
     fn descriptor(&self) -> &Descriptor { &self.descriptor }
 
     fn preflight(&self, launch: &Launch, repair: &Repair) -> Readiness { preflight::check(self, launch, repair) }
@@ -1175,6 +1192,7 @@ impl Runtime for Adapter {
             Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
                 "session": n.turn.session(), "resume": n.spec.resume, "job": n.job_id, "attached": n.attached, "fault": n.fault})),
         }?;
+        saved["stop_id"]=json!(run.stop_id);
         saved["readiness"]=json!(run.readiness);
         saved["progress"]=json!(run.progress); saved["events"]=json!(run.events); saved["rollout_progress"]=json!(run.rollout_progress);
         if let Some(frozen)=&run.frozen { saved["frozen"]=frozen.save(); }

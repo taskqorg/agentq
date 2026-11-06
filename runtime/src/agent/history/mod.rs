@@ -2,6 +2,7 @@
 use super::{Res, native};
 mod steps;
 pub mod sessions;
+pub mod stop;
 pub use steps::{Step, StepKind, StepPage, Turn};
 use serde_json::{Value, json};
 use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
@@ -117,6 +118,7 @@ impl History {
             if row.len() > BUDGET { return Err("history record exceeds 16 MiB".into()); }
             if !row.ends_with(b"\n") || consumed + row.len() > BUDGET { break; }
             let raw = std::str::from_utf8(row).map_err(|_| "history invalid UTF-8")?;
+            if raw.trim().is_empty() {consumed+=row.len();continue;}
             let v: Value = serde_json::from_str(raw).map_err(|_| "history invalid JSON")?;
             if !v.is_object() { return Err("history invalid record".into()); }
             events.push(self.event(&v, raw, self.offset + consumed as u64)?);
@@ -153,13 +155,14 @@ impl History {
             if row.len() > BUDGET { return Err("history record exceeds 16 MiB".into()); }
             if used + row.len() > BUDGET { break; }
             let raw = std::str::from_utf8(row).map_err(|_| "history invalid UTF-8")?;
+            if raw.trim().is_empty() {used+=row.len();end=row_start;continue;}
             let v: Value = serde_json::from_str(raw).map_err(|_| "history invalid JSON")?;
             if !v.is_object() { return Err("history invalid record".into()); }
             events.push(self.event(&v, raw, start + row_start as u64)?);
             used += row.len();
             end = row_start;
         }
-        if (events.is_empty() && pending_bytes == 0 && bound > 0) || pending_bytes > BUDGET {
+        if (used == 0 && pending_bytes == 0 && bound > 0) || pending_bytes > BUDGET {
             return Err("history record exceeds 16 MiB".into());
         }
         // Skip only the incomplete EOF tail; never start inside a complete record.

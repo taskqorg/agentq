@@ -28,7 +28,7 @@ fn read_calls(values:&[Value])->(Vec<Call>,Option<u64>,bool) {
     let Some(v)=values.iter().rev().find(|v|is_end(v)) else {return (vec![],None,false);};
     (vec![Call {id:None,at_ms:None,input:v["input_tokens"].as_u64(),output:v["output_tokens"].as_u64(),cache_read:None,cache_write:None,reasoning:None,model:None,outcome:"ok",error:"none",aggregate:false}],Some(1),true)
 }
-static PROTOCOL: Protocol=Protocol {history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},
+static PROTOCOL: Protocol=Protocol {stream_history:"example-native",native_history:"example-native",history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},
     history_formats:&["example-native"],history_session:|_,_,raw|session(raw),history_normalize:|_,_|("unknown","unknown",Value::Null,vec![],"unsupported-source-shape"),history_validity:|_|json!({"status":"unknown","reason":"envelope-validation-unsupported"}),
     ends:is_end,start_limit:|_|None,read_calls,final_text:|_|None,
     turn_ended:|ended,v|ended || is_end(v),
@@ -46,6 +46,7 @@ static PROTOCOL: Protocol=Protocol {history_alias:false,history_provenance:|_,_,
 fn scripted_cli() {
     if std::env::var_os("AGENTQ_EXAMPLE_CLI").is_none() {return;}
     let mut text=String::new();std::io::stdin().read_to_string(&mut text).unwrap();
+    if std::env::var_os("AGENTQ_EXAMPLE_STOP").is_some() {println!("{}",json!({"example_event":"working","example_session":"example-session"}));return;}
     println!("\n{}",json!({"example_event":"done","example_session":"example-session","answer":text,"input_tokens":2,"output_tokens":3}));
 }
 
@@ -69,6 +70,13 @@ fn one_module_launches_resumes_and_reads_its_own_protocol() {
     while runtime.poll(&mut resumed).unwrap()==State::Running {std::thread::yield_now();}
     assert_eq!(runtime.report(&resumed).unwrap().text.as_deref(),Some("second"));
     assert_eq!(runtime.session_id(&resumed).as_deref(),Some("example-session"));
+    launch.log=root.join("stop.log");launch.env.push(("AGENTQ_EXAMPLE_STOP".into(),"1".into()));
+    let mut stopped=runtime.launch(&launch).unwrap();
+    while runtime.poll(&mut stopped).unwrap()==State::Running {std::thread::yield_now();}
+    let stop=runtime.stop_event(&mut stopped,u64::MAX).unwrap().unwrap();
+    assert_eq!(stop.cause,crate::agent::history::stop::StopCause::ExitWithoutTurnEnd);
+    assert!(stop.activity_unknown.as_deref().is_none_or(|reason|!reason.contains("unsupported")),"registered history format reaches the shared reader");
+    assert_eq!(stopped.stop_facts().unwrap().format,"example-native");
     std::fs::remove_dir_all(root).unwrap();
 }
 
