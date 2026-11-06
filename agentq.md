@@ -199,7 +199,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M12.15** A worker gets its input only after preflight: client, account, capacity, workspace, permissions, inputs and storage are checked, in that order, with no model call. A blocked check refuses before spawn with a named cause and next step; no tokens are spent and no work starts half ready.
   Unknown continues by default and stays visible, because a failed probe alone must not stop work; a caller may choose strict. A failure of AgentQ's optional parts (hooks, telemetry, archive) degrades evidence, never blocks work (P1). Target: #284. [Detail](docs/spec/RUNTIME.md#worker-preflight).
 - **M12.16** Preparation fixes only what it owns, on explicit request, outside `launch`: exact-path client trust and AgentQ's own hook trust, under the client's lock and journaled. M12.6 holds for `launch` itself. It never changes login, account, model, permissions, provider, foreign hooks, or trust for a home or root folder.
-- **M12.17** A worker never silently waits for a person: the child has no interactive prompt path, and a run reads started only on native proof of a session. No proof inside the start window ends it with a named cause through identity-safe stop. Input already written is never resubmitted.
+- **M12.17** A worker never silently waits for a person: the child has no interactive prompt path, and a run reads started only on native proof of a session; until then it reads starting, visibly. A native refusal ends it with a named cause. Input already written is never resubmitted.
 - Binding [runtime operation, observation, native lookup, benchmarks and adoption](docs/spec/RUNTIME.md#runtime-operation-and-adoption).
 
 ## Linked detail

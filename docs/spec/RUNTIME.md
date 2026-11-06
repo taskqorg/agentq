@@ -234,7 +234,7 @@ Binding detail of M12.15–M12.17 and PRODUCT R14. Target of [#284](https://gith
 
 | Order | Check | Passes when | Blocked cause |
 |---|---|---|---|
-| 1 | Client | Executable resolves and version meets the descriptor `minimum`; the version is cached by binary identity (real path, size, modified time), so a self-update invalidates it | `client-missing`, `client-outdated` |
+| 1 | Client | Executable resolves and version meets the descriptor `minimum` | `client-missing`, `client-outdated` |
 | 2 | Account | The requested home exists and belongs to this account; native login status reads ok. There is never a fallback to another account | `account-home-missing`, `login-required` |
 | 3 | Capacity | `quota` picks an account, or the caller set no accounts | `quota-exhausted`, with the hold end |
 | 4 | Workspace | Root is an existing folder; writable when `Policy` needs writes; native client trust covers the exact path | `workspace-missing`, `workspace-unwritable`, `workspace-untrusted` |
@@ -247,7 +247,7 @@ Binding detail of M12.15–M12.17 and PRODUCT R14. Target of [#284](https://gith
 
 | State | Meaning | Launch |
 |---|---|---|
-| `ok` | Verified by a native read just now, or within the reuse window | Continues |
+| `ok` | Verified by a native read in this preflight | Continues |
 | `repaired` | Failed, then fixed by an M12.16 repair and verified again | Continues |
 | `degraded` | Work is possible; some evidence or optional behavior is lost | Continues; visible in the report |
 | `unknown` | The check could not read an answer, for example a probe timeout or a client with no status command | Continues by default; refuses when the caller set `Launch.readiness` to `strict` |
@@ -255,17 +255,15 @@ Binding detail of M12.15–M12.17 and PRODUCT R14. Target of [#284](https://gith
 
 A `Readiness` is part of the run's report, and its states and cause codes join `agent.turn` as metadata. Native detail stays local (M6.2). `ok` is never inferred from a missing check.
 
-### Bounds
+### Cost
 
-- Preflight makes no model call and costs no tokens. Each native probe keeps its existing limit (`--version` 5 s, login 10 s); the whole preflight has a 30 s budget, and an expired check reads `unknown`.
-- A passing check may be reused for 60 s for the same binary identity, home and root. A `blocked` or `unknown` result is never reused, so a fixed problem clears on the next launch.
-- A check is read-only unless `Repair` allows it. Concurrent preflights of one home are safe.
+Preflight makes no model call and costs no tokens. It adds no new timeout, cache or budget: each check runs once per launch, and native probes keep their existing limits (`--version` 5 s, login 10 s). A probe that ends without an answer reads `unknown`. A check is read-only unless `Repair` allows it. Limits and caches join only when telemetry shows a real problem.
 
 ### Repair
 
 `Repair` lists what the caller authorizes; the default is none. Allowed repairs:
 
-- Exact-path client trust: Claude `hasTrustDialogAccepted`, Codex project `trust_level`. Written under the client's own lock with a deadline, keeping unrelated keys. Never for a home folder or a filesystem root.
+- Exact-path client trust: Claude `hasTrustDialogAccepted`, Codex project `trust_level`. Written under the client's own lock, keeping unrelated keys. Never for a home folder or a filesystem root.
 - AgentQ's own hook trust: the hash comes from the client's own hook listing; a computed hash is only a fallback. Foreign hooks are never trusted. `--dangerously-bypass-hook-trust` is used only for an AgentQ-owned isolated home.
 
 Each repair is journaled before the write, verified by reading back, and restored by uninstall (§ 9). Login, account choice, model, permissions and provider are outside repair. Login belongs to the explicit owner-started flow of [#286](https://github.com/taskqorg/agentq/issues/286).
@@ -274,7 +272,7 @@ Each repair is journaled before the write, verified by reading back, and restore
 
 - The child gets no prompt path: no terminal on stdin unless the launch owns one, a non-interactive Git credential guard, and approvals that follow `Policy`. A request that needs an answer reaches the caller as a typed step, never a hidden wait.
 - The child environment drops inherited auth and session variables that do not belong to its account; secrets go in `Launch.env`, never in argv.
-- A run reads `started` only on native proof of a session: a session ID, or the first native record. `Launch.start_window` defaults to 120 s. Without proof the run ends with the `launch_refusal` cause or `start-timeout`, through identity-safe stop.
+- A run reads `starting` until native proof of a session: a session ID, or the first native record. Then it reads `started`. A native refusal ends it with its `launch_refusal` cause. `starting` and its age stay visible, and the caller may cancel through identity-safe stop.
 - After input is written, nothing resubmits it. Inactivity after start is the stall signal of [#287](https://github.com/taskqorg/agentq/issues/287).
 
 ### Native evidence

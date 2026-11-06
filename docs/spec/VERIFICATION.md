@@ -16,7 +16,7 @@ Candidate execution, 2026-10-17: [gate, artifact boundaries and remaining qualif
 | A4 | Tool/proxy/exporter unavailable, duplicate delivery or full storage → work preserved or direct access restored; no double count; truthful backlog/incident | R4, R8–R10 |
 | A5 | Dry-run → uninstall → native client access; only owned components removed, reused tools/later edits preserved; repeat no-op | R7 |
 | A6 | Two owners/profiles/runtimes → correlated usage/health → dashboard and agent query agree; members cannot read another owner's data | R1, R9–R10 |
-| A7 | One real launch per runtime for each failure: no client, old client, no login, exhausted quota, untrusted folder, missing root, unenforceable policy, unwritable log → refused before spawn with its cause and no tokens; repair → same launch runs; hook loss or telemetry outage → work completes, degraded visible; client waiting for input → named start or stall cause, no hang | R13, R14 |
+| A7 | One real launch per runtime for each failure: no client, old client, no login, exhausted quota, untrusted folder, missing root, unenforceable policy, unwritable log → refused before spawn with its cause and no tokens; repair → same launch runs; hook loss or telemetry outage → work completes, degraded visible; client waiting for input → visible starting or stall state with its age, cancellable | R13, R14 |
 
 Start with seven scenario families, not six claims covering every possible input. Parameterize supported clients/OS and critical boundary cases. Use the same release artifact and approved versions.
 
