@@ -565,6 +565,8 @@ pub struct Usage {
     pub output: Option<u64>,
     /// Reasoning output the client reports apart; part of `output`.
     pub reasoning: Option<u64>,
+    /// Native-reported USD only; no inferred price.
+    pub cost_usd: Option<f64>,
     pub model: Option<String>,
     /// Why no usage was read; None when some was.
     pub unknown: Option<&'static str>,
@@ -578,7 +580,8 @@ pub(crate) fn sum_usage(calls: &[Call], count: Option<u64>, known: bool) -> Usag
     for m in calls.iter().filter_map(|c| c.model.as_deref()) { *models.entry(m).or_default() += 1; }
     let model = models.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|m| m.0.to_string());
     Usage { calls: count, input: sum(|c| c.input), cache_read: sum(|c| c.cache_read), cache_write: sum(|c| c.cache_write), output: sum(|c| c.output),
-        reasoning: if calls.is_empty() { None } else { sum(|c| c.reasoning) }, model, unknown: None }
+        reasoning: if calls.is_empty() { None } else { sum(|c| c.reasoning) },
+        cost_usd: if calls.is_empty(){None}else{calls.iter().try_fold(0.0,|n,c|Some(n+c.cost_usd?)).filter(|n|n.is_finite())}, model, unknown: None }
 }
 
 /// A model id is a short code; anything else stays unreported.
@@ -699,6 +702,7 @@ impl Report {
         text(&mut v, &mut unknown, "host", capture::host().as_deref(), "not-reported");
         who.caller_fields(&mut v);
         v["unknown"] = Value::Object(unknown);
+        history::live::turn_metadata(&mut v,self);
         v
     }
 }

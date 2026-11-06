@@ -78,7 +78,9 @@ is not directly comparable to an uncoalesced record/step percentage.
 Fresh Claude discovery returned **5503 unique source IDs**, including **315** child
 sources. **43** real parent sources with subagent files opened by opaque ID without
 passing a source path; none returned an ambiguity error. Native working files remained
-unchanged. The count is a live snapshot, not a permanent source inventory.
+unchanged. One live logical parent has three physical copies and remains ambiguous
+when opened by native session ID; callers select its opaque source ID. The count is
+a live snapshot, not a permanent source inventory.
 
 Code-mode `exec` deliberately remains a composite tool: arbitrary JavaScript does
 not prove which shell commands executed. The step keeps its complete code/output

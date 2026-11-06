@@ -36,9 +36,14 @@ pub(super) fn final_text(events: &[Value]) -> Option<String> {
     })
 }
 pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
+    if events.iter().any(|v|matches!(v["type"].as_str(),Some("event_msg"|"token_usage_record"|"session_meta"))) {
+        let text=events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        let calls=super::rollout_calls(&text,false);let known=!calls.is_empty();return (calls,None,known);
+    }
     let mut calls = vec![];
-    for v in events.iter().filter(|v| v["type"] == "turn.completed") {
-        let id = v.get("total_usage").map(Value::to_string);
+    for (index,v) in events.iter().enumerate().filter(|(_,v)| v["type"] == "turn.completed") {
+        if v["response_id"].is_string() && events[index+1..].iter().any(|later|later["type"]=="turn.completed" && later["response_id"]==v["response_id"]) {continue;}
+        let id = v["response_id"].as_str().map(String::from).or_else(||v.get("total_usage").map(Value::to_string));
         let u = &v["usage"];
         let read = u["cached_input_tokens"].as_u64();
         let (outcome, error) = if v["isApiErrorMessage"] == true || v["error"].is_string() {
@@ -47,6 +52,7 @@ pub(super) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
             ("ok", "none")
         };
         calls.push(Call {
+            cost_usd:crate::agent::history::live::native_cost(u).or_else(||crate::agent::history::live::native_cost(v)),
             id,
             at_ms: v["timestamp"]
                 .as_str()
@@ -143,7 +149,9 @@ pub(super) fn classify_report(
     {
         status.2 = Some(detail.into());
     }
-    let mut r = report(Client::Codex, text, events, rollout, status, vec![]);
-    if r.error == "auth-rejected" { r.reason = auth_reason.map(String::from); }
-    r
+    let mut result=report(Client::Codex, text, events, rollout, status, vec![]);
+    if result.error=="auth-rejected" {result.reason=auth_reason.map(String::from);}
+    if let Some(cost)=end_index.and_then(|i|crate::agent::history::live::native_cost(&events[i])) {result.usage.cost_usd=Some(cost);}
+    result
+
 }

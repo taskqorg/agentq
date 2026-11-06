@@ -129,6 +129,7 @@ fn hermes_request(v: &Value) -> Call {
         cache_write: u["cache_write_tokens"].as_u64(),
         output: u["output_tokens"].as_u64(),
         reasoning: u["reasoning_tokens"].as_u64(),
+        cost_usd: None,
         model: text(v, &["response_model", "model"]).map(String::from),
         outcome: "ok",
         error: "none",

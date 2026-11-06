@@ -150,6 +150,7 @@ pub(crate) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
             ("ok", "none")
         };
         calls.push(Call {
+            cost_usd:crate::agent::history::live::native_cost(u).or_else(||crate::agent::history::live::native_cost(v)),
             id,
             at_ms: v["timestamp"]
                 .as_str()
@@ -165,7 +166,7 @@ pub(crate) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
                 u["cache_creation_input_tokens"].as_u64()
             },
             output: u["output_tokens"].as_u64(),
-            reasoning: None,
+            reasoning: u["output_tokens_details"]["thinking_tokens"].as_u64().or(u["reasoning_tokens"].as_u64()),
             model: v["message"]["model"]
                 .as_str()
                 .or_else(|| v["model"].as_str())
@@ -242,5 +243,7 @@ pub(super) fn classify_report(
             None => ("unknown", "no-end", None),
         }
     };
-    report(Client::Antigravity, text, events, rollout, status, vec![])
+    let mut result=report(Client::Antigravity, text, events, rollout, status, vec![]);
+    if let Some(cost)=end_index.and_then(|i|crate::agent::history::live::native_cost(&events[i])) {result.usage.cost_usd=Some(cost);}
+    result
 }
