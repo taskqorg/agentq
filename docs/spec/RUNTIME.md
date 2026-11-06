@@ -523,6 +523,8 @@ The explicit legacy `ProtectedHost::new` API stays available to consumers pinned
 
 ## Live run data
 
+Legacy accounting identities include the owning native turn; no snapshot retirement occurs without positive same-turn association. Native queue usage without an explicit turn ID inherits only its verified current accepted task boundary. LiveData prefers the registered native context measurement, preserving its unknown fields; an input estimate is used only when native context is absent.
+
 Every step exposes neutral `presentation` fields: model, effort, cli_version, sidechain
 and meta. Native model/effort/version context carries forward; native per-record flags
 do not. Absent fields remain null with reasons; no installed CLI version is substituted

@@ -525,6 +525,7 @@ fn native_record(turn:&mut native::NativeTurn,v:&Value)->Res<()> {
                     if v["type"] != "event_msg" { return Ok(()); }
                     let p = &v["payload"];
                     if !p.is_object() {return Err("native app record shape invalid".into());}
+                    if p["thread_id"].as_str().is_some_and(|id|id!=turn.spec.session){return Ok(());}
                     match p["type"].as_str() {
                         Some("task_started") => turn.current = p["turn_id"].as_str().filter(|s| plain_id(s)).map(String::from),
                         Some("user_message" | "item_completed") => {
@@ -545,8 +546,8 @@ fn native_record(turn:&mut native::NativeTurn,v:&Value)->Res<()> {
                         }
                         _ => {}
                     }
-                    if turn.accepted && p["type"]=="token_count" && p["turn_id"].as_str()==turn.turn.as_deref() {
-                        turn.events.push(v.clone());
+                    if turn.accepted && p["type"]=="token_count" && (p["turn_id"].as_str().is_some_and(|id|Some(id)==turn.turn.as_deref()) || p["turn_id"].is_null() && turn.current==turn.turn) {
+                        let mut owned=v.clone();owned["payload"]["turn_id"]=json!(turn.turn);turn.events.push(owned);
                     }
                     if turn.accepted && !turn.ended && turn.current == turn.turn {
                         if p["type"] == "agent_message" && p["turn_id"].as_str().is_none_or(|t|Some(t)==turn.turn.as_deref()) {
@@ -897,26 +898,31 @@ fn usage_context(row:&Value)->Option<(Option<u64>,Option<u64>)> {
     (p["type"]=="token_count").then(||(p["info"]["last_token_usage"]["total_tokens"].as_u64(),p["info"]["model_context_window"].as_u64()))
 }
 fn history_usage(rows:&[Value])->Vec<crate::agent::history::live::UsageRevision> {
-    let mut current="unreported-prefix".to_string();let mut model=Value::Null;let mut models=std::collections::BTreeMap::new();
+    let mut current=None::<String>;let mut model=Value::Null;let mut models=std::collections::BTreeMap::new();
     let mut counters=std::collections::BTreeMap::<String,Vec<Value>>::new();
     let mut explicit=std::collections::BTreeMap::new();let mut legacy=Vec::new();let mut out=Vec::new();
     for (index,row) in rows.iter().enumerate() {
         let p=row.get("payload").or(row.get("params")).unwrap_or(row);
         if row["type"]=="turn_context" {if let Some(turn)=p["turn_id"].as_str(){models.insert(turn.to_string(),p["model"].clone());}else{model=p["model"].clone();}}
-        if p["type"]=="task_started" {current=p["turn_id"].as_str().map(String::from).unwrap_or_else(||format!("source-turn-{index}"));}
-        let turn=p["turn_id"].as_str().or(p["turnId"].as_str()).unwrap_or(&current).to_string();
-        let model=models.get(&turn).unwrap_or(&model);
+        if p["type"]=="task_started" {current=p["turn_id"].as_str().map(String::from);}
+        let turn=p["turn_id"].as_str().or(p["turnId"].as_str()).map(String::from).or_else(||current.clone());
+        let model=turn.as_ref().and_then(|turn|models.get(turn)).unwrap_or(&model);
         let normalized=if row["type"]=="token_usage_record" {
-            explicit.entry(turn.clone()).or_insert(index);
+            if let Some(turn)=&turn {explicit.entry(turn.clone()).or_insert(index);}
             Some(json!({"type":"turn.completed","response_id":p["response_id"],"call":true,"usage":p["usage"],"model":p.get("model").unwrap_or(model),"timestamp":row["timestamp"]}))
         } else if p["type"]=="token_count" && p["info"]["total_token_usage"].is_object() || row["method"]=="thread/tokenUsage/updated" {
-            let events=counters.entry(turn.clone()).or_default();let before=events.len();
+            let events=counters.entry(turn.clone().unwrap_or_default()).or_default();let before=events.len();
             if row["method"]=="thread/tokenUsage/updated" {append_app_usage(events,row);}else{append_codex_usage(events,&p["info"]["last_token_usage"],&p["info"]["total_token_usage"],false);}
             if events.len()==before {None}else{let event=events.last_mut().unwrap();if event["model"].is_null(){event["model"]=model.clone();}event["timestamp"]=row["timestamp"].clone();Some(event.clone())}
         }else if row["type"]=="turn.completed"{Some(row.clone())}else{None};
         if let Some(event)=normalized {
-            for call in read_calls(std::slice::from_ref(&event)).0 {
-                if p["type"]=="token_count" {legacy.push((out.len(),turn.clone()));}
+            for mut call in read_calls(std::slice::from_ref(&event)).0 {
+                if p["type"]=="token_count" {
+                    if let Some(turn)=&turn {
+                        call.id=Some(crate::sha256_hex(json!(["native-legacy-usage",turn,call.id]).to_string().as_bytes()));
+                        legacy.push((out.len(),turn.clone()));
+                    }
+                }
                 out.push(crate::agent::history::live::UsageRevision {row:index,call,superseded_at:None});
             }
         }
