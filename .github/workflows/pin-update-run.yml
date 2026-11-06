@@ -1,0 +1,12 @@
+name: pin update run
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  update:
+    uses: ./.github/workflows/pin-update.yml
+    secrets:
+      PIN_APP_KEY: ${{ secrets.PIN_APP_KEY }}
