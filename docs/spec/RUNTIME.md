@@ -28,7 +28,7 @@ The shared ACP adapter speaks JSON-RPC 2.0 over native stdio. Registration suppl
 | `session/cancel` | Request native cancellation; only the prompt's terminal reply confirms the turn outcome. |
 | `session/set_model`, `session/set_mode` | Set a model or declared native mode; refusal stays a native error. |
 | `session/request_permission` | Typed pending request, with original ID and offered choices; a reply selects only an offered option or cancels. Questions never receive an automatic approval. |
-| `agent_message_chunk`, `agent_thought_chunk` | Assistant text or thinking; typed history uses the shared `agent::history` step projection. |
+| `agent_message_chunk`, `agent_thought_chunk` | Assistant text or thinking; typed history uses the shared `agent::history` step projection, including explicit-source reads through `Runtime::history`. |
 | `tool_call`, `tool_call_update` | Stable native tool ID, kind, input, output and state; missing fields remain unknown. |
 | `usage_update`, prompt `usage` | Observed native usage only; absent tokens and model-call counts stay unknown. |
 

@@ -270,6 +270,27 @@ fn tool_kind(name: &str) -> StepKind {
 }
 
 pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
+    if format=="acp" {
+        if record["replay"]==true {return vec![];}
+        let message=&record["message"];let update=&message["params"]["update"];
+        let mut item=update.clone();
+        if !item.is_object(){item=json!({});}
+        item["id"]=update["toolCallId"].clone();
+        let (kind,data)=match update["sessionUpdate"].as_str() {
+            Some("agent_message_chunk"|"user_message_chunk"|"agent_thought_chunk")=>{
+                let kind=if update["sessionUpdate"]=="agent_thought_chunk" {StepKind::Thinking}else if update["content"]["type"]=="image" {StepKind::Image}else{StepKind::Message};
+                (kind,json!({"text":update["content"]["text"],"content":update["content"]}))
+            },
+            Some("tool_call"|"tool_call_update")=>{
+                let kind=match update["kind"].as_str() {Some("execute")=>StepKind::Shell,Some("edit"|"delete"|"move")=>StepKind::FileChange,Some("fetch"|"search")=>StepKind::Web,_=>StepKind::Tool};
+                (kind,json!({"title":update["title"],"input":update["rawInput"],"output":update["rawOutput"],"content":update["content"]}))
+            },
+            Some("usage_update")=>(StepKind::Usage,update.clone()),
+            _ if message["method"]=="session/request_permission"=>{item["id"]=message["id"].clone();(StepKind::Approval,message["params"].clone())},
+            _=>(StepKind::Unknown,message.clone()),
+        };
+        return vec![step(event,record,&item,kind,data,0)];
+    }
     let payload = if format == "codex-rollout" {&record["payload"]} else if format == "codex-app-server" {&record["params"]} else {record};
     let item = payload.get("item").unwrap_or(payload);
     if record["method"] == "item/commandExecution/outputDelta" {

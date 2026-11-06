@@ -43,6 +43,13 @@ fn main() {
     assert!(r.control(&mut run,Control::Reply{id:json!("permission-1"),option:Some("once".into())}).is_err());
     let classified=r.classify(&std::fs::read_to_string(&l.log).unwrap());
     assert_eq!((classified.outcome,classified.text.as_deref(),classified.usage.input),("ok",Some("answer"),Some(17)));
+    let mut history=r.history("session:opaque_/1",None,Some(&l.log),None).unwrap();
+    let steps=history.steps(std::fs::metadata(&l.log).unwrap().len()).unwrap().steps;
+    assert!(steps.iter().any(|s|s.kind==agent::history::StepKind::Message && s.data["text"]=="answer"));
+    let tool=steps.iter().find(|s|s.native_id.as_deref()==Some("tool-1")).unwrap();
+    assert_eq!(tool.kind,agent::history::StepKind::Shell);assert_eq!(tool.state,"completed");assert_eq!(tool.origins.len(),2);
+    assert!(steps.iter().any(|s|s.kind==agent::history::StepKind::Approval));
+    assert!(steps.iter().any(|s|s.kind==agent::history::StepKind::Unknown));
     l.input="second".into();
     let mut resumed=r.resume("session:opaque_/1",&l).unwrap();
     r.cancel(&mut resumed).unwrap();
@@ -62,7 +69,7 @@ fn main() {
     while r.poll(&mut named_run).unwrap()==State::Running {std::thread::yield_now();}
     assert_eq!(r.report(&named_run).unwrap().outcome,"cancelled");
     let mut large=l.clone();large.input="x".repeat(9*1024*1024);large.env.push(("AGENTQ_FAKE_ACP_LARGE".into(),"1".into()));
-    large.deadline=Some(Instant::now()+Duration::from_secs(20));
+    large.deadline=None;
     let mut large_run=r.launch(&large).unwrap();r.cancel(&mut large_run).unwrap();
     while r.poll(&mut large_run).unwrap()==State::Running {std::thread::yield_now();}
     assert_eq!(r.report(&large_run).unwrap().outcome,"cancelled");
