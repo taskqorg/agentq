@@ -53,6 +53,10 @@ fn main() {
     assert!(logged.iter().any(|e|matches!(e,Event::ToolStart{..})));
     assert!(logged.iter().any(|e|matches!(e,Event::TurnEnd{outcome:"ok"})));
     assert!(!logged.iter().any(|e|matches!(e,Event::Text{delta,..} if delta=="old replay")));
+    let mut legacy=l.clone();legacy.command=vec!["agentapi".into()];legacy.parts=vec![agent::Part::Text("structured".into())];
+    assert!(r.launch(&legacy).err().unwrap().contains("turn-parts unsupported"));
+    legacy.parts.clear();legacy.mcp=Some(root.join("mcp.json"));
+    assert!(r.launch(&legacy).err().unwrap().contains("mcp-config unsupported"));
     l.env.push(("AGENTQ_FAKE_ACP_BAD_VERSION".into(),"1".into()));
     assert!(r.launch(&l).err().unwrap().contains("workspace write defect"));
     l.env.pop();l.env.push(("AGENTQ_FAKE_ACP_EOF".into(),"1".into()));

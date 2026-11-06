@@ -977,10 +977,11 @@ impl Adapter {
     fn spec(&self, l: &Launch, session: String, resume: bool) -> Res<(Spec, Optimization)> {
         (self.ops.validate)(&l.command.iter().skip(1).chain(l.host_args.iter()).cloned().collect::<Vec<_>>(),&l.settings_env,&l.policy)?;
         let name = self.descriptor.name;
+        let legacy=self.ops.acp.is_some() && self.acp(l)?.is_none();
         let app = matches!(l.mode, Mode::AppServer { .. }) || self.descriptor.has("app-server") && automatic(l);
         for (capability, set) in [("mcp-config", l.mcp.is_some()), ("instructions-file", l.instructions.is_some()), ("turn-parts", !l.parts.is_empty()),
             ("turn-deltas", l.deltas && !app), ("host-args", !l.host_args.is_empty())] {
-            if set && (l.mode != Mode::Turn || !self.descriptor.has(capability)) { return Err(format!("{capability} unsupported by {name}")); }
+            if set && (l.mode != Mode::Turn || !self.descriptor.has(capability) || legacy && matches!(capability,"turn-parts"|"mcp-config")) { return Err(format!("{capability} unsupported by {name}")); }
         }
         if !l.host_args.is_empty() && l.policy != Policy::default() { return Err(format!("host-args require the native policy on {name}")); }
         if app && !l.host_args.is_empty() { return Err("host-args unsupported with relay input".into()); }
