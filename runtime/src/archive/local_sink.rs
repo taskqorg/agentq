@@ -209,7 +209,7 @@ fn dashq_main_wire_and_recovery() {
     assert!(status(&data)["pending_bytes"].as_u64().unwrap() > 0);
     control("resume");
     pass(&data, &mut sink).unwrap();
-    assert_eq!(sink.raw(&first.1), super::super::scrub::bytes(&original).0);
+    assert_eq!(sink.raw(&attributed), super::super::scrub::bytes(&original).0);
     let replaced = capture.sources[0].path.with_extension("replaced");
     fs::rename(&capture.sources[0].path, &replaced).unwrap();
     fs::write(&capture.sources[0].path, b"{\"replacement\":true}\n").unwrap();
