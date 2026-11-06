@@ -40,6 +40,8 @@ At `91a3d9a640a299843645648348c6b6fbe3bd6713`, `cargo test --locked -p agentq-ru
 
 After correction the same three regressions pass, and `cargo test --locked -p agentq-runtime --lib agent::events` passes all 16 checks. Existing supported progress, timestamp-fault, hot-log, timeout, concurrent-tool and terminal guards remain covered. Final candidate checks and the exact source SHA are recorded in the TaskQ result; publication remains subject to merge-result CI and the exact-source runtime tag workflow.
 
+Final review extended the ordering regression with replay of an older message after a newer one. It failed on `cfa54bde3f27a1b2161c153144b0da0fb260a65b` (exit 101): the final result repeated the newer message. Only newly emitted text now updates final-result suppression; the same regression passes. The cursor also accepts the older aggregate-message deduplication keys, and user text progress stays ordered around tool results.
+
 ## Decisions a reader should check
 
 - **A stop request now removes a job.** TaskQ's case reads a KillShell call with no result as not live, and A2 names it. The 0.9.0 assertion that a stop request keeps the job changed for this reason. A failed stop result still restores the job.

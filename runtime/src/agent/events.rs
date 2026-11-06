@@ -241,12 +241,13 @@ impl Cursor {
                 let text = blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("");
                 // Older checkpoints deduplicated the aggregate message, rather than each block.
                 let legacy_seen=item.as_ref().is_some_and(|id|self.seen.contains(&format!("message:{id}:{}",crate::sha256_hex(text.as_bytes()))));
-                if !text.is_empty() { self.last_text = Some(text); }
+                let mut emitted=false;
                 for (index,block) in blocks.iter().enumerate() {
                     if block["type"] == "text" {
                         if let Some(text)=block["text"].as_str().filter(|s|!s.is_empty()) {
                             if !legacy_seen && item.as_ref().is_none_or(|id|self.seen.insert(format!("message:{id}:{index}:{}",crate::sha256_hex(text.as_bytes())))) {
                                 out.push(Event::Message{item:item.clone(),text:text.into()});
+                                emitted=true;
                             } else if self.records {out.push(Event::Progress);}
                         }
                     } else if block["type"] == "tool_use" {
@@ -257,6 +258,7 @@ impl Cursor {
                         }
                     }
                 }
+                if emitted {self.last_text=Some(text);}
             }
             let u = &message["usage"];
             if u.is_object() {
@@ -760,6 +762,10 @@ mod tests {
         let mut next=row.clone(); next["message"]["content"].as_array_mut().unwrap().push(json!({"type":"tool_use","id":"c","name":"Read"}));
         let records=runtime.log_records(&format!("{row}\n{next}"));
         assert!(matches!(records[1].events[..],[Event::Progress,Event::Progress,Event::Progress,Event::ToolStart{..}]));
+        let newer=json!({"type":"assistant","message":{"id":"new","content":[{"type":"text","text":"latest"}]}});
+        assert_eq!(cursor.read(Client::Claude,vec![newer,row.clone(),json!({"type":"result","result":"latest"})]),[
+            Event::Message{item:Some("new".into()),text:"latest".into()},Event::Activity,Event::TurnEnd{outcome:"ok"}
+        ],"replaying an older message must not defeat final-result suppression");
         let mut legacy=Cursor::default();
         legacy.seen.extend([format!("message:m:{}",crate::sha256_hex(b"samesameend")),"tool:a".into(),"tool:b".into()]);
         let mut legacy:Cursor=serde_json::from_value(serde_json::to_value(legacy).unwrap()).unwrap();
