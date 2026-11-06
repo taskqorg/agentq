@@ -10,8 +10,9 @@ pub enum Event {
     Text { item: Option<String>, delta: String },
     Message { item: Option<String>, text: String },
     /// Optional local audit detail is untrusted; consumers scrub it before storage or output.
-    ToolStart { id: Option<String>, kind: ToolKind, name: Option<String>, detail: Option<String> },
+    ToolStart { id: Option<String>, kind: ToolKind, name: Option<String>, detail: Option<String>, timeout_ms: Option<u64> },
     ToolEnd { id: Option<String>, status: Option<String> },
+    TurnEnd { outcome: &'static str },
     Quota(Vec<Window>),
     Context { used: Option<u64>, window: Option<u64> },
     Activity,
@@ -29,6 +30,8 @@ pub(super) struct Cursor {
     last_text: Option<String>,
     model: Option<String>,
     seen: HashSet<String>,
+    #[serde(default)]
+    start_limit: StartLimit,
 }
 
 fn string(v: &Value) -> Option<String> { v.as_str().map(String::from) }
@@ -67,6 +70,8 @@ fn audit_files(value: &Value) -> Option<String> {
     paths.iter().map(|p|audit_path(&p["path"])).collect::<Option<Vec<_>>>().map(|p|p.join(", "))
 }
 
+fn antigravity_timeout(input: &Value) -> Option<u64> { input["timeout_ms"].as_u64().or(input["TimeoutMs"].as_u64()) }
+
 fn antigravity_detail(name: Option<&str>, input: &Value) -> Option<String> {
     match name {
         Some("run_command")=>audit_command(&input["CommandLine"]),
@@ -77,10 +82,13 @@ fn antigravity_detail(name: Option<&str>, input: &Value) -> Option<String> {
 
 impl Cursor {
     pub fn new(deltas: bool) -> Self { Self { deltas, ..Self::default() } }
-    pub fn read(&mut self, client: Client, values: Vec<Value>) -> Vec<Event> { self.read_owned(client, values, None) }
-    pub fn read_owned(&mut self, client: Client, values: Vec<Value>, thread: Option<&str>) -> Vec<Event> {
+    pub fn read(&mut self, client: Client, values: Vec<Value>) -> Vec<Event> { self.read_owned(client, values, None, None) }
+    pub fn read_owned(&mut self, client: Client, values: Vec<Value>, thread: Option<&str>, turn: Option<&str>) -> Vec<Event> {
         let mut out = vec![];
         for v in values {
+            if matches!(self.start_limit,StartLimit::Pending) {
+                if let Some(start)=StartLimit::read(&v) {self.start_limit=start;}
+            }
             let before = out.len();
             if let Some(w) = limits::reported(client, &v, (unix_ms()/1000).max(0) as u64) { out.push(Event::Quota(w)); }
             match client {
@@ -88,6 +96,13 @@ impl Cursor {
                 Client::Codex => self.codex(&v, &mut out, thread),
                 Client::Antigravity => self.antigravity(&v, &mut out),
             }
+            let terminal=if client==Client::Codex && v["method"]=="turn/completed" && (thread.is_none() || thread==v["params"]["threadId"].as_str() && turn.is_some_and(|t|v["params"]["turn"]["id"].as_str()==Some(t))) {
+                match v["params"]["turn"]["status"].as_str() {Some("completed")=>Some("ok"),Some("failed")=>Some("failed"),Some("interrupted")=>Some("cancelled"),_=>None}
+            } else if ends(&v) {
+                let outcome=Report::read(client,&v.to_string(),std::slice::from_ref(&v),None).outcome;
+                Some(match (self.start_limit,outcome) { (StartLimit::Reached(_),_)=>"refused",(StartLimit::Working,"refused")=>"failed",_=>outcome })
+            } else {None};
+            if let Some(outcome)=terminal {out.push(Event::TurnEnd {outcome});}
             if out.len() == before { out.push(Event::Activity); }
         }
         out
@@ -117,7 +132,7 @@ impl Cursor {
                     let id = string(&block["id"]);
                     if id.as_ref().is_none_or(|id| self.seen.insert(format!("tool:{id}"))) {
                         let name = string(&block["name"]); let kind = tool_kind(name.as_deref().unwrap_or(""));
-                        out.push(Event::ToolStart { id, kind, name, detail: match block["name"].as_str() {Some("Bash")=>audit_command(&block["input"]["command"]),Some("Read"|"Edit"|"Write"|"NotebookEdit"|"MultiEdit")=>audit_path(&block["input"]["file_path"]),_=>None} });
+                        out.push(Event::ToolStart { id, kind, name, timeout_ms:block["input"]["timeout"].as_u64(), detail: match block["name"].as_str() {Some("Bash")=>audit_command(&block["input"]["command"]),Some("Read"|"Edit"|"Write"|"NotebookEdit"|"MultiEdit")=>audit_path(&block["input"]["file_path"]),_=>None} });
                     }
                 }
             }
@@ -165,7 +180,7 @@ impl Cursor {
         if matches!(native, "agentMessage" | "agent_message") {
             if end { if let Some(text) = string(&i["text"]) { out.push(Event::Message { item: id, text }); } }
         } else if matches!(native, "commandExecution" | "command_execution" | "mcpToolCall" | "mcp_tool_call" | "webSearch" | "web_search" | "fileChange" | "file_change" | "dynamicToolCall" | "dynamic_tool_call" | "collabAgentToolCall" | "collab_tool_call" | "imageView" | "image_view" | "imageGeneration" | "image_generation") {
-            if start { out.push(Event::ToolStart { id: id.clone(), kind: tool_kind(native), name: string(&i["tool"]).or_else(|| string(&i["name"])), detail: match native {"commandExecution"|"command_execution"=>audit_command(&i["command"]),"fileChange"|"file_change"=>audit_files(&i["changes"]),_=>None} }); }
+            if start { out.push(Event::ToolStart { id: id.clone(), kind: tool_kind(native), timeout_ms:i["timeout_ms"].as_u64().or(i["timeoutMs"].as_u64()), name: string(&i["tool"]).or_else(|| string(&i["name"])), detail: match native {"commandExecution"|"command_execution"=>audit_command(&i["command"]),"fileChange"|"file_change"=>audit_files(&i["changes"]),_=>None} }); }
             if end { out.push(Event::ToolEnd { id, status: string(&i["status"]) }); }
         }
     }
@@ -179,7 +194,7 @@ impl Cursor {
             let id = s["step_index"].as_u64().map(|n| n.to_string());
             if self.deltas { if let Some(delta) = string(&s["text_delta"]) { out.push(Event::Text { item: id.clone(), delta }); } }
             if s["step_type"] == "tool" {
-                if s["state"] == "ACTIVE" { out.push(Event::ToolStart { id: id.clone(), kind: ToolKind::Other, name: string(&s["tool_name"]), detail: antigravity_detail(s["tool_name"].as_str(), &s["tool_info"]["parameters"]) }); }
+                if s["state"] == "ACTIVE" { out.push(Event::ToolStart { id: id.clone(), kind: tool_kind(s["tool_name"].as_str().unwrap_or("")), timeout_ms:antigravity_timeout(&s["tool_info"]["parameters"]), name: string(&s["tool_name"]), detail: antigravity_detail(s["tool_name"].as_str(), &s["tool_info"]["parameters"]) }); }
                 if matches!(s["state"].as_str(), Some("DONE" | "ERROR" | "CANCELLED")) { out.push(Event::ToolEnd { id, status: string(&s["state"]) }); }
             }
         }
@@ -190,7 +205,10 @@ impl Cursor {
             if let Some(tools)=v["tool_calls"].as_array() {
                 for tool in tools {
                     let id=string(&tool["id"]);
-                    if id.as_ref().is_none_or(|id|self.seen.insert(format!("tool:{id}"))) {out.push(Event::ToolStart {id,kind:ToolKind::Other,name:string(&tool["name"]),detail:antigravity_detail(tool["name"].as_str(), &tool["arguments"])});}
+                    if id.as_ref().is_none_or(|id|self.seen.insert(format!("tool:{id}"))) {
+                        let input=tool.get("arguments").or(tool.get("args")).unwrap_or(&Value::Null);
+                        out.push(Event::ToolStart {id,kind:tool_kind(tool["name"].as_str().unwrap_or("")),timeout_ms:antigravity_timeout(input),name:string(&tool["name"]),detail:antigravity_detail(tool["name"].as_str(),input)});
+                    }
                 }
             }
         }
@@ -200,9 +218,163 @@ impl Cursor {
     }
 }
 
+/// Claude background tools are log evidence only; this grants no process or stop authority.
+pub(super) fn background_job(values: &[Value]) -> bool {
+    let mut jobs=BTreeMap::<String,String>::new(); // tool-use ID -> native job ID
+    let mut stops=BTreeMap::<String,String>::new();
+    for v in values {
+        if v["type"]=="assistant" {
+            if let Some(blocks)=v["message"]["content"].as_array() {
+                for b in blocks.iter().filter(|b|b["type"]=="tool_use") {
+                    let Some(id)=b["id"].as_str() else {continue;};
+                    let input=&b["input"];
+                    match b["name"].as_str() {
+                        Some("Bash") if input["run_in_background"]==true=>{jobs.insert(id.into(),id.into());}
+                        Some("Monitor")=>{jobs.insert(id.into(),id.into());}
+                        Some("TaskStop"|"KillShell")=>{
+                            if let Some(target)=input["task_id"].as_str().or(input["shell_id"].as_str()) {stops.insert(id.into(),target.into());}
+                        }
+                        _=>{}
+                    }
+                }
+            }
+        }
+        if v["type"]!="user" {continue;}
+        if let Some(blocks)=v["message"]["content"].as_array() {
+            for b in blocks.iter().filter(|b|b["type"]=="tool_result") {
+                let Some(id)=b["tool_use_id"].as_str() else {continue;};
+                if b["is_error"]==true {jobs.remove(id);continue;}
+                if let Some(target)=stops.get(id) {jobs.retain(|tool,job|tool!=target && job!=target);}
+                let native=v.get("tool_use_result").or(v.get("toolUseResult")).unwrap_or(&Value::Null);
+                if let Some(job)=native["backgroundTaskId"].as_str().or(native["taskId"].as_str()).or(native["shellId"].as_str()) {
+                    if let Some(current)=jobs.get_mut(id) {*current=job.into();}
+                }
+            }
+            for b in blocks.iter().filter(|b|b["type"]=="text") {
+                if let Some(text)=b["text"].as_str() {notifications(text,&mut jobs);}
+            }
+        }
+        if let Some(text)=v["message"]["content"].as_str() {notifications(text,&mut jobs);}
+    }
+    !jobs.is_empty()
+}
+
+fn notifications(text: &str, jobs: &mut BTreeMap<String,String>) {
+    for part in text.split("<task-notification>").skip(1) {
+        let Some((body,_))=part.split_once("</task-notification>") else {continue;};
+        let field=|tag:&str|body.split_once(&format!("<{tag}>"))?.1.split_once(&format!("</{tag}>")).map(|(v,_)|v.trim());
+        if matches!(field("status"),Some("completed"|"failed"|"killed"|"stopped"|"cancelled")) {
+            if let Some(target)=field("task-id") {jobs.retain(|tool,job|tool!=target && job!=target);}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #258 A1: a limit after work is failure, while pre-work rejection remains a refusal across reads/recovery.
+    #[test]
+    fn log_terminal_keeps_prior_work_context() {
+        for (name, start, end) in [
+            ("codex",json!({"type":"item.started","item":{"id":"tool","type":"command_execution"}}),json!({"type":"turn.failed","error":{"message":"usage limit"}})),
+            ("antigravity",json!({"event":"step_update","step_update":{"step_type":"tool"}}),json!({"event":"result","result":{"status":"ERROR","error":"quota exceeded"}})),
+            ("antigravity",json!({"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command"}]}),json!({"type":"PLANNER_RESPONSE","status":"ERROR","content":"quota exceeded"})),
+        ] {
+            let runtime=adapter::runtime(name).unwrap();
+            for (rows, expected) in [(vec![end.clone()],"refused"),(vec![start.clone(),end.clone()],"failed")] {
+                let log=rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+                assert_eq!(runtime.classify(&log).outcome,expected);
+                assert!(matches!(runtime.log_events(&log).last(),Some(Event::TurnEnd{outcome}) if *outcome==expected),"{name}: {log}");
+            }
+            let client=Client::parse(name).unwrap();
+            let mut cursor=Cursor::default();cursor.read(client,vec![start]);
+            let mut old=serde_json::to_value(&Cursor::default()).unwrap();old.as_object_mut().unwrap().remove("start_limit");
+            let _:Cursor=serde_json::from_value(old).unwrap();
+            let mut recovered:Cursor=serde_json::from_value(serde_json::to_value(&cursor).unwrap()).unwrap();
+            for c in [&mut cursor,&mut recovered] {
+                assert!(matches!(c.read(client,vec![end.clone()]).last(),Some(Event::TurnEnd{outcome:"failed"})));
+            }
+        }
+        let runtime=adapter::runtime("claude").unwrap();
+        let log=format!("{}\n{}",json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}),json!({"type":"result","is_error":true}));
+        assert_eq!(runtime.classify(&log).outcome,"refused");
+        assert!(matches!(runtime.log_events(&log).last(),Some(Event::TurnEnd{outcome:"refused"})));
+    }
+
+    // #258 A1/M12.9: callers can read all attempt transports without constructing a Run.
+    #[test]
+    fn public_log_events_keep_timeout_order_and_terminal_evidence() {
+        for (name,start,end) in [
+            ("claude",json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"touch x","timeout":600000}}]}}),json!({"type":"result","is_error":false})),
+            ("codex",json!({"type":"item.started","item":{"id":"t","type":"command_execution","timeout_ms":600000}}),json!({"type":"turn.completed"})),
+            ("codex",json!({"method":"item/started","params":{"item":{"id":"t","type":"commandExecution","timeoutMs":600000}}}),json!({"method":"turn/completed","params":{"turn":{"status":"completed"}}})),
+            ("antigravity",json!({"event":"step_update","step_update":{"step_type":"tool","state":"ACTIVE","tool_info":{"parameters":{"timeout_ms":600000}}}}),json!({"event":"result","result":{"status":"SUCCESS"}})),
+            ("antigravity",json!({"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"id":"t","name":"run_command","args":{"TimeoutMs":600000}}]}),json!({"type":"PLANNER_RESPONSE","status":"DONE","content":"answer"})),
+        ] {
+            let runtime=adapter::runtime(name).unwrap();
+            let events=runtime.log_events(&format!("native diagnostic\n{start}\n{end}\n{{partial"));
+            assert!(matches!(events.first(),Some(Event::ToolStart{timeout_ms:Some(600000),..})),"{name}: {events:?}");
+            assert!(matches!(events.last(),Some(Event::TurnEnd{outcome:"ok"})),"{name}: {events:?}");
+            assert_eq!(events.iter().filter(|e|matches!(e,Event::TurnEnd{..})).count(),1);
+        }
+        for (name,row,outcome) in [
+            ("claude",json!({"type":"result","is_error":true}),"failed"),
+            ("codex",json!({"type":"turn.failed"}),"failed"),
+            ("codex",json!({"method":"turn/completed","params":{"turn":{"status":"interrupted"}}}),"cancelled"),
+            ("antigravity",json!({"event":"result","result":{"status":"INTERRUPTED"}}),"cancelled"),
+            ("antigravity",json!({"type":"PLANNER_RESPONSE","status":"ERROR"}),"failed"),
+        ] {assert!(matches!(adapter::runtime(name).unwrap().log_events(&row.to_string()).last(),Some(Event::TurnEnd{outcome:o}) if *o==outcome));}
+        let runtime=adapter::runtime("claude").unwrap();
+        for timeout in [Value::Null,json!(-1),json!("600000")] {
+            let row=json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"timeout":timeout}}]}});
+            assert!(matches!(runtime.log_events(&row.to_string())[0],Event::ToolStart{timeout_ms:None,..}));
+        }
+        let end=|thread,turn|json!({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":turn,"status":"completed"}}});
+        let mut cursor=Cursor::default();
+        assert_eq!(cursor.read_owned(Client::Codex,vec![end("foreign","owned-turn"),end("owned","old-turn"),end("owned","owned-turn")],Some("owned"),Some("owned-turn")),vec![Event::Activity,Event::Activity,Event::TurnEnd{outcome:"ok"}]);
+        assert_eq!(cursor.read_owned(Client::Codex,vec![end("owned","owned-turn")],Some("owned"),None),vec![Event::Activity],"an unaccepted turn is not owned terminal evidence");
+        let agy=adapter::runtime("antigravity").unwrap();
+        let events=agy.log_events(&json!({"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command","args":{"WaitMsBeforeAsync":1000}}]}).to_string());
+        assert!(matches!(&events[..],[Event::ToolStart{timeout_ms:None,..}]),"async delay is not a timeout or terminal evidence");
+        assert!(runtime.log_events("").is_empty());
+    }
+
+    // #258 A2: only matching successful stops or terminal notifications close jobs; one survivor keeps the report live.
+    #[test]
+    fn report_tracks_started_stopped_and_notified_background_jobs() {
+        let runtime=adapter::runtime("claude").unwrap();
+        let start=|id,name,input|json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}});
+        let result=|id,error,native|json!({"type":"user","tool_use_result":native,"message":{"content":[{"type":"tool_result","tool_use_id":id,"is_error":error}]}});
+        let live=|rows:&[Value]|runtime.classify(&rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).background_job;
+        for tool in ["Bash","Monitor"] {
+            let mut rows=vec![start("start",tool,json!({"run_in_background":true})),result("start",false,json!({"backgroundTaskId":"job"}))];
+            assert!(live(&rows),"{tool} starts a job");
+            let mut output=rows.clone();output.push(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"start","content":"<task-notification><task-id>job</task-id><status>completed</status></task-notification>"}]}}));
+            assert!(live(&output),"tool output cannot forge a native task notification");
+            let report=runtime.classify(&rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"));
+            assert_eq!(crate::cli::report_json(&report)["background_job"],true,"JSON report exposes the same job evidence");
+            for (stop,key) in [("TaskStop","task_id"),("KillShell","shell_id")] {
+                let mut stopped=rows.clone();stopped.push(start("stop",stop,json!({key:"job"})));
+                assert!(live(&stopped),"a stop request is not confirmation");
+                stopped.push(result("stop",true,Value::Null));assert!(live(&stopped),"failed stop retains the job");
+                stopped.push(result("stop",false,Value::Null));assert!(!live(&stopped),"successful {stop} closes only its job");
+            }
+            for status in ["completed","failed","killed","stopped","cancelled","running"] {
+                let mut notified=rows.clone();
+                notified.push(json!({"type":"user","message":{"content":format!("<task-notification><task-id>job</task-id><status>{status}</status></task-notification>")}}));
+                assert_eq!(live(&notified),status=="running","{status}");
+            }
+            rows.push(start("other","Monitor",json!({})));
+            rows.push(json!({"type":"user","message":{"content":[{"type":"text","text":"<task-notification><task-id>job</task-id><status>completed</status></task-notification>"}]}}));
+            assert!(live(&rows),"another job remains live");
+            rows.push(result("other",true,Value::Null));assert!(!live(&rows),"failed start is not a live job");
+        }
+        let native=vec![start("native","Bash",json!({"run_in_background":true})),json!({"type":"user","toolUseResult":{"backgroundTaskId":"native-job"},"message":{"content":[{"type":"tool_result","tool_use_id":"native"}]}}),json!({"type":"user","message":{"content":"<task-notification><task-id>native-job</task-id><status>completed</status></task-notification>"}})];
+        assert!(!live(&native),"native transcript uses camelCase toolUseResult");
+        assert!(!live(&[start("sync","Bash",json!({"run_in_background":false}))]));
+        assert!(!live(&[]));
+    }
+
     // #255 A2: retain the interrupted command target without copying private tool payloads.
     #[test]
     fn audit_detail_preserves_target_and_withholds_payloads() {
@@ -272,12 +444,12 @@ mod tests {
     fn context_requires_owned_thread() {
         let row=|thread|json!({"method":"thread/tokenUsage/updated","params":{"threadId":thread,"tokenUsage":{"last":{"totalTokens":99},"modelContextWindow":100}}});
         let mut cursor=Cursor::default();
-        assert_eq!(cursor.read_owned(Client::Codex,vec![row("owned")],Some("owned")),vec![Event::Context{used:Some(99),window:Some(100)}]);
+        assert_eq!(cursor.read_owned(Client::Codex,vec![row("owned")],Some("owned"),None),vec![Event::Context{used:Some(99),window:Some(100)}]);
         let saved=serde_json::to_value(&cursor).unwrap();
         let mut cursor:Cursor=serde_json::from_value(saved).unwrap();
-        let events=cursor.read_owned(Client::Codex,vec![row("foreign"),row(""),row("owned")],Some("owned"));
+        let events=cursor.read_owned(Client::Codex,vec![row("foreign"),row(""),row("owned")],Some("owned"),None);
         assert_eq!(events,vec![Event::Activity,Event::Activity,Event::Context{used:Some(99),window:Some(100)}]);
-        assert_eq!(cursor.read_owned(Client::Codex,vec![json!({"method":"thread/tokenUsage/updated","params":{"threadId":"owned"}})],Some("owned")),vec![Event::Context{used:None,window:None}]);
+        assert_eq!(cursor.read_owned(Client::Codex,vec![json!({"method":"thread/tokenUsage/updated","params":{"threadId":"owned"}})],Some("owned"),None),vec![Event::Context{used:None,window:None}]);
         assert_eq!(cursor.read(Client::Codex,vec![row("foreign")]),vec![Event::Activity],"unknown owner cannot adopt notification identity");
     }
 
@@ -308,6 +480,6 @@ mod tests {
         assert!(matches!(&events[..], [Event::Activity, Event::Message{..}]));
         let mut cursor=Cursor::default();
         let events=cursor.read(Client::Claude,vec![json!({"type":"assistant","message":{"model":"last-model","usage":{"input_tokens":3,"cache_read_input_tokens":4,"cache_creation_input_tokens":0}}}),json!({"type":"result","modelUsage":{"other-model":{"contextWindow":100},"last-model":{"contextWindow":200}}})]);
-        assert!(matches!(events.last(),Some(Event::Context{used:Some(7),window:Some(200)})));
+        assert!(matches!(&events[events.len()-2..],[Event::Context{used:Some(7),window:Some(200)},Event::TurnEnd{outcome:"ok"}]));
     }
 }

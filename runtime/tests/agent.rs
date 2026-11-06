@@ -26,6 +26,7 @@ fn main() {
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("quota_account_read_guards_credentials", quota_account_read_guards_credentials),
         ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
+        ("project_identity_read_stays_inside_adapter", project_identity_read_stays_inside_adapter),
         ("rollout_progress_survives_fast_resume_and_recovery", rollout_progress_survives_fast_resume_and_recovery),
         ("antigravity_wrapped_submission_keeps_prompt_and_tail", antigravity_wrapped_submission_keeps_prompt_and_tail),
         ("antigravity_native_submission_tails_and_resumes", antigravity_native_submission_tails_and_resumes),
@@ -99,6 +100,11 @@ fn fake_quota_http() {
     assert!(input.contains("Authorization: Bearer invented-token"));
     assert!(std::env::args().all(|a|!a.contains("invented-token")),"credentials never enter argv");
     if let Some(path)=std::env::var_os("AGENTQ_FAKE_QUOTA_CHANGE") {std::fs::write(path,b"invented changed credentials").unwrap();}
+    if std::env::var_os("AGENTQ_FAKE_PROJECT_IDENTITY").is_some() {
+        assert!(input.contains(":loadCodeAssist"));
+        println!("{}",json!({"cloudaicompanionProject":"invented-project","access_token":"invented-token"}));
+        return;
+    }
     println!("{}",json!({"seven_day":{"utilization":61,"resets_at":"2026-11-09T00:00:00Z"},"limits":[{"group":"weekly","percent":99,"resets_at":"2026-11-09T00:00:00Z","scope":{"model":{"display_name":"Fixture"}}}]}));
 }
 
@@ -156,6 +162,15 @@ fn catalogue_and_account_reads_need_no_turn() {
     let rows:Vec<Value>=requests.lines().map(|l|serde_json::from_str(l).unwrap()).collect();
     assert_eq!(rows.iter().filter(|v|v["method"]=="initialize").count(),2,"one catalogue session, one account session");
     assert!(rows.iter().all(|v|!matches!(v["method"].as_str(),Some("thread/start"|"thread/resume"|"turn/start"))));
+    // #258 A4/A5: native keyring login needs no auth.json; identity reads never start a thread or refresh.
+    std::fs::remove_file(root.join("auth.json")).unwrap();
+    assert_eq!(runtime.account_limits(Some(&root),1800000000),windows);
+    assert!(!root.join("auth.json").exists());
+    assert_eq!(runtime.account_identity(Some(&root)).as_deref(),Some("private@example.invalid"));
+    let requests=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
+    let rows:Vec<Value>=requests.lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+    assert!(rows.iter().all(|v|!matches!(v["method"].as_str(),Some("thread/start"|"thread/resume"|"turn/start"))));
+    assert_eq!(rows.iter().filter(|v|v["method"]=="account/read").count(),1);
     // #255 / PM note 6675881959: the legacy API still supplies None and resolves PATH.
     assert_eq!(runtime.catalogue(Some(&root)).unwrap(),models);
     std::env::set_current_dir(cwd).unwrap();
@@ -183,6 +198,29 @@ fn quota_account_read_guards_credentials() {
         assert_eq!(runtime.account_limits(Some(&root),1800000000)[0].unknown.as_deref(),Some("credential-changed"));
         unsafe {std::env::set_var("PATH",old);std::env::remove_var("AGENTQ_FAKE_QUOTA_HTTP");std::env::remove_var("AGENTQ_FAKE_QUOTA_CHANGE");}
     }
+}
+
+// #258 A5: the public Antigravity identity read uses a read-only native request; no token enters argv or leaves the adapter.
+fn project_identity_read_stays_inside_adapter() {
+    let root=scratch("project-identity");let bin=root.join(if cfg!(windows) {"curl.exe"} else {"curl"});
+    std::fs::copy(std::env::current_exe().unwrap(),&bin).unwrap();
+    let file=root.join("antigravity-oauth-token");
+    let credential=json!({"access_token":"invented-token","expiry_date":4102444800000i64}).to_string();
+    std::fs::write(&file,&credential).unwrap();
+    let keys=["PATH","AGENTQ_FAKE_QUOTA_HTTP","AGENTQ_FAKE_PROJECT_IDENTITY","AGENTQ_FAKE_QUOTA_CHANGE"];
+    let saved:Vec<_>=keys.iter().map(|k|(*k,std::env::var_os(k))).collect();
+    let old=std::env::var_os("PATH").unwrap_or_default();
+    let path=std::env::join_paths(std::iter::once(root.clone()).chain(std::env::split_paths(&old))).unwrap();
+    // SAFETY: serial harness, all exchanges finish before restoring process environment.
+    unsafe {std::env::set_var("PATH",&path);std::env::set_var("AGENTQ_FAKE_QUOTA_HTTP","1");std::env::set_var("AGENTQ_FAKE_PROJECT_IDENTITY","1");std::env::remove_var("AGENTQ_FAKE_QUOTA_CHANGE");}
+    let runtime=agent::runtime("antigravity").unwrap();
+    assert_eq!(runtime.account_identity(Some(&root)).as_deref(),Some("invented-project"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(),credential);
+    unsafe {std::env::set_var("AGENTQ_FAKE_QUOTA_CHANGE",&file);}
+    assert_eq!(runtime.account_identity(Some(&root)),None,"changed credentials invalidate identity");
+    std::fs::write(&file,json!({"access_token":"invented-token","expiry_date":1} ).to_string()).unwrap();
+    assert_eq!(runtime.account_identity(Some(&root)),None,"expired credentials stay unknown");
+    for (key,value) in saved {unsafe {match value {Some(value)=>std::env::set_var(key,value),None=>std::env::remove_var(key)}}}
 }
 
 // ---------- fake clients ----------

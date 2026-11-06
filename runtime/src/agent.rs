@@ -903,34 +903,43 @@ fn model_code(m: &str) -> bool { !m.is_empty() && m.len() <= 64 && m.bytes().all
 /// A usage or quota limit reported before any work started: `Some(reset)` with the reset (unix seconds) when known;
 /// None after work started or without a limit.
 pub(crate) fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
-    for v in events {
-        if v["event"] == "step_update" && (v["step_update"]["step_type"] == "tool" || v["step_update"]["usage"].is_object()) { return None; }
+    events.iter().find_map(StartLimit::read).and_then(|s| match s {StartLimit::Reached(reset)=>Some(reset),_=>None})
+}
+
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+enum StartLimit { #[default] Pending, Working, Reached(Option<i64>) }
+
+impl StartLimit {
+    // The first decisive record fixes whether a limit refused admission or interrupted work.
+    fn read(v: &Value) -> Option<Self> {
+        if v["type"]=="rate_limit_event" && v["rate_limit_info"]["status"]=="rejected" {return Some(Self::Reached(v["rate_limit_info"]["resetsAt"].as_i64()));}
+        if v["event"] == "step_update" && (v["step_update"]["step_type"] == "tool" || v["step_update"]["usage"].is_object()) { return Some(Self::Working); }
         if v["event"] == "result" {
             let msg = v["result"]["error"].as_str().unwrap_or_default().to_lowercase();
-            return (v["result"]["status"] != "SUCCESS" && ["usage limit", "quota exceeded", "rate limit"].iter().any(|s| msg.contains(s))).then_some(None);
+            return Some(if v["result"]["status"] != "SUCCESS" && ["usage limit", "quota exceeded", "rate limit"].iter().any(|s| msg.contains(s)) {Self::Reached(None)} else {Self::Working});
         }
         let kind = v["type"].as_str().unwrap_or_default();
         if kind == "assistant" {
             if v["apiError"] == "usage_limit_reached" || v["quotaLimits"]["status"] == "rejected" {
-                return Some(v["quotaLimits"]["resetsAt"].as_i64().or(v["apiErrorParams"]["rate_limit_info"]["resetsAt"].as_i64()));
+                return Some(Self::Reached(limits::claude_info(v).and_then(|info|info["resetsAt"].as_i64())));
             }
-            return None;
+            return Some(Self::Working);
         }
         if kind == "PLANNER_RESPONSE" {
             if v["status"] == "ERROR" {
                 let msg = v["content"].as_str().or(v["error"]["message"].as_str()).unwrap_or_default().to_lowercase();
                 if msg.contains("usage limit") || msg.contains("quota exceeded") || msg.contains("rate limit") {
-                    return Some(v["quotaLimits"]["resetsAt"].as_i64());
+                    return Some(Self::Reached(v["quotaLimits"]["resetsAt"].as_i64()));
                 }
             }
-            return None;
+            return Some(Self::Working);
         }
-        if kind.starts_with("item.") || kind == "TOOL_RESPONSE" { return None; }
+        if kind.starts_with("item.") || kind == "TOOL_RESPONSE" { return Some(Self::Working); }
         // ponytail: Codex limit text matched by words; it reports no reset. A structured field replaces this when one exists.
         let message = v["message"].as_str().or(v["error"]["message"].as_str()).unwrap_or_default().to_lowercase();
-        if matches!(kind, "error" | "turn.failed") && (message.contains("usage limit") || message.contains("quota exceeded")) { return Some(None); }
+        if matches!(kind, "error" | "turn.failed") && (message.contains("usage limit") || message.contains("quota exceeded")) { return Some(Self::Reached(None)); }
+        None
     }
-    None
 }
 
 /// A Codex login the auth server rejected: Codex's own stderr `ERROR codex_` line or a top-level `error`/`turn.failed`
@@ -1074,6 +1083,8 @@ pub struct Report {
     pub limits: Vec<Window>,
     /// A limit reached before work started, with its reset when known: the caller records it for the account switch.
     pub reached: Option<Option<i64>>,
+    /// Claude background tools still live according to this log, never process liveness proof.
+    pub background_job: bool,
     /// Telemetry outcome code and error code.
     pub outcome: &'static str,
     pub error: &'static str,
@@ -1113,7 +1124,7 @@ impl Report {
                 }
             };
         let (calls, count, known) = read_calls(events);
-        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), limits: limits::read(client, events, rollout), reached, outcome, error, detail,
+        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), limits: limits::read(client, events, rollout), reached, background_job: client==Client::Claude && events::background_job(events), outcome, error, detail,
             text: final_text(events), exit: None, started_ms: unix_ms(), duration_us: 0, recorded: Ok(()) }
     }
 

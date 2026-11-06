@@ -647,6 +647,10 @@ pub trait Runtime: Send + Sync {
     fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>>;
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window>;
     fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window>;
+    /// Native events from complete JSONL log records, without a run or native process.
+    fn log_events(&self, log: &str) -> Vec<Event>;
+    /// Read-only account email/ID or project; unknown and unsupported identities stay absent.
+    fn account_identity(&self, home: Option<&Path>) -> Option<String>;
     /// Request the stop; true when the exit is already confirmed.
     fn cancel(&self, run: &mut Run) -> Res<bool>;
     fn poll(&self, run: &mut Run) -> Res<State>;
@@ -1056,6 +1060,13 @@ impl Runtime for Adapter {
 
     fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window> { super::limits::account(self.client, home, now) }
 
+    fn log_events(&self, log: &str) -> Vec<Event> {
+        let values=log.lines().filter_map(|line|serde_json::from_str(line).ok()).collect();
+        super::events::Cursor::new(true).read(self.client,values)
+    }
+
+    fn account_identity(&self, home: Option<&Path>) -> Option<String> { super::limits::identity(self.client,home) }
+
     fn cancel(&self, run: &mut Run) -> Res<bool> {
         match &mut self.own_mut(run)?.body {
             Body::Turn(t) => {
@@ -1126,7 +1137,7 @@ impl Runtime for Adapter {
             Body::Turn(t) => { t.sync_antigravity_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
-            Body::App(a) => { a.pump()?; return Ok(run.events.read_owned(self.client, std::mem::take(&mut a.pending), a.session.session())); }
+            Body::App(a) => { a.pump()?; return Ok(run.events.read_owned(self.client, std::mem::take(&mut a.pending), a.session.session(), a.session.turn_id())); }
         };
         let (mut values, next) = lines_from(&path, run.progress)?;
         if let Body::Turn(t) = &run.body {
