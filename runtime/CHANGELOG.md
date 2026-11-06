@@ -2,6 +2,8 @@
 
 ## 0.14.0
 
+[Regression and local transcript evidence](../docs/evidence/runtime-2448.md).
+
 - Add `Window.rejected: Option<bool>` for independent native rejection status; utilization never invents it. Claude unified-window siblings identify the top-level binding rejection. Old serialized windows read absent rejection as unknown. Exhaustive window constructors must add `rejected`.
 - `Report.detail` retains Claude terminal result subtypes and Codex failed-turn messages, preserving typed outcome/error and `Report.reached`.
 - Add `Runtime::account_limits_with_executable(home, executable, now)`; Codex uses the supplied executable with the same read-only credential guards as the existing method. The old method retains native lookup; other runtimes ignore this override. A default preserves third-party trait implementations.

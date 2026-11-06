@@ -613,7 +613,7 @@ Permissions, effort/account catalogue and interactive replies unsupported by a t
 
 ### History wire contract
 
-`History::new(format, source, session)` binds an immutable caller source label and session.
+`History::new(format, source, session)` resolves the format through the native registry and binds an immutable caller source label and session. The capability matrix separately enumerates documented transport support; registration alone adds no native qualification claim.
 `poll(path)` returns a page of at most 128 records and 16 MiB of source records,
 reading at most 16 MiB plus one lookahead byte (excluding prefix verification).
 Each UTF-8 JSONL record, including its newline, is at most 16 MiB; larger records

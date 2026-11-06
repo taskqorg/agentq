@@ -62,7 +62,7 @@ pub struct Page {
 
 impl History {
     pub fn new(format: &str, source: &str, session: &str) -> Res<Self> {
-        if !FORMATS.contains(&format) { return Err("history transport unsupported".into()); }
+        if super::registry::history_protocol(format).is_none() { return Err("history transport unsupported".into()); }
         if source.is_empty() || session.is_empty() { return Err("history source/session required".into()); }
         Ok(Self {format:format.into(), source:source.into(), session:session.into(), native_session:session.into(), native_session_alias:None, native_parent:None, offset:0,
             identity:None, prefix:crate::sha256_hex(b"")})

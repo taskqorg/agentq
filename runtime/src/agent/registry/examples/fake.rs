@@ -81,5 +81,11 @@ fn unrelated_native_shapes_are_not_interpreted() {
     c.read(CLIENT,log.lines().map(|l|serde_json::from_str(l).unwrap()).collect());
     assert!(matches!(c.start_limit,StartLimit::Pending));
     assert!(!(PROTOCOL.turn_ended)(false,&json!({"type":"result"})));
+    let root=std::env::temp_dir().join(format!("agentq-example-history-{}",crate::incident::uuid()));
+    std::fs::create_dir_all(&root).unwrap();let path=root.join("history.jsonl");std::fs::write(&path,format!("{log}\n")).unwrap();
+    let mut h=crate::agent::history::History::new("example-native","fixture","example-session").unwrap();
+    let page=h.poll(&path).unwrap();
+    assert_eq!(page.events.len(),2);assert!(page.events.iter().all(|v|v["session_binding"]=="caller" && v["kind"]=="unknown"));
+    std::fs::remove_dir_all(root).unwrap();
     assert!((PROTOCOL.history_session)("example-native",&json!({"sessionId":"foreign"}),r#"{"sessionId":"foreign"}"#).is_none());
 }
