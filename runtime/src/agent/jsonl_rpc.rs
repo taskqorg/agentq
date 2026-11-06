@@ -100,8 +100,9 @@ impl Session {
         if self.closed.is_some(){return Ok(());}
         loop {match self.server.receive(Instant::now()) {Ok(Some(v))=>self.observe(v)?,Ok(None)=>break,Err(e)=>{self.closed=Some(e);break;}}}
         if let Some(r)=&mut self.report {
-            self.server.close_stream(self.deadline)?;r.exit=self.server.poll()?;
+            self.server.close_stream();r.exit=self.server.poll()?;
             if let Some(sampler)=self.sampler.take(){r.process=sampler.usage();}
+            if r.exit.is_none(){r.process.exit_unknown="session-process-running";}
             self.closed=Some("terminal".into());
         }Ok(())
     }
@@ -132,9 +133,22 @@ pub(super) fn record_events(v:&Value)->Vec<Event> {
 }
 
 pub(super) static PROTOCOL:registry::Protocol=registry::Protocol {
+    ends:|v|v["type"]=="agent_settled",start_limit:|_|None,read_calls:|_|(vec![],None,false),final_text:|_|None,
+    history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},history_formats:&["jsonl-rpc"],
+    history_session:|_,v,_|v["data"]["sessionFile"].as_str().map(String::from),history_normalize:|_,v|normalize(v),history_validity:|_|json!({"status":"unknown","reason":"envelope-validation-unsupported"}),
     prepare_command:|_,_,_|Err("JSONL RPC requires the structured launch path".into()),input_bytes:|_|vec![],native_record:|_,_|Err("native transcript polling unsupported".into()),native_metadata:None,
-    finish_native_report:|_,_|{},session_report:|_,_|{},reported:|_,_|None,update_limits:|_,_,_|false,account_limits:|_,_|limits::unknown("account-limits unsupported"),identity:|_|None,
+    finish_native_report:|_,_|{},session_report:|_,_|{},reported:|_,_|None,update_limits:|_,_,_|false,account_limits:|_,_,_|limits::unknown("account-limits unsupported"),identity:|_|None,
     credentials:|_,_|Err("oauth-unavailable".into()),oauth_token:|_,_|Err("oauth-unavailable".into()),oauth_usage:|_|Err("oauth-unavailable".into()),turn_ended:|ended,v|ended || v["type"]=="agent_settled",
     parse_event:|_,v,out,_|out.extend(record_events(v)),terminal:|_,_,_,_,_|None,assistant_failure:|_|None,permission_mode:|_|None,lifecycle:|_|None,advances:|_|false,
     session:|_|None,snapshot:|_,_|Snapshot{unknown:Some("not-reported"),..Snapshot::default()},report:|_,_,_|{let mut r=Report::empty();r.error="classify-unsupported";r},
 };
+
+fn normalize(v:&Value)->super::history::Normalized {
+    match v["type"].as_str() {
+        Some("rpc-replay")=>("system","replay",Value::Null,vec![],"none"),
+        Some("message_end")=>(match v["message"]["role"].as_str(){Some("assistant")=>"assistant",Some("user")=>"user",_=>"unknown"},"message",Value::Null,v["message"]["content"].as_array().cloned().unwrap_or_else(||v["message"]["content"].as_str().map(|t|vec![json!({"type":"text","text":t})]).unwrap_or_default()),"none"),
+        Some("tool_execution_start"|"tool_execution_update"|"tool_execution_end")=>("tool","tool",v["toolCallId"].clone(),vec![v.clone()],"none"),
+        Some("agent_start"|"agent_end"|"agent_settled"|"auto_retry_start"|"auto_retry_end"|"auto_compaction_start"|"auto_compaction_end")=>("system","lifecycle",Value::Null,vec![v.clone()],"none"),
+        _=>("unknown","unknown",Value::Null,vec![],"unsupported-source-shape"),
+    }
+}

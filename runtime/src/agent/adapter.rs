@@ -881,8 +881,9 @@ struct NativeOps {
 
 impl NativeOps {
     const fn structured(protocol:&'static registry::Protocol,home_var:&'static str,executable:fn(&OsStr)->Res<PathBuf>,home:fn()->Option<PathBuf>)->Self {
-        Self {acp:None,rpc:None,protocol,home_var,alternate_home_var:None,session_var:"",executable,home,new_session:||"-".into(),
+        Self {acp:None,rpc:None,protocol,home_var,alternate_home_var:None,session_vars:&[],auth_vars:&[],executable,home,new_session:||"-".into(),
             args:|_|vec![],mapped:|_|Err("native CLI mapping unsupported; use the structured session".into()),extras:|_|vec![],environment:|_,_|{},settings:|_,_|{},
+            preparation:|_,_|(LaunchCheck::new("workspace","unknown",Some("workspace-trust-unknown"),"Native trust not qualified","qualify this runtime"),LaunchCheck::new("evidence","degraded",Some("hooks-unknown"),"Native hooks not qualified","qualify this runtime")),restore_preparation:None,sandbox:None,hook_status:None,limits_for:|_,_|limits::unknown("account-limits unsupported"),validate:|args,_,_|registry::validate_arguments(args),
             catalogue:|_,_|Err("catalogue unsupported".into()),login:|_,_|Check{state:"unknown",detail:"native login not qualified".into()},protected:|h|vec![h],
             refusal:|_|None,transcript:|_,_|None,background_transcript:|_,_|Err("background unsupported".into()),link:|_|Err((Cause("no-session-url"),None)),session_link:|_,_|Err((Cause("no-session-url"),None)),
             background_launch:|_,_,_,_|Err("background unsupported".into()),background_jobs:|_,_,_,_|Err("background unsupported".into()),background_job:|_,_,_|Err("background unsupported".into()),
@@ -1064,7 +1065,7 @@ impl Adapter {
         if let Some(config)=self.ops.rpc {
             if l.mode!=Mode::Turn {return Err("mode unsupported by JSONL RPC".into());}
             let command=preflight::command(self,l)?;
-            return Ok(self.run(Body::Rpc(Box::new(super::jsonl_rpc::Session::open(command,config,l,session)?)),0,optimization,l));
+            return Ok(self.checked_run(&readiness, Body::Rpc(Box::new(super::jsonl_rpc::Session::open(command,config,l,session)?)),0,optimization,l));
         }
         let command = preflight::launch_base(self,l)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
@@ -1311,7 +1312,7 @@ impl Runtime for Adapter {
                 let text=read_from(&t.log,t.start).unwrap_or_default();
                 session_of(self.client,&text).is_some() || self.log_records(&text).iter().any(|r|r.lifecycle.is_some() || r.events.iter().any(|e|!matches!(e,Event::Activity|Event::Unsupported{..})))
             },
-            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(), Body::Acp(a)=>!a.session.is_empty(),
+            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(), Body::Acp(a)=>!a.session.is_empty(), Body::Rpc(a)=>!a.session.is_empty(),
         };
         Observation { state, phase: if state != State::Running { state.code() } else if proven { "started" } else { "starting" },
             starting_ms: run.starting.elapsed().as_millis().min(u64::MAX as u128) as u64, owner:run.owner.as_ref().map(SessionOwner::observation).unwrap_or_default(),activity,error, session, url, cause, detail }

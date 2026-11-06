@@ -253,7 +253,11 @@ mod tests {
             let mut l=Launch::new(&work,work.join("native.jsonl"),"first","fixtureq");
             l.command=vec![std::env::current_exe().unwrap().into_os_string(),"--exact".into(),format!("{}::structured_server",module_path!().split_once("::").unwrap().1).into(),"--nocapture".into(),"--".into()];
             l.env=vec![("AGENTQ_STRUCTURED_FIXTURE".into(),if runtime.ops.rpc.is_some(){"rpc"}else{"acp"}.into())];
-            l.home=Some(work.join("home"));l.deadline=Some(Instant::now()+Duration::from_secs(20));l.deltas=true;
+            l.home=Some(work.join("home"));std::fs::create_dir_all(l.home.as_ref().unwrap()).unwrap();l.deadline=Some(Instant::now()+Duration::from_secs(20));l.deltas=true;
+            let mut blocked=l.clone();blocked.home=Some(work.join("missing-account"));
+            let readiness=runtime.preflight(&blocked,&Repair::default());
+            assert!(readiness.checks.iter().any(|c|c.check=="account" && c.state=="blocked"));
+            assert!(runtime.launch(&blocked).err().unwrap().contains("account-home-missing"));
             let mut run=runtime.launch(&l).unwrap();
             while runtime.poll(&mut run).unwrap()==State::Running {std::thread::yield_now();}
             let report=runtime.report(&run).unwrap();
@@ -475,7 +479,7 @@ fn secret_name(name:&str)->bool {
     let name=name.to_ascii_uppercase();
     name.bytes().all(|b|b.is_ascii_alphanumeric() || b"_.-".contains(&b)) && ["API_KEY","TOKEN","SECRET","PASSWORD","CREDENTIAL"].iter().any(|s|name==*s || name.ends_with(&format!("_{s}")) || name.ends_with(&format!(".{s}")))
 }
-fn validate_arguments(args:&[OsString])->Res<()> {
+pub(super) fn validate_arguments(args:&[OsString])->Res<()> {
     if args.iter().filter_map(|s|s.to_str()).any(|a|a.split_once('=').is_some_and(|(k,v)|!v.is_empty() && secret_name(k)) || ["--api-key","--token","--password","--secret"].contains(&a)) {return Err("secret-in-argv".into());}
     Ok(())
 }
