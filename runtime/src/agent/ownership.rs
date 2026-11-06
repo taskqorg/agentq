@@ -34,6 +34,20 @@ impl SessionStore {
     pub(super) fn adopt(&self,spec:&Spec,session:&str,native:&[NativeProcess])->Res<OwnerObservation> {
         valid_session(session)?;
         let root=self.directory()?;let _admission=lock(&root.join("admission.lock"))?;
+        let expected=binding(spec)?;
+        for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())? {
+            let pending=entry.map_err(|e|e.to_string())?.path();
+            if !pending.file_name().is_some_and(|s|s.to_string_lossy().starts_with("pending-") && pending.extension().is_some_and(|e|e=="json")) {continue;}
+            if let Some(row)=read(&pending)? {
+                if row["schema"]!="agentq-owner/1" || !row["runtime"].is_string() || !row["root"].is_string() || !(row["home"].is_null() || row["home"].is_string()) {return Err("session-owner-unknown: pending binding unreadable".into());}
+                if ["runtime","root","home"].iter().any(|k|row[*k]!=expected[*k]) {continue;}
+                scope(&row,spec)?;
+                let controller=process(&row["controller"])?.ok_or("session-owner-unknown: pending controller missing")?;
+                if controller.live()? || process(&row["native"])?.map(|n|n.live()).transpose()?.unwrap_or(false) {
+                    return Err("session-owner-unknown: pending native session must be bound before adoption".into());
+                }
+            }
+        }
         let path=path(&root,spec.client.code(),session);let _guard=lock(&path.with_extension("lock"))?;
         if let Some(row)=read(&path)? {
             scope(&row,spec)?;
@@ -54,10 +68,11 @@ impl SessionStore {
         if !native::plain_id(&token) || token=="-" {return Err("session-owner-unknown: invalid recovery token".into());}
         let mut file=if session=="-" {root.join(format!("pending-{token}.json"))} else {path(&root,spec.client.code(),&session)};
         // A checkpoint taken before discovery keeps its token after the native ID is bound.
-        if session=="-" && saved.is_some() && !file.exists() {
+        if session=="-" && saved.is_some() {
+            if let Some(row)=read(&file)? {if let Some(target)=row["binding"].as_str() {valid_session(target)?;let target_path=path(&root,spec.client.code(),target);if target_path.exists() {session=target.into();file=target_path;}}}
             for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())? {
                 let candidate=entry.map_err(|e|e.to_string())?.path();if candidate.extension().is_none_or(|s|s!="json") {continue;}
-                if let Some(row)=read(&candidate)? {if row["token"]==saved.unwrap()["token"] && row["token"].is_string() {
+                if let Some(row)=read(&candidate)? {if row["token"]==saved.unwrap()["token"] && row["token"].is_string() && row["session"]!="-" {
                     scope(&row,spec)?;session=row["session"].as_str().ok_or("session-owner-unknown: native session missing")?.into();file=candidate;break;
                 }}
             }
@@ -78,12 +93,13 @@ impl SessionStore {
         row["phase"]=saved.map(|_|old.as_ref().unwrap()["phase"].clone()).unwrap_or(json!("prepared"));
         row["native"]=saved.map(|_|old.as_ref().unwrap()["native"].clone()).unwrap_or(Value::Null);
         row["native_reason"]=old.as_ref().map(|r|r["native_reason"].clone()).unwrap_or(Value::Null);
+        row["binding"]=old.as_ref().map(|r|r["binding"].clone()).unwrap_or(Value::Null);
         save(&file,&row)?;
-        Ok(SessionOwner(Arc::new(Mutex::new(Owned {root,path:file,row,previous:old,guard}))))
+        Ok(SessionOwner(Arc::new(Mutex::new(Owned {root,path:file,row,previous:old,guard,binding:None}))))
     }
 }
 
-struct Owned {root:PathBuf,path:PathBuf,row:Value,previous:Option<Value>,guard:Option<coreq::file_lock::Lock>}
+struct Owned {root:PathBuf,path:PathBuf,row:Value,previous:Option<Value>,guard:Option<coreq::file_lock::Lock>,binding:Option<(PathBuf,coreq::file_lock::Lock)>}
 impl Drop for Owned {fn drop(&mut self) {
     if self.row["phase"]=="prepared" && self.row["native"].is_null() {
         if let Some(previous)=&self.previous {let _=save(&self.path,previous);} else {let _=std::fs::remove_file(&self.path);}
@@ -115,11 +131,14 @@ impl SessionOwner {
         }
     })}
     pub(super) fn submit(&self)->Res<()> {self.with(|o| {
+        if o.binding.is_some() {return Err("session-owner-unknown: binding write incomplete".into());}
         if o.guard.is_none() {
-            o.guard=Some(lock(&o.path.with_extension("lock"))?);
-            if read(&o.path)?.is_none_or(|r|r["token"]!=o.row["token"]) {return Err("session-busy: ownership transferred".into());}
+            let guard=lock(&o.path.with_extension("lock"))?;
+            let row=read(&o.path)?.ok_or("session-owner-unknown: ownership record missing")?;
+            if row["token"]!=o.row["token"] {return Err("session-busy: ownership transferred".into());}
+            idle(&row)?;o.guard=Some(guard);
         }
-        if o.row["phase"]=="submitted" {return Err("session-input-in-flight".into());}
+        if o.row["phase"]!="prepared" && o.row["phase"]!="idle" {return Err("session-input-in-flight".into());}
         o.row["phase"]=json!("submitted");save(&o.path,&o.row)
     })}
     pub(crate) fn bind(&self,session:&str)->Res<()> {valid_session(session)?;self.with(|o| {
@@ -127,10 +146,18 @@ impl SessionOwner {
         if o.row["session"]!="-" {return Err("session-owner-unknown: native session differs".into());}
         let _admission=lock(&o.root.join("admission.lock"))?;
         let file=path(&o.root,o.row["runtime"].as_str().ok_or("ownership runtime missing")?,session);
-        let guard=lock(&file.with_extension("lock"))?;
-        if file.exists() {return Err("session-busy: native session already registered".into());}
-        o.row["session"]=json!(session);save(&file,&o.row)?;
-        std::fs::remove_file(&o.path).map_err(|e|e.to_string())?;o.path=file;o.guard=Some(guard);Ok(())
+        if let Some((target,_))=&o.binding {if *target!=file {return Err("session-owner-unknown: binding transition differs".into());}}
+        else {
+            let guard=lock(&file.with_extension("lock"))?;
+            if let Some(existing)=read(&file)? {if existing["token"]!=o.row["token"] {return Err("session-busy: native session already registered".into());}}
+            o.binding=Some((file.clone(),guard));
+        }
+        // Journal the destination before writing it, so an early checkpoint cannot revive an obsolete alias.
+        let mut source=o.row.clone();source["binding"]=json!(session);save(&o.path,&source)?;o.row=source;
+        let mut row=o.row.clone();row["session"]=json!(session);row["binding"]=Value::Null;
+        let (target,_)=o.binding.as_ref().unwrap();save(target,&row)?;
+        match std::fs::remove_file(&o.path) {Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string())}
+        let (target,guard)=o.binding.take().unwrap();o.path=target;o.row=row;o.guard=Some(guard);Ok(())
     })}
     /// Release after this session's known terminal native report; never use a launcher exit as proof.
     pub fn finish(&self,report:&Report)->Res<()> {self.with(|o| {
@@ -140,6 +167,9 @@ impl SessionOwner {
             o.row["phase"]=json!("unconfirmed");o.row["native_reason"]=json!("native-completion-unverified");return save(&o.path,&o.row);
         }
         o.row["phase"]=json!("idle");save(&o.path,&o.row)?;o.guard=None;Ok(())
+    })}
+    pub(super) fn stop_uncertain(&self)->Res<()> {self.with(|o| {
+        o.row["phase"]=json!("unconfirmed");o.row["native_reason"]=json!("native-subtree-stop-unverified");save(&o.path,&o.row)
     })}
     pub(crate) fn process_hooks(&self,process:&Process)->Process {
         let owner=self.clone();let previous=process.spawned.clone();
@@ -197,6 +227,44 @@ mod tests {
         store.adopt(&spec,&spec.session,&[]).unwrap();let owner=store.acquire(&spec,false,None).unwrap();drop(owner);
         row["native"]=json!({"pid":0,"started":"unreadable"});save(&file,&row).unwrap();
         assert!(store.acquire(&spec,false,None).unwrap_err().starts_with("session-owner-unknown"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_and_uncertain_handles_never_regain_submission_authority() {
+        let root=crate::scratch("owner-stale-retry");
+        let spec=Spec {client:Client::Codex,root:root.clone(),session:"s".into(),resume:true,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));store.adopt(&spec,"s",&[]).unwrap();
+        let stale=store.acquire(&spec,false,None).unwrap();let mut complete=Report::empty();complete.session=Some("s".into());complete.outcome="ok";complete.error="none";
+        stale.finish(&complete).unwrap();
+        let current=store.acquire(&spec,false,None).unwrap();current.submit().unwrap();let saved=current.checkpoint().unwrap();drop(current);
+        for _ in 0..2 {assert!(stale.submit().unwrap_err().starts_with("session-busy"));}
+        let current=store.acquire(&spec,false,Some(&saved)).unwrap();assert_eq!(current.checkpoint().unwrap(),saved);
+        current.finish(&Report::empty()).unwrap();assert_eq!(current.observation().state,"unknown");
+        for _ in 0..2 {assert_eq!(current.submit().unwrap_err(),"session-input-in-flight");}
+        drop(current);drop(stale);std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_binding_stays_fenced_and_early_recovery_follows_durable_intent() {
+        let root=crate::scratch("owner-bind-write");
+        let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));let owner=store.acquire(&spec,true,None).unwrap();
+        owner.spawned(std::process::id()).unwrap();owner.submit().unwrap();
+        let early=owner.checkpoint().unwrap();let directory=store.directory().unwrap();let target=path(&directory,"codex","native");
+        let reserved=target.with_extension("json.pending");std::fs::write(&reserved,"interrupted write").unwrap();
+        for _ in 0..2 {
+            assert!(owner.bind("native").is_err());assert_eq!(owner.checkpoint().unwrap(),early);assert!(!target.exists());
+            assert!(store.adopt(&spec,"native",&[]).unwrap_err().starts_with("session-owner-unknown"));
+        }
+        let pending=directory.join(format!("pending-{}.json",early["token"].as_str().unwrap()));let intent=read(&pending).unwrap().unwrap();
+        std::fs::remove_file(reserved).unwrap();owner.bind("native").unwrap();assert_eq!(owner.checkpoint().unwrap()["session"],"native");drop(owner);
+        let recovered=store.acquire(&spec,false,Some(&early)).unwrap();assert_eq!(recovered.checkpoint().unwrap()["session"],"native");
+        let mut terminal=Report::empty();terminal.session=Some("native".into());terminal.outcome="ok";terminal.error="none";recovered.finish(&terminal).unwrap();drop(recovered);
+        let mut resumed=spec.clone();resumed.session="native".into();resumed.resume=true;
+        let newer=store.acquire(&resumed,false,None).unwrap();newer.submit().unwrap();let newer_token=newer.checkpoint().unwrap()["token"].clone();drop(newer);
+        save(&pending,&intent).unwrap();assert!(store.acquire(&spec,false,Some(&early)).unwrap_err().starts_with("session-owner-unknown"));
+        assert_eq!(read(&target).unwrap().unwrap()["token"],newer_token);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

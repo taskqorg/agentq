@@ -16,12 +16,12 @@ impl Activity {
             match event {
                 Event::Unsupported{..}=>{self.unknown=true;continue;},
                 Event::Stalled{..}=>continue,
-                Event::TurnStart|Event::TurnEnd{..}=>self.tools.clear(),
+                Event::TurnStart|Event::TurnEnd{..}=>{self.tools.clear();self.unknown=false;},
                 Event::ToolStart{id,timeout_ms,..}=>self.tools.push((id,timeout_ms.and_then(|ms|i64::try_from(ms).ok()).and_then(|ms|now.checked_add(ms)))),
                 Event::ToolEnd{id,..}=>{if let Some(i)=self.tools.iter().position(|(tool,_)|*tool==id) {self.tools.remove(i);}},
                 _=>{},
             }
-            self.last=Some(now);self.unknown=false;self.latched=false;
+            self.last=Some(now);self.latched=false;
         }
     }
     pub fn observation(&mut self,window:Option<Duration>,now:i64,running:bool)->ActivityObservation {
@@ -53,6 +53,8 @@ mod tests {
         assert_eq!(a.observation(window,200,true).state,"active");assert_eq!(a.observation(window,229,true).state,"active");assert_eq!(a.observation(window,230,true).state,"stalled");
         a.feed(vec![Event::ToolStart{id:Some("unbounded".into()),kind:super::super::ToolKind::Shell,name:None,detail:None,timeout_ms:None}],240);
         assert_eq!(a.observation(window,1000,true).state,"unknown");
+        a.feed(vec![Event::Unsupported{reason:"native record invalid"},Event::Activity],1050);
+        assert_eq!(a.observation(window,1060,true).state,"unknown");
         a.feed(vec![Event::TurnEnd{outcome:"ok"}],1100);assert_eq!(a.observation(window,2000,false).state,"active");
     }
 }

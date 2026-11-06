@@ -100,6 +100,12 @@ fn automatic_codex_turns_select_transport() {
     let mut launch = fake_launch("codex", &root, "private request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref())]);
     launch.deltas = true;
     let mut run = codex.launch(&launch).unwrap_or_else(|e| panic!("neutral deltas launch refused: {e}"));
+    let session=codex.session_id(&run).unwrap();
+    assert_eq!(codex.checkpoint(&run).unwrap()["owner"]["session"],session,"native thread binds before first poll and input");
+    assert!(codex.adopt(&session,&launch,&[]).is_err());
+    assert!(codex.resume(&session,&launch).is_err());
+    let starts=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap().lines().filter(|line|serde_json::from_str::<Value>(line).unwrap()["method"]=="turn/start").count();
+    assert_eq!(starts,1,"failed adoption cannot submit a second turn");
     let until = Instant::now() + Duration::from_secs(10);
     while codex.poll(&mut run).unwrap() == agent::State::Running {
         assert!(Instant::now() < until);
@@ -613,6 +619,15 @@ fn session_ownership_and_stall_signal() {
     append(&stop.log,&[json!({"type":"system","subtype":"init","session_id":native})]);rt.observe(&mut stopped);
     std::thread::sleep(Duration::from_millis(30));assert_eq!(rt.observe(&mut stopped).activity.state,"stalled");finish(rt,&mut stopped);
     assert_eq!(rt.report(&stopped).unwrap().outcome,"cancelled");assert_eq!(rt.report(&stopped).unwrap().owner.state,"unknown","a caller stop is not native completion proof");
+    let bad_root=root.join("malformed");std::fs::create_dir_all(&bad_root).unwrap();let bad_gate=bad_root.join("gate");let bad_cleanup=Gates(vec![bad_gate.clone()]);
+    let mut bad=fake_launch("claude",&bad_root,"unreadable evidence",&[("COREQ_FAKE_GATE",bad_gate.as_os_str())]);bad.inactivity=Some(Duration::from_millis(20));bad.stop_on_stall=true;
+    let mut unreadable=rt.launch(&bad).unwrap();wait_for(&bad_root.join("fake-turn-1.json"));let session=rt.checkpoint(&unreadable).unwrap()["owner"]["session"].clone();
+    append(&bad.log,&[json!({"type":"system","subtype":"init","session_id":session})]);assert_eq!(rt.observe(&mut unreadable).activity.state,"active");
+    use std::io::Write;writeln!(std::fs::OpenOptions::new().append(true).open(&bad.log).unwrap(),"\n{{bad native JSON}}\n[]").unwrap();
+    std::thread::sleep(Duration::from_millis(30));assert_eq!(rt.observe(&mut unreadable).activity.state,"unknown");
+    assert!(!rt.progress(&mut unreadable).unwrap().iter().any(|e|matches!(e,agent::Event::Stalled{..})));
+    let saved=rt.checkpoint(&unreadable).unwrap();drop(unreadable);let mut unreadable=rt.recover(&saved,&bad).unwrap();assert_eq!(rt.observe(&mut unreadable).activity.state,"unknown");
+    std::fs::write(&bad_gate,"").unwrap();finish(rt,&mut unreadable);assert_eq!(rt.report(&unreadable).unwrap().outcome,"ok");drop(bad_cleanup);
     let json_root=root.join("json");std::fs::create_dir_all(&json_root).unwrap();let json_gate=json_root.join("gate");let json_cleanup=Gates(vec![json_gate.clone()]);
     let request=json!({"client":"claude","root":json_root,"log":json_root.join("turn.log"),"home":l.home,"session":"12345678-0000-4000-8000-000000000001","input":"json exactly once","command":[exe().to_string_lossy()],"env":{"COREQ_FAKE_AGENT":"claude","COREQ_FAKE_GATE":json_gate},"optimization":"off","context":{"product":"fixtureq","version":"1"}}).to_string();
     let first=request.clone();let writer=std::thread::spawn(move||agentq_runtime::cli::turn(&first,None));wait_for(&json_root.join("fake-turn-1.json"));
@@ -1738,10 +1753,11 @@ fn antigravity_wrapped_submission_keeps_prompt_and_tail() {
     finish(ag, &mut run);
     let r = ag.report(&run).unwrap();
     assert_eq!((r.outcome,r.text.as_deref()),("ok",Some("wrapper answer")));
-    l.env.push(("AGENTQ_OPTIMIZATION".into(),"off".into()));
-    let mut run = ag.launch(&l).unwrap();
+    l.env.push(("AGENTQ_OPTIMIZATION".into(),"off".into()));l.log=root.join("wrapped-resume.log");
+    let mut run = ag.resume("native-conv",&l).unwrap();
     assert_eq!(run.optimization().reason, "optimization_retired");
-    ag.cancel(&mut run).unwrap();
+    wait_agentapi_receipt(ag,&mut run,&l.log,"first");
+    ag.cancel(&mut run).unwrap();finish(ag,&mut run);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1830,7 +1846,7 @@ fn runtime_trait_exposes_native_seams() {
     spec.owner=Some(native_owner("claude",&spec));
 
     // command and turn: the native start with the caller's spec, classified like a launched turn.
-    let args:Vec<_>=claude.command(Command::new(exe()),&spec).unwrap().get_args().map(|a|a.to_string_lossy().into_owned()).collect();
+    let args:Vec<_>=claude.native_arguments(&spec).unwrap().iter().map(|a|a.to_string_lossy().into_owned()).collect();
     assert_eq!(args[args.len()-2..],["--session-id".to_string(),session.to_string()]);
     let log=root.join("seam.log");
     let mut turn=claude.turn(Command::new(exe()),&spec,&log,"hello",&Process::default()).unwrap();
@@ -1907,10 +1923,10 @@ fn runtime_trait_exposes_native_seams() {
     thread.owner=Some(native_owner("codex",&thread));
     codex.app_queue(Command::new(exe()),&thread,"queued input",Duration::from_secs(30)).unwrap();
     assert_eq!(control(&root)["args"],json!(["queue","--thread","t-1","--message","queued input"]));
-    let server:Vec<_>=codex.app_server_command(Command::new(exe()),&thread).unwrap().get_args().map(|a|a.to_string_lossy().into_owned()).collect();
+    let server:Vec<_>=codex.app_server_arguments(&thread).unwrap().iter().map(|a|a.to_string_lossy().into_owned()).collect();
     assert_eq!(server,["app-server","--flag"]);
     assert_eq!(claude.app_queue(Command::new(exe()),&thread,"x",Duration::from_secs(1)).unwrap_err(),"app-queue unsupported by claude");
-    assert_eq!(claude.app_server_command(Command::new(exe()),&thread).unwrap_err(),"app-server unsupported by claude");
+    assert_eq!(claude.app_server_arguments(&thread).unwrap_err(),"app-server unsupported by claude");
     std::fs::remove_dir_all(root).unwrap();
 }
 

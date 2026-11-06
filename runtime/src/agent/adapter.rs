@@ -566,7 +566,7 @@ impl App {
 
     /// Initialize, open the thread and, with input, start the first turn.
     /// A failed handshake stops a plain child; a protected frontend stays with its host.
-    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch) -> Res<App> {
+    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch, owner:&SessionOwner) -> Res<App> {
         let mut session = match AppSession::new(spec) {
             Ok(s) => s,
             Err(e) => { if let Transport::Plain(s) = &mut transport { let _ = s.kill(); } return Err(e); }
@@ -574,12 +574,12 @@ impl App {
         if let Transport::Plain(server) = &transport { session.sample(server.id()); }
         let owned = matches!(transport, Transport::Plain(_));
         let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone() };
-        let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor);
+        let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
     }
 
-    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch, descriptor: &Descriptor) -> Res<()> {
+    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch, descriptor: &Descriptor,owner:&SessionOwner) -> Res<()> {
         let params = if self.owned { turn_thread(l)? } else { thread_params(l, thread)? };
         let until = reply_deadline(l);
         let request = self.session.initialize(initialize.clone())?;
@@ -589,6 +589,7 @@ impl App {
         let request = self.session.open(params)?;
         self.exchange(request, until)?;
         if !self.session.ready() { return Err("app-server thread not ready".into()); }
+        owner.bind(self.session.session().ok_or("session-owner-unknown: app thread missing")?)?;
         if !l.parts.is_empty() { self.start(input_items(descriptor, &l.parts).map_err(|e|e.to_string())?, until)?; }
         else if !l.input.is_empty() { self.input(&l.input, until)?; }
         Ok(())
@@ -767,9 +768,9 @@ pub trait Runtime: Send + Sync {
     fn session_link(&self, spec: &NativeSpec, job: Option<&str>) -> Result<String, (Cause, Option<String>)>;
     /// The optimization intent applied to `spec`, as `launch` applies it.
     fn prepare(&self, intent: Intent, product: &str, spec: &mut NativeSpec, install: Option<&Path>) -> Optimization;
-    /// `base` with the native turn arguments, working directory and environment of `spec`.
-    fn command(&self, base: Command, spec: &NativeSpec) -> Res<Command>;
-    /// One turn started with `command(base, spec)`; `input` goes to the client, output appends to `log`.
+    /// Native turn argument inspection; submission uses `turn` or `launch`.
+    fn native_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>>;
+    /// One owned native turn; `input` goes to the client, output appends to `log`.
     fn turn(&self, base: Command, spec: &NativeSpec, log: &Path, input: &str, process: &Process) -> Res<Turn>;
     /// Capability `background`: the launcher exchange; `reference` is the caller's durably bound input.
     fn background_launch(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Result<Output, crate::process::Failure>>;
@@ -783,8 +784,8 @@ pub trait Runtime: Send + Sync {
     fn launch_refusal(&self, text: &str) -> Option<Cause>;
     /// Capability `app-queue`: queue `reference` into the desktop thread `spec.session`.
     fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output>;
-    /// Capability `app-server`: the app-server command for a caller-owned host.
-    fn app_server_command(&self, base: Command, spec: &NativeSpec) -> Res<Command>;
+    /// Capability `app-server`: read-only argument inspection; no spawnable command.
+    fn app_server_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>>;
 }
 
 /// The caller's view of one native session for the native seams; the adapter adds its client.
@@ -866,14 +867,19 @@ fn mcp_servers(file: &Path) -> Res<Vec<String>> {
 }
 
 /// Complete JSON lines of `log` from byte `from`, and the byte after the last complete line.
-fn lines_from(log: &Path, from: u64) -> Res<(Vec<Value>, u64)> {
+fn lines_from(log: &Path, from: u64) -> Res<(Vec<Value>, u64)> {let (rows,next,_)=activity_lines(log,from)?;Ok((rows,next))}
+
+fn activity_lines(log: &Path, from: u64) -> Res<(Vec<Value>, u64,bool)> {
     let mut f = File::open(log).map_err(|e| format!("agent log unreadable: {e}"))?;
     if f.metadata().map_err(|e| e.to_string())?.len() < from { return Err("agent log truncated; progress unknown".into()); }
     let mut rest = vec![];
     f.seek(SeekFrom::Start(from)).and_then(|_| f.read_to_end(&mut rest)).map_err(|e| format!("agent log read: {e}"))?;
-    let Some(end) = rest.iter().rposition(|b| *b == b'\n') else { return Ok((vec![], from)) };
-    let values = String::from_utf8_lossy(&rest[..end]).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(Value::is_object).collect();
-    Ok((values, from + end as u64 + 1))
+    let Some(end) = rest.iter().rposition(|b| *b == b'\n') else { return Ok((vec![], from,false)) };
+    let mut invalid=false;
+    let values=rest[..end].split(|b|*b==b'\n').filter(|line|!line.iter().all(u8::is_ascii_whitespace)).filter_map(|line| {
+        match serde_json::from_slice::<Value>(line) {Ok(v) if v.is_object()=>Some(v),_=>{invalid=true;None}}
+    }).collect();
+    Ok((values, from + end as u64 + 1,invalid))
 }
 
 impl Adapter {
@@ -905,13 +911,14 @@ impl Adapter {
 
     fn refresh_activity(&self,run:&mut Run)->Res<()> {
         let run=self.own_mut(run)?;
+        let mut invalid=false;
         let events=match &mut run.body {
             Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].to_vec();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
-            Body::Turn(t)=>{t.sync_transcript()?;let (rows,next)=lines_from(&t.log,run.activity.progress)?;run.activity.progress=next;run.activity.cursor.read(self.client,rows)},
-            Body::Native(n) if n.attached=>{let (rows,next)=lines_from(n.turn.path(),run.activity.progress)?;run.activity.progress=next;run.activity.cursor.read(self.client,rows)},
+            Body::Turn(t)=>{t.sync_transcript()?;let (rows,next,bad)=activity_lines(&t.log,run.activity.progress)?;invalid=bad;run.activity.progress=next;run.activity.cursor.read(self.client,rows)},
+            Body::Native(n) if n.attached=>{let (rows,next,bad)=activity_lines(n.turn.path(),run.activity.progress)?;invalid=bad;run.activity.progress=next;run.activity.cursor.read(self.client,rows)},
             _=>vec![],
         };
-        run.activity.feed(events,unix_ms());let _=run.activity.observation(run.inactivity,unix_ms(),run.live.is_some());Ok(())
+        run.activity.feed(events,unix_ms());if invalid {run.activity.feed(vec![Event::Unsupported {reason:"native record invalid"}],unix_ms());}let _=run.activity.observation(run.inactivity,unix_ms(),run.live.is_some());Ok(())
     }
 
     fn seam_readiness(&self, command: &Command, spec: &NativeSpec, log: Option<&Path>, input: &str) -> Res<Readiness> {
@@ -1004,7 +1011,7 @@ impl Adapter {
                     turn_thread(l)?;
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
                     let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
-                    let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l)?;
+                    let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l,&owner)?;
                     let mut run=self.checked_run(&readiness,Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);return Ok(run);
                 }
                 let input = if l.parts.is_empty() { l.input.clone() } else { stream_message(&l.parts)? };
@@ -1039,7 +1046,7 @@ impl Adapter {
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
                 let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
-                let app = App::open(&spec, Transport::Plain(server), initialize, thread, l)?;
+                let app = App::open(&spec, Transport::Plain(server), initialize, thread, l,&owner)?;
                 Ok(self.checked_run(&readiness, Body::App(Box::new(app)), 0, optimization, l))
             }
         };
@@ -1207,7 +1214,10 @@ impl Runtime for Adapter {
         let (state, error) = match self.poll(run) { Ok(s) => (s, None), Err(e) => (State::Unknown, Some(e)) };
         let activity_error=self.refresh_activity(run).err();
         let mut activity=if let Some(error)=activity_error {ActivityObservation {state:"unknown".into(),idle_ms:None,reason:Some(error)}} else {run.activity.observation(run.inactivity,unix_ms(),state==State::Running)};
-        if activity.state=="stalled" && run.stop_on_stall {if let Err(error)=self.cancel(run) {activity.reason=Some(format!("stall-stop-failed: {error}"));}}
+        if activity.state=="stalled" && run.stop_on_stall {
+            activity.reason=Some(match self.cancel(run) {Ok(_)=>"stall-stop-requested: native subtree unverified".into(),Err(error)=>format!("stall-stop-failed: {error}")});
+            if let Some(owner)=&run.owner {if let Err(error)=owner.stop_uncertain() {activity.reason=Some(format!("stall-stop-ownership-unknown: {error}"));}}
+        }
         let (url, cause, detail) = match self.link(run) { Ok(u) => (Some(u), None, None), Err((c, d)) => (None, Some(c), d) };
         let session = self.session_id(run);
         let proven = match &run.body {
@@ -1335,7 +1345,7 @@ impl Runtime for Adapter {
         optimization
     }
 
-    fn command(&self, base: Command, spec: &NativeSpec) -> Res<Command> {(self.ops.validate)(&spec.args,&[],&Policy::default())?; Ok(command(base, &self.native(spec))) }
+    fn native_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>> {(self.ops.validate)(&spec.args,&[],&Policy::default())?; Ok(args(&self.native(spec))) }
 
     fn turn(&self, base: Command, spec: &NativeSpec, log: &Path, input: &str, process: &Process) -> Res<Turn> {
         let readiness=self.seam_readiness(&base,spec,Some(log),input)?;
@@ -1379,9 +1389,9 @@ impl Runtime for Adapter {
         (self.ops.app_queue)(base, &self.native(spec), reference, budget)
     }
 
-    fn app_server_command(&self, base: Command, spec: &NativeSpec) -> Res<Command> {
+    fn app_server_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>> {
         self.needs("app-server")?;
-        (self.ops.app_command)(base, &self.native(spec))
+        Ok((self.ops.app_command)(Command::new("native-argument-inspection"), &self.native(spec))?.get_args().map(OsStr::to_os_string).collect())
     }
 }
 
@@ -1395,7 +1405,7 @@ pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, 
     owner.spawned(server.id())?;
     if !l.input.is_empty() || !l.parts.is_empty() {owner.submit()?;}
     let optimization = server.optimization();
-    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l)?;
+    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner)?;
     let mut run=adapter.run(Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);Ok(run)
 }
 
@@ -1463,8 +1473,8 @@ mod tests {
                 probes.insert(capability,supported(runtime.resume("session-1",&l).map(|_|())));
             }
             let native=NativeSpec {root:root.clone(),session:"session-1".into(),home:Some(root.clone()),..NativeSpec::default()};
-            let command=runtime.command(Command::new(&absent),&native).unwrap();
-            let args:Vec<_>=command.get_args().map(|s|s.to_string_lossy()).collect();
+            let native_args=runtime.native_arguments(&native).unwrap();
+            let args:Vec<_>=native_args.iter().map(|s|s.to_string_lossy()).collect();
             probes.insert("caller-session-id",args.windows(2).any(|p|p==["--session-id","session-1"]));
             probes.insert("session-url",!matches!(runtime.session_link(&native,None),Err((Cause("no-session-url"),_))));
             probes.insert("catalogue",supported(runtime.catalogue_with_executable(Some(&root),Some(&absent)).map(|_|())));
