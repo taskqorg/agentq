@@ -32,7 +32,7 @@ impl SessionStore {
         let _=created;self.path.canonicalize().map_err(|e|e.to_string())
     }
     pub(super) fn adopt(&self,spec:&Spec,session:&str,native:&[NativeProcess])->Res<OwnerObservation> {
-        valid_session(session)?;
+        valid_session(spec.client.code(),session)?;
         let root=self.directory()?;let _admission=lock(&root.join("admission.lock"))?;
         let expected=binding(spec)?;
         for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())? {
@@ -74,7 +74,7 @@ impl SessionStore {
         let mut file=if session=="-" {root.join(format!("pending-{token}.json"))} else {path(&root,spec.client.code(),&session)};
         // A checkpoint taken before discovery keeps its token after the native ID is bound.
         if session=="-" && saved.is_some() {
-            if let Some(row)=read(&file)? {if let Some(target)=row["binding"].as_str() {valid_session(target)?;let target_path=path(&root,spec.client.code(),target);if target_path.exists() {session=target.into();file=target_path;}}}
+            if let Some(row)=read(&file)? {if let Some(target)=row["binding"].as_str() {valid_session(spec.client.code(),target)?;let target_path=path(&root,spec.client.code(),target);if target_path.exists() {session=target.into();file=target_path;}}}
             for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())? {
                 let candidate=entry.map_err(|e|e.to_string())?.path();if candidate.extension().is_none_or(|s|s!="json") {continue;}
                 if let Some(row)=read(&candidate)? {if row["token"]==saved.unwrap()["token"] && row["token"].is_string() && row["session"]!="-" {
@@ -83,7 +83,7 @@ impl SessionStore {
             }
         }
         let unknown=session=="-";
-        if !unknown {valid_session(&session)?;}
+        if !unknown {valid_session(spec.client.code(),&session)?;}
         let guard=Some(lock(&file.with_extension("lock"))?);
         let old=read(&file)?;
         if let Some(saved)=saved {
@@ -281,7 +281,8 @@ impl SessionOwner {
         if o.row["phase"]!="prepared" && o.row["phase"]!="idle" {return Err("session-input-in-flight".into());}
         o.row["phase"]=json!("submitted");save(&o.path,&o.row)
     })}
-    pub(crate) fn bind(&self,session:&str)->Res<()> {valid_session(session)?;self.with(|o| {
+    pub(crate) fn bind(&self,session:&str)->Res<()> {self.with(|o| {
+        valid_session(o.row["runtime"].as_str().ok_or("ownership runtime missing")?,session)?;
         if o.row["session"]==session {return Ok(());}
         if o.row["session"]!="-" {return Err("session-owner-unknown: native session differs".into());}
         let _admission=lock(&o.root.join("admission.lock"))?;
@@ -355,7 +356,10 @@ fn stop_path(root:&Path,row:&Value)->Res<Option<PathBuf>> {
     Ok(Some(root.join("stops").join(format!("{token}.json"))))
 }
 fn stopped(root:&Path,row:&Value)->Res<bool> {Ok(row["phase"]=="stop-unresolved" || match stop_path(root,row)? {Some(path)=>read(&path)?.is_some(),None=>false})}
-fn valid_session(session:&str)->Res<()> {if !session.starts_with('-') && native::plain_id(session) {Ok(())} else {Err("session requires a native session ID".into())}}
+fn valid_session(runtime:&str,session:&str)->Res<()> {
+    let structured=registry::structured_session(runtime);
+    if !session.is_empty() && session!="-" && (structured || !session.starts_with('-') && native::plain_id(session)) {Ok(())} else {Err("session requires a native session ID".into())}
+}
 fn binding(spec:&Spec)->Res<Value> {
     let home=spec_home(spec).map(|p|p.canonicalize().map_err(|_|"session-owner-unknown: account home unavailable")).transpose()?;
     Ok(json!({"schema":"agentq-owner/2","runtime":spec.client.code(),"root":spec.root.canonicalize().map_err(|e|e.to_string())?,"home":home,
@@ -392,6 +396,7 @@ mod tests {
         let root=crate::scratch("session-owners");let home=root.join("home");std::fs::create_dir_all(&home).unwrap();
         let spec=Spec {client:Client::Claude,root:root.clone(),session:"session-1".into(),resume:true,args:vec![],env:vec![],home:Some(home)};
         let store=SessionStore::new(root.join("owners"));
+        assert!(store.adopt(&spec,"--foreign-flag",&[]).is_err(),"structured IDs do not relax CLI argument validation");
         assert!(store.acquire(&spec,false,None,Lifetime::Recoverable).unwrap_err().starts_with("session-owner-unknown"));
         let current=NativeProcess::read(std::process::id()).unwrap().unwrap();
         assert!(store.adopt(&spec,&spec.session,std::slice::from_ref(&current)).unwrap_err().starts_with("session-busy"));

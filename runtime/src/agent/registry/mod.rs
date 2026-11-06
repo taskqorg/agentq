@@ -294,6 +294,7 @@ pub(crate) struct Protocol {
     pub snapshot: fn(&[Value],Option<&Path>)->Snapshot,
     pub report: fn(&str,&[Value],Option<&Path>)->Report,
 }
+pub(super) fn structured_session(runtime:&str)->bool {entry(runtime).and_then(|e|e.builtin).is_some_and(|a|a.ops.acp.is_some())}
 pub(crate) fn protocol(client:Client)->&'static Protocol {builtin(client).ops.protocol}
 #[cfg(test)]
 pub(crate) use antigravity::session as antigravity_session;

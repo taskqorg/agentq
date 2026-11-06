@@ -22,11 +22,28 @@ fn main() {
     l.home=Some(root.join("account"));std::fs::create_dir_all(l.home.as_ref().unwrap()).unwrap();
     l.env=vec![("AGENTQ_FAKE_ACP".into(),"1".into())];
     l.deadline=Some(Instant::now()+Duration::from_secs(20));
+    l.process.configure=Some(std::sync::Arc::new(|command|{
+        assert!(command.get_envs().any(|(name,value)|name=="GEMINI_API_KEY" && value.is_none()),"structured spawn must retain account environment cleaning");
+    }));
     l.model=Some("model-1".into());
     l.policy.approval=agent::Approval::Edits;
+    assert!(r.resume("untracked",&l).err().unwrap().starts_with("session-owner-unknown"));
+    let mut bad_store=l.clone();bad_store.session_store=agent::SessionStore::new("relative-owners");
+    assert_eq!(r.launch(&bad_store).err().unwrap(),"session-store-requires-absolute-path");
+    l.inactivity=Some(Duration::from_secs(20));
     let mut run=r.launch(&l).unwrap();
+    assert!(run.owner().is_some(),"ACP must retain the mandatory owner handle");
+    let session=r.session_id(&run).unwrap();
+    assert_eq!(run.owner().unwrap().checkpoint().unwrap()["session"],session,"native identity binds before input");
+    assert!(r.resume(&session,&l).err().unwrap().starts_with("session-busy"));
+    let mut conflicting=l.clone();conflicting.log=root.join("conflicting.jsonl");
+    conflicting.env.push(("AGENTQ_FAKE_ACP_SESSION".into(),session.clone().into()));
+    assert!(r.launch(&conflicting).err().unwrap().starts_with("session-busy"));
+    let raw=std::fs::read_to_string(&conflicting.log).unwrap();
+    assert!(!raw.lines().filter_map(|row|serde_json::from_str::<Value>(row).ok()).any(|row|row["outgoing"]==true && row["message"]["method"]=="session/prompt"),"failed binding cannot submit input");
     #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;assert_eq!(std::fs::metadata(&l.log).unwrap().permissions().mode() & 0o777,0o600);}
     assert_eq!(r.checkpoint(&run).unwrap_err(),agent::Cause("no-checkpoint"));
+    assert_eq!(r.observe(&mut run).activity.state,"active","observation sees native activity without consuming progress");
     let mut seen=vec![];
     loop {
         let events=r.progress(&mut run).unwrap();
@@ -50,7 +67,7 @@ fn main() {
     assert!(r.control(&mut run,Control::Reply{id:json!("permission-1"),option:Some("once".into())}).is_err());
     let classified=r.classify(&std::fs::read_to_string(&l.log).unwrap());
     assert_eq!((classified.outcome,classified.text.as_deref(),classified.usage.input),("ok",Some("answer"),Some(17)));
-    let mut history=r.history("session:opaque_/1",None,Some(&l.log),None).unwrap();
+    let mut history=r.history(&session,None,Some(&l.log),None).unwrap();
     let steps=history.steps(std::fs::metadata(&l.log).unwrap().len()).unwrap().steps;
     assert!(steps.iter().any(|s|s.kind==agent::history::StepKind::Message && s.data["text"]=="answer"));
     let tool=steps.iter().find(|s|s.native_id.as_deref()==Some("tool-1")).unwrap();
@@ -58,7 +75,7 @@ fn main() {
     assert!(steps.iter().any(|s|s.kind==agent::history::StepKind::Approval));
     assert!(steps.iter().any(|s|s.kind==agent::history::StepKind::Unknown));
     l.input="second".into();
-    let mut resumed=r.resume("session:opaque_/1",&l).unwrap();
+    let mut resumed=r.resume(&session,&l).unwrap();
     r.cancel(&mut resumed).unwrap();
     while r.poll(&mut resumed).unwrap()==State::Running {std::thread::yield_now();}
     let events=r.progress(&mut resumed).unwrap();
@@ -110,6 +127,20 @@ fn main() {
     let mut large_run=r.launch(&large).unwrap();r.cancel(&mut large_run).unwrap();
     while r.poll(&mut large_run).unwrap()==State::Running {std::thread::yield_now();}
     assert_eq!(r.report(&large_run).unwrap().outcome,"cancelled");
+    #[cfg(unix)] {
+        let mut signalled=l.clone();signalled.input="signalled".into();signalled.log=root.join("signalled.jsonl");
+        let mut native=r.launch(&signalled).unwrap();
+        let mut info:libc::siginfo_t=unsafe {std::mem::zeroed()};
+        assert_eq!(unsafe {libc::waitid(libc::P_PID,native.id().unwrap(),&mut info,libc::WEXITED|libc::WNOWAIT)},0,"wait only for this owned no-model fixture");
+        while r.poll(&mut native).unwrap()==State::Running {std::thread::yield_now();}
+        let report=r.report(&native).unwrap();
+        assert_eq!((report.outcome,report.exit),("ok",None));
+        assert_eq!(report.termination,agent::ProcessTermination::Observed);
+        assert_eq!(report.process.exit_unknown,"signalled");
+        let stop=r.stop_event(&mut native,u64::MAX).unwrap().unwrap();
+        assert_eq!(stop.cause,agent::history::stop::StopCause::Signal);assert_eq!(stop.exit_code,None);
+        assert_eq!(r.report(&native).unwrap().outcome,"ok");
+    }
     let mut malformed=l.clone();malformed.log=root.join("malformed.jsonl");malformed.deadline=Some(Instant::now()+Duration::from_secs(20));
     malformed.env.push(("AGENTQ_FAKE_ACP_BAD_FIELD".into(),"1".into()));
     let mut invalid=r.launch(&malformed).unwrap();
@@ -161,26 +192,28 @@ fn server() {
         let child=std::process::Command::new(std::env::current_exe().unwrap()).env("AGENTQ_FAKE_DESCENDANT","1").spawn().unwrap();
         std::fs::write("descendant.pid",child.id().to_string()).unwrap();
     }
+    let mut session=std::env::var("AGENTQ_FAKE_ACP_SESSION").unwrap_or_else(|_|format!("session:opaque_/{}",std::process::id()));
     let mut asked=false;let mut cancelled=false;let mut linger=false;
     let mut prompt=Value::Null;
     let emit=|v:Value| {println!("{v}");std::io::stdout().flush().unwrap();};
     let reply=|v:&Value,result:Value|emit(json!({"jsonrpc":"2.0","id":v["id"],"result":result}));
-    let update=|u:Value|emit(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session:opaque_/1","update":u}}));
+    let update=|session:&str,u:Value|emit(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":u}}));
     for line in std::io::stdin().lock().lines() {
         let v:Value=serde_json::from_str(&line.unwrap()).unwrap();
         match v["method"].as_str() {
             Some("initialize")=>{emit(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error fixture"}}));reply(&v,json!({"protocolVersion":1,"agentInfo":{"version":if std::env::var_os("AGENTQ_FAKE_ACP_BAD_VERSION").is_some(){"1.4.3"}else{"1.5.2"}},"agentCapabilities":{"loadSession":true},"_meta":{"large":if std::env::var_os("AGENTQ_FAKE_ACP_LARGE").is_some(){"x".repeat(9*1024*1024)}else{String::new()}}}));},
             Some("session/new"|"session/load")=>{
                 assert!(PathBuf::from(std::env::var_os("GEMINI_HOME").unwrap()).ends_with("account"));
-                if v["method"]=="session/load" {update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"old replay"}}));}
-                reply(&v,json!({"sessionId":"session:opaque_/1"}));
+                if v["method"]=="session/load" {session=v["params"]["sessionId"].as_str().unwrap().into();update(&session,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"old replay"}}));}
+                reply(&v,json!({"sessionId":session}));
             },
             Some("session/set_model")=>{assert_eq!(v["params"]["modelId"],"model-1");reply(&v,json!({}));},
             Some("session/set_mode")=>{assert_eq!(v["params"]["modeId"],"accept-edits");reply(&v,json!({}));},
             Some("session/prompt")=>{
                 if std::env::var_os("AGENTQ_FAKE_ACP_EOF").is_some() {return;}
-                if std::env::var_os("AGENTQ_FAKE_ACP_BAD_FIELD").is_some() {update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":17}}));return;}
+                if std::env::var_os("AGENTQ_FAKE_ACP_BAD_FIELD").is_some() {update(&session,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":17}}));return;}
                 match v["params"]["prompt"][0]["text"].as_str() {
+                    #[cfg(unix)] Some("signalled")=>{reply(&v,json!({"stopReason":"end_turn"}));unsafe {libc::raise(libc::SIGTERM)};unreachable!();},
                     Some("rejected-completion")=>{reply(&v,json!({"stopReason":"end_turn","usage":{"inputTokens":"bad-counter"}}));return;},
                     Some("raw-json")=>{std::io::stdout().write_all(b"{\"jsonrpc\":\"2.0\",MALFORMED_RAW_SENTINEL}\n").unwrap();return;},
                     Some("raw-utf8")=>{std::io::stdout().write_all(b"{\xffUTF8_RAW_SENTINEL}\n").unwrap();return;},
@@ -192,17 +225,17 @@ fn server() {
                 if v["params"]["prompt"][0]["text"]=="linger" {linger=true;emit(json!({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"end_turn"}}));continue;}
                 asked=true;
                 emit(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error while running"}}));
-                emit(json!({"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"sessionId":"session:opaque_/1","toolCall":{"toolCallId":"tool-1","title":"Run fixture"},"options":[{"optionId":"once","kind":"allow_once","name":"Allow"}]}}));
+                emit(json!({"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"sessionId":session,"toolCall":{"toolCallId":"tool-1","title":"Run fixture"},"options":[{"optionId":"once","kind":"allow_once","name":"Allow"}]}}));
             },
             Some("session/cancel")=>{cancelled=true;if !asked {emit(json!({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"cancelled"}}));}},
             None if v["id"]=="permission-1"=>{
                 asked=false;
                 if v["result"]["outcome"]["outcome"]=="cancelled" {assert!(cancelled);emit(json!({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"cancelled"}}));continue;}
                 assert_eq!(v["result"]["outcome"]["optionId"],"once");
-                update(json!({"sessionUpdate":"tool_call","toolCallId":"tool-1","kind":"execute","title":"Fixture","status":"in_progress"}));
-                update(json!({"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":{"stdout":"proof"}}));
-                update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer"}}));
-                update(json!({"sessionUpdate":"future_update","raw":"kept"}));
+                update(&session,json!({"sessionUpdate":"tool_call","toolCallId":"tool-1","kind":"execute","title":"Fixture","status":"in_progress"}));
+                update(&session,json!({"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":{"stdout":"proof"}}));
+                update(&session,json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answer"}}));
+                update(&session,json!({"sessionUpdate":"future_update","raw":"kept"}));
                 emit(json!({"jsonrpc":"2.0","id":prompt,"result":{"stopReason":"end_turn","usage":{"inputTokens":17,"outputTokens":2}}}));
             },
             _=>panic!("unexpected ACP message: {v}"),
