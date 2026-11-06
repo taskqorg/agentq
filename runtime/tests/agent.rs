@@ -303,6 +303,12 @@ fn fake_app_server() {
                         "native" if value["params"]["excludeTurns"]!=true=>println!("{}",padded(LIMIT+1)),
                         "exact"=>println!("{}",padded(LIMIT)),
                         "cut"=>{print!("{}",&head[..head.len()-1]);std::io::stdout().flush().unwrap();std::process::exit(0);},
+                        // Valid UTF-8 near the bound: a two-byte character closes an exact-limit pad, or straddles the bound.
+                        "exact-utf8"=>println!("{}",padded(LIMIT).replace("xx\"","é\"")),
+                        "over-utf8"=>{let pad=head.find("\"pad\":\"").unwrap()+7;println!("{}",head.replace("\"pad\":\"\"",&format!("\"pad\":\"{}é\"","x".repeat(LIMIT-pad))));},
+                        // Raw bytes: a stream cut inside a character, and a complete record that is not UTF-8.
+                        "cut-utf8"=>{let mut out=std::io::stdout();out.write_all(&head.as_bytes()[..head.len()-1]).unwrap();out.write_all(&[0xC3]).unwrap();out.flush().unwrap();std::process::exit(0);},
+                        "invalid"=>{let mut out=std::io::stdout();out.write_all(b"{\"pad\":\"\xFF\"}\n").unwrap();out.flush().unwrap();},
                         _=>println!("{head}"),
                     }
                     continue;
@@ -380,11 +386,15 @@ fn app_transport_preserves_native_tools_drafts_and_catalogue() {
 }
 
 // #253 A2/A3: a thread/resume reply over the bound and a stream cut inside a record read as different failures before any
-// input; `excludeTurns` keeps a long native history inside the bound. Risk: both collapse into one message again, the record
-// bound drifts, or the ordinary resume starts hydrating history.
+// input; `excludeTurns` keeps a long native history inside the bound. The bound counts bytes, so a valid character across it
+// still reads as size, not invalid UTF-8. Risk: both collapse into one message again, the record bound drifts, decoding runs
+// before the byte checks, or the ordinary resume starts hydrating history.
 fn app_resume_frames_stay_bounded_and_named() {
     let codex = agent::runtime("codex").unwrap();
-    for (frame, refusal) in [("native", None), ("exact", None), ("over", Some("app-server record exceeds 8 MiB")), ("cut", Some("app-server stream ended inside a record after "))] {
+    for (frame, refusal) in [("native", None), ("exact", None), ("exact-utf8", None),
+        ("over", Some("app-server record exceeds 8 MiB")), ("over-utf8", Some("app-server record exceeds 8 MiB")),
+        ("cut", Some("app-server stream ended inside a record after ")), ("cut-utf8", Some("app-server stream ended inside a record after ")),
+        ("invalid", Some("app-server record invalid"))] {
         let root = scratch(&format!("resume-frame-{frame}"));
         std::fs::write(root.join("app-native-thread"), "native-thread").unwrap();
         let mut l = fake_launch("codex", &root, "private request", &[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref()),("AGENTQ_FAKE_RESUME_FRAME",frame.as_ref())]);
