@@ -277,6 +277,7 @@ fn fake(client: &str) {
         std::fs::write("terminal.json",json!({"args":args,"pid":std::process::id()}).to_string()).unwrap();
         while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}return;
     }
+    if args.first().is_some_and(|a|a=="acp") {return fake_acp(&args);}
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
     if client == "antigravity" { input = serde_json::from_str::<Value>(&input).unwrap()["message"]["content"].as_str().unwrap().to_string(); }
@@ -377,6 +378,31 @@ fn fake(client: &str) {
         emit(json!({"type": "turn.completed", "usage": {"input_tokens": 50, "cached_input_tokens": 40, "output_tokens": 5}}));
     }
     if std::env::var("COREQ_FAKE_LINGER").is_ok() { std::thread::sleep(Duration::from_secs(60)); }
+}
+
+fn fake_acp(args:&[String]) {
+    use std::io::{BufRead,Write};
+    let session="acp-session";
+    let emit=|v:Value| {println!("{v}");std::io::stdout().flush().unwrap();};
+    for line in std::io::stdin().lock().lines() {
+        let v:Value=serde_json::from_str(&line.unwrap()).unwrap();
+        let result=match v["method"].as_str() {
+            Some("initialize")=>json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true}}),
+            Some("session/new"|"session/load")=>json!({"sessionId":session}),
+            Some("session/prompt")=>{
+                let store=Path::new("fake-sessions.json");
+                let mut sessions:Value=std::fs::read_to_string(store).ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+                let turn=sessions[session].as_u64().unwrap_or(0)+1;sessions[session]=json!(turn);
+                std::fs::write(store,sessions.to_string()).unwrap();
+                std::fs::write(format!("fake-turn-{turn}.json"),json!({"args":args,"input":v["params"]["prompt"][0]["text"],"home":std::env::var("GEMINI_HOME").ok(),
+                    "launcher":std::env::var("AGENTQ_LAUNCHER").ok(),"trace_context":std::env::var("COREQ_TRACE_CONTEXT").ok()}).to_string()).unwrap();
+                emit(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("turn {turn}")}}}}));
+                json!({"stopReason":"end_turn","usage":{"inputTokens":12,"outputTokens":8}})
+            },
+            _=>panic!("unexpected ACP fixture request: {v}"),
+        };
+        emit(json!({"jsonrpc":"2.0","id":v["id"],"result":result}));
+    }
 }
 
 fn fake_app_server() {

@@ -16,6 +16,26 @@ Each entry supplies every required callback. Registry validation rejects missing
 
 Private execution dispatches registered protocol callbacks for native events, reports, sessions, transcript observation and quotas. Client identity is opaque registration data; a new protocol needs no enum variant or parser arm in core. Codex app-server, Claude background and Antigravity sidecar details belong to their runtime modules. Shared code retains process ownership, immutable records, runtime-neutral report assembly and transport/recovery checks. Native start-limit detection, terminal classification, call usage, final text, history identity/normalization and Codex rollout parsing dispatch through the selected protocol; an unrelated runtime using `assistant` or `result` records does not inherit another runtime's semantics. Existing native behavior assertions are preserved.
 
+## ACP sessions
+
+The shared ACP adapter speaks JSON-RPC 2.0 over native stdio. Registration supplies command arguments, environment, home selection, mode mappings and rejected server versions; the adapter contains no runtime names. It checks protocol version 1 and message envelopes, preserves unknown updates and native request data in the private log, and exposes only capabilities actually reported by the server.
+
+| ACP method or update | Runtime meaning |
+|---|---|
+| `initialize` | Protocol version, native version, authentication methods and live capabilities; unsupported protocol or a rejected version refuses before a session or prompt. |
+| `session/new`, `session/load` | Start or resume the opaque native session; load replay is retained as replay evidence and never emitted again as live progress or counted as new usage. |
+| `session/prompt` | Submit the ordered text/image input once; a response with `stopReason` is terminal evidence, while EOF or process exit alone is unknown. |
+| `session/cancel` | Request native cancellation; only the prompt's terminal reply confirms the turn outcome. |
+| `session/set_model`, `session/set_mode` | Set a model or declared native mode; refusal stays a native error. |
+| `session/request_permission` | Typed pending request, with original ID and offered choices; a reply selects only an offered option or cancels. Questions never receive an automatic approval. |
+| `agent_message_chunk`, `agent_thought_chunk` | Assistant text or thinking; typed history uses the shared `agent::history` step projection. |
+| `tool_call`, `tool_call_update` | Stable native tool ID, kind, input, output and state; missing fields remain unknown. |
+| `usage_update`, prompt `usage` | Observed native usage only; absent tokens and model-call counts stay unknown. |
+
+Antigravity uses the installed `agy acp`; there is no downloaded server or managed pin. ACP versions 1.4.2 through 1.4.5 refuse because they may write built-in skills into the workspace. Its ACP home is a Gemini root, selected explicitly for an isolated chat; the server does not inherit a different scanned home. A qualification records the exact CLI version, empty-folder write inspection and source-profile preservation.
+
+The existing stream and agentapi native seams remain available until ACP has side-by-side task, tools, resume, cancellation, usage and history proof on macOS and Windows. Agentapi remains a compatibility seam, not a fallback after an uncertain ACP input. Authentication uses the separate login flow; launch never starts interactive sign-in. A missing login or native-platform proof remains an explicit qualification gap.
+
 ## Runtime trait
 
 M12.9/M12.10 apply the [specq agent-runtime rule](https://github.com/taskqorg/specq/blob/main/engineering/agent-runtimes.md). The public surface is `agent::Runtime`, `agent::Descriptor`, `agent::Policy`, `agent::Launch`, `agent::Run` and the runtime-neutral `Event`, `Window`, `Report`, `Usage`, `Snapshot`, `Accounts`, `Context` and `history` types. `agent::runtimes()` lists every adapter; `agent::runtime(name)` finds one by descriptor name (alias `agy` selects `antigravity`). Callers treat names and session IDs as opaque data.
