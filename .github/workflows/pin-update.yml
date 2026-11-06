@@ -40,6 +40,8 @@ jobs:
           NAME: ${{ steps.pin.outputs.name }}
           AUTO: ${{ inputs.auto_merge }}
         run: |
+          # An open PR for this pin may hold consumer fixes, and a push would discard them and rerun CI.
+          if gh pr view pin-update --json state,title --jq 'select(.state=="OPEN").title' 2>/dev/null | grep -qF "$NAME"; then exit 0; fi
           git config user.name 'taskqorg-pin-update[bot]'
           git config user.email 'taskqorg-pin-update[bot]@users.noreply.github.com'
           git switch -C pin-update

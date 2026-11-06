@@ -67,13 +67,13 @@ def main():
         name = runtime = newest('agentq', 'runtime-v')
         coreq = runtime_coreq(runtime)
         runtime_rev = commit('agentq', runtime)
-    changed = False
+    changed = []
     for path in manifests:
         old = path.read_text(encoding='utf-8')
         new = repin(old, coreq, runtime, runtime_rev)
         if new != old:
             path.write_text(new, encoding='utf-8')
-            changed = True
+            changed.append(path)
     if not changed:
         return 0
     if agentq:
@@ -84,8 +84,9 @@ def main():
         log = Path('runtime/CHANGELOG.md')
         entry = f'# Runtime changelog\n\n## {version}\n\n- Pin CoreQ {coreq}.\n'
         log.write_text(log.read_text(encoding='utf-8').replace('# Runtime changelog\n', entry, 1), encoding='utf-8')
-    # Resolving without --locked moves only what the edited manifests require.
-    run('cargo', 'metadata', '--format-version', '1')
+    # Resolving without --locked moves only what the edited manifests require. A nested workspace has its own lockfile.
+    for path in changed:
+        run('cargo', 'metadata', '--format-version', '1', '--manifest-path', str(path))
     print(name)
     return 0
 
