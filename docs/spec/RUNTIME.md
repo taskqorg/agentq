@@ -257,7 +257,7 @@ A rejected Claude `rate_limit_event` before work also returns `Report::reached`,
 
 ## Observation
 
-`Run::record` appends the records of a finished run in one call: one `agent.turn` and one `agent.call` per model request ([specq telemetry contract](https://github.com/taskqorg/specq/blob/main/engineering/profiling.md#telemetry-contract)). A second call on a CLI run is refused. Every record is the shared CoreQ `coreq-observation/1` shape, so a shared field not collected reads null with reason `not-collected`.
+`Run::record` appends the records of a finished run in one call: one `agent.turn` and one `agent.call` per model request ([specq telemetry contract](https://github.com/taskqorg/specq/blob/main/engineering/profiling.md#telemetry-contract)). A second call after a successful append is refused; a call after a failed append retries the same records. Every record is the shared CoreQ `coreq-observation/1` shape, so a shared field not collected reads null with reason `not-collected`.
 
 - `agent.turn` keys: `product`, `version`, `operation` and `kind` = `agent.turn`, `started_ms`, `duration_us`, `outcome`, `error`, `project`, `host`, `runtime`, `account`, `task`, `attempt`, `route`, `model`, `session_id`, `exit_code`, `user_cpu_us`, `system_cpu_us`, `peak_rss_bytes`, `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `reasoning_tokens`, `limit_used_percent`, `limit_resets_at`, `limit_window`, `unknown`.
 - `agent.call` keys: the identity keys above with `operation` and `kind` = `agent.call`, `model`, the five token buckets, `started_ms` (the record's native `timestamp`, else null with `not-reported`), `duration_us` (null with `not-reported`), `outcome`, `error` and `session_id`. `agent.turn` totals and `agent.call` records describe the same tokens: sum one kind, never both.
@@ -266,6 +266,25 @@ A rejected Claude `rate_limit_event` before work also returns `Report::reached`,
 - Runtime children: a CLI turn, an app-server session and each bounded native exchange (background, queue, job list, stop, readiness) receive the current context in `COREQ_TRACE_CONTEXT`, and a stale value is replaced or removed. `agentq agent turn` runs no collector, so it treats its own valid `COREQ_TRACE_CONTEXT` as the caller for its records and child; an invalid value stays unknown and never changes the turn.
 - The protected host carries CoreQ-validated `COREQ_TRACE_CONTEXT` through its launchd job and clean native environment. A current span wins over inherited context; without a collector, each hop decodes and re-encodes its process context. Missing or invalid context is omitted, and legacy trace-only context remains supported. Caller metadata grants no authority and changes no permit, native identity, input gate or recovery record.
 - A failed append is kept in `Report::recorded`; it never changes the turn's result. A repeated record keeps the first payload of each immutable id, so recovery never counts twice and never fails on a value only the first process could measure.
+- Every `agent.turn` has an immutable id: `agent.turn` under the CLI turn's key, `agent.native` or `agent.app` under the native turn's key.
+
+### Deferred persistence
+
+A caller that appends outside its supervision path, for example after a CoreQ budget lock wait, keeps the observation of the finished run and appends it later:
+
+```rust
+let state = runtime.poll(&mut run)?;      // Takes no store lock. A terminal poll freezes the CLI report.
+let frozen = run.snapshot(&context)?;     // `running` before the terminal observation. No store, lock or native call.
+let saved = frozen.save();                // Optional durable JSON for a retry after a restart.
+frozen.append(&store)?;                   // May wait for the store. An error leaves `frozen` and the run unchanged.
+```
+
+- The terminal poll freezes the CLI report once: tokens, calls, outcome, session, rollout values, duration, exit and resource use. `Runtime::report`, `Run::snapshot` and `Run::record` read that value. Later bytes in a shared log or rollout, queue delay, a late cancel and a passing deadline never change it. An unreadable log at that moment freezes nothing: `poll` returns the error and the next poll retries.
+- Background, queue and app-server runs freeze the same way from their native terminal report; a snapshot makes no second native read, so a later turn with the same input cannot refuse it.
+- The first `snapshot` fixes the records and the caller context of its thread. Take it in the caller's span. A repeated call returns the same value, whatever context it is given; `input` on an app-server run starts a new turn, whose snapshot is new.
+- `Frozen` holds only immutable IDs and CoreQ-validated metadata, never a prompt, result text or path. `save` writes schema `agentq-frozen/1`; `restore` refuses any other value as a whole. A `Run` checkpoint carries a taken snapshot.
+- Save the snapshot before starting a continuation on the same log. A CLI turn cannot checkpoint after its exit, so a recovered run that first observes the terminal state after a continuation cannot tell its own bytes from later ones. Its `agent.turn` id stays stable; the saved snapshot is what keeps later calls out.
+- A failed snapshot or append stays unknown to the caller and is no completion signal: it releases no capacity, permit or native ownership, and the caller retries with the same value.
 
 ### Model requests
 

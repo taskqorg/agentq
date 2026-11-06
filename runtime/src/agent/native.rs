@@ -439,11 +439,16 @@ impl NativeTurn {
     /// Idempotent FULL-commit append. Recovery uses the same native boundary and immutable payload.
     pub fn record(&mut self, ctx: &Context, store: &crate::telemetry::Store) -> Res<Option<Report>> {
         let Some(mut report) = self.poll()? else { return Ok(None) };
+        report.recorded = self.snapshot(&report, ctx).and_then(|f| f.append(store));
+        Ok(Some(report))
+    }
+
+    /// The immutable records of `report`, this turn's terminal report, without a store or native read.
+    pub(crate) fn snapshot(&self, report: &Report, ctx: &Context) -> Res<super::Frozen> {
         let mut observation = report.observation(self.spec.client, ctx);
         if self.duration.is_none() { observation["duration_us"] = Value::Null; observation["unknown"]["duration_us"] = json!("not-reported"); }
         let key = crate::sha256_hex(format!("{}\0{}\0{}\0{}\0{}\0{}", self.spec.client.code(), self.spec.root.display(), self.scope, self.spec.session, self.start, self.input).as_bytes());
-        report.recorded = crate::telemetry::Event::identified("agent.native", &key, crate::telemetry::shared(&observation)).and_then(|e| super::capture::record(store, e, &report, self.spec.client, ctx, &key));
-        Ok(Some(report))
+        super::capture::freeze("agent.native", &key, &observation, report, self.spec.client, ctx)
     }
 }
 

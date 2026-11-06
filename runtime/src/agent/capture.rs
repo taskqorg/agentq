@@ -295,7 +295,8 @@ impl Attribution {
     }
 }
 
-fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str) -> Res<Event> {
+/// The stable key and payload of one model request's `agent.call`.
+fn call_record(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str) -> (String, Value) {
     let mut unknown = Map::new();
     let mut num = |name: &str, v: Option<u64>, why: &str| -> Value {
         if v.is_none() { unknown.insert(name.into(), json!(why)); }
@@ -326,20 +327,58 @@ fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx:
     who.caller_fields(&mut v);
     v["unknown"] = Value::Object(unknown);
     let key = crate::sha256_hex(format!("{turn_key}\0{}", c.id.clone().unwrap_or_else(|| index.to_string())).as_bytes());
-    Event::identified("agent.call", &key, shared(&v))
+    (key, shared(&v))
 }
 
-/// The `agent.call` records of a finished turn, with immutable IDs under `turn_key`.
-pub(crate) fn call_events(r: &Report, client: Client, ctx: &Context, turn_key: &str) -> Res<Vec<Event>> {
-    r.calls.iter().enumerate().map(|(i, c)| call_event(c, i, r.session.as_deref(), client.code(), ctx, turn_key)).collect()
+fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str) -> Res<Event> {
+    let (key, value) = call_record(c, index, session, runtime, ctx, turn_key);
+    Event::identified("agent.call", &key, value)
 }
 
-/// Append `turn` with its calls. An immutable ID already stored keeps its first payload, so a repeated record never
-/// counts twice or fails on a value only the first process could measure.
-pub(crate) fn record(store: &Store, turn: Event, r: &Report, client: Client, ctx: &Context, turn_key: &str) -> Res<()> {
-    let mut events = vec![turn];
-    events.extend(call_events(r, client, ctx, turn_key)?);
-    append_records(store, &events)
+const FROZEN_SCHEMA: &str = "agentq-frozen/1";
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct FrozenRecord { namespace: String, key: String, observation: Value }
+impl FrozenRecord {
+    fn event(&self) -> Res<Event> { Event::identified(&self.namespace, &self.key, self.observation.clone()) }
+}
+
+/// One finished run's `agent.turn` and `agent.call` records, fixed before any store lock or append. It holds immutable IDs
+/// and CoreQ-validated metadata only, so a retry or restart appends the same records and counts them once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frozen { records: Vec<FrozenRecord> }
+
+impl Frozen {
+    fn new(records: Vec<FrozenRecord>) -> Res<Self> {
+        if records.first().is_none_or(|r| !matches!(r.namespace.as_str(), "agent.turn" | "agent.native" | "agent.app") || r.observation["kind"] != "agent.turn")
+            || records[1..].iter().any(|r| r.namespace != "agent.call" || r.observation["kind"] != "agent.call") {
+            return Err("frozen records invalid".into());
+        }
+        let frozen = Self { records };
+        frozen.events()?;
+        Ok(frozen)
+    }
+    /// The records as CoreQ events, turn first; each keeps its immutable ID.
+    pub fn events(&self) -> Res<Vec<Event>> { self.records.iter().map(FrozenRecord::event).collect() }
+    /// Append with `append_records`. A failure leaves this value unchanged for a retry; it changes no run state.
+    pub fn append(&self, store: &Store) -> Res<()> { append_records(store, &self.events()?) }
+    /// The durable form, for a caller that must retry after its own restart.
+    pub fn save(&self) -> Value { json!({"schema": FROZEN_SCHEMA, "records": self.records}) }
+    /// The value of `save`. Any other value is refused, never partly read.
+    pub fn restore(saved: &Value) -> Res<Self> {
+        if saved["schema"] != FROZEN_SCHEMA { return Err("frozen records invalid".into()); }
+        Self::new(serde_json::from_value(saved["records"].clone()).map_err(|_| "frozen records invalid")?)
+    }
+}
+
+/// Freeze one finished turn under `namespace` and `turn_key`; its calls take immutable IDs under `turn_key`.
+pub(crate) fn freeze(namespace: &str, turn_key: &str, turn: &Value, r: &Report, client: Client, ctx: &Context) -> Res<Frozen> {
+    let mut records = vec![FrozenRecord { namespace: namespace.into(), key: turn_key.into(), observation: shared(turn) }];
+    for (i, c) in r.calls.iter().enumerate() {
+        let (key, observation) = call_record(c, i, r.session.as_deref(), client.code(), ctx, turn_key);
+        records.push(FrozenRecord { namespace: "agent.call".into(), key, observation });
+    }
+    Frozen::new(records)
 }
 
 /// The most events CoreQ takes in one append.
@@ -476,6 +515,9 @@ mod tests {
         let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
         Report::read(client, &text, lines, None)
     }
+    fn record(store: &Store, r: &Report, client: Client, ctx: &Context, key: &str) -> Res<()> {
+        freeze("agent.turn", key, &r.observation(client, ctx), r, client, ctx)?.append(store)
+    }
 
     // Chain: agentq.md M12.13, specq Telemetry contract § Capture (A2). Risk: a runtime writes no `agent.call`, a turn and
     // its calls disagree, a repeated record counts twice, or an unreported bucket reads as zero.
@@ -500,9 +542,8 @@ mod tests {
         for (client, lines, calls, input) in cases {
             let r = read(client, &lines);
             let before = exported(&store).len();
-            let turn = Event::observation(r.observation(client, &ctx)).unwrap();
-            record(&store, turn.clone(), &r, client, &ctx, client.code()).unwrap();
-            record(&store, turn, &r, client, &ctx, client.code()).unwrap();
+            record(&store, &r, client, &ctx, client.code()).unwrap();
+            record(&store, &r, client, &ctx, client.code()).unwrap();
             let rows = exported(&store);
             let new = &rows[before..];
             assert_eq!(new.iter().filter(|o| o["kind"] == "agent.turn").count(), 1, "{client:?}");
@@ -517,8 +558,7 @@ mod tests {
         assert_eq!((codex["source"].as_str(), codex["reasoning_tokens"].as_u64()), (Some("turn-aggregate"), Some(1)), "turn totals are never presented as one request");
 
         let silent = read(Client::Claude, &[claude("c", json!({})), json!({"type": "result"})]);
-        let event = Event::observation(silent.observation(Client::Claude, &ctx)).unwrap();
-        record(&store, event, &silent, Client::Claude, &ctx, "silent").unwrap();
+        record(&store, &silent, Client::Claude, &ctx, "silent").unwrap();
         let rows = exported(&store);
         let (turn, call) = (&rows[rows.len() - 2], &rows[rows.len() - 1]);
         for row in [turn, call] {
@@ -543,9 +583,8 @@ mod tests {
         let ctx = Context { product: "fixtureq", version: "1.0.0", project: "other", task: None, route: Some("manager"), account: "default" };
         let lines: Vec<Value> = (0..1100).map(|i| json!({"type": "assistant", "message": {"id": format!("m{i}"), "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": 1}}})).collect();
         let r = read(Client::Claude, &lines);
-        let turn = Event::observation(r.observation(Client::Claude, &ctx)).unwrap();
-        record(&store, turn.clone(), &r, Client::Claude, &ctx, "long").unwrap();
-        record(&store, turn, &r, Client::Claude, &ctx, "long").unwrap();
+        record(&store, &r, Client::Claude, &ctx, "long").unwrap();
+        record(&store, &r, Client::Claude, &ctx, "long").unwrap();
         let (mut rows, mut after) = (vec![], 0);
         loop {
             let page = store.export(0, after, 1024).unwrap();

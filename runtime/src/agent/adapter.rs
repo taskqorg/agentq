@@ -292,6 +292,8 @@ pub struct Run {
     rollout_progress: Option<(PathBuf, u64)>,
     live: Option<Live>,
     recorded: bool,
+    /// The records of the finished turn, unchanged across repeated snapshots.
+    frozen: Option<super::Frozen>,
     deadline: Option<Instant>,
     /// The launch requested Claude Remote Control (`title`).
     remote: bool,
@@ -319,6 +321,7 @@ struct Native {
 
 impl Run {
     fn restored(mut self, saved: &Value) -> Res<Self> {
+        if let Some(frozen)=saved.get("frozen") { self.frozen=Some(super::Frozen::restore(frozen)?); }
         if let Some(progress)=saved.get("progress") { self.progress=progress.as_u64().ok_or("run progress checkpoint invalid")?; }
         if let Some(events)=saved.get("events") { self.events=serde_json::from_value(events.clone()).map_err(|_|"run event checkpoint invalid")?; }
         if let Some(value)=saved.get("rollout_progress").filter(|v|!v.is_null()) {
@@ -339,25 +342,29 @@ impl Run {
     pub fn id(&self) -> Option<u32> {
         match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id) }
     }
-    /// Append the finished run's one `agent.turn` observation (M12.4); a second call is refused, never counted twice.
+    /// The finished run's immutable records for a deferred append, without a store, lock or native call; a repeated call
+    /// returns the same value with the first caller context. A run without a terminal observation reads `running`.
+    pub fn snapshot(&mut self, ctx: &Context) -> Res<super::Frozen> {
+        if let Some(frozen) = &self.frozen { return Ok(frozen.clone()); }
+        let frozen = match &self.body {
+            Body::Turn(t) => t.snapshot(ctx)?,
+            Body::Native(n) => n.turn.snapshot(n.report.as_ref().ok_or("running")?, ctx)?,
+            // Each app-server turn records once under its native thread and turn identity.
+            Body::App(a) => a.session.snapshot(ctx)?.ok_or("running")?,
+        };
+        self.frozen = Some(frozen.clone());
+        Ok(frozen)
+    }
+    /// Append the finished run's one `agent.turn` observation (M12.4); a second call after a success is refused, never counted twice.
     pub fn record(&mut self, ctx: &Context, store: &crate::telemetry::Store) -> Res<Report> {
         if self.recorded { return Err("run already recorded".into()); }
-        let r = match &mut self.body {
-            Body::Turn(t) => {
-                if t.exit.is_none() { return Err("running".into()); }
-                let mut r = t.report();
-                let key = t.key();
-                r.recorded = crate::telemetry::Event::observation(r.observation(t.client, ctx)).and_then(|e| super::capture::record(store, e, &r, t.client, ctx, &key));
-                r
-            }
-            Body::Native(n) => {
-                if n.report.is_none() { return Err("running".into()); }
-                n.turn.record(ctx, store)?.ok_or("running")?
-            }
-            // Each app-server turn records once under its native thread and turn identity.
-            Body::App(a) => a.session.record(ctx, store)?.ok_or_else(|| "running".to_string())?,
-        };
-        self.recorded = true;
+        let mut r = match &self.body {
+            Body::Turn(t) => t.terminal_report(),
+            Body::Native(n) => n.report.clone(),
+            Body::App(a) => a.session.report(),
+        }.ok_or("running")?;
+        r.recorded = self.snapshot(ctx).and_then(|f| f.append(store));
+        self.recorded = r.recorded.is_ok();
         Ok(r)
     }
 }
@@ -958,7 +965,7 @@ impl Adapter {
 
     fn run(&'static self, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
         self.live.fetch_add(1, Ordering::SeqCst);
-        Run { runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, deadline: l.deadline,
+        Run { runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
             remote: l.title.is_some() }
     }
 
@@ -1035,7 +1042,7 @@ impl Runtime for Adapter {
         let items = input_items(&self.descriptor, parts)?;
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
-            Body::App(a) if !a.owned => { a.pump()?; a.start(items, until)?; run.recorded = false; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
+            Body::App(a) if !a.owned => { a.pump()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
             // A CLI run reads one input; the next turn is a resume.
             _ => Err(Failure::Refused(Cause("input-unsupported"))),
         }
@@ -1107,6 +1114,7 @@ impl Runtime for Adapter {
                 // An agentapi turn has exited once its deadline stop killed it.
                 let exited = t.poll()?.is_some() || t.timed_out && t.ag.native_agentapi && t.exit.is_some();
                 if !exited { return Ok(State::Running); }
+                t.freeze()?;
                 state(&t.report())
             }
             Body::Native(n) => n.poll()?,
@@ -1278,6 +1286,7 @@ impl Runtime for Adapter {
                 "session": n.turn.session(), "resume": n.spec.resume, "job": n.job_id, "attached": n.attached, "fault": n.fault})),
         }?;
         saved["progress"]=json!(run.progress); saved["events"]=json!(run.events); saved["rollout_progress"]=json!(run.rollout_progress);
+        if let Some(frozen)=&run.frozen { saved["frozen"]=frozen.save(); }
         Ok(saved)
     }
 
