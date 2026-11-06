@@ -94,8 +94,8 @@ pub(super) fn identities(spec:&SourceSpec,path:&Path)->Res<Vec<(String,Option<St
     if spec.name=="kimi" {
         if let Some(file)=super::kimi::companion(path).filter(|p|p.is_file()) {
             let state:Value=serde_json::from_slice(&std::fs::read(file).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-            if let Some(identity)=super::kimi::identity(path,&state){return Ok(vec![identity]);}
-        }else if let Some(identity)=super::kimi::identity(path,&Value::Null){return Ok(vec![identity]);}
+            if let Some(identity)=super::kimi::identity(path,&state)?{return Ok(vec![identity]);}
+        }else if let Some(identity)=super::kimi::identity(path,&Value::Null)?{return Ok(vec![identity]);}
     }
     let metadata=companion(spec,path).filter(|p|p.is_file());
     let identity_path=metadata.as_deref().unwrap_or(path);
@@ -196,7 +196,7 @@ fn validate_records(spec:&SourceSpec,path:&Path,session:&str,snapshot:&Snapshot)
     let expected=if spec.name=="kimi" {super::kimi::session(path).unwrap_or_else(||session.to_string())}else{session.to_string()};
     if spec.name=="kimi" {
         let state=snapshot.rows.iter().find(|r|r.value["agents"].is_object()).map(|r|&r.value).unwrap_or(&Value::Null);
-        if super::kimi::identity(path,state).is_some_and(|(id,_)|id!=session){return Err("history native agent differs".into());}
+        if super::kimi::identity(path,state)?.is_some_and(|(id,_)|id!=session){return Err("history native agent differs".into());}
     }
     if path.extension().is_some_and(|e|e=="json") {
         let root:Value=serde_json::from_slice(&snapshot.files[0].bytes).map_err(|e|e.to_string())?;

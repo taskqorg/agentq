@@ -86,3 +86,36 @@ fn stable_wal_index_binds_committed_frames_and_excludes_previous_generation_tail
  }
  drop(db);fs::remove_dir_all(root).unwrap();
 }
+#[test]
+fn copied_kimi_families_never_cross_bind_opaque_parent_and_child_sources() {
+ let root=root("kimi-copies");
+ for workspace in ["A","B"] {
+  let dir=root.join(format!("sessions/{workspace}/session_S"));
+  for agent in ["main","child"] {rows(&dir.join(format!("agents/{agent}/wire.jsonl")),&[json!({"type":"context.append_message","session_id":"session_S","message":{"role":"user","content":workspace},"time":1})]);}
+  fs::write(dir.join("state.json"),json!({"agents":{"main":{"type":"main","parentAgentId":null},"child":{"type":"subagent","parentAgentId":"main"}}}).to_string()).unwrap();
+ }
+ let rt=agent::runtime("kimi").unwrap();let sources=rt.history_sessions(Some(&root)).unwrap();assert_eq!(sources.len(),4);assert!(rt.history("session_S",Some(&root),None,None).is_err());
+ for workspace in ["A","B"] {
+  let dir=root.join(format!("sessions/{workspace}/session_S"));let parent=sources.iter().find(|s|s.path.starts_with(&dir) && s.parent.is_none()).unwrap();let child=sources.iter().find(|s|s.path.starts_with(&dir) && s.parent.is_some()).unwrap();
+  let parent_session=rt.history(&parent.id,Some(&root),None,None).unwrap();let checkpoint=parent_session.checkpoint();assert_eq!(checkpoint["resolved"]["children"][&child.native_session],child.id);assert_eq!(checkpoint["resolved"]["children"].as_object().unwrap().len(),1);
+  let recovered=rt.history(&parent.id,Some(&root),None,Some(&checkpoint)).unwrap();assert_eq!(recovered.checkpoint()["resolved"],checkpoint["resolved"]);
+  let child_session=rt.history(&child.id,Some(&root),None,None).unwrap();let saved=child_session.checkpoint();assert_eq!(saved["resolved"]["parent"],parent.id);
+  let mut recovered=rt.history(&child.id,Some(&root),None,Some(&saved)).unwrap();let page=recovered.steps(u64::MAX).unwrap();assert!(page.steps.iter().filter(|s|s.parent_session.is_some()).all(|s|s.parent_session.as_deref()==Some(parent.id.as_str())));assert!(page.steps.iter().any(|s|s.kind==StepKind::Message && s.parent_session.as_deref()==Some(parent.id.as_str())));
+ }
+ fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn multiple_kimi_primary_agents_refuse_without_advancing_an_open_snapshot() {
+ let root=root("kimi-primary");let dir=root.join("sessions/workspace/session_S");rows(&dir.join("agents/main/wire.jsonl"),&[json!({"type":"context.append_message","message":{"role":"user","content":"prompt"},"time":1})]);
+ let state=dir.join("state.json");fs::write(&state,json!({"agents":{"main":{"type":"main","parentAgentId":null}}}).to_string()).unwrap();let rt=agent::runtime("kimi").unwrap();let mut session=rt.history("session_S",Some(&root),None,None).unwrap();session.steps(u64::MAX).unwrap();let checkpoint=session.checkpoint();
+ rows(&dir.join("agents/other/wire.jsonl"),&[json!({"type":"context.append_message","message":{"role":"user","content":"other"},"time":1})]);
+ fs::write(&state,json!({"agents":{"main":{"type":"main","parentAgentId":null},"other":{"type":"main","parentAgentId":null}}}).to_string()).unwrap();
+ assert!(rt.history_sessions(Some(&root)).unwrap_err().contains("primary agent ambiguous"));assert!(session.steps(1).unwrap_err().contains("primary agent ambiguous"));assert_eq!(session.checkpoint(),checkpoint);fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn an_unproven_duplicate_parent_family_refuses_instead_of_choosing_first() {
+ let root=root("parent-ambiguity");let dir=root.join("sessions");fs::create_dir_all(&dir).unwrap();
+ for (file,value) in [("session_parent_A.json",json!({"id":"P","messages":[]})),("session_parent_B.json",json!({"id":"P","messages":[]})),("session_child.json",json!({"id":"C","parent_session_id":"P","messages":[{"role":"user","content":"prompt"}]}))] {fs::write(dir.join(file),value.to_string()).unwrap();}
+ let rt=agent::runtime("jcode").unwrap();let sources=rt.history_sessions(Some(&root)).unwrap();let child=sources.iter().find(|s|s.session=="C").unwrap();
+ assert!(rt.history(&child.id,Some(&root),None,None).err().unwrap().contains("native family ambiguous"));fs::remove_dir_all(root).unwrap();
+}
