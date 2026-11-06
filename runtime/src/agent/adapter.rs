@@ -645,6 +645,10 @@ pub trait Runtime: Send + Sync {
     fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>>;
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window>;
     fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window>;
+    /// Read account quotas using the caller-configured native executable when supported.
+    fn account_limits_with_executable(&self, home: Option<&Path>, executable: Option<&Path>, now: i64) -> Vec<Window> {
+        let _=executable; self.account_limits(home,now)
+    }
     /// Native events from complete JSONL log records, without a run or native process.
     fn log_events(&self, log: &str) -> Vec<Event>;
     /// log_events per source record, with native time, assistant failure, lifecycle label and saved permission mode.
@@ -942,7 +946,8 @@ impl Runtime for Adapter {
         super::limits::read(self.client, &events, path.as_deref())
     }
 
-    fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window> { super::limits::account(self.client, home, now) }
+    fn account_limits(&self, home: Option<&Path>, now: i64) -> Vec<Window> { self.account_limits_with_executable(home,None,now) }
+    fn account_limits_with_executable(&self, home: Option<&Path>, executable: Option<&Path>, now: i64) -> Vec<Window> { super::limits::account(self.client,home,executable,now) }
 
     fn log_events(&self, log: &str) -> Vec<Event> {
         let values=log.lines().filter_map(|line|serde_json::from_str(line).ok()).collect();

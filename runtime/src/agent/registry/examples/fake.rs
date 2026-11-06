@@ -28,7 +28,7 @@ fn read_calls(values:&[Value])->(Vec<Call>,Option<u64>,bool) {
     let Some(v)=values.iter().rev().find(|v|is_end(v)) else {return (vec![],None,false);};
     (vec![Call {id:None,at_ms:None,input:v["input_tokens"].as_u64(),output:v["output_tokens"].as_u64(),cache_read:None,cache_write:None,reasoning:None,model:None,outcome:"ok",error:"none",aggregate:false}],Some(1),true)
 }
-static PROTOCOL: Protocol=Protocol {history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},
+static PROTOCOL: Protocol=Protocol {history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},
     history_formats:&["example-native"],history_session:|_,_,raw|session(raw),history_normalize:|_,_|("unknown","unknown",Value::Null,vec![],"unsupported-source-shape"),history_validity:|_|json!({"status":"unknown","reason":"envelope-validation-unsupported"}),
     ends:is_end,start_limit:|_|None,read_calls,final_text:|_|None,
     turn_ended:|ended,v|ended || is_end(v),
@@ -37,7 +37,7 @@ static PROTOCOL: Protocol=Protocol {history_provenance:|_,_,_|false,history_pare
     session,snapshot:|_,_|Snapshot {unknown:Some("not-reported"),..Snapshot::default()},report:read_report,
     prepare_command:stdio_command,input_bytes:plain_input,native_record:|_,_|Err("native history unsupported by example-agent".into()),native_metadata:None,
     finish_native_report:|_,_|{},session_report:|_,_|{},reported:|_,_|None,update_limits:|_,_,_|false,
-    account_limits:|_,_|limits::unknown("account-limits unsupported by example-agent"),identity:|_|None,
+    account_limits:|_,_,_|limits::unknown("account-limits unsupported by example-agent"),identity:|_|None,
     credentials:|_,_|Err("oauth-unavailable".into()),oauth_token:|_,_|Err("oauth-unavailable".into()),oauth_usage:|_|Err("oauth-unavailable".into()),
 };
 

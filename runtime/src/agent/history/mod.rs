@@ -44,6 +44,7 @@ pub struct History {
     source: String,
     session: String,
     native_session: String,
+    native_session_alias: Option<String>,
     native_parent: Option<String>,
     offset: u64,
     identity: Option<String>,
@@ -63,20 +64,36 @@ impl History {
     pub fn new(format: &str, source: &str, session: &str) -> Res<Self> {
         if !FORMATS.contains(&format) { return Err("history transport unsupported".into()); }
         if source.is_empty() || session.is_empty() { return Err("history source/session required".into()); }
-        Ok(Self {format:format.into(), source:source.into(), session:session.into(), native_session:session.into(), native_parent:None, offset:0,
+        Ok(Self {format:format.into(), source:source.into(), session:session.into(), native_session:session.into(), native_session_alias:None, native_parent:None, offset:0,
             identity:None, prefix:crate::sha256_hex(b"")})
     }
 
+    /// Bind a caller-validated copied Claude job; this grants observation only.
+    pub fn with_native_session_alias(format:&str, source:&str, session:&str, native_session:&str)->Res<Self> {
+        let mut h=Self::new(format,source,session)?;
+        if !super::registry::history_protocol(format).is_some_and(|p|p.history_alias) || native_session.is_empty() || native_session==session {
+            return Err("history native session alias invalid".into());
+        }
+        h.native_session_alias=Some(native_session.into());Ok(h)
+    }
+
     pub fn checkpoint(&self) -> Value {
-        json!({"schema":1,"format":self.format,"source":self.source,"session":self.session,
+        let mut v=json!({"schema":1,"format":self.format,"source":self.source,"session":self.session,
             "native_session":self.native_session,"native_parent":self.native_parent,
-            "offset":self.offset,"identity":self.identity,"prefix":self.prefix})
+            "offset":self.offset,"identity":self.identity,"prefix":self.prefix});
+        if let Some(alias)=&self.native_session_alias {v["native_session_alias"]=json!(alias);}
+        v
     }
 
     pub fn recover(v: &Value) -> Res<Self> {
         if v["schema"] != 1 { return Err("history checkpoint schema invalid".into()); }
         let field = |k: &str| v[k].as_str().ok_or_else(|| format!("history checkpoint {k} invalid"));
         let mut h = Self::new(field("format")?, field("source")?, field("session")?)?;
+        match v.get("native_session_alias") {
+            None | Some(Value::Null) => {},
+            Some(Value::String(alias)) => h=Self::with_native_session_alias(&h.format,&h.source,&h.session,alias)?,
+            _ => return Err("history native session alias invalid".into()),
+        }
         if let Some(native)=v.get("native_session") {h.native_session=native.as_str().filter(|s|!s.is_empty()).ok_or("history checkpoint native session invalid")?.into();}
         h.native_parent=match &v["native_parent"] {Value::Null=>None,Value::String(s) if !s.is_empty()=>Some(s.clone()),_=>return Err("history checkpoint native parent invalid".into())};
         h.offset = v["offset"].as_u64().ok_or("history checkpoint offset invalid")?;
@@ -172,7 +189,7 @@ impl History {
         let protocol=super::registry::history_protocol(&self.format).ok_or("history transport unsupported")?;
         let native_session=(protocol.history_session)(&self.format,v,raw);
         let provenance=(protocol.history_provenance)(&self.format,v,offset);
-        if !provenance && native_session.as_deref().is_some_and(|s|s!=self.native_session) {return Err("history native session differs".into());}
+        if !provenance && native_session.as_deref().is_some_and(|s|s!=self.native_session && Some(s)!=self.native_session_alias.as_deref()) {return Err("history native session differs".into());}
         if self.native_parent.as_ref().is_some_and(|parent|(protocol.history_parent)(v).as_ref().is_some_and(|id|id!=parent)) {return Err("history native parent differs".into());}
         let (author,kind,item,blocks,limited)=(protocol.history_normalize)(&self.format,v);
         let validity=(protocol.history_validity)(v);
@@ -182,11 +199,14 @@ impl History {
             .or_else(|| v.get("emittedAtMs"))
             .or_else(|| if self.format == "antigravity-sidecar" {v.get("created_at")}else{None})
             .cloned().unwrap_or(Value::Null);
-        Ok(json!({"id":id,"source":self.source,"session":self.session,"session_binding":if provenance {"caller"}else if native_session.is_some(){"native"}else{"caller"},"provenance":provenance,"format":self.format,
+        let aliased=native_session.as_deref().is_some_and(|s|Some(s)==self.native_session_alias.as_deref());
+        let mut event=json!({"id":id,"source":self.source,"session":self.session,"session_binding":if provenance {"caller"}else if aliased {"alias"} else if native_session.is_some(){"native"}else{"caller"},"provenance":provenance,"format":self.format,
             "order":offset,"start":offset,"end":offset+raw.len() as u64,"sha256":hash,"raw":raw,
             "validity":validity,"assistant_failure":(protocol.assistant_failure)(v),
             "lifecycle":(protocol.lifecycle)(v),"permission_mode":(protocol.permission_mode)(v),
-            "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited}))
+            "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited});
+        if aliased {event["native_session"]=json!(native_session);}
+        Ok(event)
     }
 }
 

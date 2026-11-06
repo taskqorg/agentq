@@ -159,6 +159,8 @@ fn catalogue_and_account_reads_need_no_turn() {
     let empty=root.join("empty-path"); std::fs::create_dir_all(&empty).unwrap();
     unsafe {std::env::set_var("PATH", &empty);}
     let models=runtime.catalogue_with_executable(Some(&root), Some(&configured)).unwrap();
+    let configured_windows=runtime.account_limits_with_executable(Some(&root),Some(&configured),1800000000);
+    assert_eq!(configured_windows.len(),2);assert_eq!(configured_windows[1].used,Some(0.9));
     std::fs::copy(&configured,&bin).unwrap();
     unsafe {std::env::set_var("PATH", &path);}
     assert_eq!(models.iter().map(|m|m.id.as_str()).collect::<Vec<_>>(),["fixture-model-1","fixture-model-2"]);
@@ -166,7 +168,7 @@ fn catalogue_and_account_reads_need_no_turn() {
     assert_eq!(windows.len(),2);assert_eq!(windows[1].used,Some(0.9));
     let requests=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
     let rows:Vec<Value>=requests.lines().map(|l|serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(rows.iter().filter(|v|v["method"]=="initialize").count(),2,"one catalogue session, one account session");
+    assert_eq!(rows.iter().filter(|v|v["method"]=="initialize").count(),3,"one catalogue session, configured and default account sessions");
     assert!(rows.iter().all(|v|!matches!(v["method"].as_str(),Some("thread/start"|"thread/resume"|"turn/start"))));
     // #258 A4/A5: native keyring login needs no auth.json; identity reads never start a thread or refresh.
     std::fs::remove_file(root.join("auth.json")).unwrap();

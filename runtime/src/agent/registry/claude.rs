@@ -375,7 +375,7 @@ fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end
  events[..end_index?].iter().rev().take_while(|v|!ends(v) && !(v["type"]=="system" && matches!(v["subtype"].as_str(),Some("init"|"turn_duration")))).find(|v|v["type"]=="assistant").and_then(assistant_failure)
  }); classify_report(text,events,rollout,end_index,failure,live_background(events))}
 
-static PROTOCOL: Protocol=Protocol {history_provenance:|_,_,_|false,history_parent:|v|v["sessionId"].as_str().map(String::from),rollout_report:|_,_|{},history_formats:&["claude-stream","claude-native"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
+static PROTOCOL: Protocol=Protocol {history_alias:true,history_provenance:|_,_,_|false,history_parent:|v|v["sessionId"].as_str().map(String::from),rollout_report:|_,_|{},history_formats:&["claude-stream","claude-native"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:None,finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
 pub(crate) fn claude_info(v: &Value) -> Option<Value> {
     let mut info=if v["type"]=="rate_limit_event" {Some(&v["rate_limit_info"])}
@@ -396,6 +396,7 @@ pub(crate) fn claude_info(v: &Value) -> Option<Value> {
 
 pub(crate) fn claude_window(name: Option<String>, info: &Value, id: Option<String>) -> Window {
     let mut w=window(name,info["utilization"].as_f64(),info["resetsAt"].as_u64(),id);
+    w.rejected=match info["status"].as_str() {Some("rejected")=>Some(true),Some("allowed"|"allowed_warning")=>Some(false),_=>None};
     w.exhausted=match (info["status"].as_str(),w.exhausted) {(Some("rejected"),_)|(_,Some(true))=>Some(true),(Some("allowed"|"allowed_warning"),_)=>Some(false),(_,used)=>used};
     w
 }
@@ -431,7 +432,9 @@ fn reported(v:&Value,_now:u64)->Option<Vec<Window>> {let id=v["event_id"].as_str
         let mut windows = vec![];
         if let Some(all) = i["unifiedWindows"].as_object() {
             for (name, w) in all {
-                windows.push(claude_window(Some(name.clone()), w, id.clone()));
+                let mut window=claude_window(Some(name.clone()), w, id.clone());
+                if window.rejected.is_none() && i["status"]=="rejected" && i["rateLimitType"].as_str().is_some_and(|binding|binding!=name) {window.rejected=Some(false);}
+                windows.push(window);
             }
         }
         if let Some(name) = i["rateLimitType"].as_str() {
@@ -449,7 +452,7 @@ fn update_limits(v:&Value,now:u64,all:&mut BTreeMap<String,Vec<Window>>)->bool {
     true
 }
 
-fn account_limits(home:Option<&Path>,now:i64)->Vec<Window> {let client=Client::Claude;
+fn account_limits(home:Option<&Path>,_executable:Option<&Path>,now:i64)->Vec<Window> {let client=Client::Claude;
     let explicit=home.is_some() || std::env::var_os(client.home_var()).is_some();
     let Some(home) = home.map(Path::to_path_buf).or_else(|| base_home(client)) else { return unknown("home-unavailable"); };
  oauth_account(client,&home,explicit,now)

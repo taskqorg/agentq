@@ -12,7 +12,7 @@ Core profile code still owns HMAC identities, revisions, error classification an
 
 Each entry supplies every required callback. Registry validation rejects missing identity/profile metadata and duplicate IDs or aliases. Behavioral tests exercise capability operations in both directions: declared operations reach their implementation rather than an unsupported refusal, while undeclared operations return their documented unsupported/absence result. These checks use isolated files and inert commands, not login or paid calls. The fake module uses the shared Adapter and a scripted CLI through launch, events and report.
 
-Private execution dispatches registered protocol callbacks for native events, reports, sessions, transcript observation and quotas. Client identity is opaque registration data; a new protocol needs no enum variant or parser arm in core. Codex app-server, Claude background and Antigravity sidecar details belong to their runtime modules. Shared code retains process ownership, immutable records, runtime-neutral report assembly and transport/recovery checks. Native start-limit detection, terminal classification, call usage, final text, history identity/normalization and Codex rollout parsing dispatch through the selected protocol; an unrelated runtime using `assistant` or `result` records does not inherit another runtime's semantics. Existing native behavior tests remain unchanged.
+Private execution dispatches registered protocol callbacks for native events, reports, sessions, transcript observation and quotas. Client identity is opaque registration data; a new protocol needs no enum variant or parser arm in core. Codex app-server, Claude background and Antigravity sidecar details belong to their runtime modules. Shared code retains process ownership, immutable records, runtime-neutral report assembly and transport/recovery checks. Native start-limit detection, terminal classification, call usage, final text, history identity/normalization and Codex rollout parsing dispatch through the selected protocol; an unrelated runtime using `assistant` or `result` records does not inherit another runtime's semantics. Existing native behavior assertions are preserved.
 
 ## Runtime trait
 
@@ -346,6 +346,8 @@ The caller builds the base command: the client executable from `agent::executabl
 | No turn-end event, exit 0 | `unknown` | `no-end` |
 
 A rejected Claude `rate_limit_event` before work also returns `Report::reached`, preserving its reset. A reached limit returns `Report::reached`: the reported reset in unix seconds, or none. Claude reports it on the first `assistant` event (`apiError: usage_limit_reached` or `quotaLimits.status: rejected`, reset `quotaLimits.resetsAt` or `apiErrorParams.rate_limit_info.resetsAt`). Readable `apiErrorParams.rate_limit_info` name and reset fields fill missing or unreadable `quotaLimits` fields; a fallback name preserves readable data in its matching `unifiedWindows` entry, including the pre-work reset. Codex and Antigravity report it as `error` or `turn.failed` / step error text containing `usage limit` or `quota exceeded`, without a reset. A limit after work started is not a start refusal. Typed `TurnEnd` events keep that same pre-work refusal context across incremental reads and cursor recovery.
+
+`Report.detail` retains a Claude terminal `result.subtype` or Codex failed-turn native `error.message`, including the app-server failure report. These fields do not change `outcome`, `error` or `reached`; runtimes without native detail retain unknown.
 
 ## Usage
 

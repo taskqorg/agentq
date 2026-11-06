@@ -585,7 +585,7 @@ pub struct Report {
     /// Telemetry outcome code and error code.
     pub outcome: &'static str,
     pub error: &'static str,
-    /// The native reason of error `auth-rejected`, `model-capacity` or a Claude assistant failure.
+    /// Native terminal detail (Claude result subtype, Codex failed-turn message), else a classified failure reason.
     pub detail: Option<String>,
     pub text: Option<String>,
     pub exit: Option<i32>,
