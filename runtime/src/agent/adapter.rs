@@ -3,7 +3,7 @@
 use super::*;
 use crate::optimization::{self, Intent, Optimization};
 use super::native::{BackgroundJob, NativeTurn};
-use super::app::{AppServer, AppSession, app_server_command};
+use super::app::{AppServer, AppSession};
 use super::protected::ProtectedAppServer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::process::Output;
@@ -382,10 +382,10 @@ fn discover(n: &Native) -> Res<Option<BackgroundJob>> {
         Some(id) => r["id"] == id.as_str(),
         None => n.spec.resume && r["kind"] == "background" && r["sessionId"] == n.turn.session(),
     }).cloned();
-    let mut row = find(&native::background_jobs(base(&n.command, n.spec.client)?, &n.spec, true, Duration::from_secs(5))?);
-    if row.is_none() { row = find(&native::background_jobs(base(&n.command, n.spec.client)?, &n.spec, false, Duration::from_secs(5))?); }
+    let mut row = find(&(table(n.spec.client).ops.background_jobs)(base(&n.command, n.spec.client)?, &n.spec, true, Duration::from_secs(5))?);
+    if row.is_none() { row = find(&(table(n.spec.client).ops.background_jobs)(base(&n.command, n.spec.client)?, &n.spec, false, Duration::from_secs(5))?); }
     let Some(row) = row else { return Ok(None) };
-    BackgroundJob::read(&row, &n.spec, row["id"].as_str().unwrap_or_default()).map(Some)
+    (table(n.spec.client).ops.background_job)(&row, &n.spec, row["id"].as_str().unwrap_or_default()).map(Some)
 }
 
 fn state(r: &Report) -> State { match r.outcome { "ok" => State::Finished, "unknown" => State::Unknown, _ => State::Failed } }
@@ -719,6 +719,16 @@ pub struct NativeSpec {
 struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize, ops: NativeOps }
 
 struct NativeOps {
+    catalogue:fn(Option<&Path>,Option<&Path>)->Res<Vec<Model>>,
+    background_launch:fn(Command,&Spec,&str,Duration)->Res<Result<Output,crate::process::Failure>>,
+    background_jobs:fn(Command,&Spec,bool,Duration)->Res<Vec<Value>>,
+    background_job:fn(&Value,&Spec,&str)->Res<BackgroundJob>,
+    background_stop:fn(Command,&Spec,&BackgroundJob,Duration)->Res<Output>,
+    background_id:fn(&str)->Option<String>,
+    app_queue:fn(Command,&Spec,&str,Duration)->Res<Output>,
+    app_command:fn(Command,&Spec)->Res<Command>,
+
+    protocol: &'static registry::Protocol,
     home_var: &'static str,
     alternate_home_var: Option<&'static str>,
     session_var: &'static str,
@@ -847,7 +857,7 @@ impl Adapter {
                 if self.descriptor.has("app-server") && automatic(l) {
                     turn_thread(l)?;
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
-                    let server = AppServer::spawn(app_server_command(command, &spec)?, &l.log, &l.process)?;
+                    let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
                     let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l)?;
                     return Ok(self.run(Body::App(Box::new(app)), 0, optimization, l));
                 }
@@ -862,9 +872,9 @@ impl Adapter {
             Mode::Background => {
                 // A new job's transcript is unknown until discovery; the alias path does not exist.
                 let turn = NativeTurn::before(&spec, &(self.ops.background_transcript)(&spec, &spec.session)?, &l.input)?;
-                let exchange = native::background_launch(command, &spec, &l.input, Duration::from_secs(30))?;
+                let exchange = (self.ops.background_launch)(command, &spec, &l.input, Duration::from_secs(30))?;
                 let (job_id, fault) = match &exchange {
-                    Ok(o) if o.status.success() => (native::background_job_id(&String::from_utf8_lossy(&o.stdout)), None),
+                    Ok(o) if o.status.success() => ((self.ops.background_id)(&String::from_utf8_lossy(&o.stdout)), None),
                     Ok(o) => (None, uncertain("background launcher", &format!("exit {:?}", o.status.code()))),
                     Err(e) => (None, uncertain("background launcher", &e.class())),
                 };
@@ -874,13 +884,13 @@ impl Adapter {
             Mode::Queue { transcript } => {
                 if !spec.resume { return Err("queue requires the session of a running desktop thread".into()); }
                 let turn = NativeTurn::before(&spec, transcript, &l.input)?;
-                let fault = native::app_queue(command, &spec, &l.input, Duration::from_secs(30)).err().and_then(|e| uncertain("queue", &e));
+                let fault = (self.ops.app_queue)(command, &spec, &l.input, Duration::from_secs(30)).err().and_then(|e| uncertain("queue", &e));
                 let start = turn.start();
                 Ok(self.run(native(turn, true, None, true, fault, None), start, optimization, l))
             }
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
-                let server = AppServer::spawn(app_server_command(command, &spec)?, &l.log, &l.process)?;
+                let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
                 let app = App::open(&spec, Transport::Plain(server), initialize, thread, l)?;
                 Ok(self.run(Body::App(Box::new(app)), 0, optimization, l))
             }
@@ -915,7 +925,7 @@ impl Runtime for Adapter {
         }
     }
 
-    fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> { self.needs("catalogue")?; super::limits::catalogue(home, executable) }
+    fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> { self.needs("catalogue")?; (self.ops.catalogue)(home, executable) }
 
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window> {
         let events = log.lines().filter_map(|l| serde_json::from_str(l).ok()).collect::<Vec<_>>();
@@ -956,7 +966,7 @@ impl Runtime for Adapter {
             Body::Native(n) => {
                 if n.job.is_none() { n.job = discover(n)?; }
                 let job = n.job.as_ref().ok_or("background job unknown; nothing to stop")?;
-                native::background_stop(base(&n.command, n.spec.client)?, &n.spec, job, Duration::from_secs(5))?;
+                (self.ops.background_stop)(base(&n.command, n.spec.client)?, &n.spec, job, Duration::from_secs(5))?;
                 Ok(false)
             }
         }
@@ -972,7 +982,7 @@ impl Runtime for Adapter {
                     let _ = t.kill();
                 }
                 // An agentapi turn has exited once its deadline stop killed it.
-                let exited = t.poll()?.is_some() || t.timed_out && t.ag.native_agentapi && t.exit.is_some();
+                let exited = t.poll()?.is_some() || t.timed_out && t.extension.is_submission() && t.exit.is_some();
                 if !exited { return Ok(State::Running); }
                 t.freeze()?;
                 state(&t.report())
@@ -1002,7 +1012,7 @@ impl Runtime for Adapter {
     fn progress(&self, run: &mut Run) -> Res<Vec<Event>> {
         let run = self.own_mut(run)?;
         let path = match &mut run.body {
-            Body::Turn(t) => { t.sync_antigravity_transcript()?; t.log.clone() }
+            Body::Turn(t) => { t.sync_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
             Body::App(a) => { a.pump()?; return Ok(run.events.read_owned(self.client, std::mem::take(&mut a.pending), a.session.session(), a.session.turn_id())); }
@@ -1032,7 +1042,7 @@ impl Runtime for Adapter {
     fn session_id(&self, run: &Run) -> Option<String> {
         match &self.own(run).ok()?.body {
             Body::Turn(t) => session_of(self.client, &read_from(&t.log, t.start).unwrap_or_default())
-                .or_else(|| t.ag.session.clone()).or_else(|| t.resumed.clone()),
+                .or_else(|| t.extension.session().map(String::from)).or_else(|| t.resumed.clone()),
             Body::Native(n) => n.attached.then(|| n.turn.session().to_string()),
             Body::App(a) => a.session.session().map(String::from),
         }
@@ -1188,22 +1198,22 @@ impl Runtime for Adapter {
 
     fn background_launch(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Result<Output, crate::process::Failure>> {
         self.needs("background")?;
-        native::background_launch(base, &self.native(spec), reference, budget)
+        (self.ops.background_launch)(base, &self.native(spec), reference, budget)
     }
 
     fn jobs(&self, base: Command, spec: &NativeSpec, filtered: bool, budget: Duration) -> Res<Vec<Value>> {
         self.needs("background")?;
-        native::background_jobs(base, &self.native(spec), filtered, budget)
+        (self.ops.background_jobs)(base, &self.native(spec), filtered, budget)
     }
 
     fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob> {
         self.needs("background")?;
-        BackgroundJob::read(row, &self.native(spec), id)
+        (self.ops.background_job)(row, &self.native(spec), id)
     }
 
     fn stop_job(&self, base: Command, spec: &NativeSpec, job: &BackgroundJob, budget: Duration) -> Res<Output> {
         self.needs("background")?;
-        native::background_stop(base, &self.native(spec), job, budget)
+        (self.ops.background_stop)(base, &self.native(spec), job, budget)
     }
 
     fn launch_refusal(&self, text: &str) -> Option<Cause> {
@@ -1212,12 +1222,12 @@ impl Runtime for Adapter {
 
     fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output> {
         self.needs("app-queue")?;
-        native::app_queue(base, &self.native(spec), reference, budget)
+        (self.ops.app_queue)(base, &self.native(spec), reference, budget)
     }
 
     fn app_server_command(&self, base: Command, spec: &NativeSpec) -> Res<Command> {
         self.needs("app-server")?;
-        app_server_command(base, &self.native(spec))
+        (self.ops.app_command)(base, &self.native(spec))
     }
 }
 
@@ -1477,6 +1487,8 @@ mod tests {
     // cause. Risk: a caller matches on runtime names, or an unsupported operation reads as success.
     #[test]
     fn descriptors_and_neutral_operations() {
+        fn send<T:Send>() {}
+        send::<Run>();
         let names: Vec<_> = runtimes().iter().map(|r| r.descriptor().name).collect();
         assert_eq!(names, ["claude", "codex", "antigravity"]);
         assert_eq!(runtime("agy").unwrap().descriptor().name, "antigravity");

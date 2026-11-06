@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod history;
 mod native;
-mod app;
+use registry::app;
 mod protected;
 pub mod host;
 mod adapter;
@@ -29,13 +29,13 @@ pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, Prot
 
 type Res<T> = Result<T, String>;
 
-/// A supported client: Claude Code (`claude -p`), Codex CLI (`codex exec`), or Antigravity (`agentapi` / `agy`).
+/// Opaque native identity supplied by its registration module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Client { Claude, Codex, Antigravity }
+pub(crate) struct Client(&'static str);
 
 impl Client {
     pub fn parse(code: &str) -> Option<Client> {registry::native_client(code)}
-    pub fn code(self) -> &'static str {registry::native_name(self)}
+    pub fn code(self) -> &'static str {self.0}
     pub fn home_var(self) -> &'static str {registry::native_home_var(self)}
 }
 
@@ -62,8 +62,6 @@ pub fn user_bin_path(path: &OsStr, home: Option<&OsStr>) -> Option<OsString> {
     dirs.push(bin);
     std::env::join_paths(dirs).ok()
 }
-
-pub(crate) use adapter::registry::codex_native;
 
 /// The client's CLI executable: `claude` on `PATH`, Codex's native executor, or Antigravity's `agy` / `agentapi` CLI. A caller
 /// that wraps the client (a sandbox) builds its own base command around this path.
@@ -206,148 +204,8 @@ fn environment(mut base: Command, spec: &Spec) -> Command {
     base
 }
 
-/// Claude `--settings` JSON: a `SessionStart` hook on `compact` that runs `compact_hook` (rule re-delivery after
-/// compaction) and `env` for the session, which survives resume. None omits the hook.
-pub(crate) fn claude_settings(compact_hook: Option<&str>, env: &[(&str, &str)]) -> String {
-    let env: serde_json::Map<String, Value> = env.iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
-    let mut v = json!({"env": env});
-    if let Some(cmd) = compact_hook {
-        v = json!({"hooks": {"SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": cmd}]}]}, "env": v["env"]});
-    }
-    v.to_string()
-}
-
 // ---------- running turn ----------
 
-#[derive(Clone, Debug, Default)]
-struct AntigravityTranscript {
-    native_agentapi: bool,
-    session: Option<String>,
-    cursor: u64,
-    identity: Option<String>,
-    prefix: Option<String>,
-    partial: Vec<u8>,
-    pending: std::collections::VecDeque<Value>,
-    full_step: Option<u64>,
-    full_cursor: u64,
-    full_partial: Vec<u8>,
-    full_identity: Option<String>,
-    full_prefix: Option<String>,
-}
-
-fn is_native_agentapi(cmd: &Command, spec: &Spec) -> bool {
-    if spec.client != Client::Antigravity {
-        return false;
-    }
-    std::iter::once(cmd.get_program()).chain(cmd.get_args()).any(|arg| {
-        matches!(Path::new(arg).file_name().and_then(|n| n.to_str()),
-            Some("agentapi" | "agentapi.exe" | "agentapi.cmd" | "language_server" | "language_server.exe"))
-    })
-}
-
-fn transcript_paths(home: &Path, session: &str) -> (PathBuf, PathBuf) {
-    let logs = home.join("brain").join(session).join(".system_generated").join("logs");
-    (logs.join("transcript.jsonl"), logs.join("transcript_full.jsonl"))
-}
-
-impl AntigravityTranscript {
-    fn baseline(home: Option<&Path>, session: Option<String>) -> Res<Self> {
-        let mut state = Self { native_agentapi: true, session, ..Self::default() };
-        if let Some(session) = state.session.as_deref() {
-            if !native::plain_id(session) || session == "-" { return Err("antigravity session invalid".into()); }
-            let home = home.ok_or("antigravity home unavailable")?;
-            let mut file = File::open(transcript_paths(home, session).0).map_err(|e| format!("antigravity baseline: {e}"))?;
-            state.cursor = file.metadata().map_err(|e| e.to_string())?.len();
-            if state.cursor > 0 {
-                file.seek(SeekFrom::Start(state.cursor-1)).map_err(|e| e.to_string())?;
-                let mut last = [0]; file.read_exact(&mut last).map_err(|e| e.to_string())?;
-                if last != [b'\n'] { return Err("antigravity baseline incomplete".into()); }
-            }
-            state.identity = Some(native::file_id(&file)?);
-            state.prefix = Some(native::digest_prefix(&mut file, state.cursor)?);
-        }
-        Ok(state)
-    }
-
-    fn full_record(&mut self, path: &Path, step: u64) -> Res<Option<Value>> {
-        let mut file = match File::open(path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.full_identity.is_none() => return Ok(None),
-            Err(e) => return Err(format!("antigravity full transcript: {e}")),
-        };
-        if self.full_step != Some(step) {
-            self.full_step = Some(step); self.full_cursor = 0; self.full_partial.clear();
-            self.full_identity = None; self.full_prefix = None;
-        }
-        let identity = native::file_id(&file)?;
-        if self.full_identity.as_ref().is_some_and(|id| *id != identity) { return Err("antigravity full transcript replaced".into()); }
-        let prefix = native::digest_prefix(&mut file, self.full_cursor)?;
-        if self.full_prefix.as_ref().is_some_and(|p| *p != prefix) { return Err("antigravity full transcript rewritten".into()); }
-        file.seek(SeekFrom::Start(self.full_cursor)).map_err(|e| e.to_string())?;
-        let mut bytes = vec![];
-        (&mut file).take(8*1024*1024).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-        self.full_cursor += bytes.len() as u64;
-        self.full_partial.extend(bytes);
-        self.full_identity = Some(identity);
-        self.full_prefix = Some(native::digest_prefix(&mut file, self.full_cursor)?);
-        let mut consumed = 0;
-        let mut found = None;
-        for row in self.full_partial.split_inclusive(|b| *b == b'\n') {
-            if !row.ends_with(b"\n") { break; }
-            consumed += row.len();
-            let v: Value = serde_json::from_slice(row).map_err(|_| "antigravity full transcript invalid JSON")?;
-            if !v.is_object() { return Err("antigravity full transcript invalid record".into()); }
-            if v["step_index"].as_u64() == Some(step) && v.get("truncated_fields").is_none() { found = Some(v); }
-        }
-        self.full_partial.drain(..consumed);
-        Ok(found)
-    }
-
-    fn append(&mut self, home: &Path, log: &Path) -> Res<()> {
-        let Some(session) = self.session.as_deref() else { return Ok(()); };
-        if !native::plain_id(session) || session == "-" { return Err("antigravity session invalid".into()); }
-        let (compact, full) = transcript_paths(home, session);
-        let mut file = match File::open(compact) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.identity.is_none() => return Ok(()),
-            Err(e) => return Err(format!("antigravity transcript: {e}")),
-        };
-        let identity = native::file_id(&file)?;
-        if self.identity.as_ref().is_some_and(|id| *id != identity) { return Err("antigravity transcript replaced".into()); }
-        let prefix = native::digest_prefix(&mut file, self.cursor)?;
-        if self.prefix.as_ref().is_some_and(|p| *p != prefix) { return Err("antigravity transcript rewritten".into()); }
-        file.seek(SeekFrom::Start(self.cursor)).map_err(|e| e.to_string())?;
-        let mut bytes = vec![];
-        (&mut file).take(8*1024*1024).read_to_end(&mut bytes).map_err(|e| format!("antigravity transcript: {e}"))?;
-        self.cursor += bytes.len() as u64;
-        self.partial.extend(bytes);
-        let mut consumed = 0;
-        for row in self.partial.split_inclusive(|b| *b == b'\n') {
-            if !row.ends_with(b"\n") { break; }
-            consumed += row.len();
-            let value: Value = serde_json::from_slice(row).map_err(|_| "antigravity transcript invalid JSON")?;
-            if !value.is_object() { return Err("antigravity transcript invalid record".into()); }
-            self.pending.push_back(value);
-        }
-        self.partial.drain(..consumed);
-        self.identity = Some(identity);
-        self.prefix = Some(native::digest_prefix(&mut file, self.cursor)?);
-        let mut output = File::options().append(true).open(log).map_err(|e| e.to_string())?;
-        while let Some(mut value) = self.pending.front().cloned() {
-            if value.get("truncated_fields").is_some() {
-                let step = value["step_index"].as_u64().ok_or("antigravity truncated step missing index")?;
-                let Some(v) = self.full_record(&full, step)? else { break; };
-                if v["type"] != value["type"] || v["status"] != value["status"] { break; }
-                value = v;
-            }
-            writeln!(output, "{value}").map_err(|e| format!("agent log: {e}"))?;
-            self.pending.pop_front();
-        }
-        Ok(())
-    }
-}
-
-/// The turn's client process: the owned child, or after recovery the child observed by its native identity.
 enum Proc { Own(Child), Seen(crate::process::Identity) }
 
 impl Proc {
@@ -415,7 +273,7 @@ pub struct Turn {
     home: Option<PathBuf>,
     /// The resumed session; a resume's output need not name it again.
     resumed: Option<String>,
-    ag: AntigravityTranscript,
+    extension: Box<dyn TurnExtension>,
     receipt: Option<std::sync::mpsc::Receiver<Res<String>>>,
     /// Samples the owned process tree; None for a recovered child or a sidecar submission.
     sampler: Option<capture::Sampler>,
@@ -427,27 +285,14 @@ fn unix_ms() -> i64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d|
 
 impl Turn {
     /// Spawn `command(base, spec)` with `text` on stdin; output appends to `log`, so a resume continues earlier turns.
-    pub(crate) fn start(mut base: Command, spec: &Spec, log: &Path, text: &str, process: &Process) -> Res<Turn> {
+    pub(crate) fn start(base: Command, spec: &Spec, log: &Path, text: &str, process: &Process) -> Res<Turn> {
         if let Some(dir) = log.parent() { std::fs::create_dir_all(dir).map_err(|e| format!("agent log directory: {e}"))?; }
         let out = File::options().create(true).append(true).open(log).map_err(|e| format!("agent log: {e}"))?;
         let err = out.try_clone().map_err(|e| format!("agent log: {e}"))?;
         let start = out.metadata().map_err(|e| format!("agent log: {e}"))?.len();
         let home = spec_home(spec);
-        let native_agentapi = is_native_agentapi(&base, spec);
-        let ag = if native_agentapi {
-            if std::iter::once(base.get_program()).chain(base.get_args()).any(|arg| Path::new(arg).file_stem().is_some_and(|n| n == "language_server")) {
-                base.arg("agentapi");
-            }
-            base.arg(if spec.resume {"send-message"} else {"new-conversation"}).args(&spec.args);
-            if spec.resume { base.arg(&spec.session); }
-            base.arg(text);
-            base = environment(base, spec);
-            let session = spec.resume.then(|| spec.session.clone());
-            AntigravityTranscript::baseline(home.as_deref(), session)?
-        } else {
-            base = command(base, spec);
-            AntigravityTranscript::default()
-        };
+        let (mut base,extension)=(protocol(spec.client).prepare_command)(base,spec,text)?;
+        let native_agentapi=extension.is_submission();
         capture::inherit_caller(&mut base);
         let started = Instant::now();
         let started_ms = unix_ms();
@@ -466,21 +311,21 @@ impl Turn {
         } else { None };
         let mut stdin = child.stdin.take().ok_or("agent stdin unavailable")?;
         if !native_agentapi {
-            let input = if spec.client == Client::Antigravity {format!("{}\n", json!({"event":"user","message":{"content":text}})).into_bytes()} else {text.as_bytes().to_vec()};
+            let input=(protocol(spec.client).input_bytes)(text);
             // A client that never reads stdin must not block the caller; the writer ends with the pipe.
             std::thread::spawn(move || { let _ = stdin.write_all(&input); });
         } else {
             drop(stdin);
         }
         Ok(Turn { client: spec.client, cancelled: false, child: Proc::Own(child), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(), start, pos: start,
-            ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), ag, receipt, sampler, terminal: None })
+            ended: false, stopping: false, timed_out: false, started, started_ms, exit: None, home, resumed: spec.resume.then(|| spec.session.clone()), extension, receipt, sampler, terminal: None })
     }
 
     pub fn id(&self) -> u32 { self.child.id() }
 
     /// Private recovery value of a running turn (docs/spec/RUNTIME.md § Turn recovery and process setup).
     pub(crate) fn checkpoint(&self) -> Result<Value, adapter::Cause> {
-        if self.ag.native_agentapi { return Err(adapter::Cause("no-checkpoint")); }
+        if self.extension.is_submission() { return Err(adapter::Cause("no-checkpoint")); }
         if self.exit.is_some() { return Err(adapter::Cause("turn-ended")); }
         let identity = match &self.child {
             Proc::Seen(i) => i.clone(),
@@ -505,37 +350,13 @@ impl Turn {
         let age = Duration::from_millis(unix_ms().saturating_sub(started_ms).max(0) as u64);
         Ok(Turn { client: spec.client, cancelled: flag("cancelled")?, child: Proc::Seen(identity), exit_unknown: false, scope: native::scope(spec), log: log.to_path_buf(),
             start, pos: start, ended: false, stopping: false, timed_out: flag("timed_out")?, started: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
-            started_ms, exit: None, home: spec_home(spec), resumed, ag: AntigravityTranscript::default(), receipt: None, sampler: None, terminal: None })
+            started_ms, exit: None, home: spec_home(spec), resumed, extension: Box::new(StdioTurn), receipt: None, sampler: None, terminal: None })
     }
 
-    fn sync_antigravity_transcript(&mut self) -> Res<()> {
-        if !self.ag.native_agentapi {
-            return Ok(());
-        }
-        if self.exit.is_none() { return Ok(()); }
-        if let Some(receive) = &self.receipt {
-            let text = match receive.try_recv() {
-                Ok(result) => result?,
-                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
-                Err(_) => return Err("agentapi receipt reader disconnected".into()),
-            };
-            let session = session_of(Client::Antigravity, &text).or_else(|| self.resumed.clone());
-            if self.resumed.is_some() && session != self.resumed { return Err("antigravity receipt session differs".into()); }
-            self.ag.session = session;
-            let mut log = File::options().append(true).open(&self.log).map_err(|e| e.to_string())?;
-            let receipt = serde_json::from_str::<Value>(&text).map(|v| v.to_string()).unwrap_or(text);
-            writeln!(log, "\n{receipt}").map_err(|e| e.to_string())?;
-            self.receipt = None;
-        }
-        if self.exit == Some(0) {
-            if let Some(home) = self.home.as_deref() { self.ag.append(home, &self.log)?; }
-        }
-        Ok(())
-    }
-
+    fn sync_transcript(&mut self)->Res<()> {self.extension.synchronize(self.exit,&mut self.receipt,&self.resumed,self.home.as_deref(),&self.log)}
     /// Read complete new log lines; a turn-end event ends the turn even when the process lingers.
     fn read(&mut self) -> Res<()> {
-        self.sync_antigravity_transcript()?;
+        self.sync_transcript()?;
         let mut f = File::open(&self.log).map_err(|e| format!("agent log unreadable: {e}"))?;
         if f.metadata().map_err(|e| e.to_string())?.len() < self.pos { return Err("agent log truncated; turn boundary unknown".into()); }
         let mut rest = vec![];
@@ -543,11 +364,7 @@ impl Turn {
         let Some(end) = rest.iter().rposition(|b| *b == b'\n') else { return Ok(()) };
         self.pos += end as u64 + 1;
         for v in String::from_utf8_lossy(&rest[..end]).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
-            if (v["type"] == "PLANNER_RESPONSE" && !ends(&v)) || v["type"] == "TOOL_RESPONSE" {
-                self.ended = false;
-            } else if ends(&v) {
-                self.ended = true;
-            }
+            self.ended=(protocol(self.client).turn_ended)(self.ended,&v);
         }
         Ok(())
     }
@@ -561,12 +378,12 @@ impl Turn {
     }
 
     fn poll_exit(&mut self) -> Res<Option<i32>> {
-        if self.ag.native_agentapi {
+        if self.extension.is_submission() {
             if self.exit.is_none() {
                 self.exit = self.child.try_wait()?.map(|c| c.unwrap_or(-1));
             }
             self.read()?;
-            return Ok(self.exit.filter(|code| self.stopping || (self.receipt.is_none() && (*code != 0 || self.ag.session.is_none() || self.ended))));
+            return Ok(self.exit.filter(|code| self.stopping || (self.receipt.is_none() && (*code != 0 || self.extension.session().is_none() || self.ended))));
         }
         if self.exit.is_some() { return Ok(self.exit); }
         self.read()?;
@@ -600,7 +417,7 @@ impl Turn {
             if deadline.is_some_and(|d| Instant::now() >= d) && !self.timed_out {
                 self.timed_out = true;
                 let _ = self.kill();
-                if self.ag.native_agentapi {
+                if self.extension.is_submission() {
                     if let Some(code) = self.exit {
                         self.freeze()?;
                         return Ok(code);
@@ -642,11 +459,8 @@ impl Turn {
 
     fn read_report(&self, text: &str) -> Report {
         let events: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        let session = session_of(self.client, text).or_else(|| self.ag.session.clone()).or_else(|| self.resumed.clone());
-        let rollout = match self.client {
-            Client::Codex => session.as_deref().and_then(|t| rollout(t, self.home.as_deref())),
-            Client::Claude | Client::Antigravity => None,
-        };
+        let session = session_of(self.client, text).or_else(|| self.extension.session().map(String::from)).or_else(|| self.resumed.clone());
+        let rollout=session.as_deref().and_then(|session|registry::native_transcript(self.client,session,self.home.as_deref()));
         let mut r = Report::read(self.client, text, &events, rollout.as_deref());
         r.session = session;
         r.duration_us = self.started.elapsed().as_micros() as u64;
@@ -654,7 +468,7 @@ impl Turn {
         r.exit = if self.exit_unknown { None } else { self.exit };
         r.process = match &self.sampler {
             Some(s) => s.usage(),
-            None if self.ag.native_agentapi => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("sidecar-server") },
+            None if self.extension.is_submission() => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("sidecar-server") },
             None => capture::ProcessUse { exit_unknown: "exit-unknown", ..capture::ProcessUse::none("recovered") },
         };
         // A Codex `exec` turn names each request only in its rollout; `turn.completed` holds the totals.
@@ -681,19 +495,6 @@ fn read_log(log: &Path, pos: u64) -> std::io::Result<String> {
     let mut b = vec![];
     f.seek(SeekFrom::Start(pos)).and_then(|_| f.read_to_end(&mut b))?;
     Ok(String::from_utf8_lossy(&b).into_owned())
-}
-
-/// A turn-end event: Claude `result`, Codex `turn.completed` or `turn.failed`, Antigravity terminal `PLANNER_RESPONSE` or `turn.cancelled`.
-fn ends(v: &Value) -> bool {
-    if v["event"] == "result" { return matches!(v["result"]["status"].as_str(), Some("SUCCESS" | "ERROR" | "CANCELED" | "INTERRUPTED" | "INVALID")); }
-    match v["type"].as_str() {
-        Some("result" | "turn.completed" | "turn.failed" | "turn.cancelled") => true,
-        Some("PLANNER_RESPONSE") => {
-            matches!(v["status"].as_str(), Some("ERROR" | "CANCELLED"))
-                || (v["status"] == "DONE" && v["tool_calls"].as_array().is_none_or(Vec::is_empty))
-        }
-        _ => false,
-    }
 }
 
 /// The observation context the caller owns; every value is a code (R27).
@@ -738,16 +539,6 @@ pub struct Usage {
     pub unknown: Option<&'static str>,
 }
 
-/// Model use of the turn's events: Claude assistant messages (each message id once: input, cache read, cache write,
-/// output, the model of most calls), Codex `turn.completed` (`input_tokens` includes `cached_input_tokens`, no cache
-/// writes), Antigravity `PLANNER_RESPONSE` steps (each `step_index` once: `input_tokens`, `cache_read_tokens`,
-/// `output_tokens`). A counted call without a value makes that sum unknown, never smaller.
-#[cfg(test)]
-pub(crate) fn usage(events: &[Value]) -> Usage {
-    let (calls, count, known) = read_calls(events);
-    sum_usage(&calls, count, known)
-}
-
 /// The turn's token sums of its calls; a call without a value makes that sum unknown, never smaller.
 pub(crate) fn sum_usage(calls: &[Call], count: Option<u64>, known: bool) -> Usage {
     if !known { return Usage { unknown: Some("no-usage"), ..Usage::default() }; }
@@ -759,192 +550,14 @@ pub(crate) fn sum_usage(calls: &[Call], count: Option<u64>, known: bool) -> Usag
         reasoning: if calls.is_empty() { None } else { sum(|c| c.reasoning) }, model, unknown: None }
 }
 
-/// The model requests of the turn's events, the Claude message count, and whether any usage was read.
-pub(crate) fn read_calls(events: &[Value]) -> (Vec<Call>, Option<u64>, bool) {
-    let (mut ids, mut turns, mut calls) = (std::collections::HashSet::new(), false, vec![]);
-    let mut cli_usage = false;
-    for (idx, v) in events.iter().enumerate() {
-        let kind = if v["event"] == "step_update" {"agy-step"} else {v["type"].as_str().unwrap_or_default()};
-        let cli = kind == "agy-step";
-        let codex = kind == "turn.completed";
-        let ag = kind == "PLANNER_RESPONSE";
-        let mut id = None;
-        let counted = match kind {
-            "assistant" => { id = v["message"]["id"].as_str().map(String::from); v["message"]["id"].as_str().is_some_and(|id| ids.insert(id.to_string())) }
-            "turn.completed" => { turns = true; id = v.get("total_usage").map(Value::to_string); true }
-            "agy-step" => {
-                let step = &v["step_update"];
-                if step["state"] != "DONE" || (step["step_type"] != "agent_response" && !step["usage"].is_object()) { continue; }
-                let Some(n) = step["step_index"].as_u64() else {continue;};
-                if events[idx+1..].iter().any(|later| later["event"] == "step_update" && later["step_update"]["step_index"].as_u64() == Some(n) && later["step_update"]["state"] == "DONE" && (later["step_update"]["step_type"] == "agent_response" || later["step_update"]["usage"].is_object())) {continue;}
-                cli_usage = true; turns = true;
-                id = Some(format!("agy-step-{n}"));
-                ids.insert(format!("agy-step-{n}"))
-            }
-            "PLANNER_RESPONSE" => {
-                if !matches!(v["status"].as_str(), Some("DONE" | "ERROR" | "CANCELLED")) { continue; }
-                if v["step_index"].as_u64().is_some_and(|step| events[idx+1..].iter().any(|later| later["type"] == "PLANNER_RESPONSE" && later["step_index"].as_u64() == Some(step))) { continue; }
-                let Some(step) = v["step_index"].as_u64() else { continue; };
-                id = Some(format!("ag-step-{step}"));
-                ids.insert(format!("ag-step-{step}"))
-            }
-            _ => false,
-        };
-        if !counted { continue }
-        let u = if cli { &v["step_update"]["usage"] } else if codex { &v["usage"] } else if ag { v } else { &v["message"]["usage"] };
-        let input = u["input_tokens"].as_u64();
-        let read = if codex {
-            u["cached_input_tokens"].as_u64()
-        } else if ag || cli {
-            u["cache_read_tokens"].as_u64().or(u["cache_read_input_tokens"].as_u64())
-        } else {
-            u["cache_read_input_tokens"].as_u64()
-        };
-        let (outcome, error) = if v["isApiErrorMessage"] == true || v["error"].is_string() { ("failed", "client-error") }
-            else if ag && v["status"] == "ERROR" { ("failed", "turn-failed") }
-            else if ag && v["status"] == "CANCELLED" { ("cancelled", "turn-cancelled") }
-            else { ("ok", "none") };
-        calls.push(Call {
-            id, at_ms: v["timestamp"].as_str().or(v["created_at"].as_str()).and_then(capture::time_ms),
-            input: if codex { input.zip(read).and_then(|(i, r)| i.checked_sub(r)) } else { input },
-            cache_read: read,
-            cache_write: if codex { Some(0) } else if ag || cli { u["cache_write_tokens"].as_u64().or(u["cache_creation_input_tokens"].as_u64()) } else { u["cache_creation_input_tokens"].as_u64() },
-            output: u["output_tokens"].as_u64(),
-            reasoning: if codex { u["reasoning_output_tokens"].as_u64() } else { None },
-            model: v["message"]["model"].as_str().or_else(|| v["model"].as_str()).filter(|m| model_code(m)).map(String::from),
-            outcome, error, aggregate: codex && v["call"] != true,
-        });
-    }
-    let count = (!cli_usage && !ids.is_empty()).then_some(ids.len() as u64);
-    let known = count.is_some() || turns;
-    (calls, count, known)
-}
-
 /// A model id is a short code; anything else stays unreported.
 fn model_code(m: &str) -> bool { !m.is_empty() && m.len() <= 64 && m.bytes().all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c)) }
 
-/// A usage or quota limit reported before any work started: `Some(reset)` with the reset (unix seconds) when known;
-/// None after work started or without a limit.
-pub(crate) fn limit_reached(events: &[Value]) -> Option<Option<i64>> {
-    events.iter().find_map(StartLimit::read).and_then(|s| match s {StartLimit::Reached(reset)=>Some(reset),_=>None})
-}
-
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
-enum StartLimit { #[default] Pending, Working, Reached(Option<i64>) }
-
-impl StartLimit {
-    // The first decisive record fixes whether a limit refused admission or interrupted work.
-    fn read(v: &Value) -> Option<Self> {
-        if v["type"]=="rate_limit_event" && v["rate_limit_info"]["status"]=="rejected" {return Some(Self::Reached(v["rate_limit_info"]["resetsAt"].as_i64()));}
-        if v["event"] == "step_update" && (v["step_update"]["step_type"] == "tool" || v["step_update"]["usage"].is_object()) { return Some(Self::Working); }
-        if v["event"] == "result" {
-            let msg = v["result"]["error"].as_str().unwrap_or_default().to_lowercase();
-            return Some(if v["result"]["status"] != "SUCCESS" && ["usage limit", "quota exceeded", "rate limit"].iter().any(|s| msg.contains(s)) {Self::Reached(None)} else {Self::Working});
-        }
-        let kind = v["type"].as_str().unwrap_or_default();
-        if kind == "assistant" {
-            if v["apiError"] == "usage_limit_reached" || v["quotaLimits"]["status"] == "rejected" {
-                return Some(Self::Reached(limits::claude_info(v).and_then(|info|info["resetsAt"].as_i64())));
-            }
-            return Some(Self::Working);
-        }
-        if kind == "PLANNER_RESPONSE" {
-            if v["status"] == "ERROR" {
-                let msg = v["content"].as_str().or(v["error"]["message"].as_str()).unwrap_or_default().to_lowercase();
-                if msg.contains("usage limit") || msg.contains("quota exceeded") || msg.contains("rate limit") {
-                    return Some(Self::Reached(v["quotaLimits"]["resetsAt"].as_i64()));
-                }
-            }
-            return Some(Self::Working);
-        }
-        if kind.starts_with("item.") || kind == "TOOL_RESPONSE" { return Some(Self::Working); }
-        // ponytail: Codex limit text matched by words; it reports no reset. A structured field replaces this when one exists.
-        let message = v["message"].as_str().or(v["error"]["message"].as_str()).unwrap_or_default().to_lowercase();
-        if matches!(kind, "error" | "turn.failed") && (message.contains("usage limit") || message.contains("quota exceeded")) { return Some(Self::Reached(None)); }
-        None
-    }
-}
-
-/// A Codex login the auth server rejected: Codex's own stderr `ERROR codex_` line or a top-level `error`/`turn.failed`
-/// event naming a rejected refresh token or a 401; worker output (`item.*`) never matches.
-pub(crate) fn auth_rejected(text: &str) -> Option<&'static str> {
-    text.lines().find_map(|l| {
-        let m = match serde_json::from_str::<Value>(l) {
-            Ok(v) if matches!(v["type"].as_str(), Some("error" | "turn.failed")) => v["message"].as_str().or(v["error"]["message"].as_str()).unwrap_or_default().to_lowercase(),
-            Err(_) if l.contains("ERROR codex_") => l.to_lowercase(),
-            _ => return None,
-        };
-        if m.contains("refresh token") && (m.contains("already used") || m.contains("expired") || m.contains("revoked") || m.contains("invalid")) || m.contains("refresh_token_") {
-            Some("refresh token rejected")
-        } else if m.contains("401 unauthorized") || m.contains("auth error: 401") { Some("401 Unauthorized") } else { None }
-    })
-}
-
-/// The last turn end is a Codex `turn.failed` naming model capacity: its message.
-pub(crate) fn transient_failure(events: &[Value]) -> Option<String> {
-    let end = events.iter().filter(|v| matches!(v["type"].as_str(), Some("turn.completed" | "turn.failed"))).last()?;
-    // ponytail: only the "Selected model is at capacity" text is verified; other overload texts read as failed.
-    let m = end["error"]["message"].as_str().filter(|_| end["type"] == "turn.failed")?;
-    m.to_lowercase().contains("model is at capacity").then(|| m.to_string())
-}
-
-/// The final text of a turn: Claude's last `result`, Codex's last `agent_message`, or Antigravity's last `PLANNER_RESPONSE` content.
-pub(crate) fn final_text(events: &[Value]) -> Option<String> {
-    events.iter().rev().find_map(|v| {
-        if v["event"] == "result" { v["result"]["response"].as_str().map(String::from) }
-        else if v["type"] == "result" { v["result"].as_str().map(String::from) }
-        else if v["type"] == "item.completed" && v["item"]["type"] == "agent_message" { v["item"]["text"].as_str().map(String::from) }
-        else if v["type"] == "PLANNER_RESPONSE" && v["status"] == "DONE" && ends(v) { v["content"].as_str().filter(|s| !s.is_empty()).map(String::from) }
-        else { None }
-    })
-}
-
-/// Codex's thread ID: the first `thread.started` line.
-pub(crate) fn codex_thread(text: &str) -> Option<String> {
-    text.lines().find_map(|l| {
-        let v: Value = serde_json::from_str(l).ok()?;
-        (v["type"] == "thread.started").then(|| v["thread_id"].as_str().map(String::from)).flatten()
-    })
-}
-
-/// Antigravity's conversation ID from `agentapi` JSON output or a stream event.
-pub(crate) fn antigravity_session(text: &str) -> Option<String> {
-    serde_json::from_str::<Value>(text).into_iter().chain(text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok())).find_map(|v| {
-        v.pointer("/response/newConversation/conversationId").and_then(Value::as_str)
-            .or_else(|| v.pointer("/response/sendMessage/recipientId").and_then(Value::as_str))
-            .or_else(|| v["conversationId"].as_str())
-            .or_else(|| v["conversation_id"].as_str())
-            .or_else(|| v["result"]["conversation_id"].as_str())
-            .or_else(|| (matches!(v["type"].as_str(), Some("conversation.started" | "system" | "result"))).then(|| v["session_id"].as_str()).flatten())
-            .filter(|s| native::plain_id(s) && *s != "-")
-            .map(String::from)
-    })
-}
+pub(crate) enum StartLimit { #[default] Pending, Working, Reached(Option<i64>) }
 
 /// The native session of a turn: Claude's `session_id` (init or result), Codex's thread, or Antigravity's `conversationId`.
-pub(crate) fn session_of(client: Client, text: &str) -> Option<String> {
-    match client {
-        Client::Codex => codex_thread(text),
-        Client::Claude => text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .find_map(|v| (matches!(v["type"].as_str(), Some("system" | "result"))).then(|| v["session_id"].as_str().map(String::from)).flatten()),
-        Client::Antigravity => antigravity_session(text),
-    }
-}
-
-/// The thread's rollout `<home>/sessions/**/rollout-*-<thread>.jsonl`, in `home` or the client's own home.
-pub(crate) fn rollout(thread: &str, home: Option<&Path>) -> Option<PathBuf> {
-    fn find(dir: &Path, end: &str, depth: u8) -> Option<PathBuf> {
-        if depth == 0 { return None; }
-        std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
-            let p = e.path();
-            if p.is_dir() { find(&p, end, depth - 1) } else { p.file_name()?.to_str()?.ends_with(end).then_some(p) }
-        })
-    }
-    if thread.is_empty() || !thread.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { return None; }
-    let home = home.map(Path::to_path_buf).or_else(|| base_home(Client::Codex))?;
-    // sessions/<yyyy>/<mm>/<dd>/<file>
-    find(&home.join("sessions"), &format!("{thread}.jsonl"), 4)
-}
+pub(crate) fn session_of(client:Client,text:&str)->Option<String> {(protocol(client).session)(text)}
 
 /// A subscription limit snapshot; each None has `unknown`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -963,38 +576,6 @@ fn percent(v: f64) -> Option<u64> { (v.is_finite() && v >= 0.0).then(|| v.round(
 /// Claude: the last `rate_limit_event` (`rate_limit_info.utilization` 0-1, `resetsAt`, `rateLimitType`). Codex: the
 /// last `rate_limits` (`primary`/`secondary`: `used_percent` 0-100, `resets_at`, `window_minutes`) in the turn's events,
 /// else the last `token_count` of the thread rollout; the window with the higher use binds.
-pub(crate) fn snapshot(client: Client, events: &[Value], rollout: Option<&Path>) -> Snapshot {
-    let found = match client {
-        Client::Claude | Client::Antigravity => events.iter().rev().find(|v| v["type"] == "rate_limit_event").map(|v| {
-            let i = &v["rate_limit_info"];
-            Snapshot { used_percent: i["utilization"].as_f64().and_then(|u| percent(u * 100.0)), resets_at: i["resetsAt"].as_u64(),
-                window: i["rateLimitType"].as_str().filter(|w| model_code(w)).map(String::from), unknown: None }
-        }),
-        Client::Codex => {
-            let own = events.iter().rev().find_map(|v| codex_limits(v));
-            own.or_else(|| {
-                let f = File::open(rollout?).ok()?;
-                BufReader::new(f).lines().map_while(Result::ok).filter(|l| l.contains("\"rate_limits\""))
-                    .filter_map(|l| serde_json::from_str::<Value>(&l).ok()).filter_map(|v| codex_limits(&v)).last()
-            })
-        }
-    };
-    match found {
-        Some(mut s) => {
-            if s.used_percent.is_none() || s.resets_at.is_none() { s.unknown = Some("partial-snapshot"); }
-            s
-        }
-        None => Snapshot { unknown: Some(if client == Client::Codex && rollout.is_none() { "no-rollout" } else { "not-reported" }), ..Snapshot::default() },
-    }
-}
-
-fn codex_limits(v: &Value) -> Option<Snapshot> {
-    let r = [&v["rate_limits"], &v["payload"]["rate_limits"], &v["msg"]["rate_limits"]].into_iter().find(|r| r.is_object())?;
-    let (used, w) = [&r["primary"], &r["secondary"]].into_iter().filter_map(|w| w["used_percent"].as_f64().map(|u| (u, w)))
-        .fold(None::<(f64, &Value)>, |best, c| if best.is_none_or(|b| c.0 > b.0) { Some(c) } else { best })?;
-    let resets = w["resets_at"].as_u64().or_else(|| w["resets_in_seconds"].as_u64().map(|s| (unix_ms() / 1000) as u64 + s));
-    Some(Snapshot { used_percent: percent(used), resets_at: resets, window: w["window_minutes"].as_u64().map(|m| format!("{m}m")), unknown: None })
-}
 
 /// What one turn did, read from its log.
 #[derive(Clone, Debug)]
@@ -1028,40 +609,7 @@ pub struct Report {
 
 impl Report {
     /// Classify the turn's log text.
-    pub(crate) fn read(client: Client, text: &str, events: &[Value], rollout: Option<&Path>) -> Report {
-        let reached = limit_reached(events);
-        let end_index = if client == Client::Antigravity {
-            events.iter().rposition(|v| v["event"] == "result" || matches!(v["type"].as_str(), Some("PLANNER_RESPONSE" | "TOOL_RESPONSE" | "turn.failed" | "turn.cancelled"))).filter(|i| ends(&events[*i]))
-        } else { events.iter().rposition(|v| ends(v) || events::assistant_failure(client,v).is_some()) };
-        let end = end_index.map(|i| &events[i]);
-        let failure = end.and_then(|v| events::assistant_failure(client,v)).or_else(|| {
-            if client != Client::Claude || !end.is_some_and(|v| v["type"] == "result" && v["is_error"] == true) { return None; }
-            events[..end_index?].iter().rev()
-                .take_while(|v| !ends(v) && !(v["type"] == "system" && matches!(v["subtype"].as_str(), Some("init" | "turn_duration"))))
-                .find(|v| v["type"] == "assistant").and_then(|v| events::assistant_failure(client,v))
-        });
-        let (mut detail, auth, capacity) = (None, auth_rejected(text), transient_failure(events));
-        let (outcome, error) = if reached.is_some() { ("refused", "usage-limit") }
-            else if let Some(a) = auth { detail = Some(a.to_string()); ("failed", "auth-rejected") }
-            else if capacity.is_some() { detail = capacity; ("failed", "model-capacity") }
-            else if let Some(failure) = failure { detail = failure.detail; ("failed", failure.error) }
-            else {
-                match end {
-                    Some(v) if v["event"] == "result" && matches!(v["result"]["status"].as_str(), Some("CANCELED" | "INTERRUPTED")) => ("cancelled", "turn-cancelled"),
-                    Some(v) if v["event"] == "result" && v["result"]["status"] != "SUCCESS" => ("failed", "turn-failed"),
-                    Some(v) if v["type"] == "turn.failed" || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "ERROR") => ("failed", "turn-failed"),
-                    Some(v) if v["type"] == "turn.cancelled" || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "CANCELLED") => ("cancelled", "turn-cancelled"),
-                    Some(v) if (v["type"] == "result" && v["is_error"] == true) || (v["type"] == "PLANNER_RESPONSE" && v["status"] == "ERROR") => ("failed", "client-error"),
-                    Some(_) => ("ok", "none"),
-                    None => ("unknown", "no-end"),
-                }
-            };
-        let (calls, count, known) = read_calls(events);
-        let live_background = if client==Client::Claude {events::live_background(events)} else {vec![]};
-        Report { session: session_of(client, text), usage: sum_usage(&calls, count, known), calls, process: ProcessUse::default(), limit: snapshot(client, events, rollout), limits: limits::read(client, events, rollout), reached, background_job: !live_background.is_empty(), live_background, outcome, error, detail,
-            text: final_text(events), exit: None, started_ms: unix_ms(), duration_us: 0, recorded: Ok(()) }
-    }
-
+    pub(crate) fn read(client:Client,text:&str,events:&[Value],rollout:Option<&Path>)->Report {(protocol(client).report)(text,events,rollout)}
     /// The `agent.turn` observation: codes and numbers only; every null names its reason.
     pub(crate) fn observation(&self, client: Client, ctx: &Context) -> Value { self.observation_as(client.code(), ctx) }
 
@@ -1256,58 +804,8 @@ mod tests {
     }
 
     // M12.1: a bounded poll must progress through a full transcript larger than its read budget.
-    #[test]
-    fn antigravity_full_history_progresses_past_budget() {
-        let root = crate::scratch("large-full-tail");
-        let (path, full) = transcript_paths(&root, "conv-1");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let log = root.join("turn.log"); std::fs::write(&log, "").unwrap();
-        let compact = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","truncated_fields":["content"]});
-        std::fs::write(path, format!("{compact}\n")).unwrap();
-        let old = json!({"step_index":0,"content":"x".repeat(9*1024*1024)});
-        let complete = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"full"});
-        std::fs::write(full, format!("{old}\n{complete}\n")).unwrap();
-        let mut state = AntigravityTranscript {native_agentapi:true,session:Some("conv-1".into()),..Default::default()};
-        for _ in 0..4 {state.append(&root, &log).unwrap();}
-        assert_eq!(final_text(&events(&std::fs::read_to_string(log).unwrap())).as_deref(), Some("full"));
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     // M12.1/P2: partial writes, resume history and replacement must not fabricate completion or usage.
-    #[test]
-    fn antigravity_tail_preserves_boundaries_and_unknowns() {
-        let root = crate::scratch("antigravity-tail");
-        let (path, full) = transcript_paths(&root, "conv-1");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let log = root.join("turn.log"); std::fs::write(&log, "").unwrap();
-        let old = json!({"type":"PLANNER_RESPONSE","step_index":0,"status":"DONE","content":"old"});
-        std::fs::write(&path, format!("{old}\n")).unwrap();
-        let mut state = AntigravityTranscript::baseline(Some(&root), Some("conv-1".into())).unwrap();
-        let event = json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"new","tool_calls":[]}).to_string();
-        let half = event.len()/2;
-        let mut writer = File::options().append(true).open(&path).unwrap();
-        writer.write_all(event[..half].as_bytes()).unwrap();
-        state.append(&root, &log).unwrap(); assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
-        writeln!(writer, "{}", &event[half..]).unwrap();
-        state.append(&root, &log).unwrap(); state.append(&root, &log).unwrap();
-        assert_eq!(events(&std::fs::read_to_string(&log).unwrap()).len(), 1, "new complete record only, once");
-        let compact = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","truncated_fields":["content"]});
-        writeln!(writer, "{compact}").unwrap();
-        state.append(&root, &log).unwrap(); assert_eq!(events(&std::fs::read_to_string(&log).unwrap()).len(), 1);
-        let complete = json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"full"});
-        std::fs::write(&full, format!("{old}\n{complete}")).unwrap();
-        state.append(&root, &log).unwrap(); assert_eq!(events(&std::fs::read_to_string(&log).unwrap()).len(), 1, "partial full record waits");
-        std::fs::write(&full, format!("{old}\n{complete}\n")).unwrap();
-        state.append(&root, &log).unwrap(); assert_eq!(events(&std::fs::read_to_string(&log).unwrap()).len(), 2);
-        std::fs::write(&path, "").unwrap(); assert!(state.append(&root, &log).is_err(), "truncation retains unknown ownership");
-        let failed = events(r#"{"type":"PLANNER_RESPONSE","step_index":1,"status":"ERROR","content":"quota exceeded"}"#);
-        assert_eq!(Report::read(Client::Antigravity, "", &failed, None).outcome, "refused");
-        let cancelled = events(r#"{"type":"PLANNER_RESPONSE","step_index":1,"status":"CANCELLED"}"#);
-        assert_eq!(Report::read(Client::Antigravity, "", &cancelled, None).outcome, "cancelled");
-        assert_eq!(snapshot(Client::Antigravity, &[], None).unknown, Some("not-reported"));
-        assert_eq!(antigravity_session(r#"{"conversationId":"../foreign"}"#), None);
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     // Chain: coreq.md R50, docs/design/agent.md § Limit snapshot: shapes copied from a Claude 2026-10 `rate_limit_event`
     // and a Codex 2026-11 rollout `token_count`. Risk: a limit reads as 0 % or a reset is invented.
@@ -1364,4 +862,30 @@ mod tests {
         assert_eq!((v["route"].as_str(), v["unknown"]["task"].as_str()), (Some("pilotq.manager"), Some("no-task")));
         crate::telemetry::Event::new(v).expect("valid route observation");
     }
+}
+
+pub(crate) fn snapshot(client:Client,events:&[Value],rollout:Option<&Path>)->Snapshot {(protocol(client).snapshot)(events,rollout)}
+
+pub(crate) trait TurnExtension: Send {
+    fn is_submission(&self)->bool;
+    fn session(&self)->Option<&str>;
+    fn synchronize(&mut self,exit:Option<i32>,receipt:&mut Option<std::sync::mpsc::Receiver<Res<String>>>,resumed:&Option<String>,home:Option<&Path>,log:&Path)->Res<()>;
+}
+struct StdioTurn;
+impl TurnExtension for StdioTurn {
+    fn is_submission(&self)->bool {false}
+    fn session(&self)->Option<&str> {None}
+    fn synchronize(&mut self,_:Option<i32>,_:&mut Option<std::sync::mpsc::Receiver<Res<String>>>,_:&Option<String>,_:Option<&Path>,_:&Path)->Res<()> {Ok(())}
+}
+fn stdio_command(base:Command,spec:&Spec,_:&str)->Res<(Command,Box<dyn TurnExtension>)> {Ok((command(base,spec),Box::new(StdioTurn)))}
+fn plain_input(text:&str)->Vec<u8> {text.as_bytes().to_vec()}
+
+use registry::parsing::*;
+#[cfg(test)]
+use registry::claude_settings;
+
+fn protocol(client:Client)->&'static registry::Protocol {registry::protocol(client)}
+
+impl Report {
+    fn empty()->Self {Report {session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,text:None,exit:None,started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
 }

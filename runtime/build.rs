@@ -13,7 +13,7 @@ fn registry(directory: &Path, output: &Path) {
         entries.push(format!("&{name}::ENTRY"));
     }
     assert!(!entries.is_empty(), "registry has no modules");
-    source += &format!("const ENTRIES: [&Entry; {}] = [{}];\n", entries.len(), entries.join(","));
+    source += &format!("pub(super) const ENTRIES: [&Entry; {}] = [{}];\n", entries.len(), entries.join(","));
     fs::write(output, source).expect("generated registry");
 }
 

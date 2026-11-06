@@ -1,5 +1,5 @@
 //! `agent.turn` and `agent.call` capture (agentq.md M12.13, M12.14; docs/spec/RUNTIME.md § Observation).
-use super::{Client, Context, Report, Res, model_code, read_calls, sum_usage};
+use super::{protocol,Client, Context, Report, Res, model_code, read_calls, sum_usage};
 use crate::telemetry::{Event, Store, capture::TraceContext, shared};
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
@@ -444,11 +444,7 @@ pub fn session_records(turn: &SessionTurn, ctx: &Context, text: &str) -> Res<Vec
     let client = Client::parse(turn.runtime).ok_or("session records need a known runtime")?;
     let events: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["message"]["model"] != "<synthetic>").collect();
     let mut r = Report::read(client, text, &events, None);
-    if client == Client::Codex {
-        r.calls = rollout_calls(text, false);
-        let known = !r.calls.is_empty();
-        r.usage = sum_usage(&r.calls, None, known);
-    }
+    (protocol(client).session_report)(text,&mut r);
     if text.is_empty() { r.usage.unknown = Some("no-transcript"); }
     session_events(turn, ctx, r)
 }
@@ -457,7 +453,7 @@ pub fn session_records(turn: &SessionTurn, ctx: &Context, text: &str) -> Res<Vec
 pub fn session_call_records(turn: &SessionTurn, ctx: &Context, mut calls: Vec<Call>) -> Res<Vec<Event>> {
     // The store refuses a model that is not a code, which would lose the whole turn.
     for c in &mut calls { c.model = c.model.take().filter(|m| model_code(m)); }
-    let mut r = Report::read(Client::Claude, "", &[], None);
+    let mut r = Report::empty();
     r.usage = sum_usage(&calls, None, !calls.is_empty());
     r.calls = calls;
     session_events(turn, ctx, r)

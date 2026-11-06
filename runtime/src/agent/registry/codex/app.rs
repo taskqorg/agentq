@@ -12,7 +12,7 @@ pub(crate) struct AppServer {
 }
 
 impl AppServer {
-    pub(super) fn spawn(mut command:Command,private_log:&Path,process:&super::Process)->Res<Self> {
+    pub(crate) fn spawn(mut command:Command,private_log:&Path,process:&super::Process)->Res<Self> {
         let mut options=File::options();options.create(true).append(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(private_log).map_err(|e|format!("app-server log: {e}"))?;
@@ -91,7 +91,7 @@ impl AppServer {
     }
 
     /// EOF lets the native server close its MCP children; the owned server is reaped before return.
-    pub(super) fn close(&mut self)->Res<()> {
+    pub(crate) fn close(&mut self)->Res<()> {
         self.input.take();
         let until=Instant::now()+Duration::from_secs(2);
         while self.poll()?.is_none() && Instant::now()<until {std::thread::sleep(Duration::from_millis(10));}
@@ -179,7 +179,7 @@ impl AppSession {
 
     pub fn ready(&self) -> bool { self.ready && self.fault.is_none() }
     pub fn session(&self) -> Option<&str> { self.thread.as_deref() }
-    pub(super) fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
+    pub(crate) fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
 
     /// Save the returned state before writing this request to the transport. A lost reply remains pending.
     pub fn start_turn(&mut self, mut params: Value) -> Res<Value> {
@@ -443,7 +443,6 @@ mod tests {
             assert_eq!(current.report().unwrap().limits,limits::unknown("native-read-refused"));
         }
     }
-
 
     fn observations(store: &crate::telemetry::Store) -> Vec<Value> {
         store.export(0, 0, 100).unwrap()["events"].as_array().unwrap().iter().map(|e| e["observation"].clone()).filter(|o| o["kind"] == "agent.turn").collect()
