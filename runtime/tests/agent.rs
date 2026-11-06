@@ -1050,6 +1050,10 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         seen.extend(r.progress(&mut run).unwrap());
         assert_eq!((state, r.running()), (agent::State::Finished, before), "{}", d.name);
         assert!(!seen.is_empty() && r.progress(&mut run).unwrap().is_empty(), "{}: progress reads each record once", d.name);
+        // #282 A4: one native read feeds both readers; a live step names why it has no byte range.
+        let live = r.steps(&mut run).unwrap();
+        assert!(!live.is_empty() && live.iter().all(|s| s.source.is_none() && s.unknown["source"] == "live-stream"), "{}: {live:?}", d.name);
+        assert!(r.steps(&mut run).unwrap().is_empty(), "{}: steps reads each record once", d.name);
         let flags = record(&root, 1)["args"].clone();
         let native = match d.name { "claude" => "bypassPermissions", "codex" => "--dangerously-bypass-approvals-and-sandbox", _ => "--dangerously-skip-permissions" };
         assert!(flags.as_array().unwrap().iter().any(|a| a == native), "{}: policy maps to {native}: {flags}", d.name);

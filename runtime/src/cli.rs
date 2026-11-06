@@ -68,6 +68,51 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     Ok(out)
 }
 
+/// `agentq agent history`: one JSON page of a session, or the full text of one source range (RUNTIME.md § Reading a session).
+pub fn history(args: &[&str]) -> Res<Value> {
+    let mut flags = std::collections::BTreeMap::new();
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        if !matches!(*flag, "--runtime" | "--session" | "--home" | "--checkpoint" | "--until-byte" | "--read") { return Err(format!("unknown flag {flag}")); }
+        flags.insert(*flag, *rest.next().ok_or(format!("{flag} requires a value"))?);
+    }
+    let name = flags.get("--runtime").ok_or("--runtime requires a name")?;
+    let session = flags.get("--session").ok_or("--session requires an ID")?;
+    let runtime = agent::runtime(name).ok_or_else(|| format!("runtime {name} unknown"))?;
+    let home = match flags.get("--home") {
+        Some(home) if Path::new(home).is_absolute() => Some(PathBuf::from(home)),
+        Some(_) => return Err("--home requires an absolute path".into()),
+        None => None,
+    };
+    let home = home.as_deref();
+    if let Some(range) = flags.get("--read") {
+        let mut parts = range.splitn(3, ':');
+        let mut number = || parts.next().and_then(|p| p.parse::<u64>().ok()).ok_or("--read requires <start>:<end>:<pointer>");
+        let (start, end) = (number()?, number()?);
+        let pointer = parts.next().filter(|p| !p.is_empty()).map(String::from);
+        let text = runtime.read_source(session, home, &agent::steps::Source { start, end, pointer }).map_err(|e| e.to_string())?;
+        return Ok(json!({"schema": 1, "bytes": text.len(), "text": text}));
+    }
+    let saved = match flags.get("--checkpoint") {
+        Some(&"-") => Some(std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?),
+        Some(path) => Some(std::fs::read_to_string(path).map_err(|e| format!("checkpoint: {e}"))?),
+        None => None,
+    };
+    let saved = saved.map(|text| serde_json::from_str::<Value>(&text).map_err(|e| format!("checkpoint: {e}"))).transpose()?;
+    let until = flags.get("--until-byte").map(|n| n.parse::<u64>().map_err(|_| "--until-byte requires a number")).transpose()?;
+    let page = runtime.history(session, home, saved.as_ref(), until).map_err(|e| e.to_string())?;
+    let state = runtime.session_state(session, home);
+    let (resume, resume_unknown) = match runtime.resume_command(session, home) {
+        Ok(command) => (json!({"argv": command.argv, "env": command.env, "cwd": command.cwd}), Value::Null),
+        Err(agent::Failure::Refused(cause)) => (Value::Null, json!(cause.0)),
+        Err(failure) => (Value::Null, json!(failure.to_string())),
+    };
+    let capabilities = agent::history::capabilities(&page.format, page.session.version.as_deref(), std::env::consts::OS)?;
+    Ok(json!({"schema": 1, "runtime": runtime.descriptor().name, "format": page.format, "session": page.session,
+        "turns": page.turns, "steps": page.steps, "covered": page.covered, "more": page.more, "pending_bytes": page.pending_bytes,
+        "checkpoint": page.checkpoint, "state": state, "resume": resume, "resume_unknown": resume_unknown, "capabilities": capabilities}))
+}
+
 /// The report as JSON: codes, numbers and the final text; every null in `usage` and `limit` has its `unknown` reason.
 pub fn report_json(r: &Report) -> Value {
     let u = &r.usage;

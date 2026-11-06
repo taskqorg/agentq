@@ -145,7 +145,7 @@ fn completed_non_tool(item: &Value) -> bool {
 }
 
 // `capture::time_ms` trusts its source's shape; a health signal must refuse an impossible date.
-fn native_time(s: &str) -> Option<i64> {
+pub(super) fn native_time(s: &str) -> Option<i64> {
     let b=s.as_bytes();
     if b.len()<20 || b[4]!=b'-' || b[7]!=b'-' || b[10]!=b'T' || b[13]!=b':' || b[16]!=b':' {return None;}
     let digits=[0..4,5..7,8..10,11..13,14..16,17..19];
@@ -470,7 +470,7 @@ pub(super) fn live_background(values: &[Value]) -> Vec<String> {
 }
 
 /// The native task a successful start names. Output of a foreground command is never read for one.
-fn started_task(background: bool, native: &Value, content: &Value) -> Option<String> {
+pub(super) fn started_task(background: bool, native: &Value, content: &Value) -> Option<String> {
     let structured=native["backgroundTaskId"].as_str()
         .or_else(||if background {native["taskId"].as_str().or(native["task_id"].as_str()).or(native["shellId"].as_str())} else {None})
         .map(String::from);

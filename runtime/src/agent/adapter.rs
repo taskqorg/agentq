@@ -19,6 +19,8 @@ pub struct Descriptor {
     pub models: &'static [&'static str],
     /// Oldest supported CLI version; empty: none.
     pub minimum: &'static str,
+    /// The native terminal command of an existing session; `{session}` marks its ID.
+    pub resume: &'static [&'static str],
     pub capabilities: &'static [&'static str],
 }
 
@@ -282,6 +284,14 @@ pub struct Quota { pub account: Option<String>, pub free: bool, pub off: bool, p
 struct Live(&'static AtomicUsize);
 impl Drop for Live { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); } }
 
+/// `state` is `running`, `idle` or `unknown`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SessionState { pub state: &'static str, pub reason: String }
+
+/// A command a client terminal starts; the runtime never starts it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ResumeCommand { pub argv: Vec<String>, pub env: Vec<(String, String)>, pub cwd: Option<String>, pub state: SessionState }
+
 /// One running or finished run. Opaque: operate on it through its `Runtime`.
 pub struct Run {
     runtime: &'static str,
@@ -290,6 +300,10 @@ pub struct Run {
     progress: u64,
     events: super::events::Cursor,
     rollout_progress: Option<(PathBuf, u64)>,
+    /// Native records read but not yet taken: one read feeds both `progress` and `steps`.
+    event_buffer: Vec<Event>,
+    step_buffer: super::steps::Batch,
+    live_steps: super::steps::Reducer,
     live: Option<Live>,
     recorded: bool,
     /// The records of the finished turn, unchanged across repeated snapshots.
@@ -693,6 +707,18 @@ pub trait Runtime: Send + Sync {
     fn home(&self) -> Option<PathBuf>;
     /// The native transcript file of `session` in `home` (None: the client's own); none where the runtime keeps none.
     fn session_transcript(&self, session: &str, home: Option<&Path>) -> Option<PathBuf>;
+    /// Step revisions of caller-held JSONL, without a run, process or lookup.
+    fn log_steps(&self, log: &str) -> Vec<super::steps::Step>;
+    /// One page of a session as typed steps, from `saved` when set. Read-only.
+    fn history(&self, session: &str, home: Option<&Path>, saved: Option<&Value>, until: Option<u64>) -> Result<super::steps::StepPage, Failure>;
+    /// The full text of one `Source` of a session.
+    fn read_source(&self, session: &str, home: Option<&Path>, source: &super::steps::Source) -> Result<String, Failure>;
+    /// Step revisions of a run since the previous call. It shares the native read with `progress`.
+    fn steps(&self, run: &mut Run) -> Res<Vec<super::steps::Step>>;
+    /// Running evidence of a session; absent evidence reads unknown with its reason.
+    fn session_state(&self, session: &str, home: Option<&Path>) -> SessionState;
+    /// The native terminal command of a session. A running session refuses with cause `session-running`.
+    fn resume_command(&self, session: &str, home: Option<&Path>) -> Result<ResumeCommand, Failure>;
     /// Capability `session-url`: the link of caller-built session `spec.session` (background `job`, if any) in `spec.home`,
     /// or its absence cause with native detail (Session observation).
     fn session_link(&self, spec: &NativeSpec, job: Option<&str>) -> Result<String, (Cause, Option<String>)>;
@@ -737,13 +763,13 @@ pub struct NativeSpec {
 struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize }
 
 static ADAPTERS: [Adapter; 3] = [
-    Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
+    Adapter { client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude", resume: &["claude", "--resume", "{session}"],
         models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
         capabilities: &["turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
             "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } },
-    Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt", models: &[], minimum: "0.162.0",
-        capabilities: &["turn", "resume", "quota-snapshot", "account-limits", "catalogue", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env", "mcp-config", "instructions-file", "turn-parts", "turn-deltas"] } },
-    Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", models: &[], minimum: "",
+    Adapter { client: Client::Codex, live: AtomicUsize::new(0), descriptor: Descriptor { name: "codex", label: "Codex CLI", brand: "OpenAI", family: "gpt", resume: &["codex", "resume", "{session}"], models: &[], minimum: "0.162.0",
+        capabilities: &["live-output", "turn", "resume", "quota-snapshot", "account-limits", "catalogue", "app-queue", "app-server", "effort", "image-input", "account", "host-args", "settings-env", "mcp-config", "instructions-file", "turn-parts", "turn-deltas"] } },
+    Adapter { client: Client::Antigravity, live: AtomicUsize::new(0), descriptor: Descriptor { name: "antigravity", label: "Antigravity", brand: "Google", family: "gemini", resume: &["agy", "--conversation", "{session}"], models: &[], minimum: "",
         capabilities: &["turn", "resume", "title", "account-limits"] } },
 ];
 
@@ -967,7 +993,7 @@ impl Adapter {
 
     fn run(&'static self, body: Body, progress: u64, optimization: Optimization, l: &Launch) -> Run {
         self.live.fetch_add(1, Ordering::SeqCst);
-        Run { runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
+        Run { runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, event_buffer: vec![], step_buffer: Default::default(), live_steps: super::steps::Reducer::new(self.client), optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
             remote: l.title.is_some() }
     }
 
@@ -1029,6 +1055,97 @@ impl Adapter {
                 Ok(self.run(Body::App(Box::new(app)), 0, optimization, l))
             }
         }
+    }
+}
+
+impl Adapter {
+    /// One native read feeds typed events and step revisions, so neither reader loses the other's data.
+    fn read_native(&self, run: &mut Run) -> Res<()> {
+        let path = match &mut run.body {
+            Body::Turn(t) => { t.sync_antigravity_transcript()?; t.log.clone() }
+            Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
+            Body::Native(_) => return Ok(()),
+            Body::App(a) => {
+                a.pump()?;
+                let values = std::mem::take(&mut a.pending);
+                for value in &values { run.live_steps.read_live(value, &mut run.step_buffer); }
+                let events = run.events.read_owned(self.client, values, a.session.session(), a.session.turn_id());
+                run.event_buffer.extend(events);
+                return Ok(());
+            }
+        };
+        let (mut values, next) = lines_from(&path, run.progress)?;
+        if let Body::Turn(t) = &run.body {
+            if self.client == Client::Codex {
+                if run.rollout_progress.is_none() && t.resumed.is_none() { run.rollout_progress = session_of(self.client, &read_from(&t.log,t.start).unwrap_or_default()).and_then(|s| rollout(&s, t.home.as_deref())).map(|p|(p,0)); }
+                if let Some((path, from)) = &mut run.rollout_progress {
+                    let (rows, next) = lines_from(path, *from)?; *from = next;
+                    values.extend(rows.into_iter().filter(|v| v["payload"]["type"] == "token_count"));
+                }
+            }
+        }
+        run.progress = next;
+        for value in &values { run.live_steps.read_live(value, &mut run.step_buffer); }
+        let events = run.events.read(self.client, values);
+        run.event_buffer.extend(events);
+        Ok(())
+    }
+
+    /// The native source of a session; a caller never chooses a path.
+    fn history_source(&self, session: &str, home: Option<&Path>) -> Result<(&'static str, PathBuf), Failure> {
+        if !super::native::plain_id(session) { return Err(Failure::Refused(Cause("session-invalid"))); }
+        let missing = || Failure::Refused(Cause("session-not-found"));
+        let root = home.map(Path::to_path_buf).or_else(|| base_home(self.client)).ok_or_else(missing)?;
+        match self.client {
+            Client::Codex => {
+                let archived = || std::fs::read_dir(root.join("archived_sessions")).ok()?.flatten().map(|e| e.path()).find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&format!("{session}.jsonl"))));
+                rollout(session, Some(&root)).or_else(archived).map(|path| ("codex-rollout", path)).ok_or_else(missing)
+            }
+            Client::Claude => {
+                let projects = std::fs::read_dir(root.join("projects")).map_err(|_| missing())?;
+                for project in projects.flatten() {
+                    let dir = project.path();
+                    if session.starts_with("agent-") {
+                        for parent in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                            let path = parent.path().join("subagents").join(format!("{session}.jsonl"));
+                            if path.is_file() { return Ok(("claude-native", path)); }
+                        }
+                    } else {
+                        let path = dir.join(format!("{session}.jsonl"));
+                        if path.is_file() { return Ok(("claude-native", path)); }
+                    }
+                }
+                Err(missing())
+            }
+            Client::Antigravity => {
+                let path = root.join("brain").join(session).join(".system_generated").join("logs").join("transcript.jsonl");
+                if path.is_file() { Ok(("antigravity-sidecar", path)) } else { Err(missing()) }
+            }
+        }
+    }
+}
+
+/// Codex publishes no process registry: the newest turn record and the source's age are the evidence.
+fn codex_turn_state(path: &Path) -> SessionState {
+    const RECENT: Duration = Duration::from_secs(30 * 60);
+    let state = |state, reason: &str| SessionState { state, reason: reason.into() };
+    let Ok(mut file) = File::open(path) else { return state("unknown", "source-unreadable") };
+    let Ok(meta) = file.metadata() else { return state("unknown", "source-unreadable") };
+    let window = meta.len().saturating_sub(16 * 1024 * 1024);
+    let mut text = Vec::new();
+    if file.seek(SeekFrom::Start(window)).is_err() || file.read_to_end(&mut text).is_err() { return state("unknown", "source-unreadable"); }
+    let newest = text.split(|b| *b == b'\n').rev().filter(|row| row.windows(5).any(|w| w == b"task_" || w == b"turn_")).find_map(|row| {
+        let value: Value = serde_json::from_slice(row).ok()?;
+        let kind = value["payload"]["type"].as_str()?;
+        matches!(kind, "task_started" | "task_complete" | "turn_aborted").then(|| kind.to_string())
+    });
+    match newest.as_deref() {
+        Some("task_complete" | "turn_aborted") => state("idle", "turn-terminal"),
+        None => state("unknown", "no-turn-record"),
+        Some(_) => match meta.modified().ok().and_then(|at| at.elapsed().ok()) {
+            Some(age) if age <= RECENT => state("running", "open-turn-recent-write"),
+            _ => state("unknown", "open-turn-stale"),
+        },
     }
 }
 
@@ -1145,24 +1262,80 @@ impl Runtime for Adapter {
 
     fn progress(&self, run: &mut Run) -> Res<Vec<Event>> {
         let run = self.own_mut(run)?;
-        let path = match &mut run.body {
-            Body::Turn(t) => { t.sync_antigravity_transcript()?; t.log.clone() }
-            Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
-            Body::Native(_) => return Ok(vec![]),
-            Body::App(a) => { a.pump()?; return Ok(run.events.read_owned(self.client, std::mem::take(&mut a.pending), a.session.session(), a.session.turn_id())); }
-        };
-        let (mut values, next) = lines_from(&path, run.progress)?;
-        if let Body::Turn(t) = &run.body {
-            if self.client == Client::Codex {
-                if run.rollout_progress.is_none() && t.resumed.is_none() { run.rollout_progress = session_of(self.client, &read_from(&t.log,t.start).unwrap_or_default()).and_then(|s| rollout(&s, t.home.as_deref())).map(|p|(p,0)); }
-                if let Some((path, from)) = &mut run.rollout_progress {
-                    let (rows, next) = lines_from(path, *from)?; *from = next;
-                    values.extend(rows.into_iter().filter(|v| v["payload"]["type"] == "token_count"));
+        self.read_native(run)?;
+        Ok(std::mem::take(&mut run.event_buffer))
+    }
+
+    fn steps(&self, run: &mut Run) -> Res<Vec<super::steps::Step>> {
+        let run = self.own_mut(run)?;
+        self.read_native(run)?;
+        Ok(std::mem::take(&mut run.step_buffer).steps)
+    }
+
+    fn log_steps(&self, log: &str) -> Vec<super::steps::Step> {
+        let mut reducer = super::steps::Reducer::new(self.client);
+        let mut batch = super::steps::Batch::default();
+        let mut start = 0;
+        for raw in log.split_inclusive('\n') {
+            let end = start + raw.len() as u64;
+            if let Ok(value) = serde_json::from_str::<Value>(raw) { if value.is_object() { reducer.read(&value, raw, start, end, &mut batch); } }
+            start = end;
+        }
+        batch.steps
+    }
+
+    fn history(&self, session: &str, home: Option<&Path>, saved: Option<&Value>, until: Option<u64>) -> Result<super::steps::StepPage, Failure> {
+        let (format, path) = self.history_source(session, home)?;
+        let mut page = super::steps::page(self.client, format, session, &path, saved, until).map_err(Failure::Failed)?;
+        if page.session.id.is_none() { page.session.id = Some(session.into()); }
+        Ok(page)
+    }
+
+    fn read_source(&self, session: &str, home: Option<&Path>, source: &super::steps::Source) -> Result<String, Failure> {
+        let (_, path) = self.history_source(session, home)?;
+        super::history::read_source(&path, source).map_err(Failure::Failed)
+    }
+
+    fn session_state(&self, session: &str, home: Option<&Path>) -> SessionState {
+        let state = |state, reason: &str| SessionState { state, reason: reason.into() };
+        match self.client {
+            Client::Antigravity => state("unknown", "no-native-state"),
+            Client::Claude if session.starts_with("agent-") => state("unknown", "subagent-session"),
+            Client::Claude => {
+                let Some(home) = home.map(Path::to_path_buf).or_else(|| base_home(Client::Claude)) else { return state("unknown", "no-client-home") };
+                let Ok(entries) = std::fs::read_dir(home.join("sessions")) else { return state("unknown", "registry-unreadable") };
+                for entry in entries.flatten() {
+                    // The registry holds private key files beside its JSON; read only `<pid>.json`.
+                    let path = entry.path();
+                    if path.extension().is_none_or(|e| e != "json") { continue; }
+                    let Ok(text) = std::fs::read_to_string(&path) else { return state("unknown", "registry-unreadable") };
+                    let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
+                    if value["sessionId"] != session { continue; }
+                    let Some(pid) = value["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else { return state("unknown", "registry-unreadable") };
+                    return match crate::process::identity(pid) {
+                        Ok(Some(_)) => state("running", "live-process"),
+                        Ok(None) => state("idle", "process-ended"),
+                        Err(_) => state("unknown", "process-unreadable"),
+                    };
                 }
+                state("idle", "no-live-entry")
+            }
+            Client::Codex => {
+                let Some(path) = rollout(session, home) else { return state("unknown", "session-not-found") };
+                codex_turn_state(&path)
             }
         }
-        run.progress = next;
-        Ok(run.events.read(self.client, values))
+    }
+
+    fn resume_command(&self, session: &str, home: Option<&Path>) -> Result<ResumeCommand, Failure> {
+        if !super::native::plain_id(session) { return Err(Failure::Refused(Cause("session-invalid"))); }
+        let state = self.session_state(session, home);
+        if state.state == "running" { return Err(Failure::Refused(Cause("session-running"))); }
+        if session.starts_with("agent-") { return Err(Failure::Refused(Cause("resume-unsupported"))); }
+        let page = self.history(session, home, None, None)?;
+        let argv = self.descriptor.resume.iter().map(|word| word.replace("{session}", session)).collect();
+        let env = home.map(|h| vec![(self.client.home_var().to_string(), h.display().to_string())]).unwrap_or_default();
+        Ok(ResumeCommand { argv, env, cwd: page.session.cwd, state })
     }
 
     fn launcher_output(&self, run: &mut Run) -> Result<Result<Output, crate::process::Failure>, Cause> {

@@ -1,5 +1,15 @@
 # Runtime changelog
 
+## 0.14.0
+
+- Add `agent::steps`: `Turn`, `Step` (14 kinds), `Output`, `Source`, `Session`, `Timeline` and `Step::merge`. Any run reads as one ordered list of typed steps, live or finished. See [Steps](../docs/spec/RUNTIME.md#steps).
+- Add `Runtime::history`, `read_source`, `log_steps`, `steps`, `session_state` and `resume_command`, and the command `agentq agent history`. Consumers implementing `Runtime` must implement them. `progress` and `steps` share one native read.
+- Add `Descriptor.resume`, the native terminal command, and the Codex capability `live-output`. Consumers constructing a `Descriptor` must add the field.
+- `History` events now map Codex `CommandExecution`, `FileChange`, `McpToolCall`, `Reasoning`, `ContextCompaction` and `AgentMessage` items and Claude `thinking` blocks instead of reading them as unknown. `kind` gains `thinking`, and blocks gain `thinking` and `lifecycle`. Consumers matching these values exhaustively must add them. `capabilities` gains the feature `live_output`.
+- `History` binds a Claude `agent-<id>` session by the record's `agentId`, because a subagent file carries its parent's `sessionId`.
+
+Existing event variants, history checkpoints, launch arguments and policy are unchanged.
+
 ## 0.13.1
 
 - `History` events add `validity: {status, reason}`. Claude records with a non-empty string `type` are `valid`, including unsupported metadata such as `file-history-snapshot`. Missing or malformed discriminators are `invalid`. Other transports report `unknown`. A consumer can skip valid metadata and refuse invalid envelopes without parsing native JSON. See [task #288 evidence](../docs/evidence/runtime-288.md).

@@ -1,0 +1,101 @@
+[
+  {
+    "fixture": "claude-2.1.295.jsonl",
+    "origin": "real native transcript",
+    "native_version": "Claude Code 2.1.295",
+    "source_sha256": "8671a6d3413b08f4ab9a16530dbaf9a3856c7dbcefcfdae6866c040e18de80fe",
+    "source_rows": 95,
+    "rows": 35,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "claude-2.1.318-agent.jsonl",
+    "origin": "real native transcript",
+    "native_version": "Claude Code 2.1.318",
+    "source_sha256": "e61d3e92c359a1f58b9e7505a2dad3a83c914fd82342ba4774a31094e8fa7d20",
+    "source_rows": 283,
+    "rows": 55,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "claude-2.1.318-compaction.jsonl",
+    "origin": "real native transcript",
+    "native_version": "Claude Code 2.1.318",
+    "source_sha256": "f1b38d1bffe87fb783402b5d279a1a7bdc2f9b473a117ca836eab37549417d64",
+    "source_rows": 1746,
+    "rows": 123,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "claude-2.1.318-subagent.jsonl",
+    "origin": "real native transcript",
+    "native_version": "Claude Code 2.1.318",
+    "source_sha256": "d00d2a53a3f02e6087e7c982d2df50c005f85dcbd7826622d5280488caab584e",
+    "source_rows": 21,
+    "rows": 17,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "claude-2.1.318.jsonl",
+    "origin": "real native transcript",
+    "native_version": "Claude Code 2.1.318",
+    "source_sha256": "3a5c8ec06fd3c343ceb9e8ef01805fd1443964e8c635e737efaa9294d04be5c6",
+    "source_rows": 1905,
+    "rows": 169,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "codex-0.162.1-app-server.jsonl",
+    "origin": "real native transcript",
+    "native_version": "codex-cli 0.162.1",
+    "source_sha256": "d96b2d240eba134d020f077f6d13f28a87f427294ec10fcc152aa0980f18d3f8",
+    "source_rows": 15,
+    "rows": 15,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "codex-0.162.1-compaction.jsonl",
+    "origin": "real native transcript",
+    "native_version": "codex-cli 0.162.1",
+    "source_sha256": "be899a16a65c91b50e67ee30879998f13fb9b4a4c30b355fcced30bb20d4096d",
+    "source_rows": 856,
+    "rows": 237,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "codex-0.162.1-fork.jsonl",
+    "origin": "real native transcript",
+    "native_version": "codex-cli 0.162.1",
+    "source_sha256": "f2cbbb4fb93c1f0e2ff50f1accac8f40d33e6ae4b86be5ec6ab53f181355bdd8",
+    "source_rows": 18,
+    "rows": 15,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "codex-0.162.1-parent.jsonl",
+    "origin": "real native transcript",
+    "native_version": "codex-cli 0.162.1",
+    "source_sha256": "c2c43dd103ee09aebff71047460e72d65011a773e87e0a6559d48d041977b261",
+    "source_rows": 123,
+    "rows": 55,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "codex-0.162.1-rollout.jsonl",
+    "origin": "real native transcript",
+    "native_version": "codex-cli 0.162.1",
+    "source_sha256": "9e02d3aec9f21fb32b1f42e349e0349cd115fa307b9d205e9d6e8b76c8183500",
+    "source_rows": 198,
+    "rows": 75,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  },
+  {
+    "fixture": "codex-0.162.1-subagent.jsonl",
+    "origin": "real native transcript",
+    "native_version": "codex-cli 0.162.1",
+    "source_sha256": "9714318179a1ce4e8e21287f77a72f0f76b1b0056bed4a1566af01f1f098549d",
+    "source_rows": 63,
+    "rows": 39,
+    "redaction": "scripts/scrub_history_fixture.py: protocol values, numbers and structure kept; IDs mapped consistently; other strings replaced; times moved to 2000-01-01."
+  }
+]

@@ -40,6 +40,7 @@ Existing Codex conversations bound to the retired provider are intentionally not
 
 ## Commands
 
+- `agentq agent history --runtime <name> --session <id>` reads one session as JSON pages of typed steps, with each command's console, for any client to render. [Steps](docs/spec/RUNTIME.md#steps).
 - `agentq agent turn` runs one Codex/Claude turn from JSON stdin and returns a JSON report. No optimizer service is required. Library and request format: [runtime contract](docs/spec/RUNTIME.md).
 
 - `agentq compress <agent>` reads one tool-result JSON object (`adapter`, `tool`, `text`) and returns `text` and a recovery `ref`. Unqualified hook/provider recipes pass unchanged. `agentq stats [--json]` shows local call outcomes and bytes; missing or corrupt records are unknown.

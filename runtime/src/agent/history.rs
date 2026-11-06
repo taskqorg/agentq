@@ -27,10 +27,38 @@ pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res
         };
         features.insert(feature.into(), json!({"status":status,"reason":reason}));
     }
+    let live = match format {
+        "codex-app-server" => ("supported", "item/commandExecution/outputDelta"),
+        "codex-exec" | "codex-rollout" => ("unsupported", "native records carry output only at item end"),
+        "claude-stream" | "claude-native" => ("unsupported", "no native record of tool output before tool_result"),
+        _ => ("unsupported", "adapter records carry no output before the step ends"),
+    };
+    features.insert("live_output".into(), json!({"status":live.0,"reason":live.1}));
     Ok(json!({"schema":1,"format":format,"native_version":native_version,"os":os,"features":features,
         "native":{"status":"untested","reason":"history API not qualified on a native version/OS tuple"},
-        "evidence":["runtime/tests/history.rs","runtime/tests/agent.rs"],
+        "evidence":["runtime/tests/history.rs","runtime/tests/steps.rs","runtime/tests/agent.rs"],
         "limits":{"page_bytes":BUDGET,"record_bytes":BUDGET,"page_events":128}}))
+}
+
+/// The full value at `source`: one complete record of `path`, read by its byte range. No cursor moves.
+pub fn read_source(path: &Path, source: &super::steps::Source) -> Res<String> {
+    if source.end <= source.start || source.end - source.start > BUDGET as u64 { return Err("history range invalid".into()); }
+    let mut file = File::open(path).map_err(|e| format!("history unavailable: {e}"))?;
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    if source.end > len { return Err("history range invalid".into()); }
+    if source.start > 0 {
+        file.seek(SeekFrom::Start(source.start - 1)).map_err(|e| e.to_string())?;
+        let mut byte = [0];
+        file.read_exact(&mut byte).map_err(|e| e.to_string())?;
+        if byte[0] != b'\n' { return Err("history range is not a record boundary".into()); }
+    }
+    let mut bytes = vec![0; (source.end - source.start) as usize];
+    file.seek(SeekFrom::Start(source.start)).map_err(|e| e.to_string())?;
+    file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.last() != Some(&b'\n') { return Err("history range is not a record boundary".into()); }
+    let v: Value = serde_json::from_slice(&bytes).map_err(|_| "history invalid JSON")?;
+    let found = match &source.pointer { Some(pointer) => v.pointer(pointer).ok_or("history pointer not found")?, None => &v };
+    super::steps::value_text(found).ok_or_else(|| "history value is null".into())
 }
 
 /// An observation cursor, never execution or stop authority. Protect its checkpoint as private data.
@@ -162,8 +190,12 @@ impl History {
     fn event(&self, v: &Value, raw: &str, offset: u64) -> Res<Value> {
         let client = if self.format.starts_with("codex-") {super::Client::Codex}
             else if self.format.starts_with("claude-") {super::Client::Claude} else {super::Client::Antigravity};
-        let session = super::session_of(client, raw);
+        // A Claude subagent file carries its parent's session; its own identity is `agentId`.
+        let agent = (client == super::Client::Claude && self.session.starts_with("agent-")).then(|| v["agentId"].as_str().map(|a| format!("agent-{a}"))).flatten();
+        let session = if client == super::Client::Claude && self.session.starts_with("agent-") { agent } else { super::session_of(client, raw) };
+        let subagent = client == super::Client::Claude && self.session.starts_with("agent-");
         let native_session = session.as_deref().or_else(|| match self.format.as_str() {
+            "claude-native" | "claude-stream" if subagent => None,
             "claude-native" | "claude-stream" => v["sessionId"].as_str().or(v["session_id"].as_str()),
             "agy-stream" => v["step_update"]["conversation_id"].as_str(),
             "codex-rollout" if v["type"] == "session_meta" => v["payload"]["id"].as_str(),
@@ -232,11 +264,13 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
             let i = p.get("item").unwrap_or(p);
             item = i.get("id").or_else(||i.get("call_id")).cloned().unwrap_or(Value::Null);
             match i["type"].as_str() {
-                Some("message" | "agent_message" | "agentMessage" | "userMessage" | "UserMessage") => {
+                Some("message" | "agent_message" | "agentMessage" | "AgentMessage" | "userMessage" | "UserMessage") => {
                     author = match i["role"].as_str() {Some("user")=>"user",Some("assistant")=>"assistant",_ if i["type"]=="userMessage" || i["type"]=="UserMessage"=>"user",_ if i["type"]!="message"=>"assistant",_=>"unknown"};
                     kind="message"; blocks=i["content"].as_array().cloned().unwrap_or_else(||text(&i["text"])); limited="none";
                 }
-                Some("command_execution" | "commandExecution" | "function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output" | "mcp_tool_call" | "mcpToolCall" | "dynamicToolCall") => {author="tool";kind="tool";blocks.push(i.clone());limited="none";}
+                Some("command_execution" | "commandExecution" | "CommandExecution" | "function_call" | "custom_tool_call" | "function_call_output" | "custom_tool_call_output" | "mcp_tool_call" | "mcpToolCall" | "McpToolCall" | "dynamicToolCall" | "file_change" | "fileChange" | "FileChange") => {author="tool";kind="tool";blocks.push(i.clone());limited="none";}
+                Some("reasoning" | "Reasoning") => {author="assistant";kind="thinking";blocks.push(i.clone());limited="none";}
+                Some("context_compaction" | "contextCompaction" | "ContextCompaction") => {author="system";kind="lifecycle";blocks.push(i.clone());limited="none";}
                 _ => {
                     if matches!(v["type"].as_str(),Some("thread.started"|"turn.started"|"turn.completed"|"turn.failed"|"error"))
                         || matches!(p["type"].as_str(),Some("task_started"|"task_complete"|"turn_aborted"|"token_count"))
@@ -295,7 +329,8 @@ fn normalize(format: &str, v: &Value) -> (&'static str, &'static str, Value, Vec
 fn block(format: &str, v: Value) -> Value {
     let kind = v["type"].as_str().unwrap_or_default();
     match kind {
-        "text" | "input_text" | "output_text" => json!({"type":"text","text":v["text"],"native":v}),
+        "text" | "Text" | "input_text" | "output_text" => json!({"type":"text","text":v["text"],"native":v}),
+        "thinking" | "reasoning" | "Reasoning" => json!({"type":"thinking","native":v}),
         "image" | "input_image" | "image_url" => json!({"type":"image","native":v}),
         "document" | "attachment" | "file" | "input_file" => json!({"type":"attachment","native":v}),
         "tool_use" | "function_call" | "custom_tool_call" => json!({"type":"tool_call",
@@ -304,9 +339,10 @@ fn block(format: &str, v: Value) -> Value {
         "tool_result" | "function_call_output" | "custom_tool_call_output" => json!({"type":"tool_result",
             "id":v.get("tool_use_id").or_else(||v.get("call_id")),
             "output":v.get("content").or_else(||v.get("output")),"native":v}),
-        "command_execution" | "commandExecution" => json!({"type":"tool_result","id":v["id"],
+        "command_execution" | "commandExecution" | "CommandExecution" => json!({"type":"tool_result","id":v["id"],
             "name":"shell","input":v["command"],"output":v.get("aggregated_output").or_else(||v.get("aggregatedOutput")),"native":v}),
-        "mcp_tool_call" | "mcpToolCall" | "dynamicToolCall" | "TOOL_RESPONSE" => json!({"type":"tool_result","native":v}),
+        "mcp_tool_call" | "mcpToolCall" | "McpToolCall" | "dynamicToolCall" | "file_change" | "fileChange" | "FileChange" | "TOOL_RESPONSE" => json!({"type":"tool_result","native":v}),
+        "context_compaction" | "contextCompaction" | "ContextCompaction" => json!({"type":"lifecycle","native":v}),
         _ if format == "antigravity-sidecar" && v.get("type").is_none()
             && v.get("args").is_some() && v["name"].as_str().is_some() => {
             json!({"type":"tool_call","id":v.get("id"),"name":v["name"],"input":v["args"],"native":v})

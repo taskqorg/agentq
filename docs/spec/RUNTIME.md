@@ -39,6 +39,11 @@ Each adapter implements every operation. The sections below remain the binding d
 | `executable(path)` | The client executable resolved on `path` (none: the process `PATH`), as in Arguments; Codex resolves its native executor. Unresolved names come back bare; nothing is spawned. |
 | `home()` | The client's own home (Arguments, `protected_paths`). |
 | `session_transcript(session, home)` | The native transcript file of a session in `home` (none: the client's own): the Codex rollout. Other runtimes and an unknown session read none. |
+| `history(session, home, saved, until)` | One JSON-ready `StepPage` of the session in `home` (none: the client's own), from checkpoint `saved` ([reading a session](#reading-a-session)). |
+| `log_steps(log)` | Step revisions of caller-held JSONL text, without a run, process or lookup: the same mapping as a transcript, for a caller's own `exec` or stream log. |
+| `read_source(session, home, range)` | The full text of one `Source` range of the session; no run, no write. |
+| `steps(run)` | Step revisions of a run since the previous call, in native order, each returned once. It shares the run's native read with `progress`, so neither call loses data of the other ([steps](#steps)). |
+| `session_state(session, home)`, `resume_command(session, home)` | Running evidence of a session, and the native terminal command of an idle or unknown one. A running one refuses with cause `session-running` ([reading a session](#reading-a-session)). |
 | `session_link(&NativeSpec, job)` | Capability `session-url`: the session URL of caller-built session `spec.session` (background `job`, if any) in `spec.home`, or its absence cause with native detail (Session observation). `--remote-control` in `spec.args` marks Remote Control requested. Other runtimes read `no-session-url`. |
 | `prepare(intent, product, &mut NativeSpec, install)` | The optimization intent applied to a caller-built spec, as `launch` applies it. |
 | `command(base, &NativeSpec)`, `turn(base, &NativeSpec, log, input, &Process)` | The native turn command (Arguments), and one `Turn` started with it: `id`, `poll`, `kill`, `wait`, `report`. For a caller that adds native arguments of its own; `launch` stays the default. |
@@ -50,11 +55,11 @@ Each adapter implements every operation. The sections below remain the binding d
 
 Descriptor data, the only runtime metadata a caller reads. `models` are the model aliases a caller may offer when it has no catalogue read; `minimum` is the oldest supported CLI version (empty: none).
 
-| `name` | `label` | `brand` | `family` | `models` | `minimum` | `capabilities` |
-|---|---|---|---|---|---|---|
-| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `account-limits`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas`, `settings-env` |
-| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `turn`, `resume`, `quota-snapshot`, `account-limits`, `catalogue`, `app-queue`, `app-server`, `effort`, `image-input`, `account`, `host-args`, `settings-env`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas` |
-| `antigravity` | Antigravity | Google | `gemini` | | | `turn`, `resume`, `title`, `account-limits` |
+| `name` | `label` | `brand` | `family` | `models` | `minimum` | `resume` | `capabilities` |
+|---|---|---|---|---|---|---|---|
+| `claude` | Claude Code | Anthropic | `claude` | `opus`, `sonnet`, `haiku` | 2.1.0 | `claude --resume {session}` | `turn`, `resume`, `caller-session-id`, `compact-hook`, `session-url`, `quota-snapshot`, `account-limits`, `background`, `title`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas`, `settings-env` |
+| `codex` | Codex CLI | OpenAI | `gpt` | | 0.162.0 | `codex resume {session}` | `live-output`, `turn`, `resume`, `quota-snapshot`, `account-limits`, `catalogue`, `app-queue`, `app-server`, `effort`, `image-input`, `account`, `host-args`, `settings-env`, `mcp-config`, `instructions-file`, `turn-parts`, `turn-deltas` |
+| `antigravity` | Antigravity | Google | `gemini` | | | `agy --conversation {session}` | `turn`, `resume`, `title`, `account-limits` |
 
 ### Session observation
 
@@ -527,6 +532,7 @@ Supplying a version is observation input, never a native probe or a qualificatio
 | Any other runtime/transport/version/OS | U transport not enumerated; T unqualified version/OS | U unknown schema normalization; raw retained | No inferred parity |
 
 All enumerated formats run offline contract checks on the host; CI supplies Linux/macOS/Windows adapter coverage.
+Real transcripts of `codex-cli 0.162.1` and Claude Code `2.1.295`-`2.1.318` on Windows x86_64 were read through the step reducer ([task 282](../evidence/runtime-282.md)); `capabilities` keeps other version and OS tuples T.
 Other OSes remain untested. Headless Antigravity streams do not expose every persisted step field.
 Use a caller-selected sidecar transcript for full content; never locate another account or substitute a different session.
 Media support means retaining native references/blocks, not downloading, decoding or inventing captions.
@@ -615,6 +621,179 @@ a nonempty array marks `truncated-source`, and any other shape marks
 callers can select the full source.
 History lifecycle events are descriptive only; existing terminal/identity parsers remain the sole turn-completion authority.
 
+## Steps
+
+M12.18 gives every product one read of a run. `agent::steps` turns native records into `Turn` and `Step` values through one reducer, for a finished transcript and for a live stream. Clients own rendering; the shape carries no layout. It also suits a later central archive, because a step is self-contained JSON with a stable id. The runtime stores no steps: it holds no database, and a checkpoint is caller data.
+
+### Types
+
+`Turn { id, status, started_ms, ended_ms, duration_ms, revision }`. `status` is `running`, `completed`, `failed`, `cancelled` or `unknown`.
+
+Every `Step` has these fields, then the fields of its `kind`:
+
+| Field | Meaning |
+|---|---|
+| `id` | Stable within the session: the native item, call or record ID, else a hash of the record. |
+| `kind` | One of the 14 kinds below. |
+| `order` | Source position of the first record of this step. Sort by it. A later revision keeps it. |
+| `revision` | Position of the newest record that contributed: the source end byte in a file read, a counter in a live read. Compare revisions only within one source. |
+| `turn`, `parent` | Turn ID. Parent step ID of subagent or background work. Null when the source names none. |
+| `status` | `running`, `completed`, `failed`, `cancelled` or `unknown`. |
+| `started_ms`, `ended_ms` | Native times when reported. |
+| `source` | `{start, end}` byte range of the newest record. Null in a live read. |
+| `unknown` | Map from a null field to its reason, for example `exit_code: not-reported`. |
+
+| `kind` | Fields |
+|---|---|
+| `message` | `role`, `text` |
+| `thinking` | `text`, `encrypted` |
+| `shell` | `command`, `argv`, `cwd`, `exit_code`, `duration_ms`, `output`, `stdout`, `stderr`, `background`, `origin` |
+| `file_change` | `files` (`path`, `action`, `diff`), `output`, `stderr` |
+| `tool` | `name`, `input`, `output`, `duration_ms` |
+| `mcp` | `server`, `tool`, `input`, `output`, `duration_ms` |
+| `web` | `action`, `query`, `url`, `output`, `duration_ms` |
+| `subagent` | `action`, `agent`, `sessions`, `input`, `output` |
+| `image` | `path`, `media_type` |
+| `question` | `prompt`, `answer` |
+| `approval` | `request`, `decision` |
+| `compaction` | `trigger`, `tokens_before`, `tokens_after` |
+| `usage` | `input`, `cache_read`, `cache_write`, `output`, `reasoning`, `total`, `context_window`, `model` |
+| `unknown` | `record`, `raw` |
+
+An `unknown` step keeps the whole native record in `raw`, unchanged. It is never dropped and never read as text.
+
+### Output
+
+Text fields are `Output { text, truncated, bytes, source }`. `text` holds at most 64 KiB, cut on a character boundary. `bytes` is the native length when known. `source` is `{start, end, pointer}`: the byte range of the source record and the JSON pointer of the value inside it. `read_source` returns the full value. An array of text blocks reads as the joined text. A value the native client stored outside the record, for example Claude `persistedOutputPath`, sets `truncated` and the reason `output_full: persisted-outside-transcript`; the runtime does not open that file.
+
+### Revision rule
+
+A step revises by `id`. `Step::merge` is the convergence rule; a client in another language applies the same rule:
+
+1. The revision with the larger `revision` is newer. A tie keeps the later delivery.
+2. A non-null field of the newer revision wins. Null never replaces a known value.
+3. A field of the older revision fills only a null of the newer one.
+4. `order` and `started_ms` keep the smaller value. A field in `unknown` leaves the map when it becomes known.
+5. A specific kind is never replaced by `tool` or `unknown`. A later specific kind replaces `tool`.
+
+Repeated delivery, in any order, gives the same step. `Timeline` applies this rule for a Rust client and lists steps by `order`.
+
+The reducer keeps only steps that are not terminal, so a checkpoint stays bounded. A record that revises a step already closed emits a partial revision, and rule 2 keeps the earlier values.
+
+### Mapping
+
+| Source record | Step |
+|---|---|
+| Codex `item_completed` and `item/completed` `CommandExecution` | `shell`: `argv`, `command`, `cwd` (a `file://` URL reads as its path), `exit_code`, `duration`, `aggregated_output` |
+| `Reasoning` and `response_item` `reasoning` (same id) | `thinking`; encrypted content sets `encrypted` and is not copied |
+| `FileChange` | `file_change`: path, action and `unified_diff` per file |
+| `McpToolCall` | `mcp`: server, tool, arguments, result or error, duration |
+| `ContextCompaction` and the `compacted` record of the same compaction | one `compaction` |
+| `UserMessage`, `AgentMessage`, `response_item` `message` | `message`; `AgentMessage` shares its id with the response item. A `UserMessage` joins the preceding response item with equal text, so it appears once. Injected developer and environment text stays visible with its native role. |
+| `Extension` kind `web.search` and other `Extension` | `web`, else `tool` named by its kind |
+| `ImageView`, `ImageGeneration` | `image` |
+| `CollabAgentToolCall`, `SubAgentActivity` | `subagent`; `sessions` names the child threads. These revise the `spawn_agent`, `send_message`, `followup_task` or `wait_agent` call of the same id |
+| `custom_tool_call`, `function_call` and their outputs | `tool`, by `call_id`. The `exec` wrapper script is its own step: the native record links no inner item to it, so `parent` stays null |
+| `token_usage_record`, `token_count` | one `usage` per distinct cumulative total of the turn |
+| `task_started`, `task_complete`, `turn_aborted`, `turn/started`, `turn/completed`, `turn.*` | `Turn` |
+| `item/commandExecution/requestApproval`, `item/fileChange/requestApproval` | `approval` |
+| `item/tool/requestUserInput` | `question` |
+| `item/commandExecution/outputDelta` | Appends to the running `shell` output, up to the inline bound. `item/completed` then replaces it. |
+| Claude `tool_use` + `tool_result` + `toolUseResult`: `Bash`, `PowerShell`, `Monitor` | `shell`: `stdout` and `stderr` apart; `cwd` of the record |
+| `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | `file_change` with `structuredPatch` |
+| `Agent`, `Task` | `subagent`; `sessions` names `agent-<agentId>` |
+| `WebSearch`, `WebFetch` | `web` |
+| `AskUserQuestion` | `question` |
+| `mcp__<server>__<tool>` | `mcp` |
+| Any other tool | `tool` |
+| `thinking` block | `thinking`; empty native text reads null with reason `not-retained` |
+| `text` block or string content | `message`; the id is the record `uuid` and block index |
+| `message.usage` | `usage`, by message id |
+| `system` `compact_boundary` | `compaction` |
+| `system` `init`, `turn_duration`, `result`; `promptId` | `Turn` |
+| `control_request` `can_use_tool` and its `control_response` | `approval`, by request id |
+| `task_status`, `task_notification`, `queued_command` and `queue-operation` notifications | Revise the background `shell` step named by `tool-use-id` or `toolUseId`; the task maps to `background` |
+| Attachment `hook_success`, `hook_non_blocking_error`, `hook_cancelled` | `shell` with `origin: hook`: command, exit code, duration, stdout, stderr |
+| Attachment `edited_text_file` | `file_change` with action `external` |
+| Attachment `file` | `tool` named `attachment` |
+| Antigravity `agy` `step_update` `user_input`, `agent_response` and `system_message` | `message`; absent text reads null with reason `text-not-emitted` |
+| `agy` `step_update` `tool` and sidecar `tool_calls` + `TOOL_RESPONSE` | `shell` for `run_command`, else `tool` |
+| `agy` and sidecar step usage | `usage`, by step index |
+| `agy` `init` and `result`, sidecar terminal `PLANNER_RESPONSE` | `Turn` |
+
+Shell facts:
+
+- Codex reports `exit_code` and `duration`. A failed Claude call reports its code in the text `Exit code <n>`, and a background call in its notification summary `(exit code <n>)`. A Claude call that succeeded reports no code, so `exit_code` reads null with reason `not-reported`; it never reads 0.
+- A Claude `duration_ms` is the time between the `tool_use` and `tool_result` records, and for a background job between `tool_use` and its notification. It is not a native measure. A record without a valid time reads null with reason `not-reported`.
+- `stdout` and `stderr` are null on Codex, which reports one merged stream, with reason `merged-output`.
+
+A known record that adds no step is counted in the page field `covered` by record type, and its bytes stay readable by byte range:
+
+- Codex: `session_meta`, `turn_context`, `world_state`, `thread_settings_applied`, `inter_agent_communication_metadata`. `session_meta` fills the page `session`.
+- App-server: JSON-RPC replies (`rpc-response`), `thread/*`, `account/*`, `remoteControl/*`, `warning`, `deprecationNotice`, `error` and text delta notifications.
+- Claude metadata: `api-request`, `api-request-blob`, `api-request-shape`, `last-prompt`, `atis-latch`, `agent-name`, `custom-title`, `ai-title`, `mode`, `permission-mode`, `session-owner`, `relocated`, `worktree-state`, `tools-used`, `bridge-session`, `file-history-snapshot`, `file-history-delta`, `cost-state`, `pr-link`, `rate_limit_event`, `stream_event`.
+- Claude `system` `bridge_status`, `stop_hook_summary`, `away_summary`.
+- Claude context attachments: `deferred_tools_record`, `deferred_tools_delta`, `silent_turn_reminder`, `task_reminder`, `environment`, `prompt_snapshot`, `remote_session_change`, `mcp_instructions_delta`, `hook_additional_context`, `date`, `instructions`, `model`, `session_context`, `credential_org`, `skill_listing`, `agent_listing_delta`, `auto_mode`, `read_truncation_notice`, `compact_file_reference`, `nested_memory`, `thinking_drop`, `total_tokens_reminder`.
+
+Any other record reads as an `unknown` step.
+
+### Parent links
+
+- A Claude background `Bash` or `Monitor` call stays one `shell` step, status `running`, from its start result until its notification. `background` holds the native task.
+- A `subagent` step names its child sessions. Read a child with `history` and that session ID.
+- A child page names its parent in `session`: `parent`, `root` and `relation` (`subagent` or `fork`). A Claude child in `subagents/agent-<id>.jsonl` names the parent session; its records carry the parent `sessionId`, so the binding reads their `agentId`.
+- A child session does not name the parent step, so `session.parent_step` reads null with reason `not-reported`. The parent step's `sessions` holds that link.
+
+### Live output
+
+`history::capabilities` reports `live_output` per format, and the descriptor capability `live-output` marks a runtime with a proven source.
+
+| Format | `live_output` | Evidence |
+|---|---|---|
+| `codex-app-server` | `supported` | Native `item/commandExecution/outputDelta` of `thread/shellCommand`, `codex-cli 0.162.1` |
+| `codex-exec`, `codex-rollout` | `unsupported` | Native records carry output only at item end |
+| `claude-stream`, `claude-native` | `unsupported` | No native record of tool output before `tool_result` in the transcripts read on `2.1.281` to `2.1.318`; partial messages carry model text only |
+| `agy-stream`, `antigravity-sidecar` | `unsupported` | Adapter records carry no output before the step ends; native run not repeated |
+
+Without a live source a step shows its output when it ends. Output is never invented, and a running step's `output` reads null with reason `not-started-or-unreported`.
+
+### Reading a session
+
+`agentq agent history --runtime <name> --session <id>` prints one page. It locates the native source itself, so a caller never chooses a path or a binding:
+
+| Runtime | Source |
+|---|---|
+| `codex` | `<home>/sessions/**/rollout-*-<thread>.jsonl`, then `<home>/archived_sessions/` |
+| `claude` | `<home>/projects/*/<session>.jsonl`; `agent-<id>` reads `<home>/projects/*/*/subagents/agent-<id>.jsonl` |
+| `antigravity` | `<home>/brain/<session>/.system_generated/logs/transcript.jsonl` (sidecar) |
+
+The JSON page has `schema` 1, `runtime`, `format`, `session` (`id`, `root`, `parent`, `parent_step`, `relation`, `fork`, `cwd`, `version`, `unknown`), `turns`, `steps`, `covered`, `more`, `pending_bytes`, `checkpoint`, `state`, `resume`, `resume_unknown` and `capabilities`. A page covers at most 128 source records and 16 MiB, under the [history wire contract](#history-wire-contract).
+
+- `--checkpoint <file>` holds the previous `checkpoint` value, or `-` reads it from stdin. The checkpoint binds the source as the wire contract states, and adds the open steps and the current turn. Save it only after accepting the page. A replaced or rewritten source refuses without advancing.
+- `--read <start>:<end>:<pointer>` prints `{text, bytes}`, the full value of one `Source`. The range must be one complete record of that source.
+- A page with `more` false can still grow while the session runs. Poll again with the checkpoint.
+- An error prints `Error:`/`Next:` and exits 1. An unknown session reads cause `session-not-found`.
+
+A forked Codex session names its base in `session.fork`: `session`, `end_byte` and `end_ordinal`, from native `history_base`. Its own source holds only records after the fork. Read the base with `--session <session> --until-byte <end_byte>`, then the fork. `--until-byte` ends the read at the last complete record inside that bound.
+
+`state` is `{state, reason}`:
+
+| Runtime | `running` | `idle` | `unknown` |
+|---|---|---|---|
+| `claude` | `<home>/sessions/<pid>.json` names the session and that process lives | Registry readable, no live entry | Registry unreadable |
+| `codex` | The newest turn has no terminal record and the source changed in the last 30 minutes | The newest turn has a terminal record | The newest turn has no terminal record and the source is older |
+| `antigravity` | | | Always, reason `no-native-state` |
+
+`ponytail:` Codex publishes no process registry, so its evidence is the transcript. A Codex client idle between turns reads `idle`, and a killed one reads `unknown` after 30 minutes. A native registry replaces this when one exists.
+
+`resume` is `{argv, env, cwd}` from the descriptor `resume` template, with the home variable when a home was given. A running session sets `resume` null and `resume_unknown` to `session-running`, and `resume_command` refuses with that cause. A Claude `agent-<id>` session reads `resume-unsupported`, because the native client resumes only its parent. An `unknown` state returns the command and names its reason, so the client can warn: refusing would block every killed session forever. The runtime never starts this command; the client's terminal does.
+
+### Limits
+
+- Antigravity: `agy` completed steps can omit text and tool output, sidecar `GENERIC` records have no known author, tool or call ID and read as `unknown` steps, and truncated fields set `truncated`. No fixture proves a live `agy` tool output. The sidecar is the only located source, because a headless `agy` stream exists only in the caller's own log.
+- A live `steps(run)` read has `source` null with reason `live-stream`, and an `unknown` step holds the record serialized again rather than its original bytes. Read the source afterward for full text and exact bytes; a Codex item keeps its ID across the live stream and its rollout.
+- Native `approval` and `question` requests on Codex come from the app-server method names; their fixtures are schema-only until a real request is captured. No real Claude `AskUserQuestion` call is in the transcripts read; its mapping has a schema fixture.
+
 ## JSON command
 
 `agentq agent turn` reads one JSON request on stdin, runs the turn with `agent::run` (or `Turn` without a store) and prints one JSON report. It uses the same `Spec`, `Report` and optimization code as the library. A request error prints `Error:`/`Next:` and exits 1; a failed turn is a report and exits 0.
@@ -667,7 +846,7 @@ Consumers of the runtime and CoreQ on their default branches when this page chan
 | DashQ, ServerQ | `coreq` v0.11.0, no `agent` use | None |
 | AssetQ | `coreq` v0.19.2, `agentq-runtime` tag `runtime-v0.2.0` (which resolves its own `coreq` v0.18.0) | Pinned; a newer revision follows its own contract and qualification |
 
-- Runtime crate version 0.13.1; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
+- Runtime crate version 0.14.0; consumer changes are listed in [the runtime changelog](../../runtime/CHANGELOG.md). The public surface uses catalogue/limit reads and typed events instead of native `Runtime::send` and raw `progress`; explicit protected request/reply remains under `ProtectedAppServer`. Example source pin: `33cef656ba86536e4e7f970ed5fc637b81622b06`, CoreQ v0.19.2 in its lockfile; the example runs through `agent::Runtime`. Protected API source pin: `aab1a190ab76f1e932578520d7a8787ef1d4b660`; [consumer recipe and publication evidence](../evidence/runtime-186.md).
 - Publication: publish the runtime source commit and pin its full immutable Git SHA (`rev`) in `examples/runtime-consumer`; its checked lockfile must resolve that same remote SHA, without a local path patch. The example builds and runs both clients from that pin on each platform. Publication does not authorize consumer adoption or live installation. After a runtime version change merges to main and that exact source passes the `Test` workflow on Linux, macOS and Windows, `.github/workflows/runtime-tag.yml` invokes `scripts/tag_runtime.py`. The script checks that exact run and SHA, creates the missing tag `runtime-v<runtime/Cargo.toml version>` and reads it back. It never replaces an existing tag and rejects an existing tag at any other SHA. Consumers pin `agentq-runtime = { git = "https://github.com/taskqorg/agentq", tag = "runtime-v<version>" }`.
 - One CoreQ source: a consumer that uses CoreQ directly spells the runtime's exact CoreQ dependency, currently `coreq = { git = "https://github.com/taskqorg/coreq", tag = "v0.23.0" }`. Cargo treats `tag` and `rev` at the same commit as two sources, and then two `Store` types. `tests/runtime_publication.py` resolves such a consumer and refuses more than one CoreQ source.
 - `examples/runtime-consumer` is the minimal consumer outside the workspace; the runtime contract tests build and run it on each platform.
