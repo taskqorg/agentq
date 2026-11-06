@@ -71,7 +71,7 @@ fn one_module_launches_resumes_and_reads_its_own_protocol() {
     assert_eq!(runtime.report(&resumed).unwrap().text.as_deref(),Some("second"));
     assert_eq!(runtime.session_id(&resumed).as_deref(),Some("example-session"));
     launch.log=root.join("stop.log");launch.env.push(("AGENTQ_EXAMPLE_STOP".into(),"1".into()));
-    let mut stopped=runtime.launch(&launch).unwrap();
+    let mut stopped=runtime.resume("example-session",&launch).unwrap();
     while runtime.poll(&mut stopped).unwrap()==State::Running {std::thread::yield_now();}
     let stop=runtime.stop_event(&mut stopped,u64::MAX).unwrap().unwrap();
     assert_eq!(stop.cause,crate::agent::history::stop::StopCause::ExitWithoutTurnEnd);
