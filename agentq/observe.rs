@@ -121,7 +121,7 @@ pub fn stop(data: &Path, runtime: &str, input: &Value, launched: bool, deadline:
 fn hermes_request(v: &Value) -> Call {
     let u = &v["usage"];
     let id = text(v, &["api_request_id"]).map_or_else(|| format!("{}:{}:{}", v["session_id"], v["turn_id"], v["ended_at"]), String::from);
-    Call {
+    Call {native_turn:None,accounting_unknown:None,
         id: Some(id),
         at_ms: v["ended_at"].as_f64().filter(|s| s.is_finite() && *s > 0.0).map(|s| (s * 1000.0) as u64),
         input: u["input_tokens"].as_u64(),
