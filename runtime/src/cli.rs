@@ -28,6 +28,14 @@ fn strings(v: &Value, k: &str) -> Res<Vec<String>> {
     }
 }
 
+/// Explicit ownership import for callers outside Rust; never a launch or a login operation.
+pub fn adopt(request:&str)->Res<Value> {
+    let v:Value=serde_json::from_str(request).map_err(|e|format!("invalid request: {e}"))?;
+    let runtime=agent::runtime(text(&v,"client")?).ok_or("unknown client")?;
+    let native:Vec<agent::NativeProcess>=if v["known_native"].is_null() {vec![]} else {serde_json::from_value(v["known_native"].clone()).map_err(|e|format!("invalid known_native: {e}"))?};
+    serde_json::to_value(runtime.adopt(text(&v,"session")?,&preflight_launch(&v)?,&native)?).map_err(|e|e.to_string())
+}
+
 /// Read launch evidence without a model call. Repair requires the caller's existing ownership journal.
 pub fn preflight(request: &str, repair: bool, journal: Option<&Path>) -> Res<Value> {
     let v:Value=serde_json::from_str(request).map_err(|e|format!("invalid request: {e}"))?;
@@ -49,6 +57,7 @@ fn native_arguments_readiness(readiness: &mut agent::Readiness,v:&Value)->Res<()
 fn preflight_launch(v: &Value) -> Res<agent::Launch> {
     let mut launch=agent::Launch::new(path(v,"root")?.ok_or("root requires an absolute path")?,path(v,"log")?.ok_or("log requires an absolute path")?,v["input"].as_str().unwrap_or(""),"agentq");
     if !v["policy"].is_null() {launch.policy=serde_json::from_value(v["policy"].clone()).map_err(|e|format!("invalid policy: {e}"))?;}
+    if let Some(store)=path(v,"session_store")? {launch.session_store=agent::SessionStore::new(store);}
     launch.home=path(v,"home")?;launch.store=path(v,"store")?;
     launch.model=v["model"].as_str().map(String::from);
     launch.command=strings(v,"command")?.into_iter().map(OsString::from).collect();
@@ -94,9 +103,10 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let mut readiness=agent::runtime(client.code()).ok_or("unknown runtime")?.preflight(&launch,&agent::Repair::default());
     native_arguments_readiness(&mut readiness,&v)?;
     readiness.permit(launch.readiness)?;
+    let owner=agent::runtime(client.code()).ok_or("unknown runtime")?.session_owner(resume.then_some(spec.session.as_str()),&launch)?;
     let report = agent::with_environment_caller(|| match &store {
-        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?, readiness.clone()),
-        None => { let mut t = agent::Turn::start(base, &spec, &log, input, &agent::Process::default())?.prepared(readiness.clone()); t.wait(deadline)?; Ok(t.report()) }
+        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?, readiness.clone(),owner.clone()),
+        None => { let mut t = agent::Turn::start(base, &spec, &log, input, &owner.process_hooks(&agent::Process::default()))?.owned(owner.clone()).prepared(readiness.clone()); t.wait(deadline)?; Ok(t.report()) }
     })?;
     let mut out = report_json(&report);
     out["readiness"]=json!(readiness);
@@ -108,7 +118,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
 /// The report as JSON: codes, numbers and the final text; every null in `usage` and `limit` has its `unknown` reason.
 pub fn report_json(r: &Report) -> Value {
     let u = &r.usage;
-    json!({"schema": 1, "readiness": r.readiness, "session": r.session, "outcome": r.outcome, "error": r.error, "reason": r.reason, "detail": r.detail, "text": r.text, "exit": r.exit, "termination": r.termination,
+    json!({"schema": 1, "readiness": r.readiness, "owner":r.owner, "session": r.session, "outcome": r.outcome, "error": r.error, "reason": r.reason, "detail": r.detail, "text": r.text, "exit": r.exit, "termination": r.termination,
         "started_ms": r.started_ms, "duration_us": r.duration_us,
         "usage": {"calls": u.calls, "input": u.input, "cache_read": u.cache_read, "cache_write": u.cache_write, "output": u.output, "reasoning": u.reasoning, "model": u.model, "unknown": u.unknown},
         "process": {"user_cpu_us": r.process.user_cpu_us, "system_cpu_us": r.process.system_cpu_us, "peak_rss_bytes": r.process.peak_rss_bytes, "unknown": r.process.unknown},

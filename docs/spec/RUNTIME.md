@@ -308,6 +308,16 @@ Each repair is journaled before the write, verified by reading back, and restore
 
 A fake client proves only the adapter. Each check needs one real failing case and one real passing case per runtime and OS, with client versions recorded (VERIFICATION A7). Antigravity has no login status command, so its account check reads `unknown` until a native read exists; this is reported, never `ok`.
 
+## Session ownership and stall observation
+
+Every launch and resume uses the caller-owned `Launch.session_store`; there is no compatibility bypass. `Launch::new` places it beside the caller log by default, and callers sharing native sessions must select the same store. The store binds the native session to runtime, canonical project and account home, a run token, the controller's native creation identity and the observed native worker identity. It is private durable caller data, never telemetry or native configuration.
+
+A writer holds an OS advisory lock and journals admission before input. Unknown native session IDs hold a private pending record and OS lock until native evidence binds the ID; unrelated new sessions remain independently admissible. Resume of an untracked session refuses with `session-owner-unknown`; a second writer refuses with `session-busy`. Unknown process identity refuses with `session-owner-unknown`. A reused PID is distinct from the recorded native process and never authorizes a signal. An exited process without a known native completion leaves ownership unknown until explicit adoption; launcher exit or a caller cancellation alone never proves that no native writer remains. Recovery checks the original token and binding and acquires exclusive control without resubmitting input; it cannot coexist with the original controller. Existing protected-host permits and no-replay checks remain required.
+
+`Runtime::adopt(session, launch, known_native)` is explicit import authority. It refuses an existing live writer and checks each supplied native process creation identity; a live matching process refuses. When native writers cannot be enumerated, adoption records `native-writer-unverifiable` and returns that uncertainty to the caller, rather than claiming native absence. The store then arbitrates cooperating runtime writers. The #282 resume command adopts before its first resume. Non-Rust callers use `agentq agent adopt` with the launch binding, `session` and optional `known_native` process identities; it returns the same owner observation and never starts a client. `agent turn` accepts the same `session_store` path. Native submission seams take the same explicit `SessionOwner` handle and validate its runtime, project, account and session before input.
+
+`Launch.inactivity`, when set by the caller, is an observation window with no default. It adds no automatic timeout. `Observation.activity` is `active`, `stalled`, `unknown` or `disabled`, with a reason and observed idle age; a transition to stalled emits one `Event::Stalled`. Native activity resets the signal. A tool with a native declared timeout is exempt until that timeout; an active tool with no timeout reads unknown. No native activity evidence also reads unknown. The default only reports; `Launch.stop_on_stall` explicitly requests existing identity-safe cancellation. Observation uses a separate native-record cursor, so observing does not consume caller events. Checkpoints retain ownership and activity state.
+
 ## Session model
 
 - One native session belongs to one conversation or one task attempt.
@@ -587,12 +597,16 @@ Claude child IDs are scoped by their parent session. Each discovered source also
 an opaque `id`; pass it to `Runtime::history` when a native ID has multiple physical
 copies or locations. Parent/child links use these IDs when resolved. Clients never
 choose or parse native paths to disambiguate sources.
-`Runtime::history_resume` returns terminal argv from caller-supplied process evidence;
-running or unknown state refuses. This is an advisory command description: verified
-second-writer fencing belongs to the launch/preflight work in #287, not this reader.
-This API never launches that command.
-`Session::resume_command` resolves source handles to native argv and explicitly refuses
-unsupported native subagent terminal resume. Descriptor argv accepts native IDs only.
+`Descriptor::history_resume(session, launch, known_native)` and
+`Session::resume_command(launch, known_native)` explicitly adopt and acquire the session
+before returning an owned `ResumeCommand`. Caller-reported process state is not writer
+proof. `arguments()` exposes the native arguments for inspection; `spawn()` uses the
+selected launch command, account environment and process hooks, recording native process
+identity before returning the child to the caller. Dropping the command before spawn releases its unused
+admission. After spawn, the durable native identity continues to refuse another writer
+while that process lives, even if the controller exits. The terminal command requires
+an empty input and no relay-only options or worker observation windows; it never submits a worker turn. Source handles
+resolve to native IDs, and native subagent terminal resume remains refused.
 
 Codex app-server `item/commandExecution/outputDelta` is supported as observed deltas;
 they do not prove completion. Claude and Antigravity live console deltas are unsupported

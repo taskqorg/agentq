@@ -22,6 +22,7 @@ pub enum Event {
     Quota(Vec<Window>),
     Context { used: Option<u64>, window: Option<u64> },
     Activity,
+    Stalled { idle_ms:u64 },
 }
 
 /// The native time of one source record. Null and malformed time stay apart from absent time.
@@ -586,7 +587,7 @@ mod tests {
                         Event::Unsupported{reason}=>self.error=Some(reason),
                         Event::Message{..}|Event::Progress=>self.done(at),
                         Event::TurnEnd{..}=>{self.tools.clear();self.error=None;self.done(at);}
-                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Activity=>{}
+                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Activity|Event::Stalled{..}=>{}
                     }
                 }
             }

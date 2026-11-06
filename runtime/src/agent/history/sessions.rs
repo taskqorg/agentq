@@ -23,10 +23,10 @@ impl Session {
     }
     pub fn checkpoint(&self) -> Value {self.history.checkpoint()}
     pub fn read_bytes(&self, start:u64, length:u64)->Res<Vec<u8>> {self.history.read_bytes(&self.path,start,length)}
-    /// Advisory argv, never launch authority. Source IDs resolve inside the adapter.
-    pub fn resume_command(&self, process:super::super::State)->Res<Vec<String>> {
+    /// Explicitly adopt and acquire terminal resume authority; source IDs resolve inside the adapter.
+    pub fn resume_command(&self, launch:&super::super::Launch, native:&[super::super::NativeProcess])->Res<super::super::ResumeCommand> {
         if self.history.native_parent.is_some() || self.runtime=="claude" && self.history.session!=self.history.native_session {return Err("native subagent terminal resume unsupported".into());}
-        resume(&self.runtime,&self.history.native_session,process)
+        super::super::runtime(&self.runtime).ok_or("history runtime unsupported")?.descriptor().history_resume(&self.history.native_session,launch,native)
     }
 }
 
@@ -136,8 +136,7 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
     Ok(Session {history,path:source.path,runtime:runtime.into(),parent,parent_step:source.parent_step,children})
 }
 
-pub fn resume(runtime:&str, session:&str, state:super::super::State)->Res<Vec<String>> {
-    if !matches!(state,super::super::State::Finished|super::super::State::Failed) {return Err("resume description requires caller-reported finished state; verified writer fencing belongs to #287".into());}
+pub(crate) fn resume(runtime:&str, session:&str)->Res<Vec<String>> {
     if session.is_empty() || session.starts_with('-') {return Err("history session invalid".into());}
     Ok(match runtime {
         "codex"=>vec!["codex".into(),"resume".into(),session.into()],

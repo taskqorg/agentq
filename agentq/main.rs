@@ -32,7 +32,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROJECT: &str = "host";
 const PASS: u64 = 30;
 const UPDATE_EVERY: u64 = 3600;
-const USAGE: &str = "agentq status [--json] | disable|enable [agent] [--dry-run] | agent turn | agent preflight [--repair] | agent history | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
+const USAGE: &str = "agentq status [--json] | disable|enable [agent] [--dry-run] | agent turn | agent preflight [--repair] | agent history | agent adopt | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -90,6 +90,9 @@ fn main() {
         ["agent", "host", "--action", action, "--request", request] => match agentq_runtime::agent::host::dispatch(action, request) {
             Ok(()) => 0,
             Err(e) => fail(&e, "retain the original permit and reconcile; never replay uncertain work"),
+        },
+        ["agent", "adopt"] => match std::io::read_to_string(std::io::stdin()).map_err(|e|e.to_string()).and_then(|s|agentq_runtime::cli::adopt(&s)) {
+            Ok(v)=>println_code(&v.to_string()),Err(e)=>fail(&e,"send the session and caller-owned launch binding on stdin"),
         },
         ["agent", "history"] => match std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string()).and_then(|s| agentq_runtime::agent::history::sessions::request(&s)) {
             Ok(v) => println_code(&v.to_string()),

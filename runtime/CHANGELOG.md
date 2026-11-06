@@ -2,6 +2,13 @@
 
 Entries describe behavior at their released revisions. Current AgentQ identity and support: [the worker-layer contract](../agentq.md); historical optimization intent remains a compatible no-op under [the retirement decision](../docs/spec/OPTIMIZATION-RETIRED.md).
 
+## 0.15.0
+
+- Require a caller-owned `Launch.session_store` on every worker launch, resume and recovery. Untracked sessions require explicit adoption; concurrent writers refuse with `session-busy`. Native submission seams require the same `SessionOwner`. There is no no-store mode.
+- Replace caller-reported process state in history resume helpers with explicit adoption and an owned `ResumeCommand`; spawning journals native process identity before terminal input.
+- Add caller-selected `Launch.inactivity` and `stop_on_stall`, `Observation.activity`, owner observations and `Event::Stalled`. Detection only reports by default; declared native tool deadlines and unknown activity remain distinct. Checkpoints retain the separate activity cursor and ownership token.
+- Public struct literals must supply the new fields; older run checkpoints without ownership evidence refuse with `session-owner-unknown`. Protected-host authority and observation-only recovery never resubmit input.
+
 ## 0.14.0
 
 [Regression and local transcript evidence](../docs/evidence/runtime-2448.md).
