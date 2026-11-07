@@ -2448,7 +2448,7 @@ fn archive_capture_and_failure_never_change_work() {
         std::fs::write(data.join("connection/connection.json"),json!({"installation":"fixture","active":{"destination":"https://fixture.invalid","workspace":"fixture","installation":"fixture","generation":1,"credential":"invented","schemas":["agent-history/1"],"capabilities":[]},"pending":null,"revoke":[]}).to_string()).unwrap();
         let app_env=[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref())];
         let mut launch=fake_launch(name,&root,"brief",if app{&app_env}else{&[]});
-        launch.install=Some(root.join("install"));launch.home=Some(root.join("native-home"));launch.deltas=app;
+        launch.install=Some(root.join("install"));launch.home=Some(root.join("native-home"));std::fs::create_dir_all(launch.home.as_ref().unwrap()).unwrap();launch.deltas=app;
         let runtime=agent::runtime(name).unwrap();let mut run=runtime.launch(&launch).unwrap();
         assert_eq!(finish(runtime,&mut run),agent::State::Finished);
         let ctx=Context {product:"fixture",version:"1",project:"fixture/archive",task:Some((283,7)),route:None,account:"default"};

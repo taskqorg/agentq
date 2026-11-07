@@ -418,13 +418,16 @@ fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> 
             c,
             &source,
             &mut manifest,
+            source.format != "native",
             if index == 0 { c.turn.as_deref() } else { None },
             wire,
         ) {
             error = Some(e);
         }
     }
-    let sources = rt.history_sessions(c.home.as_deref())?;
+    let sources = rt
+        .history_sessions(c.home.as_deref())
+        .map_err(|_| "archive source discovery unavailable")?;
     let mut family = vec![session.clone()];
     loop {
         let old = family.len();
@@ -466,11 +469,60 @@ fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> 
             start: 0,
             end: None,
         };
-        if let Err(e) = upload_source(data, grant, c, &src, &mut manifest, None, wire) {
+        if let Err(e) = upload_source(data, grant, c, &src, &mut manifest, false, None, wire) {
             error = Some(e);
         }
     }
     error.map_or(Ok(()), Err)
+}
+
+struct ReadPath(PathBuf);
+impl Drop for ReadPath {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn caller_snapshot(data: &Path, src: &Source) -> Res<(ReadPath, String)> {
+    let mut file = fs::File::open(&src.path).map_err(|_| "archive source unavailable")?;
+    let metadata = file.metadata().map_err(|_| "archive source unavailable")?;
+    if !metadata.is_file() {
+        return Err("archive source is not a regular file".into());
+    }
+    let identity =
+        agent::archive_file_identity(&file).map_err(|_| "archive source identity unavailable")?;
+    let end = src.end.unwrap_or(metadata.len()).min(metadata.len());
+    let length = end
+        .checked_sub(src.start)
+        .ok_or("archive source truncated")?;
+    file.seek(SeekFrom::Start(src.start))
+        .map_err(|_| "archive source unavailable")?;
+    let mut bytes = Vec::new();
+    file.take(length)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "archive source unavailable")?;
+    if bytes.len() as u64 != length {
+        return Err("archive source truncated".into());
+    }
+    let complete = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1);
+    let dir = root(data).join("reads");
+    private(&dir)?;
+    let path = dir.join(format!("{}.jsonl", crate::incident::uuid()));
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options
+        .open(&path)
+        .map_err(|_| "archive source snapshot unavailable")?;
+    let snapshot = ReadPath(path);
+    output
+        .write_all(&bytes[..complete])
+        .map_err(|_| "archive source snapshot unavailable")?;
+    Ok((snapshot, identity))
 }
 
 // The snapshot digest ties native validation and media origins to the bytes actually queued.
@@ -478,24 +530,65 @@ struct NativeBytes {
     bytes: Vec<u8>,
     identity: String,
     media: MediaCatalog,
+    format: String,
+    base: u64,
 }
-fn native_bytes(c: &Capture, src: &Source, session: &str) -> Res<NativeBytes> {
-    let rt = agent::runtime(&c.runtime).ok_or("archive runtime unsupported")?;
-    let mut reader = rt
-        .history(session, c.home.as_deref(), Some(&src.path), None)
-        .map_err(|_| "archive media inspection unavailable for source")?;
-    let media = reader
-        .media()
-        .map_err(|_| "archive native media unavailable")?;
-    let page = reader
-        .steps(u64::MAX)
-        .map_err(|_| "archive native source authority unverified")?;
-    let end = page.checkpoint["offset"]
-        .as_u64()
-        .ok_or("archive source boundary unknown")?;
-    let bytes = reader
-        .read_bytes(0, end)
-        .map_err(|_| "archive native source changed")?;
+fn native_bytes(
+    data: &Path,
+    c: &Capture,
+    src: &Source,
+    session: &str,
+    caller: bool,
+) -> Res<NativeBytes> {
+    let (media, page, bytes, identity, base) = if caller {
+        let (snapshot, identity) = caller_snapshot(data, src)?;
+        let source_label = enroll::digest(&json!([c.id, src.path, src.start]));
+        let mut reader = agent::history::History::caller(
+            &c.runtime,
+            &src.format,
+            &source_label,
+            &c.id,
+            Some(session),
+        )
+        .map_err(|_| "archive caller format unavailable")?;
+        let page = reader
+            .steps(&snapshot.0, u64::MAX)
+            .map_err(|_| "archive caller source authority unverified")?;
+        let media = reader
+            .media(&snapshot.0)
+            .map_err(|_| "archive caller media unavailable")?;
+        let end = page.checkpoint["offset"]
+            .as_u64()
+            .ok_or("archive source boundary unknown")?;
+        let bytes = reader
+            .read_bytes(&snapshot.0, 0, end)
+            .map_err(|_| "archive caller source changed")?;
+        (media, page, bytes, Some(identity), src.start)
+    } else {
+        let rt = agent::runtime(&c.runtime).ok_or("archive runtime unsupported")?;
+        let mut reader = rt
+            .history(session, c.home.as_deref(), Some(&src.path), None)
+            .map_err(|_| "archive media inspection unavailable for source")?;
+        if reader.checkpoint()["format"]
+            .as_str()
+            .is_some_and(|f| f.starts_with("history-"))
+        {
+            return Err("archive multipart source representation unsupported".into());
+        }
+        let page = reader
+            .steps(u64::MAX)
+            .map_err(|_| "archive native source authority unverified")?;
+        let media = reader
+            .media()
+            .map_err(|_| "archive native media unavailable")?;
+        let end = page.checkpoint["offset"]
+            .as_u64()
+            .ok_or("archive source boundary unknown")?;
+        let bytes = reader
+            .read_bytes(0, end)
+            .map_err(|_| "archive native source changed")?;
+        (media, page, bytes, None, 0)
+    };
     if page.checkpoint["prefix"] != crate::sha256_hex(&bytes) {
         return Err("archive native source changed".into());
     }
@@ -549,11 +642,15 @@ fn native_bytes(c: &Capture, src: &Source, session: &str) -> Res<NativeBytes> {
         }
     }
     Ok(NativeBytes {
-        bytes,
-        identity: page.checkpoint["identity"]
+        format: page.checkpoint["format"]
             .as_str()
-            .ok_or("archive source identity unknown")?
+            .ok_or("archive format unknown")?
             .into(),
+        bytes,
+        identity: identity
+            .or_else(|| page.checkpoint["identity"].as_str().map(String::from))
+            .ok_or("archive source identity unknown")?,
+        base,
         media,
     })
 }
@@ -585,6 +682,7 @@ fn upload_source(
     c: &Capture,
     src: &Source,
     manifest: &mut Value,
+    caller: bool,
     turn: Option<&str>,
     wire: &mut dyn Wire,
 ) -> Res<()> {
@@ -596,27 +694,17 @@ fn upload_source(
         return upload(data, grant, c, src, manifest, turn, None, wire);
     }
     let native = native_bytes(
+        data,
         c,
         src,
         manifest["session"]
             .as_str()
             .ok_or("archive session unknown")?,
+        caller,
     )?;
     let mut source = src.clone();
     if source.format == "native" {
-        let reader = agent::runtime(&c.runtime)
-            .ok_or("archive runtime unsupported")?
-            .history(
-                manifest["session"].as_str().unwrap(),
-                c.home.as_deref(),
-                Some(&src.path),
-                None,
-            )
-            .map_err(|_| "archive source format unavailable")?;
-        source.format = reader.checkpoint()["format"]
-            .as_str()
-            .ok_or("archive format unknown")?
-            .into();
+        source.format = native.format.clone();
     }
     let mut error = upload(data, grant, c, &source, manifest, turn, Some(&native), wire).err();
     for item in &native.media.items {
@@ -777,8 +865,23 @@ fn upload(
     if database_bytes(&raw) {
         return Err("archive raw database authority unavailable".into());
     }
-    let end = src.end.unwrap_or(raw.len() as u64).min(raw.len() as u64) as usize;
-    let base = usize::try_from(src.start).map_err(|_| "archive source truncated")?;
+    let source_base = native.map_or(0, |n| n.base);
+    let available_end = source_base
+        .checked_add(raw.len() as u64)
+        .ok_or("archive source range invalid")?;
+    let end = usize::try_from(
+        src.end
+            .unwrap_or(available_end)
+            .min(available_end)
+            .saturating_sub(source_base),
+    )
+    .map_err(|_| "archive source range invalid")?;
+    let base = usize::try_from(
+        src.start
+            .checked_sub(source_base)
+            .ok_or("archive source range invalid")?,
+    )
+    .map_err(|_| "archive source truncated")?;
     if base > end {
         return Err("archive source truncated".into());
     }
@@ -1537,6 +1640,106 @@ mod tests {
         let st: Checkpoint = read(&files(&root(&data).join("sources")).unwrap()[0]).unwrap();
         assert_eq!(st.sent, bytes.len() as u64);
         assert!(st.pending.is_empty());
+        let _ = fs::remove_dir_all(data.parent().unwrap());
+    }
+    #[test]
+    fn caller_log_segments_do_not_import_other_native_sessions_or_later_media() {
+        let (data, mut c) = setup("archive-caller-segment");
+        c.runtime = "codex".into();
+        c.manifest["runtime"] = json!("codex");
+        let image = c.root.join("own.png");
+        fs::write(&image, b"\x89PNG\r\n\x1a\nown").unwrap();
+        let foreign = c.root.join("foreign.png");
+        fs::write(&foreign, b"\x89PNG\r\n\x1a\nforeign").unwrap();
+        let prefix = format!(
+            "{}\n",
+            json!({"type":"thread.started","thread_id":"other-session"})
+        );
+        let segment = format!(
+            "{}\n{}\n",
+            json!({"type":"thread.started","thread_id":"s-1"}),
+            json!({"type":"item.completed","item":{"id":"own","type":"imageGeneration","savedPath":image}})
+        );
+        let tail = format!(
+            "{}\n",
+            json!({"type":"item.completed","item":{"id":"later","type":"imageGeneration","savedPath":foreign}})
+        );
+        let path = c.sources[0].path.clone();
+        fs::write(&path, format!("{prefix}{segment}{tail}")).unwrap();
+        c.sources = vec![Source {
+            path,
+            format: "codex-exec".into(),
+            start: prefix.len() as u64,
+            end: Some((prefix.len() + segment.len()) as u64),
+        }];
+        register(&data, c.clone()).unwrap();
+        let mut sink = Sink::default();
+        pass(&data, &mut sink).unwrap();
+        assert_eq!(status(&data)["state"], "observed", "{}", status(&data));
+        assert!(sink.requests.iter().any(|b| b["format"] == "codex-exec"
+            && b["bytes"] == agent::encode_base64(segment.as_bytes())));
+        let media: Vec<_> = sink
+            .requests
+            .iter()
+            .filter(|b| b["media"] == true)
+            .collect();
+        assert_eq!(media.len(), 1);
+        assert_eq!(
+            media[0]["source"],
+            crate::sha256_hex(b"\x89PNG\r\n\x1a\nown")
+        );
+        let n = sink.requests.len();
+        pass(&data, &mut sink).unwrap();
+        assert_eq!(sink.requests.len(), n);
+        assert_eq!(status(&data)["replaced"], 0);
+        assert_eq!(fs::read_dir(root(&data).join("reads")).unwrap().count(), 0);
+        fs::write(
+            &c.sources[0].path,
+            format!("{prefix}{}{tail}", segment.replace("s-1", "s-2")),
+        )
+        .unwrap();
+        pass(&data, &mut sink).unwrap();
+        assert_eq!(sink.requests.len(), n);
+        assert_eq!(
+            status(&data)["reason"],
+            "archive caller source authority unverified"
+        );
+        let _ = fs::remove_dir_all(data.parent().unwrap());
+    }
+    #[test]
+    fn session_scoped_sql_view_never_authorizes_whole_database_or_wal_export() {
+        let (data, mut c) = setup("archive-sql-boundary");
+        c.runtime = "hermes".into();
+        c.manifest["runtime"] = json!("hermes");
+        c.sources.clear();
+        let path = c.home.as_ref().unwrap().join("state.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL;
+            CREATE TABLE sessions(id TEXT PRIMARY KEY,parent_session_id TEXT,model TEXT);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,tool_calls TEXT,tool_call_id TEXT,reasoning_content TEXT);
+            CREATE TABLE session_model_usage(session_id TEXT,model TEXT,input_tokens INTEGER,output_tokens INTEGER,actual_cost_usd REAL,estimated_cost_usd REAL);
+            INSERT INTO sessions VALUES('s-1',NULL,'fixture'),('manual-unopted',NULL,'fixture');
+            INSERT INTO messages VALUES(1,'s-1','user','selected user',NULL,NULL,NULL),(2,'manual-unopted','user','unopted secret',NULL,NULL,NULL);").unwrap();
+        let rt = agent::runtime("hermes").unwrap();
+        let mut reader = rt
+            .history("s-1", c.home.as_deref(), Some(&path), None)
+            .unwrap();
+        let page = reader.steps(u64::MAX).unwrap();
+        assert!(page.steps.iter().any(|s| s.data["text"] == "selected user"));
+        assert!(!serde_json::to_string(&page)
+            .unwrap()
+            .contains("unopted secret"));
+        assert!(PathBuf::from(format!("{}-wal", path.display())).exists());
+        register(&data, c.clone()).unwrap();
+        let mut sink = Sink::default();
+        pass(&data, &mut sink).unwrap();
+        assert!(sink.requests.is_empty());
+        assert_eq!(status(&data)["pending_bytes"], 0);
+        assert_eq!(
+            status(&data)["reason"],
+            "archive raw database authority unavailable"
+        );
+        drop(db);
         let _ = fs::remove_dir_all(data.parent().unwrap());
     }
 }
