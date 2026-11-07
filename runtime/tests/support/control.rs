@@ -3,6 +3,30 @@ use super::*;
 use agent::{Answer,Control,Event,Part,Runtime};
 use std::io::{BufRead,Write};
 
+pub fn owner_transitions() {
+    for mode in ["bind-owner","terminal-owner"] {
+        let root=scratch("control-owner-transition");let runtime=agent::runtime("codex").unwrap();let mut l=fake_launch("codex",&root,"first",&[]);l.controls=true;
+        l.env.extend([("AGENTQ_CONTROL_FIXTURE".into(),"1".into()),("AGENTQ_CONTROL_EXTRA".into(),mode.into())]);
+        if mode=="bind-owner" {
+            assert_eq!(runtime.launch(&l).err().unwrap(),"control-owner-changed");
+        }else{
+            let mut run=runtime.launch(&l).unwrap();
+            loop {if runtime.progress(&mut run).unwrap().iter().any(|e|matches!(e,Event::Request{..})) {break;}std::thread::yield_now();}
+            let path=std::fs::read_dir(&l.session_store.path).unwrap().map(|e|e.unwrap().path()).find(|p|p.extension().is_some_and(|e|e=="json")).unwrap();
+            let mut row:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();row["token"]=json!("foreign");std::fs::write(&path,row.to_string()).unwrap();
+            std::fs::write(root.join("changed-owner"),row.to_string()).unwrap();let before=std::fs::read(root.join("control-input.jsonl")).unwrap();
+            std::fs::write(root.join("inject"),"").unwrap();wait_for(&root.join("emitted"));let until=Instant::now()+Duration::from_secs(30);
+            let error=loop {if let Err(error)=runtime.poll(&mut run) {break error;}assert!(Instant::now()<until,"terminal not observed");std::thread::yield_now();};
+            assert_eq!(error,"control-owner-changed");assert!(runtime.input(&mut run,&[Part::Text("unauthorized next".into())]).is_err());drop(run);
+            assert_eq!(std::fs::read(root.join("control-input.jsonl")).unwrap(),before,"lost terminal owner sends no further input");
+        }
+        let rows=std::fs::read_dir(&l.session_store.path).unwrap().map(|e|e.unwrap().path()).filter(|p|p.extension().is_some_and(|e|e=="json")).collect::<Vec<_>>();
+        assert_eq!(rows.len(),1);assert_eq!(std::fs::read(&rows[0]).unwrap(),std::fs::read(root.join("changed-owner")).unwrap(),"neither transition nor drop restores stale authority");
+        let audit:Vec<Value>=std::fs::read_to_string(root.join("control-input.jsonl")).unwrap().lines().map(|s|serde_json::from_str(s).unwrap()).collect();
+        assert_eq!(audit.iter().filter(|v|v["method"]=="turn/start").count(),if mode=="bind-owner" {0}else{1});teardown(root);
+    }
+}
+
 pub fn resolution() {
     for mode in ["foreign-resolved","resolved"] {
         let root=scratch("control-resolution");let runtime=agent::runtime("codex").unwrap();let mut l=fake_launch("codex",&root,"first",&[]);l.controls=true;
@@ -174,7 +198,13 @@ pub fn server() {
         let scope=||json!({"threadId":"control-thread","turnId":format!("control-turn-{turn}"),"itemId":"tool"});
         match value["method"].as_str() {
             Some("initialize")=>emit(json!({"id":id,"result":{}})),Some("initialized")=>{},
-            Some("thread/start")=>emit(json!({"id":id,"result":{"thread":{"id":"control-thread"},"model":"fixture-model"}})),
+            Some("thread/start")=>{
+                if std::env::var("AGENTQ_CONTROL_EXTRA").as_deref()==Ok("bind-owner") {
+                    let root=std::env::current_dir().unwrap();let path=std::fs::read_dir(root.join(".agentq-sessions")).unwrap().map(|e|e.unwrap().path()).find(|p|p.extension().is_some_and(|e|e=="json")).unwrap();
+                    let mut row:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();row["token"]=json!("foreign-before-bind");std::fs::write(path,row.to_string()).unwrap();std::fs::write(root.join("changed-owner"),row.to_string()).unwrap();
+                }
+                emit(json!({"id":id,"result":{"thread":{"id":"control-thread"},"model":"fixture-model"}}));
+            },
             Some("turn/start")=>{
                 turn+=1;phase="approval";emit(json!({"id":id,"result":{"turn":{"id":format!("control-turn-{turn}")}}}));
                 emit(json!({"method":"turn/started","params":{"threadId":"control-thread","turn":{"id":format!("control-turn-{turn}")}}}));
@@ -184,7 +214,9 @@ pub fn server() {
                 if let Some(mode)=std::env::var_os("AGENTQ_CONTROL_EXTRA") {
                     let root=std::env::current_dir().unwrap();let mode=mode.to_string_lossy().into_owned();
                     std::thread::spawn(move|| {wait_for(&root.join("inject"));
-                        if mode=="resolved" || mode=="foreign-resolved" {
+                        if mode=="terminal-owner" {
+                            println!("{}",json!({"method":"turn/completed","params":{"threadId":"control-thread","turn":{"id":"control-turn-1","status":"completed"}}}));
+                        }else if mode=="resolved" || mode=="foreign-resolved" {
                             println!("{}",json!({"method":"serverRequest/resolved","params":{"threadId":"foreign","requestId":"native-reused"}}));
                             println!("{}",json!({"method":"serverRequest/resolved","params":{"threadId":"control-thread","requestId":[]}}));
                             if mode=="resolved" {
