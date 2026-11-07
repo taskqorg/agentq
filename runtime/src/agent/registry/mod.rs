@@ -237,7 +237,12 @@ mod tests {
             let e=entry(name).unwrap();
             assert_eq!(e.qualification().state,"unqualified");
             assert_eq!(e.descriptor().unwrap().name,name);
-            assert!(runtime(name).is_none());
+            let reader=runtime(name).unwrap();
+            assert!(reader.descriptor().has("history-only"),"{name}: lookup must not expose execution");
+            let root=crate::scratch("unqualified-reader");
+            let launch=Launch::new(&root,root.join("unused.jsonl"),"input","fixtureq");
+            assert!(reader.launch(&launch).err().unwrap().detail.contains("history-only"),"{name}");
+            std::fs::remove_dir_all(root).unwrap();
             assert!(!runtimes().iter().any(|r|r.descriptor().name==name));
             assert!(native_client(name).is_none(),"native CLI seams cannot bypass qualification");
             for (capability,flow) in [("login-browser",LoginFlow::Browser),("login-device",LoginFlow::Device)] {
@@ -313,8 +318,13 @@ mod tests {
             runtime.cancel(&mut resumed).unwrap();
             while runtime.poll(&mut resumed).unwrap()==State::Running {std::thread::yield_now();}
             assert_eq!(runtime.report(&resumed).unwrap().outcome,"cancelled","{name}");
-            let mut history=runtime.history(&session,None,Some(&l.log),None).unwrap();
-            let page=history.steps(std::fs::metadata(&l.log).unwrap().len()).unwrap();
+            // The protocol journal is not a native persisted session; supply a schema/session-bound history fixture.
+            let source=work.join("history.jsonl");
+            let rows=[json!({"type":"session","id":session}),json!({"type":"message","sessionId":session,"id":"fixture-message","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool","name":"bash","input":{"command":"fixture"}}]}})];
+            std::fs::write(&source,rows.iter().map(|v|format!("{v}\n")).collect::<String>()).unwrap();
+            assert!(runtime.history("foreign-session",None,Some(&source),None).is_err(),"{name}: source identity is required");
+            let mut history=runtime.history(&session,None,Some(&source),None).unwrap_or_else(|e|panic!("{name}: history: {e}"));
+            let page=history.steps(std::fs::metadata(&source).unwrap().len()).unwrap();
             assert!(page.steps.iter().any(|s|s.native_id.as_deref()==Some("tool")),"{name}: canonical history keeps native tools");
             assert!(page.steps.iter().all(|s|s.source["raw"].is_string()));
             if runtime.ops.rpc.is_some() {

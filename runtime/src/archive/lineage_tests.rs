@@ -35,8 +35,16 @@ fn lineage_same_physical_jsonl_maps_across_accepted_chunks_and_keeps_hashes_priv
     let step=native_prefix("claude","claude-native",c.sources[0].path.to_str().unwrap(),"s-1",Some("s-1"),raw.as_bytes()).unwrap().remove(0);
     let physical=agent::archive_file_identity(&fs::File::open(&c.sources[0].path).unwrap()).unwrap();
     let handle=Handle {data:data.clone(),capture:c.clone(),native:None,native_run:None};
-    let intent=json!({"id":"fixture-physical","operation":"fork","parent":"s-1","selected":step,"physical":{"path":c.sources[0].path,"identity":physical}});
-    let native=json!({"thread":{"id":"fixture-child"}});let observed=json!({"child":"fixture-child"});
+    let child_path=c.root.join("fixture-child.jsonl");assert!(!child_path.exists());
+    let intent=json!({"id":"fixture-physical","operation":"fork","parent":"s-1","selected":step,"physical":{"path":c.sources[0].path,"identity":physical},"child_source":{"before":"absent","path":child_path}});
+    let child_raw=raw.replace("s-1","fixture-child");fs::write(&child_path,&child_raw).unwrap();
+    let mut child_history=agent::history::History::new("claude-native",child_path.to_str().unwrap(),"fixture-child").unwrap();
+    let page=child_history.steps(&child_path,child_raw.len() as u64).unwrap();assert!(!page.more);assert_eq!(page.pending_bytes,0);
+    let pid=std::process::id();
+    let native=json!({"claude":{"persistence":{"session_id":"fixture-child","path":child_path,"history":child_history.checkpoint()},"initialize":{"pid":pid},"process":{"pid":pid}}});
+    let observed=json!({"child":"fixture-child"});
+    let mut missing=native.clone();missing["claude"]["persistence"]["history"]["prefix"]=Value::Null;
+    assert!(portable::publish(&handle,&intent,&missing,&observed).is_err(),"incomplete child witness must refuse");
     portable::publish(&handle,&intent,&native,&observed).unwrap();
     let path=root(&data).join("lineage").join(format!("{}.jsonl",crate::sha256_hex(b"fixture-physical")));
     let first=agent::history::lineage::decode(&fs::read(&path).unwrap(),"fixture-child").unwrap();assert!(matches!(first.parent.point,Point::Unmapped {..}));
