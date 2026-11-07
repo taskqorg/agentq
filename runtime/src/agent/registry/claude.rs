@@ -6,6 +6,11 @@ pub(super) mod control;
 mod history;
 #[path="claude/parsing.rs"]
 mod parsing;
+#[cfg(windows)]
+#[path="claude/locator_windows.rs"]
+mod locator_windows;
+#[cfg(windows)]
+use locator_windows::{background_directory,background_open_at};
 use self::parsing::*;
 // Claude Code registration: native worker and installation behavior.
 use super::super::super::events::{string,tool_kind,audit_path,audit_command,native_timeout};
@@ -598,7 +603,7 @@ impl BackgroundCandidate {
         Ok(value)
     }
     fn locator_file(&self,id:&str)->Res<File> {
-        #[cfg(unix)] {
+        #[cfg(any(unix,windows))] {
             let home=background_directory(&self.home)?;
             let bound=self.home_identity.as_ref().ok_or("background locator provenance unknown")?;
             if super::super::super::native::file_id(&home)?!=super::super::super::native::file_id(bound)? {return Err("background locator provenance unknown: account changed".into());}
@@ -606,7 +611,7 @@ impl BackgroundCandidate {
             let job=background_open_at(&jobs,OsStr::new(id),true)?;
             background_open_at(&job,OsStr::new("state.json"),false)
         }
-        #[cfg(not(unix))] {let _=id;Err("background locator provenance unknown: secure path unsupported".into())}
+        #[cfg(not(any(unix,windows)))] {let _=id;Err("background locator provenance unknown: secure path unsupported".into())}
     }
     fn validate_locator(&self,cwd:&str,session:&str)->Res<()> {
         let cwd=Path::new(cwd).canonicalize().map_err(|e|format!("background locator cwd unreadable: {e}"))?;
@@ -642,8 +647,8 @@ pub(crate) fn background_candidates(rows:Vec<Value>,spec:&Spec,home_identity:Opt
 }
 
 pub(crate) fn background_home_identity(home:&Path)->Res<Option<std::sync::Arc<File>>> {
-    #[cfg(unix)] {background_directory(home).map(|file|Some(std::sync::Arc::new(file)))}
-    #[cfg(not(unix))] {let _=home;Ok(None)}
+    #[cfg(any(unix,windows))] {background_directory(home).map(|file|Some(std::sync::Arc::new(file)))}
+    #[cfg(not(any(unix,windows)))] {let _=home;Ok(None)}
 }
 
 #[cfg(unix)]

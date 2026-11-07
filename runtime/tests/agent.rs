@@ -2341,7 +2341,7 @@ fn runtime_trait_exposes_native_seams() {
     let jobs=job.parent().unwrap();std::fs::remove_dir(job).unwrap();std::fs::remove_dir(jobs).unwrap();std::os::unix::fs::symlink(&foreign_jobs,jobs).unwrap();refuses();std::fs::remove_file(jobs).unwrap();
     let old_home=observed.home().with_extension("original-account");std::fs::rename(observed.home(),&old_home).unwrap();std::fs::create_dir_all(observed.home().join("jobs/c37eb75a")).unwrap();std::fs::write(&path,&raw).unwrap();refuses();std::fs::remove_dir_all(observed.home()).unwrap();std::fs::rename(old_home,observed.home()).unwrap();
     }
-    #[cfg(not(unix))] {
+    #[cfg(not(any(unix,windows)))] {
         assert!(claude.background_input(&observed,"owned input",&mut 8192).unwrap_err().contains("secure path unsupported"));
         assert!(claude.background_failure(&observed).unwrap_err().contains("secure path unsupported"));
     }
