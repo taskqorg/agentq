@@ -87,7 +87,7 @@ impl Session {
             let mut r=Report::empty();r.session=Some(self.session.clone());r.started_ms=self.started_ms;r.duration_us=self.started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
             for m in &self.messages {
                 let u=&m["usage"];
-                r.calls.push(Call{id:None,at_ms:m["timestamp"].as_u64(),input:u["input"].as_u64(),output:u["output"].as_u64(),cache_read:u["cacheRead"].as_u64(),cache_write:u["cacheWrite"].as_u64(),reasoning:None,
+                r.calls.push(Call{id:None,native_turn:None,accounting_unknown:None,cost_usd:None,at_ms:m["timestamp"].as_u64(),input:u["input"].as_u64(),output:u["output"].as_u64(),cache_read:u["cacheRead"].as_u64(),cache_write:u["cacheWrite"].as_u64(),reasoning:None,
                     model:m["model"].as_str().map(String::from),outcome:match m["stopReason"].as_str(){Some("error")=>"failed",Some("aborted")=>"cancelled",_=>"ok"},error:if m["stopReason"]=="error"{"client-error"}else{"none"},aggregate:false});
             }
             let last=self.messages.last();
@@ -140,7 +140,7 @@ pub(super) fn record_events(v:&Value)->Vec<Event> {
 
 pub(super) static PROTOCOL:registry::Protocol=registry::Protocol {
     stream_history:"jsonl-rpc",native_history:"jsonl-rpc",
-    ends:|v|v["type"]=="agent_settled",start_limit:|_|None,read_calls:|_|(vec![],None,false),final_text:|_|None,
+    ends:|v|v["type"]=="agent_settled",start_limit:|_|None,read_calls:|_|(vec![],None,false),history_usage:|_|vec![],history_context:|_|None,final_text:|_|None,
     history_alias:false,history_provenance:|_,_,_|false,history_parent:|_|None,rollout_report:|_,_|{},history_formats:&["jsonl-rpc"],
     history_session:|_,v,_|v["data"]["sessionFile"].as_str().map(String::from),history_normalize:|_,v|normalize(v),history_validity:|_|json!({"status":"unknown","reason":"envelope-validation-unsupported"}),
     prepare_command:|_,_,_|Err("JSONL RPC requires the structured launch path".into()),input_bytes:|_|vec![],native_record:|_,_|Err("native transcript polling unsupported".into()),native_metadata:None,

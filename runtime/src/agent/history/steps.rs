@@ -281,7 +281,7 @@ pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
             _=>StepKind::Unknown,
         };
         item["status"]=json!(match ty {"tool_execution_start"=>"started","tool_execution_end"=>"completed",_=>"unknown"});
-        return vec![step(event,record,&item,kind,json!({"input":record["args"],"output":record["result"],"native":record}),0)];
+        return vec![base_step(event,record,&item,kind,json!({"input":record["args"],"output":record["result"],"native":record}),0)];
     }
     if format=="acp" {
         if record["replay"]==true {return vec![];}
