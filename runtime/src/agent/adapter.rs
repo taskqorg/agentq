@@ -577,6 +577,7 @@ struct App {
     cancelling: bool,
     approval: Approval,
     capture:Option<PathBuf>,
+    lineage_operation:Option<(String,bool)>,
     binding:Option<Binding>,
 }
 
@@ -656,9 +657,15 @@ impl App {
     fn observe(&mut self, frame:NativeFrame, until: Option<Instant>) -> Res<()> {
         if let Err(error)=self.observe_inner(frame,until) {self.closed=Some(error.clone());return Err(error);}Ok(())
     }
-    fn observe_inner(&mut self, frame:NativeFrame, until: Option<Instant>) -> Res<()> {
+    fn observe_inner(&mut self, mut frame:NativeFrame, until: Option<Instant>) -> Res<()> {
         let m=frame.value.clone();
-        if let Some((_,log))=&mut self.control {writeln!(log,"{m}").map_err(|e|format!("control-log-unknown: {e}"))?;}
+        if let Some((_,log))=&mut self.control {
+            let start=log.metadata().ok().map(|m|m.len());let raw=format!("{m}\n");
+            log.write_all(raw.as_bytes()).map_err(|e|format!("control-log-unknown: {e}"))?;
+            frame.journal=start.zip(self.journal.as_ref()).and_then(|(start,path)| {
+                Some(crate::archive::JournalRecord {root:self.session.project_root().into(),path:path.clone(),identity:native::file_id(log).ok()?,start,end:start.checked_add(raw.len() as u64)?,sha256:crate::sha256_hex(raw.as_bytes())})
+            });
+        }
         let selected=self.session.observe_frame(frame)?;
         for image in self.session.take_images() {
             // Early frames keep their original position; drained early progress is emitted upon acceptance.
@@ -669,7 +676,7 @@ impl App {
             if let Some(at)=at {self.pending[at].1=Some(Event::Image(image));}
             else {self.pending.push((Value::Null,Some(Event::Image(image))));}
         }
-        if let Some(path)=&self.capture {for line in selected {if Some(line.session.as_str())==self.session.session() && line.turn.as_deref()==self.session.turn_id() {crate::archive::stream(path,&line.raw);}}}
+        if let Some(path)=&self.capture {for line in selected {if Some(line.session.as_str())==self.session.session() && line.turn.as_deref()==self.session.turn_id() {let operation=self.lineage_operation.as_mut().map(|(id,first)|{let value=(id.clone(),*first);*first=false;value});crate::archive::selected(path,&line.raw,line.journal,&line.session,line.turn.as_deref(),operation.as_ref().map(|(id,_)|id.as_str()),operation.as_ref().is_some_and(|(_,first)|*first));}}}
 
         if m["method"]=="serverRequest/resolved" && self.control.is_some() {
             let id=&m["params"]["requestId"];
@@ -734,7 +741,7 @@ impl App {
             #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
             Some((super::control::Requests::new(),options.open(&l.log).map_err(|e|format!("control-log: {e}"))?))
         }else{None};
-        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval,binding:None,capture:owned.then(||crate::archive::stream_path(l.install.as_deref(),&l.log)) };
+        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval,binding:None,capture:owned.then(||crate::archive::stream_path(l.install.as_deref(),&l.log)),lineage_operation:None };
         let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner,lineage,branch_check);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         match opened {Ok(())=>Ok(app),Err(detail)=>Err(app.session.start_failure().unwrap_or_else(||detail.into()))}
@@ -1789,7 +1796,7 @@ impl Runtime for Adapter {
             let app = &saved["app"];
             let spec = me.spec(l, app["session"].as_str().ok_or("run recovery session invalid")?.into(), app["session"] != "-")?;
             let session = AppSession::recover(&spec, app)?;
-            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),writer:None,cancelling:false,approval:l.policy.approval,binding:None,capture:None };
+            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),writer:None,cancelling:false,approval:l.policy.approval,binding:None,capture:None,lineage_operation:None };
             let mut run=me.run(Body::App(Box::new(a)),0,l);run.owner=Some(acquire()?);return run.restored(saved);
         }
         let session = saved["session"].as_str().filter(|s| native::plain_id(s)).ok_or("run recovery session invalid")?;
@@ -2013,7 +2020,7 @@ mod tests {
         let mut session=AppSession::new(&spec).unwrap();let initialize=session.initialize(json!({})).unwrap();session.observe(&json!({"id":initialize["id"],"result":{}})).unwrap();
         let open=session.open(json!({})).unwrap();session.observe(&json!({"id":open["id"],"result":{"thread":{"id":"session"}}})).unwrap();
         let before=session.checkpoint();
-        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None};
+        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None,lineage_operation:None};
         assert_eq!(app.start(json!([]),Instant::now()).unwrap_err(),"control-state-unknown");assert_eq!(app.session.checkpoint(),before);
         drop((app,readonly));std::fs::remove_dir_all(root).unwrap();
     }
@@ -2071,7 +2078,7 @@ mod tests {
             }
             probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
             let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
-            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None}));
+            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None,lineage_operation:None}));
             let mut run=adapter.run(body,0,&launch());
             probes.insert("account",!matches!(runtime.account(&mut run),Err(Failure::Refused(Cause("account-unsupported")))));
             probes.insert("respond",matches!(runtime.respond(&mut run,Control::Reply{id:json!("missing"),option:None}),Err(Failure::Refused(Cause("respond-transport-unsupported")))));

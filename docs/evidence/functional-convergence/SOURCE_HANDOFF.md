@@ -30,12 +30,12 @@ Central must provide frozen exact source for these existing producers; this inte
 1. Claude history facts: integrated exact `29b48cce03925519a2a603a52835dcbae9a01cb8` against `71a32aa28e82134278347c2e15bb3fb170346332`; author report `/tmp/agentq-claude-source-facts-29b48cc/report.md`.
 2. Launcher: integrated exact `d3b0513653c788ad2f9a06ce91b50c283080a3db` to `c233839eb97cb6a03ef3b2273111349152e23d61`; author report `/tmp/agentq-launcher-observation-source-c233839/report.md`.
 3. Claude fork: `ctx_a9231c3bac43`.
-4. Lineage: `ctx_a6ab5af09d22`.
+4. Lineage: integrated exact cumulative `68adde6809829b56ac2a715de746424b97f42810` to `6445b86f407b784e7a9c563ffd69749d6a4d78fc`; author report `/tmp/agentq-300-a2-source-report.md`.
 
 Partial Claude fork source `acd030ff8f35d4ac3585468db8f2a262ecbfb4f3` on `68adde6` remains retained on its original ref for a later source join, not imported in this continuation. Author report: `/tmp/agentq-300-claude-native-source-implementation.md`. It does not implement a successful native fork; capability remains undeclared and `fork-unsupported` remains required.
 5. After those functional joins, central supplies exactly one source to the TaskQ cold caller for adoption.
 
-No unresolved source conflict is intentionally left in this initial join. This does not establish GLOBAL functional completion: Claude fork completion, lineage producer deltas and actual TaskQ caller adoption remain pending. Independent review and the single coordinated compile/test batch remain deferred until central GLOBAL functional completion. Native, Windows, service, deployment and external delivery acceptance remain separate and unknown.
+No unresolved source conflict is intentionally left in this initial join. This does not establish GLOBAL functional completion: Claude fork completion, the pending locator correction and actual TaskQ/DashQ caller/pin convergence remain pending. Independent review and the single coordinated compile/test batch remain deferred until central GLOBAL functional completion. Native, Windows, service, deployment and external delivery acceptance remain separate and unknown.
 
 ## Claude source-facts continuation
 
@@ -52,3 +52,15 @@ The exact d3-to-c233839 delta is integrated onto `bce7d38`. It includes exported
 Historical launcher bytes retain an explicit unknown and never grant BeforeInput, accepted input, owner, session/process or control authority. The new plain CLI proof remains qualified by the actual owned original source, requested resumed thread, positive nonzero observed exit, exact native grammar and absent cancellation/timeout/unknown exit. Cold/recovered/copied text does not gain this authority. Existing optional native exit code remains optional; no synthetic -1 conversion is introduced.
 
 Actual background positive correlation remains missing and explicitly incomplete: the launcher exchange has no correlated native child/session/source witness, and a provisional returned job token or refusal text cannot supply one. This source does not populate background start_failure from those bytes and does not claim no-start, replay safety, capability completion or acceptance. TaskQ owns final caller migration. All added regression source remains uncompiled and unexecuted; no intermediate verification or review was run.
+
+## Portable lineage continuation
+
+The complete 68-to-6445b86 source delta is integrated onto `0de460d`, including initial `69adf8d` API and the measured selected-frame bridge. The join includes the closed typed decoder, mandatory nullable values, duplicate/extra/framing rejection, immutable operation/revision chain, generated decoder identity source hook, grant-checked auxiliary spool/refinement, durable physical/queued/accepted witnesses, selected bridge, owner-proof-first optional publication and contracts/fixtures. No fingerprint generation ran.
+
+The only textual conflict was `registry/codex/app.rs::selected`: the coherent P1 `scope_consistent` check already contains and strengthens all incoming inline scope checks. It remains the single selector guard, followed by the existing registered history-session affirmation. The selected SessionLine now additionally carries the actual frame's private journal witness. This preserves conflicting thread/turn/image/terminal refusal while retaining the complete early-frame origin bridge; no raw fallback or weaker scope check replaces it.
+
+All App constructors, NativeFrame constructors, SessionLine construction and selected archive writer call sites use the cumulative source shapes. The bridge retains immutable selected caller runtime/format/source/binding/nullable-native identity, requires all selected contributors in one physical frame, and anchors projection only through accepted scrubbed coverage. Requested versus acknowledged conditions, unknown/null/pending outcomes and native authority remain distinct. The wire retains its 15 keys; auxiliary uploads supply no native session/turn/media/control authority.
+
+DashQ sink `83eb2ea62c88da1caf8ae0121289be6d73733741` uses the unchanged public lineage API from `69adf8d39c68d036958cae936891b5207ebc0f53`; report `/tmp/dashq-lineage-source/report.md`. No sink code or intermediate dependency pin changed here. Its decoder equality must be evaluated using the final compiled runtime, not a digest supplied before the authorized build.
+
+Remaining finite source gaps: locator correction `ctx_e1b3c0850502` is still being implemented; partial Claude fork `acd030ff8f35d4ac3585468db8f2a262ecbfb4f3` remains unintegrated and functionally incomplete; affirmative background positive correlation is absent in the existing backend; central still owns final TaskQ cold-caller/API alignment and DashQ final runtime pin. No global completion, acceptance or native success is claimed. All lineage source fixtures and existing guard fixtures remain unexecuted, and all earlier immutable archives/refs remain preserved.

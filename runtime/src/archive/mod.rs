@@ -1,6 +1,8 @@
 //! Separate content producer; never writes to telemetry (agentq.md M6.12–M6.13).
 mod scrub;
 mod store;
+mod lineage;
+mod selected;
 use crate::agent::{Context, Frozen, Launch};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,6 +15,10 @@ pub use store::{disconnect, enroll, pass, status};
 type Res<T> = Result<T, String>;
 pub const SCHEMA: &str = "agent-history/1";
 pub const MANUAL: &str = "agent-history.manual";
+
+/// Shared disclosure validation for the auxiliary decoder; never returns native content.
+pub(crate) fn lineage_disclosure(bytes:&[u8])->bool {scrub::bytes(bytes).0==bytes}
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Source {
@@ -77,9 +83,15 @@ pub(crate) struct Handle {
     native_run: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct JournalRecord {
+    pub root:PathBuf, pub path:PathBuf, pub identity:String, pub start:u64, pub end:u64, pub sha256:String,
+}
+
 enum Job {
     Capture(PathBuf, Capture, Option<NativeCandidate>),
-    Bytes(PathBuf, Vec<u8>),
+    Lineage(Handle, Value, Value, Value),
+    Selected(PathBuf,Vec<u8>,Option<JournalRecord>,String,Option<String>,Option<String>,bool),
 }
 fn queue(job: Job) {
     static WRITER: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
@@ -93,7 +105,8 @@ fn queue(job: Job) {
                         Job::Capture(data, capture, candidate) => {
                             store::register_candidate(&data, capture, candidate)
                         }
-                        Job::Bytes(path, bytes) => store::append_stream(&path, &bytes),
+                        Job::Lineage(handle,intent,native,observed)=>store::publish_lineage(&handle,&intent,&native,&observed),
+                        Job::Selected(path,bytes,journal,session,turn,operation,first)=>store::selected(&path,&bytes,journal.as_ref(),&session,turn.as_deref(),operation.as_deref(),first),
                     };
                     if result.is_err() {
                         eprintln!("agentq: archive capture unavailable");
@@ -175,6 +188,10 @@ impl Handle {
         attribution(&mut handle.capture.manifest, ctx);
         handle.save();
         handle
+    }
+    /// Called only after the mandatory private owner proof is durable; failure cannot change it.
+    pub(crate) fn lineage(&self,intent:&Value,native:&Value,observed:&Value) {
+        if self.data.is_absolute(){queue(Job::Lineage(self.clone(),intent.clone(),native.clone(),observed.clone()));}
     }
     pub(crate) fn bind_native(&mut self, run: &str) {
         self.native_run = Some(run.into());
@@ -281,11 +298,6 @@ pub fn capture(data: &Path, capture: Capture) {
     queue(Job::Capture(data.into(), capture, None));
 }
 
-/// Raw app-server wire recording, on the archive writer rather than the pipe reader.
-pub(crate) fn stream(path: &Path, bytes: &[u8]) {
-    queue(Job::Bytes(path.into(), bytes.into()));
-}
-
 /// Private source for a recorded app-server transport; recording itself checks the active grant.
 pub(crate) fn stream_path(install: Option<&Path>, log: &Path) -> PathBuf {
     install
@@ -343,4 +355,9 @@ pub fn hook(data: &Path, runtime: &str, input: &Value, launched: bool, project: 
         capture,
         path.map(NativeCandidate::Hook),
     ));
+}
+
+/// Records only frames approved by the owned native selector, retaining their actual journal origin.
+pub(crate) fn selected(path:&Path,bytes:&[u8],journal:Option<JournalRecord>,session:&str,turn:Option<&str>,operation:Option<&str>,first:bool) {
+    queue(Job::Selected(path.into(),bytes.into(),journal,session.into(),turn.map(String::from),operation.map(String::from),first));
 }

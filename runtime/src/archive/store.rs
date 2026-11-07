@@ -1,4 +1,8 @@
 use super::*;
+#[path="lineage_store.rs"]
+mod portable;
+pub(super) fn selected(path:&Path,bytes:&[u8],journal:Option<&JournalRecord>,session:&str,turn:Option<&str>,operation:Option<&str>,first:bool)->Res<()> {super::selected::write_selected(path,bytes,journal,session,turn,operation,first)}
+pub(super) fn publish_lineage(handle:&Handle,intent:&Value,native:&Value,observed:&Value)->Res<()> {portable::publish(handle,intent,native,observed)}
 use crate::agent::{self, history::media::MediaCatalog};
 use coreq::enroll::{self, Request, Wire};
 use std::{
@@ -7,7 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn root(data: &Path) -> PathBuf {
+pub(super) fn root(data: &Path) -> PathBuf {
     data.join("archive")
 }
 fn connection(data: &Path) -> PathBuf {
@@ -39,7 +43,7 @@ fn write(path: &Path, value: &impl Serialize) -> Res<()> {
     )
     .map_err(|_| "archive storage unavailable".into())
 }
-fn private(path: &Path) -> Res<()> {
+pub(super) fn private(path: &Path) -> Res<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -79,13 +83,13 @@ fn private(path: &Path) -> Res<()> {
     }
     Ok(())
 }
-fn active(data: &Path) -> Res<Option<Value>> {
+pub(super) fn active(data: &Path) -> Res<Option<Value>> {
     if !connection(data).join("connection.json").exists() {
         return Ok(None);
     }
     enroll::active(&connection(data)).map_err(|_| "archive grant unreadable".into())
 }
-fn enabled(data: &Path) -> Res<bool> {
+pub(super) fn enabled(data: &Path) -> Res<bool> {
     let path = data.join("integration.json");
     if !path.exists() {
         return Ok(true);
@@ -99,7 +103,7 @@ fn enabled(data: &Path) -> Res<bool> {
 fn identity(grant: &Value) -> Value {
     json!({"destination":grant["destination"],"workspace":grant["workspace"],"installation":grant["installation"],"generation":grant["generation"]})
 }
-fn allowed(grant: &Value, capture: &str) -> bool {
+pub(super) fn allowed(grant: &Value, capture: &str) -> bool {
     grant["schemas"]
         .as_array()
         .is_some_and(|a| a.contains(&json!(SCHEMA)))
@@ -121,6 +125,8 @@ struct Registration {
     capture: Capture,
     #[serde(default)]
     native: Option<NativeWitness>,
+    #[serde(default)]
+    auxiliary: Option<portable::Auxiliary>,
 }
 
 #[cfg(test)]
@@ -225,7 +231,7 @@ pub(super) fn register_candidate(
             checkpoint: page.checkpoint,
         })
     });
-    write(&path, &Registration { capture, native })
+    write(&path, &Registration { capture, native, auxiliary:None })
 }
 
 pub(super) fn append_stream(path: &Path, bytes: &[u8]) -> Res<()> {
@@ -255,7 +261,7 @@ pub(super) fn append_stream(path: &Path, bytes: &[u8]) -> Res<()> {
 }
 
 /// Literal per-project exclusions; invalid rules stop capture, never widen it.
-fn excluded(root: &Path, path: &Path) -> Res<bool> {
+pub(super) fn excluded(root: &Path, path: &Path) -> Res<bool> {
     let file = root.join(".agentq-archive.json");
     if !file
         .try_exists()
@@ -419,13 +425,26 @@ fn authority(c: &Capture, mut paths: Vec<PathBuf>, evidence: Value) -> Res<Autho
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Queued {
+    #[serde(default)]
+    witness_bytes: Option<Vec<u8>>,
     body: Value,
     replay: bool,
     #[serde(default)]
     authority: Option<Authority>,
 }
 #[derive(Clone, Serialize, Deserialize)]
+struct Accepted {
+    body:Value,
+    receipt:Value,
+    authority:Authority,
+    bytes:Vec<u8>,
+}
+#[derive(Clone, Serialize, Deserialize)]
 struct Checkpoint {
+    #[serde(default)]
+    frames:Vec<super::lineage::Frame>,
+    #[serde(default)]
+    accepted:Vec<Accepted>,
     #[serde(default)]
     authority: Option<Authority>,
     #[serde(default)]
@@ -508,6 +527,7 @@ pub fn pass(data: &Path, wire: &mut dyn Wire) -> Res<()> {
             &grant,
             &mut registration.capture,
             registration.native.as_ref(),
+            registration.auxiliary.as_ref(),
             wire,
         ) {
             summary.error = Some(e);
@@ -521,6 +541,7 @@ fn session(
     grant: &Value,
     c: &mut Capture,
     witness: Option<&NativeWitness>,
+    auxiliary: Option<&portable::Auxiliary>,
     wire: &mut dyn Wire,
 ) -> Res<()> {
     if excluded(&c.root, &c.root)? {
@@ -539,6 +560,7 @@ fn session(
             }
         }
     }
+    if let Some(auxiliary)=auxiliary {return portable::upload_auxiliary(data,grant,c,auxiliary,wire);}
     let rt = agent::runtime(&c.runtime).ok_or("archive runtime unsupported")?;
     if c.manifest["session"].as_str().is_none() {
         c.manifest["session"] = json!("unknown");
@@ -961,6 +983,7 @@ fn upload_source(
     if excluded(&c.root, &src.path)? {
         return Ok(());
     }
+    if src.format==agent::history::lineage::FORMAT {return Err("archive auxiliary constructor required".into());}
     raw_authority(src)?;
     if src.format == "raw" {
         return upload(data, grant, c, src, manifest, turn, None, wire);
@@ -1224,6 +1247,8 @@ fn upload(
         st.authority = old.authority;
         st.owner = old.owner;
         st.paths = old.paths;
+        st.frames = old.frames;
+        st.accepted = old.accepted;
         st.previous = old.previous;
         st.previous.push(old.source);
         st.pending = old.pending;
@@ -1268,6 +1293,16 @@ fn upload(
     }
     // Rescan the native prefix so a PEM block continuing in a later append remains scrubbed.
     let (scrubbed, count) = super::scrub::bytes_from(raw, st.raw as usize);
+    // Capture the original physical domain before delivery; old generations retain their own frame.
+    if native.is_some() && src.format!="raw" && src.format!=agent::history::lineage::FORMAT {
+        let mut frame=super::lineage::Frame::capture(&st.source,&identity,&src.path,src.start,&src.format,raw)?;
+        frame.history=history.as_ref().map(|h|json!(h));
+        if src.format==agent::history::CODEX_APP_SERVER_SELECTED {super::selected::bind(&frame,&st.manifest_hash)?;}
+        if let Some(old)=st.frames.iter_mut().find(|f|f.source==st.source) {
+            if old.identity!=frame.identity || old.base!=frame.base || old.path!=frame.path || old.format!=frame.format {return Err("archive frame changed".into());}
+            *old=frame;
+        }else{st.frames.push(frame);}
+    }
     let bytes = &scrubbed[st.raw as usize..];
     let st_raw = st.raw;
     queue_bytes(
@@ -1295,6 +1330,7 @@ fn upload(
         if let Some(mut last) = st.last.clone() {
             last["turns"] = json!(st.turns);
             st.pending.push(Queued {
+                witness_bytes: None,
                 body: last,
                 replay: true,
                 authority: st.last_authority.clone(),
@@ -1351,6 +1387,7 @@ fn queue_bytes(
             return Err("archive request exceeds sink body limit".into());
         }
         st.pending.push(Queued {
+            witness_bytes: if total.is_none() && st.frames.iter().any(|f|f.source==st.source){Some(chunk.to_vec())}else{None},
             body,
             replay: false,
             authority: st.authority.clone(),
@@ -1374,6 +1411,8 @@ fn fresh(
     let mut manifest = manifest.clone();
     super::scrub::manifest(&mut manifest);
     Checkpoint {
+        frames:vec![],
+        accepted:vec![],
         authority: None,
         history: None,
         source: crate::incident::uuid(),
@@ -1481,6 +1520,11 @@ fn send(
         if !queued.replay {
             st.uploaded += length;
             st.scrubbed += body["scrubbed"].as_u64().unwrap_or(0);
+        }
+        if let Some(bytes)=queued.witness_bytes {
+            if bytes.len() as u64!=length || agent::encode_base64(&bytes)!=body["bytes"] || crate::sha256_hex(&bytes)!=body["sha256"] {return Err("archive witness mismatch".into());}
+            let accepted=Accepted {body:body.clone(),receipt:receipt.clone(),authority:proof.clone(),bytes};
+            if !st.accepted.iter().any(|old|old.body==accepted.body && old.authority.evidence==accepted.authority.evidence) {st.accepted.push(accepted);}
         }
         st.last_upload = Some(wire.now());
         if body["source"] == st.source {
@@ -1650,6 +1694,7 @@ mod tests {
         (data, capture)
     }
     include!("authority_tests.rs");
+    include!("lineage_tests.rs");
 
     // A4/A6: lost response and process restart replay precisely the persisted scrubbed request.
     // A changed/truncated native file gets a different source; accepted bytes remain immutable.

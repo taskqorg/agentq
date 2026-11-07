@@ -21,6 +21,10 @@ fn source<'a>(adapter:&Adapter,run:&'a mut Run,operation:&'static str)->Result<&
 }
 
 impl App {
+    fn archive_primary(&self)->Option<Value> {
+        let source=self.captured_source()?;let file=File::open(&source.path).ok()?;
+        Some(json!({"path":source.path,"identity":native::file_id(&file).ok()?,"end":file.metadata().ok()?.len(),"format":source.format,"session":source.session}))
+    }
     fn branch_settled(&mut self)->Res<()> {
         self.branch_source_intact()?;self.pump()?;self.writable()?;
         if !self.session.idle() || !self.requests.is_empty() || self.cancelling || self.control.as_ref().is_some_and(|(r,_)|!r.ids().is_empty()) {return Err("branch-source-not-idle".into());}Ok(())
@@ -108,6 +112,7 @@ impl App {
 
 pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&Launch)->Result<Run,Failure> {
     let until=run.deadline;
+    let archive=run.archive.clone();
     let app=source(adapter,run,"fork")?;
     if launch.mode!=Mode::Turn || !launch.controls {return Err(refuse("fork-child-mode-unsupported"));}
     if launch.mcp.is_some() || launch.instructions.is_some() || launch.effort.is_some() {return Err(refuse("fork-condition-unsupported"));}
@@ -133,9 +138,9 @@ pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&L
     // beforeTurnId is experimental and has no verified support advertisement on this channel.
     if keep==0 {return Err(refuse("fork-empty-prefix-unsupported"));}
     params["threadId"]=json!(parent);params["lastTurnId"]=turns[keep-1]["id"].clone();
-    let intent=json!({"id":crate::incident::uuid(),"operation":"fork","parent":parent,"selected":through,"retained":&turns[..keep],"requested":params});
     let prefix_len=parent_log.metadata().map_err(|e|e.to_string())?.len();
     let prefix=native::digest_prefix(&mut parent_log,prefix_len)?;
+    let intent=json!({"id":crate::incident::uuid(),"operation":"fork","parent":parent,"selected":through,"retained":&turns[..keep],"requested":params,"archive_primary":app.archive_primary(),"physical":{"identity":native::file_id(&parent_log)?,"path":app.journal,"prefix_end":prefix_len,"prefix_sha256":prefix},"requested_conditions":{"model":launch.model,"effort":launch.effort,"policy":launch.policy}});
     let lineage=json!({"operation":"fork","parent_owner":owner.checkpoint()?,"intent":intent,"fork_params":params});
     let mut verify=|child_app:&mut App,phase:Phase|->Res<()> {
         let child_owner=child_app.writer.as_ref().ok_or("control-owner-required")?.clone();
@@ -160,26 +165,29 @@ pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&L
         app.branch_settled()?;child_app.branch_settled()?;
         if native::digest_prefix(&mut parent_log,prefix_len)?!=prefix {return Err("branch-source-changed".into());}
         let observed=json!({"child":child,"retained":&turns[..keep]});
-        owner.branch_finish(&intent,&observed)?;child_owner.branch_finish(&intent,&observed)?;Ok(())
+        owner.branch_finish(&intent,&observed)?;child_owner.branch_finish(&intent,&observed)?;child_app.lineage_operation=intent["id"].as_str().map(|id|(id.to_string(),true));archive.lineage(&intent,&result,&observed);Ok(())
     };
     Ok(me.start_lineage(launch,None,Some(&lineage),Some(&mut verify)).map_err(|e|Failure::Failed(e.detail))?)
 }
 
 pub(super) fn rewind(adapter:&Adapter,run:&mut Run,through:Option<&Step>)->Result<(),Failure> {
     let until=run.deadline;
+    let archive=run.archive.clone();
     let app=source(adapter,run,"rewind")?;
     let thread=app.session.session().ok_or("branch-session-unknown")?.to_string();
     app.branch_goal_absent(&thread,until)?;
     let turns=app.branch_turns(&thread,None,until)?;
     let keep=app.branch_boundary(through,&turns)?;
-    if keep==turns.len() {return Ok(());}
-    let intent=json!({"id":crate::incident::uuid(),"operation":"rewind","parent":thread,"selected":through,"retained":&turns[..keep],"before":turns[keep]["id"]});
+    let noop=keep==turns.len();
+    let selected_file=File::open(app.journal.as_ref().ok_or("branch-source-unknown")?).map_err(|e|e.to_string())?;
+    let intent=json!({"id":crate::incident::uuid(),"operation":"rewind","parent":thread,"selected":through,"retained":&turns[..keep],"before":turns.get(keep).map(|t|&t["id"]),"effect":if noop {"noop"}else{"applied"},"archive_primary":app.archive_primary(),"physical":{"identity":native::file_id(&selected_file)?,"path":app.journal}});
     let owner=app.writer.as_ref().ok_or("control-owner-required")?.clone();owner.branch_begin(&intent)?;
+    if noop {let observed=json!({"thread":{"id":thread},"noop":true});owner.branch_observed(&intent,&observed)?;owner.branch_finish(&intent,&observed)?;archive.lineage(&intent,&observed,&observed);return Ok(());}
     let result=app.branch_query("thread/revert",json!({"threadId":thread,"beforeTurnId":turns[keep]["id"]}),Some(&intent),until)?;
     owner.branch_observed(&intent,&result)?;
     if result["thread"]["id"]!=thread || result["thread"]["turns"]!=json!([]) || !result.get("turnsBackwardsCursor").is_some_and(|v|v.is_null() || v.is_string()) || !result.get("itemsBackwardsCursor").is_some_and(|v|v.is_null() || v.is_string()) {return Err("rewind-reply-unknown".into());}
     if app.branch_turns(&thread,Some(&intent),until)?!=turns[..keep] {return Err("rewind-prefix-readback-unknown".into());}
-    owner.branch_finish(&intent,&result)?;Ok(())
+    owner.branch_finish(&intent,&result)?;app.lineage_operation=intent["id"].as_str().map(|id|(id.to_string(),true));archive.lineage(&intent,&result,&result);Ok(())
 }
 
 // Effective native conditions are observed separately from the request, before child input.
@@ -200,7 +208,7 @@ mod tests {
             let Some(descriptor)=entry.descriptor() else {continue;};
             let adapter=registry::builtin(Client(descriptor.name));
             let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
-            let app=App {transport:None,session:AppSession::new(&spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None};
+            let app=App {transport:None,session:AppSession::new(&spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None,lineage_operation:None};
             let mut run=adapter.run(Body::App(Box::new(app)),0,&launch);
             let supported=adapter.client==Client::Codex;
             assert_eq!(adapter.descriptor.has("fork"),supported);assert_eq!(adapter.descriptor.has("rewind"),supported);

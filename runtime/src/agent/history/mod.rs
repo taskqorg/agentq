@@ -1,6 +1,7 @@
 //! Read-only, bounded native history (agentq.md §12; RUNTIME.md history wire contract).
 use super::{Res, native};
 mod steps;
+pub mod lineage;
 mod requests;
 pub mod sessions;
 pub mod stop;
@@ -20,6 +21,7 @@ pub(crate) fn interpretation(format:&str)->&str {if format==CODEX_APP_SERVER_SEL
 
 /// Adapter support is distinct from native qualification. Version and OS are caller readback.
 pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res<Value> {
+    if format==lineage::FORMAT {return Ok(json!({"schema":1,"format":format,"history":"read-only lineage links","native":{"status":"unsupported","reason":"auxiliary observations grant no native Session, resume or control authority"}}));}
     if !FORMATS.contains(&format) && !sources::external(format) { return Err("history transport unsupported".into()); }
     if let Some(spec)=sources::SPECS.iter().find(|s|s.format==format && sources::external(format)){return sources::capability(spec.name);}
     let sidecar = format == "antigravity-sidecar";

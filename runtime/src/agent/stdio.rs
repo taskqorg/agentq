@@ -16,8 +16,9 @@ fn channel<T>(bound:Option<usize>)->(Pipe<T>,Receiver<T>) {match bound {
 pub(crate) struct NativeFrame {
     pub(crate) value:Value,
     pub(crate) raw:Option<Vec<u8>>,
+    pub(crate) journal:Option<crate::archive::JournalRecord>,
 }
-impl NativeFrame {pub(crate) fn parsed(value:Value)->Self {Self {value,raw:None}}}
+impl NativeFrame {pub(crate) fn parsed(value:Value)->Self {Self {value,raw:None,journal:None}}}
 
 type WriteRequest=(Vec<u8>,mpsc::Sender<Res<()>>);
 
@@ -91,7 +92,7 @@ impl Stdio {
                 if failed {
                     if let Err(e)=diagnostics.write_all(&line).and_then(|_|diagnostics.flush()) {let _=output.send(Err(format!("app-server raw evidence log: {e}")));break;}
                 }
-                if output.send(event.map(|value|NativeFrame {value,raw:Some(line)})).is_err() || failed {break;}
+                if output.send(event.map(|value|NativeFrame {value,raw:Some(line),journal:None})).is_err() || failed {break;}
             }
         });
         Ok(Self {child,input:Some(input),events,bounded,stopped:false,#[cfg(windows)] job})

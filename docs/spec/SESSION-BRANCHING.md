@@ -53,7 +53,7 @@ Do not add Node/SDK execution or reimplement its transcript copy/remapping in Ru
 
 The original table at immutable blob `20f490ead4055c94490741a976659e17ba511864` is retained as historical proposal, not a compatible wire contract. Current `Source.parent_step` is a native call/item ID, and local `Step.id`/revision/origin domains do not equal sink reconstruction. Do not overwrite these fields or add the previously proposed keys to the exactly-15-key archive manifest.
 
-[SESSION-LINEAGE-WIRE.md](SESSION-LINEAGE-WIRE.md), token **F300-L20261107-2**, is the single revised portable lineage/condition proposal. It reuses the existing archive range envelope for a read-only sidecar, separates private native evidence from scrubbed archive anchors, and requires centrally reviewed producer/reader integration. No ACK of the Runtime API acknowledges this new field set. Required local lineage durability stays independent of optional delivery.
+[SESSION-LINEAGE-WIRE.md](SESSION-LINEAGE-WIRE.md), token **F300-L20261107-2**, is the single revised portable lineage/condition contract, centrally field/domain ACKed for SOURCE implementation in the current dispatch. It reuses the existing archive range envelope for a read-only sidecar, separates private native evidence from scrubbed archive anchors, and requires centrally reviewed producer/reader integration. This field/domain authorization does not qualify native operations, archive delivery or sink behavior. Required local lineage durability stays independent of optional delivery.
 
 ## Connected caller and ownership inventory
 

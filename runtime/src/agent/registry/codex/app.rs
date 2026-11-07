@@ -10,7 +10,7 @@ pub(super) fn error_response(value:&Value)->bool {
         && value["error"].is_object() && value["error"]["code"].is_i64() && value["error"]["message"].is_string()
 }
 
-pub(crate) struct SessionLine {pub(crate) session:String,pub(crate) turn:Option<String>,pub(crate) raw:Vec<u8>}
+pub(crate) struct SessionLine {pub(crate) session:String,pub(crate) turn:Option<String>,pub(crate) raw:Vec<u8>,pub(crate) journal:Option<crate::archive::JournalRecord>}
 
 /// Caller-owned server transport: preserve all policy arguments and the account, without CLI `exec` flags.
 pub(crate) fn app_server_command(mut base: Command, spec: &Spec) -> Res<Command> {
@@ -59,6 +59,7 @@ pub(crate) struct AppSession {
 
 impl AppSession {
     pub(crate) fn start_failure(&self)->Option<LaunchError> {self.start_failure.clone()}
+    pub(crate) fn project_root(&self)->&Path {&self.spec.root}
     pub(crate) fn history_home(&self)->Option<PathBuf> {spec_home(&self.spec)}
     pub fn new(spec: &Spec) -> Res<Self> {
         if spec.client != Client::Codex || spec.resume && (!native::plain_id(&spec.session) || spec.session == "-") {
@@ -213,7 +214,7 @@ impl AppSession {
         let Ok(text)=std::str::from_utf8(&raw) else {return;};
         if !self.scope_consistent(&frame.value,self.turn.as_deref())
             || super::history::history_session(crate::agent::history::CODEX_APP_SERVER_SELECTED,&frame.value,text).as_deref()!=Some(session) {return;}
-        selected.push(SessionLine {session:session.into(),turn:self.turn.clone(),raw});
+        selected.push(SessionLine {session:session.into(),turn:self.turn.clone(),raw,journal:frame.journal});
     }
 
     fn observe_inner(&mut self, frame:NativeFrame,selected:&mut Vec<SessionLine>) -> Res<()> {
@@ -635,10 +636,11 @@ mod tests {
         let init=app.initialize(json!({})).unwrap();app.observe(&json!({"id":init["id"],"result":{}})).unwrap();
         let open=app.open(json!({})).unwrap();app.observe(&json!({"id":open["id"],"result":{"thread":{"id":"thread"}}})).unwrap();
         let start=app.start_turn(json!({"input":[]})).unwrap();
-        let frame=|raw:&str|NativeFrame {value:serde_json::from_str(raw).unwrap(),raw:Some(raw.as_bytes().to_vec())};
+        let frame=|raw:&str|NativeFrame {value:serde_json::from_str(raw).unwrap(),raw:Some(raw.as_bytes().to_vec()),journal:None};
         let first=concat!(r#" { "params": {"threadId":"thread","turnId":"turn","itemId":"one","delta":"\u4e2d"}, "method":"item/agentMessage/delta" }"#, "\r\n");
         let second="{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread\",\"turnId\":\"turn\",\"itemId\":\"two\",\"delta\":\"é\"}}\n";
-        assert!(app.observe_frame(frame(first)).unwrap().is_empty());
+        let mut original=frame(first);original.journal=Some(crate::archive::JournalRecord {root:spec.root.clone(),path:spec.root.join("fixture-journal"),identity:"original-incarnation".into(),start:7,end:7+first.len() as u64,sha256:crate::sha256_hex(first.as_bytes())});
+        assert!(app.observe_frame(original).unwrap().is_empty());
         let old=second.replace("\"turn\"","\"old\"");assert!(app.observe_frame(frame(&old)).unwrap().is_empty());
         assert!(app.observe_frame(frame(second)).unwrap().is_empty());
         let saved=app.checkpoint();assert!(saved["early"][0].get("raw").is_none());
@@ -646,6 +648,7 @@ mod tests {
         let receipt=json!({"id":start["id"],"result":{"turn":{"id":"turn"}}});
         let selected=app.observe_frame(NativeFrame::parsed(receipt.clone())).unwrap();
         assert_eq!(selected.iter().map(|s|s.raw.as_slice()).collect::<Vec<_>>(),[first.as_bytes(),second.as_bytes()]);
+        assert_eq!(selected[0].journal.as_ref().unwrap().start,7);assert_eq!(selected[0].journal.as_ref().unwrap().identity,"original-incarnation");assert!(selected[1].journal.is_none());
         assert!(selected.iter().all(|s|s.session=="thread" && s.turn.as_deref()==Some("turn")));
         assert!(recovered.observe_frame(NativeFrame::parsed(receipt)).unwrap().is_empty());assert_eq!(app.checkpoint(),recovered.checkpoint());
         let row=json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"x","delta":"owned"}});

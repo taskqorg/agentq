@@ -38,3 +38,6 @@ test = true
 name = "acp"
 path = "tests/acp.rs"
 harness = false
+
+[build-dependencies]
+ring = "0.17"
