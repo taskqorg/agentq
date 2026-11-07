@@ -1747,8 +1747,9 @@ impl Runtime for Adapter {
         let mut native=self.native(spec);
         native.home=Some(spec_home(&native).ok_or("background home unknown")?.canonicalize().map_err(|e|format!("background home unreadable: {e}"))?);
         native.root=native.root.canonicalize().map_err(|e|format!("background project unreadable: {e}"))?;
+        let home_identity=registry::background_home_identity(native.home.as_deref().ok_or("background home unknown")?)?;
         let rows=(self.ops.background_jobs)(base,&native,filtered,budget)?;
-        registry::background_candidates(rows,&native)
+        registry::background_candidates(rows,&native,home_identity)
     }
     fn background_input(&self,candidate:&BackgroundCandidate,input:&str,remaining_bytes:&mut u64)->Res<bool> {
         self.needs("background")?;

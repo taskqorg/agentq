@@ -751,6 +751,10 @@ Missing/unrecognized status is unknown and retains occupancy uncertainty; this i
 `background_input(candidate, input, remaining_bytes)` lazily reads only the bound native job locator. It preserves the existing 1 MiB locator limit and debits the caller's
 aggregate recovery-pass byte budget, including failed reads; it never resets that budget per candidate. Missing, unreadable, malformed or changed session/cwd evidence is an error,
 not false. Actual cwd must equal the candidate and remain within its query project.
+The lazy reader must bind the actual opened locator to the original account: Unix walks canonical home and job components through held directory descriptors without following
+symlinks and retains its home handle and compares that identity before decoding. Changed home, linked components or a nonregular file refuse without returning native content.
+Platforms without a verified descriptor-relative path, including unqualified Windows reparse handling, refuse lazy input/failure as provenance unknown; path-only canonicalization
+is not evidence and never enables fallback.
 
 Intent matching preserves exactly `text.trim() == input`: native surrounding whitespace is trimmed, the submitted reference is unchanged. History matching accepts only one native
 text block or string with that comparison. Neither is byte equality; there is no substring, fuzzy or further normalization. Intent locates a candidate and never proves input

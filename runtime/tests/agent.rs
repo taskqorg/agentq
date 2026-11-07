@@ -2291,6 +2291,7 @@ fn runtime_trait_exposes_native_seams() {
         assert_eq!(seen.cwd(),cwd.canonicalize().unwrap());
         assert!(claude.job(&changed,&bg,"c37eb75a").is_err(),"subtree observation cannot create a control capability");
     }
+    #[cfg(unix)] {
     let path=observed.home().join("jobs/c37eb75a/state.json");std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let locator=json!({"cwd":root,"sessionId":"native-session","intent":"  owned input\n","state":"working","detail":"native failure","providerEnv":{"FIXTURE":"not returned"}});
     let raw=locator.to_string();std::fs::write(&path,&raw).unwrap();let mut budget=(raw.len()*2) as u64;
@@ -2313,6 +2314,19 @@ fn runtime_trait_exposes_native_seams() {
     std::fs::write(&path," ".repeat(1024*1024+1)).unwrap();assert!(claude.background_input(&observed,"owned input",&mut u64::MAX).is_err(),"existing 1 MiB locator limit retained");
     std::fs::remove_file(&path).unwrap();assert!(claude.background_input(&observed,"owned input",&mut 8192).is_err());assert!(claude.background_failure(&observed).is_err());
     std::fs::create_dir(&path).unwrap();assert!(claude.background_input(&observed,"owned input",&mut 8192).is_err(),"nonregular locator must refuse");std::fs::remove_dir(&path).unwrap();
+    // Both lazy projections must refuse foreign locator bytes through either linked file or job directory.
+    let foreign=outside.join("foreign-job");std::fs::create_dir(&foreign).unwrap();std::fs::write(foreign.join("state.json"),&raw).unwrap();
+    let refuses=|| {let mut remaining=8192;assert!(claude.background_input(&observed,"owned input",&mut remaining).is_err());assert_eq!(remaining,8192,"provenance refusal reads no foreign bytes");assert!(claude.background_failure(&observed).is_err());};
+    std::os::unix::fs::symlink(foreign.join("state.json"),&path).unwrap();refuses();std::fs::remove_file(&path).unwrap();
+    let job=path.parent().unwrap();std::fs::remove_dir(job).unwrap();std::os::unix::fs::symlink(&foreign,job).unwrap();refuses();std::fs::remove_file(job).unwrap();std::fs::create_dir(job).unwrap();
+    let foreign_jobs=outside.join("foreign-jobs");std::fs::create_dir_all(foreign_jobs.join("c37eb75a")).unwrap();std::fs::write(foreign_jobs.join("c37eb75a/state.json"),&raw).unwrap();
+    let jobs=job.parent().unwrap();std::fs::remove_dir(job).unwrap();std::fs::remove_dir(jobs).unwrap();std::os::unix::fs::symlink(&foreign_jobs,jobs).unwrap();refuses();std::fs::remove_file(jobs).unwrap();
+    let old_home=observed.home().with_extension("original-account");std::fs::rename(observed.home(),&old_home).unwrap();std::fs::create_dir_all(observed.home().join("jobs/c37eb75a")).unwrap();std::fs::write(&path,&raw).unwrap();refuses();std::fs::remove_dir_all(observed.home()).unwrap();std::fs::rename(old_home,observed.home()).unwrap();
+    }
+    #[cfg(not(unix))] {
+        assert!(claude.background_input(&observed,"owned input",&mut 8192).unwrap_err().contains("secure path unsupported"));
+        assert!(claude.background_failure(&observed).unwrap_err().contains("secure path unsupported"));
+    }
     let mut missing_home=bg.clone();missing_home.home=Some(root.join("missing-account"));assert!(claude.background_candidates(Command::new(exe()),&missing_home,false,Duration::from_secs(30)).is_err(),"explicit account never falls back");
     assert!(codex.background_input(&observed,"owned input",&mut 8192).is_err());
     assert_eq!(bg.owner.as_ref().unwrap().checkpoint().unwrap(),owner_before);

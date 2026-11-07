@@ -549,7 +549,7 @@ impl BackgroundRow {
 
 /// Observation only: no public constructor, raw rows, checkpoint or conversion to execution authority.
 #[derive(Clone, Debug)]
-pub struct BackgroundCandidate {runtime:&'static str,home:PathBuf,project:PathBuf,row:BackgroundRow}
+pub struct BackgroundCandidate {runtime:&'static str,home:PathBuf,home_identity:Option<std::sync::Arc<File>>,project:PathBuf,row:BackgroundRow}
 impl BackgroundCandidate {
     pub fn runtime(&self)->&str {self.runtime}
     pub fn provenance(&self)->&str {"native-background-jobs"}
@@ -565,9 +565,7 @@ impl BackgroundCandidate {
 
     fn locator<T:serde::de::DeserializeOwned>(&self,remaining:Option<&mut u64>)->Res<T> {
         let id=self.id().filter(|id|plain_id(id)).ok_or("background input requires a background job")?;
-        let path=self.home.join("jobs").join(id).join("state.json");
-        if !std::fs::metadata(&path).map_err(|e|format!("background locator unavailable: {e}"))?.is_file() {return Err("background locator nonregular".into());}
-        let file=File::open(path).map_err(|e|format!("background locator unreadable: {e}"))?;
+        let file=self.locator_file(id)?;
         let meta=file.metadata().map_err(|e|e.to_string())?;
         if !meta.is_file() {return Err("background locator nonregular".into());}
         let value=if let Some(remaining)=remaining {
@@ -580,6 +578,17 @@ impl BackgroundCandidate {
             value.map_err(|e|format!("background locator invalid: {e}"))?
         } else {serde_json::from_reader(file).map_err(|e|format!("background locator invalid: {e}"))?};
         Ok(value)
+    }
+    fn locator_file(&self,id:&str)->Res<File> {
+        #[cfg(unix)] {
+            let home=background_directory(&self.home)?;
+            let bound=self.home_identity.as_ref().ok_or("background locator provenance unknown")?;
+            if super::super::super::native::file_id(&home)?!=super::super::super::native::file_id(bound)? {return Err("background locator provenance unknown: account changed".into());}
+            let jobs=background_open_at(&home,OsStr::new("jobs"),true)?;
+            let job=background_open_at(&jobs,OsStr::new(id),true)?;
+            background_open_at(&job,OsStr::new("state.json"),false)
+        }
+        #[cfg(not(unix))] {let _=id;Err("background locator provenance unknown: secure path unsupported".into())}
     }
     fn validate_locator(&self,cwd:&str,session:&str)->Res<()> {
         let cwd=Path::new(cwd).canonicalize().map_err(|e|format!("background locator cwd unreadable: {e}"))?;
@@ -605,11 +614,43 @@ struct BackgroundInput {cwd:String,#[serde(rename="sessionId")] session:String,i
 #[derive(serde::Deserialize)]
 struct BackgroundFailure {cwd:String,#[serde(rename="sessionId")] session:String,state:String,detail:Option<String>}
 
-pub(crate) fn background_candidates(rows:Vec<Value>,spec:&Spec)->Res<Vec<BackgroundCandidate>> {
+pub(crate) fn background_candidates(rows:Vec<Value>,spec:&Spec,home_identity:Option<std::sync::Arc<File>>)->Res<Vec<BackgroundCandidate>> {
     if spec.client!=Client::Claude {return Err("background requires Claude".into());}
     let home=spec.home.clone().ok_or("background home unknown")?;
     let project=spec.root.clone();
-    rows.iter().map(|row|Ok(BackgroundCandidate {runtime:spec.client.code(),home:home.clone(),project:project.clone(),row:BackgroundRow::read(row)?})).collect()
+    let current=background_home_identity(&home)?;
+    if current.as_ref().map(|f|super::super::super::native::file_id(f)).transpose()?!=home_identity.as_ref().map(|f|super::super::super::native::file_id(f)).transpose()? {return Err("background locator provenance unknown: account changed".into());}
+    rows.iter().map(|row|Ok(BackgroundCandidate {runtime:spec.client.code(),home:home.clone(),home_identity:home_identity.clone(),project:project.clone(),row:BackgroundRow::read(row)?})).collect()
+}
+
+pub(crate) fn background_home_identity(home:&Path)->Res<Option<std::sync::Arc<File>>> {
+    #[cfg(unix)] {background_directory(home).map(|file|Some(std::sync::Arc::new(file)))}
+    #[cfg(not(unix))] {let _=home;Ok(None)}
+}
+
+#[cfg(unix)]
+fn background_directory(path:&Path)->Res<File> {
+    let mut directory=File::open("/").map_err(|_|"background locator provenance unknown")?;
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir=>{},
+            std::path::Component::Normal(name)=>directory=background_open_at(&directory,name,true)?,
+            _=>return Err("background locator provenance unknown: noncanonical home".into()),
+        }
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn background_open_at(parent:&File,name:&OsStr,directory:bool)->Res<File> {
+    use std::os::{fd::{AsRawFd,FromRawFd},unix::ffi::OsStrExt};
+    let name=std::ffi::CString::new(name.as_bytes()).map_err(|_|"background locator provenance unknown")?;
+    let flags=libc::O_RDONLY|libc::O_CLOEXEC|libc::O_NOFOLLOW|if directory {libc::O_DIRECTORY} else {libc::O_NONBLOCK};
+    // The held parent pins the directory; O_NOFOLLOW refuses replacement links before any native bytes are read.
+    let fd=unsafe {libc::openat(parent.as_raw_fd(),name.as_ptr(),flags)};
+    if fd<0 {return Err("background locator provenance unknown: secure open refused".into());}
+    // SAFETY: openat returned a new owned descriptor, transferred exactly once to File.
+    Ok(unsafe {File::from_raw_fd(fd)})
 }
 
 /// Validated native readiness. This is neither accepted input nor an execution grant.
@@ -904,6 +945,17 @@ fn main_worktree(root:&Path)->Option<PathBuf> {
 #[cfg(test)]
 mod preparation_tests {
     use super::*;
+    #[test]
+    #[cfg(unix)]
+    fn locator_directory_handle_pins_original_account_across_parent_replacement() {
+        let root=crate::scratch("locator-held-parent").canonicalize().unwrap();let home=root.join("account");let job=home.join("jobs/job");let foreign=root.join("foreign");
+        std::fs::create_dir_all(&job).unwrap();std::fs::create_dir(&foreign).unwrap();std::fs::write(job.join("state.json"),"original").unwrap();std::fs::write(foreign.join("state.json"),"foreign").unwrap();
+        let held=background_directory(&job.canonicalize().unwrap()).unwrap();
+        std::fs::rename(&job,home.join("original-job")).unwrap();std::os::unix::fs::symlink(&foreign,&job).unwrap();
+        let mut file=background_open_at(&held,OsStr::new("state.json"),false).unwrap();let mut text=String::new();file.read_to_string(&mut text).unwrap();assert_eq!(text,"original");
+        assert!(background_directory(&job).is_err(),"fresh traversal refuses the replacement symlink");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn inherited_project_trust_stops_at_git_root_and_uses_registered_worktrees() {
         let root=crate::scratch("claude-trust-parents").canonicalize().unwrap();let project=root.join("project");let sub=project.join("sub");std::fs::create_dir_all(sub.join(".git")).unwrap();
