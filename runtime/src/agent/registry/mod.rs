@@ -240,6 +240,11 @@ mod tests {
             assert!(runtime(name).is_none());
             assert!(!runtimes().iter().any(|r|r.descriptor().name==name));
             assert!(native_client(name).is_none(),"native CLI seams cannot bypass qualification");
+            for (capability,flow) in [("login-browser",LoginFlow::Browser),("login-device",LoginFlow::Device)] {
+                assert!(!e.descriptor().unwrap().has(capability));
+                let options=LoginOptions::new(Some(std::env::temp_dir().join(crate::incident::uuid())),flow);
+                assert!(matches!(e.builtin.unwrap().login_start(&options),Err(Failure::Refused(Cause("login-flow-unsupported")))));
+            }
         }
         validate().unwrap();
     }
