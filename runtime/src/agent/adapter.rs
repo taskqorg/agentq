@@ -15,6 +15,8 @@ mod ownership;
 pub use ownership::{SessionStore,SessionOwner,NativeProcess,OwnerObservation,ResumeCommand};
 #[path="activity.rs"]
 mod activity;
+#[path="branching.rs"]
+mod branching;
 pub use activity::ActivityObservation;
 #[path="lifetime.rs"]
 mod lifetime;
@@ -666,7 +668,7 @@ impl App {
 
     /// Initialize, open the thread and, with input, start the first turn.
     /// A failed handshake stops a plain child; a protected frontend stays with its host.
-    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch, owner:&SessionOwner) -> Res<App> {
+    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch, owner:&SessionOwner,before_input:Option<&mut dyn FnMut(&mut App)->Res<()>>) -> Res<App> {
         let mut session = match AppSession::new(spec) {
             Ok(s) => s,
             Err(e) => { if let Transport::Plain(s) = &mut transport { let _ = s.kill(); } return Err(e); }
@@ -679,23 +681,30 @@ impl App {
             Some((super::control::Requests::new(),options.open(&l.log).map_err(|e|format!("control-log: {e}"))?))
         }else{None};
         let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval,capture:owned.then(||crate::archive::stream_path(l.install.as_deref(),&l.log)) };
-        let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner);
+        let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner,before_input);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
     }
 
-    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch, descriptor: &Descriptor,owner:&SessionOwner) -> Res<()> {
+    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch, descriptor: &Descriptor,owner:&SessionOwner,before_input:Option<&mut dyn FnMut(&mut App)->Res<()>>) -> Res<()> {
         let params = if self.owned { turn_thread(l)? } else { thread_params(l, thread)? };
         let until = reply_deadline(l);
         let request = self.session.initialize(initialize.clone())?;
         self.exchange(request, until)?;
         let initialized = self.session.initialized()?;
         self.send(&initialized,Some(until))?;
-        let request = self.session.open(params)?;
+        let fork=owner.branch_params()?;
+        let request = if let Some(params)=&fork {self.session.fork(params.clone())?}else{self.session.open(params)?};
         self.exchange(request, until)?;
         if !self.session.ready() { return Err("app-server thread not ready".into()); }
+        if let Some(params)=&fork {
+            if self.session.session()==params["threadId"].as_str() {return Err("fork-child-identity-unknown".into());}
+            let reply=self.pending.iter().rev().find(|(m,_)|m.get("result").is_some_and(|r|r["thread"].is_object())).ok_or("fork-child-resume-unknown")?;
+            branching::child_conditions(&reply.0["result"],l)?;
+        }
         owner.bind(self.session.session().ok_or("session-owner-unknown: app thread missing")?)?;
         if self.control.is_some() {owner.hold_controls()?;}
+        if let Some(before_input)=before_input {before_input(self)?;}
         if !l.parts.is_empty() { self.start(input_items(descriptor, &l.parts).map_err(|e|e.to_string())?, until)?; }
         else if !l.input.is_empty() { self.input(&l.input, until)?; }
         Ok(())
@@ -849,6 +858,9 @@ pub trait Runtime: Send + Sync {
     }
     fn launch(&self, launch: &Launch) -> Res<Run>;
     fn resume(&self, session: &str, launch: &Launch) -> Res<Run>;
+    /// Native conversation prefix operations; selection is observation, never writer authority.
+    fn fork(&self, _source: &mut Run, _through: Option<&super::history::Step>, _launch: &Launch) -> Result<Run, Failure> {Err(Failure::Refused(Cause("fork-unsupported")))}
+    fn rewind(&self, _source: &mut Run, _through: Option<&super::history::Step>) -> Result<(), Failure> {Err(Failure::Refused(Cause("rewind-unsupported")))}
     /// Start the next turn of a session run with exactly `parts`, once; see `Failure` for refusals.
     fn input(&self, run: &mut Run, parts: &[Part]) -> Result<(), Failure>;
     /// Read-only login identity of a session run (capability `account`); never refreshes or writes a credential.
@@ -1107,6 +1119,7 @@ impl Adapter {
 
     fn seam_readiness(&self, command: &Command, spec: &NativeSpec, log: Option<&Path>, input: &str) -> Res<Readiness> {
         spec.validate_session()?;
+        spec.owner.as_ref().ok_or("session-owner-required")?.verify(&self.native(spec))?;
         (self.ops.validate)(&spec.args,&[],&Policy::default())?;
         let mut launch=Launch::new(&spec.root,log.map(Path::to_path_buf).unwrap_or_else(||spec.root.join(".agentq-preflight-log")),input,"agentq");
         launch.home=spec.home.clone();
@@ -1186,7 +1199,9 @@ impl Adapter {
         let mut run = self.run(body, progress, optimization, l); run.readiness = readiness.clone(); run
     }
 
-    fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {
+    fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {self.start_lineage(l,session,None,None)}
+
+    fn start_lineage(&'static self, l: &Launch, session: Option<&str>, lineage: Option<&Value>, mut before_input:Option<&mut dyn FnMut(&mut App)->Res<()>>) -> Res<Run> {
         let name = self.descriptor.name;
         if l.controls && (l.mode!=Mode::Turn || !self.descriptor.has("respond")) {return Err("controls-unsupported".into());}
         if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability())); }
@@ -1199,7 +1214,8 @@ impl Adapter {
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let mut owner_spec=spec.clone();
         if session.is_none() && matches!(l.mode,Mode::Background) {owner_spec.session="-".into();}
-        let owner=l.session_store.acquire(&owner_spec,session.is_none(),None,l.lifetime)?;
+        let owner=l.session_store.acquire(&owner_spec,session.is_none() || lineage.is_some(),None,l.lifetime)?;
+        if let Some(lineage)=lineage {owner.branch_lineage(lineage)?;}
         let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process,matches!(l.mode,Mode::Turn) && self.descriptor.has("process-lifetime"))?;let l=&owned_launch;
         if let Some(config)=acp {
             if l.mode!=Mode::Turn {return Err("mode unsupported by ACP".into());}
@@ -1231,7 +1247,7 @@ impl Adapter {
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
                     let command=(self.ops.app_command)(command,&spec)?;
                     let server=if l.controls {AppServer::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?}else{AppServer::spawn(command,&l.log,&l.process)?};
-                    let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l,&owner)?;
+                    let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l,&owner,before_input.take())?;
                     let stop_id=app.control.as_ref().map(|(requests,_)|requests.run.clone());
                     let mut run=self.checked_run(&readiness,Body::App(Box::new(app)),0,optimization,l);if let Some(id)=stop_id {run.stop_id=id;}run.owner=Some(owner);return Ok(run);
                 }
@@ -1267,7 +1283,7 @@ impl Adapter {
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
                 let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
-                let app = App::open(&spec, Transport::Plain(server), initialize, thread, l,&owner)?;
+                let app = App::open(&spec, Transport::Plain(server), initialize, thread, l,&owner,None)?;
                 Ok(self.checked_run(&readiness, Body::App(Box::new(app)), 0, optimization, l))
             }
         };
@@ -1276,6 +1292,8 @@ impl Adapter {
 }
 
 impl Runtime for Adapter {
+    fn fork(&self,source:&mut Run,through:Option<&super::history::Step>,launch:&Launch)->Result<Run,Failure> {branching::fork(self,source,through,launch)}
+    fn rewind(&self,source:&mut Run,through:Option<&super::history::Step>)->Result<(),Failure> {branching::rewind(self,source,through)}
     fn login_start(&self,options:&LoginOptions)->Result<LoginSession,Failure> {sign_in::start(self,options)}
     fn stop_event(&self, run: &mut Run, bytes: u64) -> Res<Option<super::history::stop::StopEvent>> {
         super::history::stop::observe(self, run, bytes)
@@ -1733,7 +1751,7 @@ pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, 
     owner.spawned(server.id())?;
     if !l.input.is_empty() || !l.parts.is_empty() {owner.submit()?;}
     let optimization = server.optimization();
-    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner)?;
+    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner,None)?;
     let mut run=adapter.run(Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);Ok(run)
 }
 
@@ -1866,6 +1884,8 @@ mod tests {
             probes.insert("respond",matches!(runtime.respond(&mut run,Control::Reply{id:json!("missing"),option:None}),Err(Failure::Refused(Cause("respond-transport-unsupported")))));
             probes.insert("steer",matches!(runtime.steer(&mut run,&[Part::Text("probe".into())]),Err(Failure::Refused(Cause("steer-transport-unsupported")))));
             probes.insert("compact",matches!(runtime.compact(&mut run),Err(Failure::Refused(Cause("compact-transport-unsupported")))));
+            probes.insert("fork",matches!(runtime.fork(&mut run,None,&launch()),Err(Failure::Refused(Cause("branch-transport-unsupported")))));
+            probes.insert("rewind",matches!(runtime.rewind(&mut run,None),Err(Failure::Refused(Cause("branch-transport-unsupported")))));
             probes.insert("set-option",!matches!(runtime.set_option(&mut run,Control::Model("probe".into())),Err(Failure::Refused(Cause("set-option-unsupported")))));
             let quotas=concat!(r#"{"type":"rate_limit_event","rate_limit_info":{"rateLimitType":"five_hour","utilization":0.5,"resetsAt":9999999999}}"#,"\n",
                 r#"{"type":"event_msg","payload":{"rate_limits":{"primary":{"used_percent":50,"window_minutes":300,"resets_at":9999999999}}}}"#);

@@ -43,7 +43,7 @@ impl SessionStore {
                 if ["runtime","root","home"].iter().any(|k|row[*k]!=expected[*k]) {continue;}
                 let _pending=lock(&pending.with_extension("lock")).map_err(|e|format!("session-owner-unknown: pending admission: {e}"))?;
                 let row=read(&pending)?.ok_or("session-owner-unknown: pending record disappeared")?;
-                scope(&row,spec)?;
+                scope(&row,spec)?;mutation_clear(&row)?;
                 if stopped(&root,&row)? {return Err("session-owner-unknown: unresolved native stop".into());}
                 require_scope_absent(&root,&row)?;
                 if process(&row["native"])?.map(|n|n.live()).transpose()?.unwrap_or(false) {
@@ -52,8 +52,9 @@ impl SessionStore {
             }
         }
         let path=path(&root,spec.client.code(),session);let _guard=lock(&path.with_extension("lock"))?;
-        if let Some(row)=read(&path)? {
-            scope(&row,spec)?;
+        let previous=read(&path)?;
+        if let Some(row)=&previous {
+            scope(row,spec)?;mutation_clear(row)?;
             if stopped(&root,&row)? {return Err("session-owner-unknown: unresolved native stop".into());}
             if row["phase"]!="idle" {
                 require_scope_absent(&root,&row)?;
@@ -64,6 +65,7 @@ impl SessionStore {
         for process in native {if process.live()? {return Err("session-busy: live native writer".into());}}
         let reason=Some("native-writer-unverifiable".to_string());
         let mut row=binding(spec)?;row["session"]=json!(session);row["phase"]=json!("idle");row["native_reason"]=json!(reason);
+        row["lineage"]=previous.as_ref().map(|r|r["lineage"].clone()).unwrap_or(Value::Null);
         save(&path,&row)?;
         Ok(OwnerObservation {state:"adopted".into(),reason})
     }
@@ -113,6 +115,9 @@ impl SessionStore {
         row["control_writer"]=saved.map(|_|old.as_ref().unwrap()["control_writer"].clone()).unwrap_or(Value::Null);
         row["native"]=saved.map(|_|old.as_ref().unwrap()["native"].clone()).unwrap_or(Value::Null);
         row["native_reason"]=old.as_ref().map(|r|r["native_reason"].clone()).unwrap_or(Value::Null);
+        row["mutation_evidence"]=old.as_ref().map(|r|r["mutation_evidence"].clone()).unwrap_or(Value::Null);
+        row["mutation"]=old.as_ref().map(|r|r["mutation"].clone()).unwrap_or(Value::Null);
+        row["lineage"]=old.as_ref().map(|r|r["lineage"].clone()).unwrap_or(Value::Null);
         row["binding"]=old.as_ref().map(|r|r["binding"].clone()).unwrap_or(Value::Null);
         if stopped(&root,&row)? {row["phase"]=json!("stop-unresolved");row["native_reason"]=json!("native-subtree-stop-unverified");}
         if saved.is_none() {if let Some(old)=&old {retain_scope(&root,old)?;}}
@@ -244,13 +249,19 @@ fn request_stop(root:&Path,row:&Value,native:&NativeProcess)->Res<()> {
 
 struct Owned {root:PathBuf,path:PathBuf,row:Value,previous:Option<Value>,guard:Option<coreq::file_lock::Lock>,binding:Option<(PathBuf,coreq::file_lock::Lock)>}
 impl Owned {
+    fn authority(&self)->Res<()> {
+        self.current()?;
+        if self.guard.is_none() || self.binding.is_some() || stopped(&self.root,&self.row)? || matches!(self.row["phase"].as_str(),Some("unconfirmed"|"stop-unresolved")) {return Err("control-owner-unavailable".into());}
+        let native=process(&self.row["native"])?.ok_or("control-native-identity-unknown")?;
+        if NativeProcess::read(native.pid)?.as_ref()!=Some(&native) {return Err("control-native-identity-changed".into());}Ok(())
+    }
     fn current(&self)->Res<()> {
         let row=read(&self.path)?.ok_or("session-owner-unknown: ownership record missing")?;
         if row!=self.row {return Err("control-owner-changed".into());}Ok(())
     }
 }
 impl Drop for Owned {fn drop(&mut self) {
-    if self.guard.is_some() && self.row["phase"]=="prepared" && self.row["native"].is_null() && self.current().is_ok() {
+    if self.guard.is_some() && self.row["branch_admission"]!=true && self.row["phase"]=="prepared" && self.row["native"].is_null() && self.current().is_ok() {
         if let Some(previous)=&self.previous {let _=save(&self.path,previous);} else {let _=std::fs::remove_file(&self.path);}
     }
 }}
@@ -259,15 +270,35 @@ pub struct SessionOwner(Arc<Mutex<Owned>>);
 impl std::fmt::Debug for SessionOwner {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.debug_struct("SessionOwner").finish_non_exhaustive()}}
 impl SessionOwner {
     fn with<T>(&self,f:impl FnOnce(&mut Owned)->Res<T>)->Res<T> {{let mut owned=self.0.lock().map_err(|_|"session-owner-unknown: poisoned owner")?;if owned.guard.is_some() {owned.current()?;}f(&mut owned)}}
-    pub fn observation(&self)->OwnerObservation {self.with(|o| {if o.guard.is_none() {o.current()?;}if stopped(&o.root,&o.row)? {return Ok(OwnerObservation {state:"unknown".into(),reason:Some("native-subtree-stop-unverified".into())});}Ok(OwnerObservation {state:if o.row["phase"]=="idle" {"idle"} else if o.row["native"].is_null() || o.row["phase"]=="unconfirmed" {"unknown"} else {"owned"}.into(),reason:o.row["native_reason"].as_str().map(String::from).or_else(||o.row["native"].is_null().then(||"native-writer-unidentified".into()))})}).unwrap_or_default()}
+    pub fn observation(&self)->OwnerObservation {self.with(|o| {if o.guard.is_none() {o.current()?;}if !o.row["mutation"].is_null() {return Ok(OwnerObservation {state:"unknown".into(),reason:Some("session-mutation-unknown".into())});}if stopped(&o.root,&o.row)? {return Ok(OwnerObservation {state:"unknown".into(),reason:Some("native-subtree-stop-unverified".into())});}Ok(OwnerObservation {state:if o.row["phase"]=="idle" {"idle"} else if o.row["native"].is_null() || o.row["phase"]=="unconfirmed" {"unknown"} else {"owned"}.into(),reason:o.row["native_reason"].as_str().map(String::from).or_else(||o.row["native"].is_null().then(||"native-writer-unidentified".into()))})}).unwrap_or_default()}
     pub fn checkpoint(&self)->Res<Value> {self.with(|o|Ok(json!({"session":o.row["session"],"token":o.row["token"],"lifetime":o.row["lifetime"]})))}
-    pub(crate) fn control(&self)->Res<()> {self.with(|o| {
-        if o.guard.is_none() || o.binding.is_some() || stopped(&o.root,&o.row)? || matches!(o.row["phase"].as_str(),Some("unconfirmed"|"stop-unresolved")) {return Err("control-owner-unavailable".into());}
-        let native=process(&o.row["native"])?.ok_or("control-native-identity-unknown")?;
-        if NativeProcess::read(native.pid)?.as_ref()!=Some(&native) {return Err("control-native-identity-changed".into());}
-        Ok(())
+    pub(crate) fn control(&self)->Res<()> {self.with(|o| {o.authority()?;mutation_clear(&o.row)})}
+    pub(super) fn branch_begin(&self,intent:&Value)->Res<()> {self.with(|o| {
+        o.authority()?;mutation_clear(&o.row)?;
+        let mut row=o.row.clone();row["mutation"]=intent.clone();row["mutation_evidence"]=Value::Null;save(&o.path,&row)?;o.row=row;Ok(())
     })}
-    pub(super) fn verify(&self,spec:&Spec)->Res<()> {self.with(|o| {scope(&o.row,spec)?;if stopped(&o.root,&o.row)? {return Err("session-owner-unknown: unresolved native stop".into());}if spec.resume && o.row["session"]!=spec.session {return Err("session-owner-unknown: session differs".into());}Ok(())})}
+    pub(super) fn branch_authority(&self,intent:&Value)->Res<()> {self.with(|o| {
+        o.authority()?;if o.row["mutation"]!=*intent {return Err("mutation-owner-changed".into());}Ok(())
+    })}
+    pub(super) fn branch_observed(&self,intent:&Value,evidence:&Value)->Res<()> {self.with(|o| {
+        if o.guard.is_none() {return Err("control-owner-unavailable".into());}if o.row["mutation"]!=*intent {return Err("mutation-owner-changed".into());}
+        let mut row=o.row.clone();row["mutation_evidence"]=evidence.clone();save(&o.path,&row)?;o.row=row;Ok(())
+    })}
+    pub(super) fn branch_finish(&self,intent:&Value,evidence:&Value)->Res<()> {self.with(|o| {
+        o.authority()?;if o.row["mutation"]!=*intent {return Err("mutation-owner-changed".into());}
+        let mut row=o.row.clone();let mut entries=row["lineage"].as_array().cloned().unwrap_or_default();entries.push(json!({"intent":intent,"native":row["mutation_evidence"],"observed":evidence}));row["lineage"]=json!(entries);row["mutation"]=Value::Null;row["mutation_evidence"]=Value::Null;
+        save(&o.path,&row)?;o.row=row;Ok(())
+    })}
+    pub(super) fn branch_lineage(&self,lineage:&Value)->Res<()> {self.with(|o| {
+        if o.guard.is_none() || o.row["phase"]!="prepared" || !o.row["native"].is_null() {return Err("child-admission-unavailable".into());}
+        let mut row=o.row.clone();row["lineage"]=json!([lineage]);row["branch_admission"]=json!(true);save(&o.path,&row)?;o.row=row;Ok(())
+    })}
+    pub(super) fn branch_params(&self)->Res<Option<Value>> {self.with(|o|Ok((o.row["branch_admission"]==true).then(||o.row["lineage"][0]["fork_params"].clone())))}
+    pub(super) fn branch_scope(&self,store:&SessionStore,spec:&Spec)->Res<()> {self.with(|o| {
+        scope(&o.row,spec)?;
+        if o.root!=store.directory()? {return Err("branch-session-store-differs".into());}Ok(())
+    })}
+    pub(super) fn verify(&self,spec:&Spec)->Res<()> {self.with(|o| {scope(&o.row,spec)?;mutation_clear(&o.row)?;if stopped(&o.root,&o.row)? {return Err("session-owner-unknown: unresolved native stop".into());}if spec.resume && o.row["session"]!=spec.session {return Err("session-owner-unknown: session differs".into());}Ok(())})}
     pub(super) fn spawned(&self,pid:u32)->Res<()> {self.with(|o| {
         if o.guard.is_none() {return Err("session-owner-unknown: admission released".into());}
         let native=NativeProcess::read(pid)?.ok_or("session-owner-unknown: child identity unavailable")?;
@@ -286,6 +317,7 @@ impl SessionOwner {
         }
     })}
     pub(super) fn submit(&self)->Res<()> {self.with(|o| {
+        mutation_clear(&o.row)?;
         if stopped(&o.root,&o.row)? {return Err("session-owner-unknown: unresolved native stop".into());}
         if o.binding.is_some() {return Err("session-owner-unknown: binding write incomplete".into());}
         if o.guard.is_none() {
@@ -324,6 +356,7 @@ impl SessionOwner {
     })}
     /// Known native turn completion does not release a controlled native writer.
     pub fn finish(&self,report:&Report)->Res<()> {self.with(|o| {
+        if !o.row["mutation"].is_null() {return Ok(());}
         let retain=o.row["control_writer"]==true;
         if report.session.as_deref().zip(o.row["session"].as_str()).is_some_and(|(seen,owned)|seen!=owned) {return Err("session-owner-unknown: native session differs".into());}
         if o.guard.is_none() {return Ok(());}
@@ -396,7 +429,9 @@ fn lock(path:&Path)->Res<coreq::file_lock::Lock> {coreq::file_lock::try_lock(pat
 fn read(path:&Path)->Res<Option<Value>> {match std::fs::read(path) {Ok(b)=>serde_json::from_slice(&b).map(Some).map_err(|_|"session-owner-unknown: unreadable record".into()),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(e)=>Err(format!("session-owner-unknown: {e}"))}}
 fn save(path:&Path,row:&Value)->Res<()> {coreq::write_durable(path,serde_json::to_vec(row).map_err(|e|e.to_string())?)}
 fn process(value:&Value)->Res<Option<NativeProcess>> {if value.is_null() {Ok(None)} else {serde_json::from_value(value.clone()).map(Some).map_err(|_|"session-owner-unknown: invalid native identity".into())}}
+fn mutation_clear(row:&Value)->Res<()> {if row["mutation"].is_null() {Ok(())} else {Err("session-mutation-unknown: original operation retained".into())}}
 fn idle(row:&Value)->Res<()> {
+    mutation_clear(row)?;
     if row["phase"]=="idle" {return Ok(());}
     match process(&row["native"])? {Some(native) if !native.live()?=>Err("session-owner-unknown: native writer ended without completion; adopt explicitly".into()),Some(_)=>Err("session-busy: native writer alive".into()),None=>Err("session-owner-unknown: native writer not identified".into())}
 }

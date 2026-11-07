@@ -11,6 +11,8 @@ mod protected;
 #[path="support/signin.rs"]
 mod signin;
 
+#[path="support/branching.rs"]
+mod branching;
 #[path="support/control.rs"]
 mod control;
 #[path="support/claude_control.rs"]
@@ -22,6 +24,7 @@ pub(crate) fn main() {
     if std::env::var_os("AGENTQ_FAKE_LOGIN").is_some() {return signin::fake();}
     if std::env::var_os("AGENTQ_NATIVE_LOGIN_PROOF").is_some() {return signin::native_proof();}
     if std::env::var_os("AGENTQ_CLAUDE_CONTROL_FIXTURE").is_some() {return claude_control::server();}
+    if std::env::var_os("AGENTQ_BRANCH_FIXTURE").is_some() {return branching::server();}
     if std::env::var_os("AGENTQ_CONTROL_FIXTURE").is_some() {return control::server();}
     #[cfg(unix)]
     if std::env::args().nth(1).as_deref()==Some("--claude-control-owner") {return claude_control::owner(Path::new(&std::env::args_os().nth(2).unwrap()));}
@@ -54,6 +57,9 @@ pub(crate) fn main() {
     }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
+        ("codex_branch_prefix_keeps_parent_files_and_frozen_report",branching::prefix),
+        ("codex_branch_refusals_precede_native_mutation",branching::refusals),
+        ("codex_branch_unknown_mutation_stays_durably_fenced",branching::uncertain),
         ("account_login_controller_loss_never_reopens_a_live_home_writer",signin::home_processes),
         ("account_login_callback_authority_is_shared_between_processes",signin::callback_processes),
         ("account_login_startup_and_pipe_completion_stay_distinct",signin::startup_and_pipes),

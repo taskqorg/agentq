@@ -84,8 +84,17 @@ impl AppSession {
         self.request(if self.spec.resume { "thread/resume" } else { "thread/start" }, params)
     }
 
+    pub(crate) fn fork(&mut self,params:Value)->Res<Value> {
+        if !self.initialized || self.thread.is_some() {return Err("app-server thread not ready to fork".into());}
+        self.request("thread/fork",params)
+    }
+
     pub fn ready(&self) -> bool { self.ready && self.fault.is_none() }
     pub fn session(&self) -> Option<&str> { self.thread.as_deref() }
+    pub(crate) fn branch_scope(&self,spec:&Spec)->Res<()> {
+        if self.spec.root!=spec.root || spec_home(&self.spec)!=spec_home(spec) || self.spec.env!=spec.env {return Err("branch-source-scope-differs".into());}Ok(())
+    }
+    pub(crate) fn idle(&self)->bool {self.ready() && self.pending.is_none() && (!self.active || self.terminal.is_some())}
     pub(crate) fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
     pub(crate) fn control_pending(&self)->bool {self.pending.is_some_and(|(_,method)|matches!(method,"turn/steer"|"thread/compact/start"))}
 
@@ -195,7 +204,7 @@ impl AppSession {
                 let result = &message["result"];
                 match method {
                     "initialize" => self.initialized = true,
-                    "thread/start" | "thread/resume" => {
+                    "thread/start" | "thread/resume" | "thread/fork" => {
                         let thread = result["thread"]["id"].as_str().filter(|s| native::plain_id(s)).ok_or("app-server returned no thread")?;
                         if self.spec.resume && thread != self.spec.session { return Err("app-server resumed another session".into()); }
                         self.thread = Some(thread.into()); self.ready = true;
@@ -349,7 +358,7 @@ impl AppSession {
         let mut s = Self::new(spec)?;
         s.next = v["next"].as_u64().filter(|n| *n > 0).ok_or("app-server recovery request invalid")?;
         if !v["pending"].is_null() {
-            let method = match v["pending"][1].as_str() { Some("initialize") => "initialize", Some("thread/start") => "thread/start", Some("thread/resume") => "thread/resume", Some("turn/start") => "turn/start", Some("turn/interrupt") => "turn/interrupt", Some("turn/steer")=>"turn/steer",Some("thread/compact/start")=>"thread/compact/start",_ => return Err("app-server recovery method invalid".into()) };
+            let method = match v["pending"][1].as_str() { Some("initialize") => "initialize", Some("thread/start") => "thread/start", Some("thread/resume") => "thread/resume", Some("turn/start") => "turn/start", Some("turn/interrupt") => "turn/interrupt", Some("turn/steer")=>"turn/steer",Some("thread/compact/start")=>"thread/compact/start",Some("thread/read")=>"thread/read",Some("thread/turns/list")=>"thread/turns/list",Some("thread/goal/get")=>"thread/goal/get",Some("thread/fork")=>"thread/fork",Some("thread/revert")=>"thread/revert",_ => return Err("app-server recovery method invalid".into()) };
             s.pending = Some((v["pending"][0].as_u64().ok_or("app-server recovery id invalid")?,method));
         }
         s.initialized = v["initialized"].as_bool().ok_or("app-server recovery state invalid")?;
