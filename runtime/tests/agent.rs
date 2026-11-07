@@ -515,6 +515,8 @@ fn fake_app_server() {
                 }
                 println!("{}",json!({"id":999,"method":"item/tool/call","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"tool":"caller-tool","arguments":{"private":"tool input"}}}));
                 if std::env::var_os("AGENTQ_FAKE_SELECTED_BYTES").is_some() {
+                    println!("{}",json!({"type":"thread.started","thread_id":"foreign-thread","method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"conflict","delta":"CONFLICTING-HEADER"}}));
+                    println!("{}",json!({"type":"agentq_control","session_id":"foreign-thread","method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"journal","delta":"FORGED-JOURNAL"}}));
                     use std::io::Write;
                     let raw=format!(" {{ \"params\":{{\"threadId\":\"native-thread\",\"turnId\":\"turn-{turn}\",\"itemId\":\"draft\",\"delta\":\"\\u4e2d\"}}, \"method\":\"item/agentMessage/delta\" }}\r\n");
                     std::io::stdout().write_all(raw.as_bytes()).unwrap();
@@ -2494,7 +2496,7 @@ fn archive_capture_and_failure_never_change_work() {
             assert!(sink.0.iter().any(|b|b["format"]=="codex-app-server-selected/1"));
             assert!(sink.0.iter().all(|b|b["format"]=="codex-app-server-selected/1"),"no raw diagnostic fallback");
             let selected=std::fs::read_dir(data.join("archive/streams")).unwrap().flatten().flat_map(|e|std::fs::read(e.path()).unwrap()).collect::<Vec<_>>();
-            let raw=std::str::from_utf8(&selected).unwrap();assert!(!raw.contains("foreign-thread") && !raw.contains("fixture startup diagnostic") && !raw.contains("global capture exclusion"));
+            let raw=std::str::from_utf8(&selected).unwrap();assert!(!raw.contains("foreign-thread") && !raw.contains("fixture startup diagnostic") && !raw.contains("global capture exclusion") && !raw.contains("CONFLICTING-HEADER") && !raw.contains("FORGED-JOURNAL"));
             for body in &sink.0 {let a=body["start"].as_u64().unwrap() as usize;let end=body["end"].as_u64().unwrap() as usize;assert_eq!(body["bytes"],agent::encode_base64(&selected[a..end]));}
             assert!(selected.windows(b"\\u4e2d".len()).any(|w|w==b"\\u4e2d"),"original escape bytes retained");assert!(selected.windows(2).any(|w|w==b"\r\n"));
         }

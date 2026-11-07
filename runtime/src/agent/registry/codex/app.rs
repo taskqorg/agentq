@@ -142,11 +142,19 @@ impl AppSession {
     }
 
     fn selected(&self,frame:NativeFrame,selected:&mut Vec<SessionLine>) {
+        let (Some(raw),Some(session))=(frame.raw,self.thread.as_deref()) else {return;};
+        let Ok(text)=std::str::from_utf8(&raw) else {return;};
+        if frame.value["type"]=="agentq_control"
+            || frame.value["type"]=="thread.started" && frame.value["thread_id"].as_str()!=Some(session)
+            || super::history::history_session(crate::agent::history::CODEX_APP_SERVER_SELECTED,&frame.value,text).as_deref()!=Some(session) {return;}
         let p=&frame.value["params"];
         if p.get("thread").is_some_and(|v|v["id"].as_str()!=self.thread.as_deref())
             || p.get("turn").is_some_and(|v|v["id"].as_str()!=self.turn.as_deref())
-            || p.get("turnId").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
-        if let (Some(raw),Some(session))=(frame.raw,self.thread.clone()) {selected.push(SessionLine {session,turn:self.turn.clone(),raw});}
+            || p.get("turnId").is_some_and(|v|v.as_str()!=self.turn.as_deref())
+            || p.get("turn_id").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
+        // History also recognizes turn headers in an optional top-level payload.
+        if ["turn_id","turnId"].iter().any(|key|frame.value["payload"].get(*key).is_some_and(|v|v.as_str()!=self.turn.as_deref())) {return;}
+        selected.push(SessionLine {session:session.into(),turn:self.turn.clone(),raw});
     }
 
     fn observe_inner(&mut self, frame:NativeFrame,selected:&mut Vec<SessionLine>) -> Res<()> {
@@ -393,7 +401,24 @@ mod tests {
         let mut rejected=vec![row.clone(),row.clone(),row.clone(),row.clone(),row.clone(),row.clone(),row.clone()];
         rejected[0]["params"]["threadId"]=json!("foreign");rejected[1]["params"]["turnId"]=json!("old");rejected[2]["params"]["turn"]=json!({"id":"foreign"});rejected[3]["params"]["turnId"]=Value::Null;rejected[3]["params"]["turn"]=json!({"id":"turn"});rejected[4]["method"]=json!("future/unknown");rejected[5]["params"]["delta"]=json!([]);rejected[6]["params"].as_object_mut().unwrap().remove("threadId");
         rejected.extend([json!({"method":"account/rateLimits/updated","params":{"rateLimits":{}}}),json!({"id":9999,"result":{"account":{"email":"private"}}}),json!({"type":"agentq_control","session_id":"thread"})]);
+        for identity in [json!("foreign-thread"),json!(""),Value::Null,json!([]),json!({}),json!(7),json!(true)] {
+            let mut value=row.clone();value["type"]=json!("thread.started");value["thread_id"]=identity;rejected.push(value);
+        }
+        let mut missing=row.clone();missing["type"]=json!("thread.started");rejected.push(missing);
+        for identity in [json!("foreign-thread"),json!("thread"),Value::Null] {
+            let mut value=row.clone();value["type"]=json!("agentq_control");value["session_id"]=identity;rejected.push(value);
+        }
+        for identity in [json!("old"),Value::Null,json!([])] {
+            let mut value=row.clone();value["params"]["turn_id"]=identity.clone();rejected.push(value);
+            for key in ["turn_id","turnId"] {let mut value=row.clone();value["payload"]=json!({key:identity});rejected.push(value);}
+        }
         for value in rejected {let raw=format!("{value}\n");assert!(app.observe_frame(frame(&raw)).unwrap().is_empty(),"{value}");}
+        let mut matching=row.clone();matching["type"]=json!("thread.started");matching["thread_id"]=json!("thread");matching["params"]["turn_id"]=json!("turn");matching["payload"]=json!({"turn_id":"turn","turnId":"turn"});
+        let raw=format!("{matching}\n");assert_eq!(app.observe_frame(frame(&raw)).unwrap()[0].raw,raw.as_bytes());
+        let valid=format!("{row}\n");let admitted=app.observe_frame(frame(&valid)).unwrap();assert_eq!(admitted[0].raw,valid.as_bytes());
+        let root=crate::scratch("selected-header-binding");std::fs::create_dir_all(&root).unwrap();let path=root.join("selected.jsonl");std::fs::write(&path,&admitted[0].raw).unwrap();
+        let mut reader=crate::agent::history::History::caller("codex",crate::agent::history::CODEX_APP_SERVER_SELECTED,"selected","attempt",Some("thread")).unwrap();
+        let page=reader.steps(&path,u64::MAX).unwrap();assert!(!page.steps.is_empty());assert_eq!(reader.read_bytes(&path,0,valid.len() as u64).unwrap(),valid.as_bytes());let _=std::fs::remove_dir_all(root);
         let request=json!({"id":99,"method":"item/tool/call","params":{"threadId":"thread","turnId":"turn","tool":"owned","arguments":{}}});
         let raw=format!("{request}\n");assert_eq!(app.observe_frame(frame(&raw)).unwrap()[0].raw,raw.as_bytes());
         let terminal=json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}});let raw=format!("{terminal}\n");
