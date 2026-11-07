@@ -106,7 +106,7 @@ Each adapter explicitly implements every required operation. `account_limits_wit
 | `prepare(intent, product, &mut NativeSpec, install)` | Compatible no-op optimization report and independent launcher attribution for a caller-built spec. |
 | `native_arguments(&NativeSpec)`, `turn(base, &NativeSpec, log, input, &Process)` | Native argument inspection (Arguments), and one owned `Turn`: `id`, `poll`, `kill`, `wait`, `report`. For a caller that adds native arguments of its own; `launch` stays the default. |
 | `background_launch`, `jobs`, `job`, `stop_job` | Capability `background`: the launcher exchange, the job list (`filtered` adds the project filter), one validated `BackgroundJob` row and its stop request (Compatibility sessions). Other runtimes refuse with `background unsupported by <name>`. |
-| `launch_refusal(text)` | The named cause of a launch failure, from its stderr or `launch`/`resume` error text: `workspace-untrusted` (Claude `Workspace not trusted`), `session-missing` (Claude `No conversation found with session ID`, Codex `app-server thread/resume refused`), `login-required` (Claude `Not logged in` or `/login`; Codex `401`, `login` or `log in`, any case); otherwise none. Callers match the cause, never the text. |
+| `launch_refusal(text)` | The named cause of a launch failure, from its stderr or `launch`/`resume` error text: `workspace-untrusted` (Claude `Workspace not trusted`), `session-missing` (Claude `No conversation found with session ID`, Codex `app-server thread/resume refused`), `login-required` (Claude `Not logged in` or `/login`; Codex `401`, `login` or `log in`, any case); `session-busy` (Codex `already has an active writer`); otherwise none. Callers match the cause, never the text. |
 | `app_queue`, `app_server_arguments` | Capabilities `app-queue` and `app-server`: the desktop-thread queue exchange and read-only app-server argument inspection. Submission uses the owned runtime or protected-host path. Other runtimes refuse with `<capability> unsupported by <name>`. |
 
 `NativeSpec` is the caller's view of one native session for these operations: `root`, `session`, `resume`, `args` (native client arguments in the Arguments position), `home` and `env`; the adapter adds its own client. Callers gate each optional operation on `descriptor().has(capability)`.
@@ -482,7 +482,9 @@ A rejected Claude `rate_limit_event` before work also returns `Report::reached`,
 
 `Report.detail` retains a Claude terminal `result.subtype` or Codex failed-turn native `error.message`, including the app-server failure report. These fields do not change `outcome`, `error` or `reached`; runtimes without native detail retain unknown.
 
-`Report.reason` retains the short classified Codex authentication reason (`401 Unauthorized` or `refresh token rejected`) on both exec and app-server paths. `error` remains `auth-rejected`; `detail` keeps the full native failed-turn message. Other reports leave `reason` absent. Products consume these fields without parsing native messages.
+`Report.reason` retains the short classified Codex authentication reason (`401 Unauthorized` or `refresh token rejected`) on both exec and app-server paths. `error` remains `auth-rejected`; `detail` keeps the full native failed-turn message.
+
+Codex native `already has an active writer` diagnostics classify as `refused` / `session-busy`, preserving native `detail`, including caller-held stderr. Only diagnostic text or native error records qualify, never quoted assistant output. This observation grants no takeover or resubmission; unrecognized failures remain unknown. Other reports leave `reason` absent. Products consume these fields without parsing native messages.
 
 `Report.termination` is a typed native-process observation, independent of turn outcome, `exit` and `StopEvent`: `Observed` means AgentQ reaped the actual worker child; `Unknown { reason }` means termination was not observed. `Runtime::report` and the JSON report expose the same value (`state: observed` or `state: unknown` with `reason`). Log-only classification and native background/app-server session reports remain unknown because a terminal record is not process-termination evidence.
 
@@ -732,6 +734,13 @@ a lost-owner event. Other Runtime implementations may explicitly refuse stop obs
 subagent, image, question, approval, compaction, usage and unknown. Each step keeps
 its raw record, source byte range and digest; normalization happens at read time.
 Nothing writes a native transcript or stores a second canonical history.
+
+Antigravity stream `step_update/user_input` projects native ACTIVE as `Step.state=started` and DONE as `completed`; missing or unsupported states remain `unknown`. Physical events expose the same input `state` on bounded forward/backward polling; unrelated records expose `unknown`.
+Only the completed user message observes accepted input.
+Session binding, reported native turn (else explicitly unknown) and exact physical source range remain attached; unrelated Activity/Progress, successful writes and liveness do not prove acceptance.
+
+Physical history events from forward and backward polling expose `presentation` through the same record-local projection as steps: model, effort, CLI version, sidechain and meta, with null and named unknowns for absent fields.
+Paging retains physical boundaries and IDs; it does not scan earlier records to infer presentation. Step context inheritance remains separate.
 
 Approval and question history projects the same `Event::Request`, `Choice` and
 `Question` data emitted by live control ([shared proposal](https://github.com/taskqorg/specq/issues/132)).

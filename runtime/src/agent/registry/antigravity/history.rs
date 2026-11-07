@@ -1,4 +1,9 @@
 use super::*;
+pub(in crate::agent) fn input_state(format:&str,record:&Value)->Option<&'static str> {
+    if format!="agy-stream" || record["event"]!="step_update" || record["step_update"]["step_type"]!="user_input" {return None;}
+    Some(match record["step_update"]["state"].as_str() {Some("ACTIVE")=>"started",Some("DONE")=>"completed",_=>"unknown"})
+}
+
 pub(super) fn normalize(
     format: &str,
     v: &Value,

@@ -126,8 +126,18 @@ pub(super) fn classify_report(
     rollout: Option<&Path>,
     end_index: Option<usize>,
 ) -> Report {
+    let writer = text.lines().find_map(|line| {
+        let detail=match serde_json::from_str::<Value>(line) {
+            Ok(v) if matches!(v["type"].as_str(),Some("error"|"turn.failed"))=>v["message"].as_str().or(v["error"]["message"].as_str()).map(String::from),
+            Err(_)=>Some(line.into()),
+            _=>None,
+        }?;
+        (super::refusal(&detail)==Some(Cause("session-busy"))).then_some(detail)
+    });
     let auth_reason = auth_rejected(text);
-    let mut status = if limit_reached(Client::Codex, events).is_some() {
+    let mut status = if let Some(detail)=writer {
+        ("refused", "session-busy", Some(detail))
+    } else if limit_reached(Client::Codex, events).is_some() {
         ("refused", "usage-limit", None)
     } else if let Some(a) = auth_reason {
         ("failed", "auth-rejected", Some(a.into()))

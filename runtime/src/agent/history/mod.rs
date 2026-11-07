@@ -252,7 +252,7 @@ impl History {
             "order":offset,"start":offset,"end":offset+raw.len() as u64,"sha256":hash,"raw":raw,
             "validity":validity,"assistant_failure":(protocol.assistant_failure)(v),
             "lifecycle":(protocol.lifecycle)(v),"permission_mode":(protocol.permission_mode)(v),
-            "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited});
+            "state":super::registry::antigravity_input_state(&self.format,v).unwrap_or("unknown"),"presentation":steps::presentation_facts(v),"time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited});
         if aliased {event["native_session"]=json!(native_session);}
         if let Some(runtime)=&self.caller_runtime {
             event["caller_runtime"]=json!(runtime);event["native_session"]=json!(native_session);

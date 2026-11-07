@@ -106,7 +106,8 @@ fn login(mut command: Command,subscription:bool) -> Check {
 fn protected(home: PathBuf) -> Vec<PathBuf> { vec![home] }
 fn refusal(text: &str) -> Option<Cause> {
     let lower = text.to_ascii_lowercase();
-    Some(Cause(if text.contains("app-server thread/resume refused") { "session-missing" }
+    Some(Cause(if lower.contains("already has an active writer") { "session-busy" }
+    else if text.contains("app-server thread/resume refused") { "session-missing" }
     else if ["401", "login", "log in"].iter().any(|m| lower.contains(m)) { "login-required" } else { return None }))
 }
 fn transcript(session: &str, home: Option<&Path>) -> Option<PathBuf> { rollout(session,home) }

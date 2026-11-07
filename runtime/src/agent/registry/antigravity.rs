@@ -1,5 +1,6 @@
 #[path="antigravity/history.rs"]
 mod history;
+pub(in crate::agent) use self::history::input_state;
 #[path="antigravity/parsing.rs"]
 mod parsing;
 use self::parsing::*;

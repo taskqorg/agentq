@@ -195,7 +195,7 @@ pub(super) fn base_step(event: &Value, record: &Value, item: &Value, kind: StepK
         unknown:if kind == StepKind::Unknown {Some("unsupported source shape".into())}else{None},source:event.clone(),origins:origin(event)}
 }
 
-fn presentation_facts(record:&Value)->Value {
+pub(super) fn presentation_facts(record:&Value)->Value {
     let p=record.get("payload").or(record.get("params")).unwrap_or(record);
     let mut facts=json!({"model":record["message"].get("model").or(p.get("model")),
         "effort":p.get("effort").or(p.get("reasoning_effort")).or(record.get("effort")).or(record.get("reasoningEffort")).or(record.get("reasoning_effort")),
@@ -334,6 +334,13 @@ fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
             _=>(StepKind::Unknown,message.clone()),
         };
         return vec![base_step(event,record,&item,kind,data,0)];
+    }
+    if let Some(state)=super::super::registry::antigravity_input_state(format,record) {
+        let native=&record["step_update"];
+        let item=json!({"state":state});
+        let mut step=base_step(event,record,&item,StepKind::Message,data(StepKind::Message,native,record),0);
+        if step.turn.id.is_none(){step.turn=base_step(event,native,&item,StepKind::Message,Value::Null,0).turn;}
+        return vec![step];
     }
     let payload = if format == "codex-rollout" {&record["payload"]} else if super::interpretation(format) == "codex-app-server" {&record["params"]} else {record};
     let item = payload.get("item").unwrap_or(payload);
