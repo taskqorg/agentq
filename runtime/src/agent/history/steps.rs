@@ -270,6 +270,19 @@ fn tool_kind(name: &str) -> StepKind {
 }
 
 pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
+    if format=="jsonl-rpc" {
+        let ty=record["type"].as_str().unwrap_or_default();
+        if ty=="rpc-replay" {return vec![];}
+        if ty=="message_end" {return decode("claude-native",event,&json!({"type":record["message"]["role"],"message":record["message"]}));}
+        let mut item=record.clone();item["id"]=record["toolCallId"].clone();
+        let kind=match ty {
+            "tool_execution_start"|"tool_execution_update"|"tool_execution_end"=>tool_kind(record["toolName"].as_str().unwrap_or_default()),
+            "auto_compaction_start"|"auto_compaction_end"=>StepKind::Compaction,
+            _=>StepKind::Unknown,
+        };
+        item["status"]=json!(match ty {"tool_execution_start"=>"started","tool_execution_end"=>"completed",_=>"unknown"});
+        return vec![base_step(event,record,&item,kind,json!({"input":record["args"],"output":record["result"],"native":record}),0)];
+    }
     if format=="acp" {
         if record["replay"]==true {return vec![];}
         let message=&record["message"];let update=&message["params"]["update"];

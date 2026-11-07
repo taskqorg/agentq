@@ -36,7 +36,8 @@ impl Session {
 }
 
 fn client(runtime: &str) -> Res<super::super::Client> {
-    match runtime {"codex"=>Ok(super::super::Client::Codex),"claude"=>Ok(super::super::Client::Claude),"antigravity"=>Ok(super::super::Client::Antigravity),_=>Err("history runtime unsupported".into())}
+    let entry=super::super::registry::entry(runtime).filter(|e|e.descriptor().is_some()).ok_or("history runtime unsupported")?;
+    Ok(super::super::Client(entry.name))
 }
 
 fn walk(root:&Path, out:&mut Vec<PathBuf>) -> Res<()> {
@@ -61,8 +62,9 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
         if row.trim().is_empty() {continue;}
         let v:Value=serde_json::from_str(&row).map_err(|e|format!("history discovery invalid JSON: {e}"))?;
         let acp=v["type"]=="acp";
-        let format=if acp {"acp"}else{format};
-        let id=if acp {v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str())}else{match runtime {
+        let rpc=v["type"]=="response" && v["command"]=="get_state" && v["data"]["sessionFile"].is_string();
+        let format=if acp {"acp"}else if rpc {"jsonl-rpc"}else{format};
+        let id=if acp {v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str())}else if rpc {v["data"]["sessionFile"].as_str()}else{match runtime {
             "codex" if v["type"]=="session_meta"=>v["payload"]["id"].as_str(),
             "claude"=>v["agentId"].as_str().or(v["sessionId"].as_str()).or(v["session_id"].as_str()),
             "antigravity"=>path.parent().and_then(Path::parent).and_then(Path::parent).and_then(Path::file_name).and_then(|s|s.to_str()),
@@ -76,6 +78,7 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
 
 fn discover(runtime:&str, home:Option<&Path>) -> Res<Vec<Source>> {
     let client=client(runtime)?;
+    if !matches!(runtime,"codex"|"claude"|"antigravity") {return Err("history-discovery-unsupported; pass an explicit source".into());}
     let home=home.map(Path::to_path_buf).or_else(||super::super::base_home(client)).ok_or("history home unknown")?;
     let root=home.join(match runtime {"codex"=>"sessions","claude"=>"projects",_=>"antigravity-cli/brain"});
     let mut paths=Vec::new();walk(&root,&mut paths)?;paths.sort();

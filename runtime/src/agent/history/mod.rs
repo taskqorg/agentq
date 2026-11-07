@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
 
 const BUDGET: usize = 16 * 1024 * 1024;
-const FORMATS: &[&str] = &["codex-exec", "codex-rollout", "codex-app-server", "claude-stream", "claude-native", "agy-stream", "antigravity-sidecar", "acp"];
+const FORMATS: &[&str] = &["codex-exec", "codex-rollout", "codex-app-server", "claude-stream", "claude-native", "agy-stream", "antigravity-sidecar", "acp", "jsonl-rpc"];
 
 /// Adapter support is distinct from native qualification. Version and OS are caller readback.
 pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res<Value> {
