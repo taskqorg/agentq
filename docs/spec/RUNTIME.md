@@ -1256,7 +1256,22 @@ Claude may return a Run before refusal arrives. `Report.start_failure` carries t
 
 `Image` exposes optional session, turn, item, outcome, saved path and opaque whole-item digest, plus generation kind; no native payload. App-server images enter progress and terminal `Report.images` only through the same accepted thread/turn path, including early replay. `Report.turn` is native accepted scope. Exact duplicates are idempotent; conflicting candidates remain visible. Explicit completed status without failure is required for image success; missing, malformed, future or contradictory facts stay unknown. Paths authorize no file access.
 
-Checkpoints retain accepted image observations and digests and validate their scope on recovery; they grant no new authority or exact wire-byte proof. Protected raw capture and selected-source authority remain unavailable. Native terminal outcome and process/descendant completion remain distinct. Image, binding, catalogue and native detail stay outside metadata telemetry.
+Image, terminal and checkpoint evidence share the S283 recognized-header conflict predicate. A lower-priority native header never masks a contradictory, null or malformed recognized identity. Optional absent headers do not supply identity. Unrecognized JSON fields do not become new identity aliases.
+
+| Recognized scope | Acceptance and precedence |
+|---|---|
+| `params.threadId` | Explicit matching native thread is required for Image and terminal. A present invalid value cannot fall back to another header. |
+| `params.thread.id` | Optional wrapper; when present its id must match the native thread. |
+| `params.turnId`, `params.turn.id`, `params.turn_id` | Each present identity must match. Image requires explicit turnId; terminal may use nested turn.id. Null/malformed values never fall back to a lower-priority value. |
+| `payload.turn_id`, `payload.turnId` | Each present alias must match even though history prefers payload over params. |
+| root `thread_id` when type is `thread.started` | Required and matching, even when params.threadId already matches. |
+| root `promptId` when type is `user` or `assistant` | Optional, but a present identity must match the native turn. Other types do not interpret promptId. |
+| root `turn_id` when type is `turn.completed` | A present value must match unless native usage normalization consumes payload token_count with object total_token_usage or method thread/tokenUsage/updated; those existing paths do not interpret the root turn_id. |
+| type `agentq_control` | Runtime-authored control is not native Image or terminal evidence, including when IDs appear to match. |
+
+Checkpoints retain accepted image observations, digests and the original accepted terminal Value frame. Recovery applies the same scope predicate and requires matching terminal status; terminal checkpoints missing that frame refuse without reconstructing proof from a typed outcome. This conservatively refuses older terminal checkpoints without retained frame evidence, including pre-correction candidates. No checkpoint grants new authority or exact wire-byte proof.
+
+Protected raw capture and selected-source authority remain unavailable. Native terminal outcome and process/descendant completion remain distinct. Image, binding, catalogue and native detail stay outside metadata telemetry.
 
 `Runtime::binding` requires the same ready idle Run before any input and returns its correlated thread provider with one same-transport non-refreshing account read. Protected binding requires the independently prepared account home and fresh original authority; actual input rechecks authority. Provider IDs do not prove billing, email or principal identity. Missing proof refuses before query; failures after dispatch remain failed/unknown without replay.
 

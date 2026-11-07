@@ -31,6 +31,7 @@ pub(crate) struct AppSession {
     turn: Option<String>,
     active: bool,
     terminal: Option<String>,
+    terminal_frame: Option<Value>,
     model: Option<String>,
     provider: Option<String>,
     images: Vec<Image>,
@@ -64,7 +65,7 @@ impl AppSession {
             return Err("app-server session invalid".into());
         }
         Ok(Self { spec: spec.clone(), next: 1, pending: None, initialized: false, ready: false,
-            thread: None, turn: None, active: false, terminal: None, model: None, provider:None, images:vec![],image_items:vec![],image_events:vec![], text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0, sampler: None, process: None,
+            thread: None, turn: None, active: false, terminal: None, terminal_frame:None, model: None, provider:None, images:vec![],image_items:vec![],image_events:vec![], text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0, sampler: None, process: None,
             early:vec![],fault:None,start_failure:None,scope:native::scope(spec),worked:false,failure:None, windows:limits::unknown("not-reported"), latest_windows:limits::unknown("not-reported"), window_groups:BTreeMap::new() })
     }
 
@@ -143,7 +144,7 @@ impl AppSession {
         let changed_model = params.get("model").is_some_and(|m| m.as_str() != self.model.as_deref());
         let request = self.request("turn/start", params)?;
         self.images.clear();self.image_items.clear();self.image_events.clear();
-        self.active = true; self.turn = None; self.terminal = None; self.text = None; self.usage.clear(); self.limits = self.latest_limits.clone(); self.started_ms = unix_ms();
+        self.active = true; self.turn = None; self.terminal = None; self.terminal_frame=None; self.text = None; self.usage.clear(); self.limits = self.latest_limits.clone(); self.started_ms = unix_ms();
         self.windows = self.latest_windows.clone();
         self.process = None;
         if let Some(sampler) = &self.sampler { sampler.mark(); }
@@ -168,26 +169,50 @@ impl AppSession {
         Ok(selected)
     }
 
+    // S283's recognized scope headers: a lower-priority identity never masks a contradictory one.
+    fn scope_consistent(&self,value:&Value,turn:Option<&str>)->bool {
+        let Some(session)=self.thread.as_deref() else {return false;};
+        let matches=|value:&Value,expected:Option<&str>|value.as_str().is_some_and(|id|Some(id)==expected);
+        if value["type"]=="agentq_control"
+            || value["type"]=="thread.started" && !matches(&value["thread_id"],Some(session)) {return false;}
+        let p=&value["params"];
+        if p.get("threadId").is_some_and(|v|!matches(v,Some(session)))
+            || p.get("thread").is_some_and(|v|!matches(&v["id"],Some(session)))
+            || p.get("turn").is_some_and(|v|!matches(&v["id"],turn))
+            || ["turnId","turn_id"].iter().any(|key|p.get(*key).is_some_and(|v|!matches(v,turn))) {return false;}
+        // History prefers payload over params; neither payload turn alias may contradict native scope.
+        if ["turn_id","turnId"].iter().any(|key|value["payload"].get(*key).is_some_and(|v|!matches(v,turn))) {return false;}
+        if matches!(value["type"].as_str(),Some("user"|"assistant"))
+            && value.get("promptId").is_some_and(|v|!matches(v,turn)) {return false;}
+        // Only an unnormalized completion passes its root turn_id to read_calls.
+        let usage=value.get("payload").unwrap_or(p);
+        if value["type"]=="turn.completed" && value["method"]!="thread/tokenUsage/updated"
+            && !(usage["type"]=="token_count" && usage["info"]["total_token_usage"].is_object())
+            && value.get("turn_id").is_some_and(|v|!matches(v,turn)) {return false;}
+        true
+    }
+
+    fn turn_scope(&self,value:&Value)->bool {
+        let p=&value["params"];
+        self.thread.is_some() && self.turn.is_some() && p["threadId"].as_str()==self.thread.as_deref()
+            && p["turnId"].as_str().or(p["turn"]["id"].as_str())==self.turn.as_deref()
+            && self.scope_consistent(value,self.turn.as_deref())
+    }
+
+    fn image_observation(&self,value:&Value)->Option<Image> {
+        let p=&value["params"];
+        if value["method"]!="item/completed" || !self.turn_scope(value) || p["turnId"].as_str()!=self.turn.as_deref() {return None;}
+        let generated=p["item"]["type"].as_str().and_then(super::image_kind)?;
+        Some(super::image(&p["item"],generated,p["threadId"].as_str().map(String::from),p["turnId"].as_str().map(String::from),true))
+    }
+
+    pub(crate) fn accepted_terminal(&self,value:&Value)->bool {self.terminal_frame.as_ref()==Some(value)}
+
     fn selected(&self,frame:NativeFrame,selected:&mut Vec<SessionLine>) {
         let (Some(raw),Some(session))=(frame.raw,self.thread.as_deref()) else {return;};
         let Ok(text)=std::str::from_utf8(&raw) else {return;};
-        if frame.value["type"]=="agentq_control"
-            || frame.value["type"]=="thread.started" && frame.value["thread_id"].as_str()!=Some(session)
+        if !self.scope_consistent(&frame.value,self.turn.as_deref())
             || super::history::history_session(crate::agent::history::CODEX_APP_SERVER_SELECTED,&frame.value,text).as_deref()!=Some(session) {return;}
-        let p=&frame.value["params"];
-        if p.get("thread").is_some_and(|v|v["id"].as_str()!=self.thread.as_deref())
-            || p.get("turn").is_some_and(|v|v["id"].as_str()!=self.turn.as_deref())
-            || p.get("turnId").is_some_and(|v|v.as_str()!=self.turn.as_deref())
-            || p.get("turn_id").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
-        // History also recognizes turn headers in an optional top-level payload.
-        if ["turn_id","turnId"].iter().any(|key|frame.value["payload"].get(*key).is_some_and(|v|v.as_str()!=self.turn.as_deref())) {return;}
-        if matches!(frame.value["type"].as_str(),Some("user"|"assistant"))
-            && frame.value.get("promptId").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
-        // Only an unnormalized completion passes its root turn_id to read_calls.
-        let usage=frame.value.get("payload").unwrap_or(p);
-        if frame.value["type"]=="turn.completed" && frame.value["method"]!="thread/tokenUsage/updated"
-            && !(usage["type"]=="token_count" && usage["info"]["total_token_usage"].is_object())
-            && frame.value.get("turn_id").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
         selected.push(SessionLine {session:session.into(),turn:self.turn.clone(),raw});
     }
 
@@ -275,6 +300,7 @@ impl AppSession {
         if p.get("turnId").is_some_and(|value|value.as_str()!=id)
             || p.get("turn").is_some_and(|turn|turn["id"].as_str()!=id)
             || p.get("thread").is_some_and(|thread|thread["id"].as_str()!=self.thread.as_deref()) {return Ok(());}
+        if matches!(method,"item/completed"|"turn/completed") && !self.scope_consistent(message,id) {return Ok(());}
         if self.turn.is_none() && self.pending.is_some_and(|(_, m)| m == "turn/start") {
             if self.early.len()>=256 || self.early.iter().map(|e|e.value.to_string().len()).sum::<usize>()+message.to_string().len()>8*1024*1024 {
                 return Err("app-server early notifications exceed bound; reconcile original submission".into());
@@ -282,10 +308,8 @@ impl AppSession {
             self.early.push(frame);return Ok(());
         }
         if self.turn.is_none() || id != self.turn.as_deref() { return Ok(()); }
-        if self.terminal.is_none() && method == "item/completed"
-            && p["turnId"].as_str()==self.turn.as_deref() {
-            if let Some(generated)=p["item"]["type"].as_str().and_then(super::image_kind) {
-                let image=super::image(&p["item"],generated,self.thread.clone(),self.turn.clone(),true);
+        if self.terminal.is_none() {
+            if let Some(image)=self.image_observation(message) {
                 if !self.images.contains(&image) {
                     self.image_items.push(message.clone());self.images.push(image.clone());self.image_events.push(image);
                 }
@@ -304,9 +328,11 @@ impl AppSession {
         if self.terminal.is_none() && matches!(method,"item/started"|"item/completed")
             && p["item"]["type"].as_str().is_some_and(|s|s!="userMessage") {self.worked=true;}
         if method == "turn/completed" {
+            if !self.turn_scope(message) {return Ok(());}
             let status = p["turn"]["status"].as_str().filter(|s| matches!(*s,"completed"|"failed"|"interrupted")).ok_or("app-server terminal status unknown")?;
             if self.terminal.as_deref().is_some_and(|old| old != status) { return Err("app-server terminal outcomes conflict".into()); }
             if self.terminal.is_none() && p["turn"]["error"].is_object() {self.failure=Some(p["turn"]["error"].clone());}
+            if self.terminal.is_none() {self.terminal_frame=Some(message.clone());}
             if self.terminal.is_none() { self.process = self.sampler.as_ref().map(super::capture::Sampler::usage); }
             self.terminal = Some(status.into());
         } else if self.terminal.is_none() {
@@ -390,7 +416,7 @@ impl AppSession {
     pub fn checkpoint(&self) -> Value {
         json!({"schema":"coreq-app-session/1", "root":self.spec.root, "home":self.spec.home, "session":self.spec.session,
             "next":self.next, "pending":self.pending.map(|(id, method)| json!([id,method])), "initialized":self.initialized, "ready":self.ready,
-            "thread":self.thread,"turn":self.turn,"provider":self.provider,"images":self.images,"image_items":self.image_items,"active":self.active,"terminal":self.terminal,"model":self.model,"text":self.text,
+            "thread":self.thread,"turn":self.turn,"provider":self.provider,"images":self.images,"image_items":self.image_items,"active":self.active,"terminal":self.terminal,"terminal_frame":self.terminal_frame,"model":self.model,"text":self.text,
             "usage":self.usage,"limits":self.limits,"latest_limits":self.latest_limits,"windows":self.windows,"latest_windows":self.latest_windows,"window_groups":self.window_groups,"started_ms":self.started_ms,"early":self.early.iter().map(|e|&e.value).collect::<Vec<_>>(),"fault":self.fault,"scope":self.scope,"worked":self.worked,"failure":self.failure})
     }
 
@@ -415,14 +441,16 @@ impl AppSession {
             s.image_items=v["image_items"].as_array().ok_or("app-server recovery image evidence missing")?.clone();
             if s.images.len()!=s.image_items.len() {return Err("app-server recovery image evidence differs".into());}
             for (image,item) in s.images.iter().zip(&s.image_items) {
-                let p=&item["params"];
-                if s.thread.is_none() || s.turn.is_none() || p["threadId"].as_str()!=s.thread.as_deref() || p["turnId"].as_str()!=s.turn.as_deref() || item["method"]!="item/completed"
-                    || p.get("thread").is_some_and(|thread|thread["id"].as_str()!=s.thread.as_deref()) || p.get("turn").is_some_and(|turn|turn["id"].as_str()!=s.turn.as_deref())
-                    || p["item"]["type"].as_str().and_then(super::image_kind).is_none_or(|generated|*image!=super::image(&p["item"],generated,s.thread.clone(),s.turn.clone(),true)) {
-                    return Err("app-server recovery image scope or evidence differs".into());
-                }
+                if s.image_observation(item).as_ref()!=Some(image) {return Err("app-server recovery image scope or evidence differs".into());}
             }
         }
+        if !v["terminal_frame"].is_null() {s.terminal_frame=Some(v["terminal_frame"].as_object().ok_or("app-server recovery terminal evidence invalid")?.clone().into());}
+        if let Some(status)=s.terminal.as_deref() {
+            let frame=s.terminal_frame.as_ref().ok_or("app-server recovery terminal evidence missing")?;
+            if frame["method"]!="turn/completed" || !s.turn_scope(frame) || frame["params"]["turn"]["status"].as_str()!=Some(status) {
+                return Err("app-server recovery terminal scope or evidence differs".into());
+            }
+        }else if s.terminal_frame.is_some() {return Err("app-server recovery terminal state differs".into());}
         s.usage = v["usage"].as_array().ok_or("app-server recovery usage invalid")?.clone(); s.limits = (!v["limits"].is_null()).then(|| v["limits"].clone());
         s.latest_limits=(!v["latest_limits"].is_null()).then(||v["latest_limits"].clone());
         if let Some(w) = v.get("windows") { s.windows = serde_json::from_value(w.clone()).map_err(|_| "app-server recovery windows invalid")?; }
@@ -488,6 +516,47 @@ mod tests {
         let metadata=report.observation(Client::Codex,&Context {product:"fixture",version:"1",project:"other",task:None,route:None,account:"default"}).to_string();
         assert!(!metadata.contains("never/open") && !metadata.contains(early[0].evidence.as_ref().unwrap()));
         let serialized=crate::cli::report_json(&report);assert_eq!(serialized["turn"],"turn");assert!(serialized["images"][0].get("native").is_none());
+    }
+
+    // One S283 header inventory protects live/early Image, terminal and restored original Value evidence.
+    #[test]
+    fn finite_scope_headers_cannot_mask_foreign_null_or_malformed_identity() {
+        let spec=Spec {client:Client::Codex,root:std::env::temp_dir(),session:"-".into(),resume:false,args:vec![],env:vec![],home:None};
+        let image=json!({"method":"item/completed","type":"thread.started","thread_id":"thread","promptId":"turn","turn_id":"turn",
+            "payload":{"turn_id":"turn","turnId":"turn"},"params":{"threadId":"thread","thread":{"id":"thread"},"turnId":"turn","turn_id":"turn","turn":{"id":"turn"},
+            "item":{"id":"image","type":"imageGeneration","status":"completed","savedPath":"/never/open.png"}}});
+        let terminal={let mut row=image.clone();row["method"]=json!("turn/completed");row["params"]["turn"]["status"]=json!("completed");row};
+        for (pointer,kind) in [("/params/threadId","thread.started"),("/params/thread","thread.started"),("/params/thread/id","thread.started"),("/params/turnId","thread.started"),("/params/turn","thread.started"),
+            ("/params/turn_id","thread.started"),("/params/turn/id","thread.started"),("/payload/turn_id","thread.started"),("/payload/turnId","thread.started"),
+            ("/thread_id","thread.started"),("/promptId","user"),("/promptId","assistant"),("/turn_id","turn.completed")] {
+            for invalid in [json!("foreign"),json!(""),Value::Null,json!([]),json!({}),json!(7),json!(true)] {
+                for early in [false,true] {
+                    let mut app=AppSession::new(&spec).unwrap();let init=app.initialize(json!({})).unwrap();app.observe(&json!({"id":init["id"],"result":{}})).unwrap();
+                    let open=app.open(json!({})).unwrap();app.observe(&json!({"id":open["id"],"result":{"thread":{"id":"thread"}}})).unwrap();
+                    let start=app.start_turn(json!({"input":[]})).unwrap();let ack=json!({"id":start["id"],"result":{"turn":{"id":"turn"}}});
+                    if !early {app.observe(&ack).unwrap();}
+                    let mut bad_image=image.clone();bad_image["type"]=json!(kind);*bad_image.pointer_mut(pointer).unwrap()=invalid.clone();
+                    let mut bad_terminal=terminal.clone();bad_terminal["type"]=json!(kind);*bad_terminal.pointer_mut(pointer).unwrap()=invalid.clone();
+                    for row in [&bad_image,&bad_image,&bad_terminal] {app.observe(row).unwrap();}
+                    if early {app.observe(&ack).unwrap();}
+                    assert!(app.take_images().is_empty(),"{pointer} {invalid} early={early}");assert!(app.report().is_none());
+                    for row in [&image,&image,&terminal] {app.observe(row).unwrap();}
+                    let report=app.report().unwrap();assert_eq!(app.take_images(),report.images);assert_eq!(report.images.len(),1);
+                    let saved=app.checkpoint();assert_eq!(AppSession::recover(&spec,&saved).unwrap().report().unwrap().images,report.images);
+                    let mut forged=saved.clone();forged["image_items"][0]=bad_image;assert!(AppSession::recover(&spec,&forged).is_err());
+                    let mut forged=saved.clone();forged["terminal_frame"]=bad_terminal;assert!(AppSession::recover(&spec,&forged).is_err());
+                    let mut missing=saved;missing.as_object_mut().unwrap().remove("terminal_frame");assert!(AppSession::recover(&spec,&missing).is_err());
+                }
+            }
+        }
+        let mut app=AppSession::new(&spec).unwrap();app.thread=Some("thread".into());app.turn=Some("turn".into());
+        for field in ["threadId","turnId"] {let mut missing=image.clone();missing["params"].as_object_mut().unwrap().remove(field);assert!(app.image_observation(&missing).is_none());}
+        let mut missing=image.clone();missing.as_object_mut().unwrap().remove("thread_id");assert!(app.image_observation(&missing).is_none());
+        let mut nested=terminal;nested["params"].as_object_mut().unwrap().remove("turnId");assert!(app.turn_scope(&nested),"terminal's nested native turn remains valid when the optional direct alias is absent");
+        // Runtime-authored control is never native evidence, even with apparently matching direct IDs.
+        let mut row=image;row["type"]=json!("agentq_control");
+        let mut app=AppSession::new(&spec).unwrap();app.thread=Some("thread".into());app.turn=Some("turn".into());
+        assert!(app.image_observation(&row).is_none());
     }
 
     #[test]

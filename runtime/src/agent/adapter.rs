@@ -1179,7 +1179,11 @@ impl Adapter {
                     }
                     let parse=event.as_ref().is_none_or(|event|matches!(event,Event::Image(..)));
                     if let Some(event)=event {events.push(event);}
-                    if parse && !raw.is_null() {events.extend(run.events.read_owned(self.client,vec![raw],a.session.session(),a.session.turn_id()).into_iter().filter(|e|!matches!(e,Event::Image(..))));}
+                    if parse && !raw.is_null() {
+                        let terminal=a.session.accepted_terminal(&raw);
+                        events.extend(run.events.read_owned(self.client,vec![raw],a.session.session(),a.session.turn_id()).into_iter()
+                            .filter(|e|!matches!(e,Event::Image(..)) && (!matches!(e,Event::TurnEnd{..}) || terminal)));
+                    }
                 }
                 return Ok(events);
             }

@@ -110,6 +110,8 @@ pub(crate) fn main() {
         ("typed_log_reads_are_public", typed_log_reads_are_public),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
         ("finite_protected_binding_and_denial",protected::finite_protected_binding_and_denial),
+        #[cfg(unix)]
+        ("finite_images_reject_independent_scope_probe",finite_images_reject_independent_scope_probe),
         ("finite_images_progress_and_report_share_early_acceptance",finite_images_progress_and_report_share_early_acceptance),
         ("finite_producer_same_connection_queries_and_binding",finite_producer_same_connection_queries_and_binding),
         ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
@@ -569,6 +571,7 @@ fn fake_app_server() {
                     println!("{}",row("foreign-thread","turn-1",&image));println!("{}",row("native-thread","foreign-turn",&image));
                     println!("{}",row("native-thread","turn-1",&image));println!("{}",row("native-thread","turn-1",&image));
                     let mut conflict=image.clone();conflict["hidden"]=json!("conflict");println!("{}",row("native-thread","turn-1",&conflict));
+                    println!("{}",json!({"method":"turn/completed","params":{"threadId":"native-thread","turn_id":"foreign","turn":{"id":"turn-1","status":"completed"}}}));
                     println!("{}",json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"turn-1","status":"completed"}}}));
                     std::fs::write("images-early","").unwrap();wait_for(Path::new("images-ack"));
                     println!("{}",json!({"id":id,"result":{"turn":{"id":"turn-1"}}}));continue;
@@ -724,6 +727,28 @@ fn finite_images_progress_and_report_share_early_acceptance() {
     assert_eq!(progress.iter().filter(|e|matches!(e,agent::Event::TurnEnd{outcome:"ok"})).count(),1);
     let saved=codex.checkpoint(&run).unwrap();let cold=codex.recover(&saved,&l).unwrap();assert_eq!(codex.report(&cold).unwrap().images,images);
     assert!(codex.progress(&mut run).unwrap().is_empty());codex.cancel(&mut run).unwrap();drop(cold);drop(run);teardown(root);
+}
+
+// Reviewer nine-case wire input stays unchanged; false native headers must not become owned facts on recovery.
+#[cfg(unix)]
+fn finite_images_reject_independent_scope_probe() {
+    let rt=agent::runtime("codex").unwrap();
+    for mode in ["positive","foreign","unscoped","nested","alias","header","failed","unknown","conflict"] {
+        let root=scratch(&format!("finite-independent-{mode}"));
+        let mut l=agent::Launch::new(&root,root.join("run.log"),"invented","independent");
+        l.home=Some(root.join("invented-home"));std::fs::create_dir(l.home.as_ref().unwrap()).unwrap();
+        l.command=vec!["/usr/bin/python3".into(),concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/assetq63-scope-probe/client.py").into(),mode.into(),root.clone().into()];
+        l.deltas=true;l.deadline=Some(Instant::now()+Duration::from_secs(10));
+        let mut run=rt.launch(&l).unwrap();let until=Instant::now()+Duration::from_secs(5);let mut events=vec![];
+        loop {let state=rt.poll(&mut run).unwrap();events.extend(rt.progress(&mut run).unwrap());if state!=agent::State::Running {break;}assert!(Instant::now()<until);std::thread::yield_now();}
+        let report=rt.report(&run).unwrap();let images:Vec<_>=events.iter().filter_map(|e|if let agent::Event::Image(image)=e {Some(image.clone())}else{None}).collect();
+        assert_eq!(images,report.images);assert_eq!(report.turn.as_deref(),Some("turn"));
+        let saved=rt.checkpoint(&run).unwrap();let cold=rt.recover(&saved,&l).unwrap();assert_eq!(rt.report(&cold).unwrap().images,images);
+        let expected=if ["foreign","unscoped","nested","alias","header"].contains(&mode) {0}else if mode=="conflict" {2}else{1};
+        assert_eq!(images.len(),expected,"{mode}: foreign/conflicting scope must not be owned");
+        if mode=="failed" {assert_eq!(images[0].outcome.as_deref(),Some("failed"));}if mode=="unknown" {assert!(images[0].outcome.is_none());}
+        let _=rt.cancel(&mut run);drop(cold);drop(run);teardown(root);
+    }
 }
 
 // Same-connection finite queries must not launch another client, infer billing, prompt or resend.
