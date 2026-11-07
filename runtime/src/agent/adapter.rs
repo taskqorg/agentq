@@ -489,7 +489,6 @@ fn state(r: &Report) -> State { match r.outcome { "ok" => State::Finished, "unkn
 pub(crate) enum Transport { Plain(AppServer), Protected(Box<ProtectedAppServer>) }
 
 impl Transport {
-    fn send(&mut self, m: &Value, until: Instant) -> Res<()> { match self { Transport::Plain(s) => s.send(m, until), Transport::Protected(s) => s.send(m, until) } }
     fn receive(&mut self, until: Instant) -> Res<Option<Value>> { match self { Transport::Plain(s) => s.receive(until), Transport::Protected(s) => s.receive(until) } }
     fn id(&self) -> u32 { match self { Transport::Plain(s) => s.id(), Transport::Protected(s) => s.id() } }
     fn exit(&mut self) -> Res<Option<i32>> { match self { Transport::Plain(s) => s.poll(), Transport::Protected(s) => s.poll() } }
@@ -510,6 +509,7 @@ struct App {
     effort: Option<String>,
     control: Option<(super::control::Requests,File)>,
     journal: Option<PathBuf>,
+    writer: Option<SessionOwner>,
     cancelling: bool,
     approval: Approval,
 }
@@ -517,7 +517,9 @@ struct App {
 impl Drop for App {
     fn drop(&mut self) {
         if let Some((requests,log))=&mut self.control {let _=requests.retire(log,self.session.session().unwrap_or(""),"unknown");}
-        if self.owned { if let Some(Transport::Plain(s)) = &mut self.transport { let _ = s.close(); } }
+        if self.owned { if let Some(Transport::Plain(s)) = &mut self.transport {
+            if self.writer.as_ref().is_some_and(|o|o.control().is_ok()) {let _=s.close();}else{s.close_stream();let _=s.poll();}
+        } }
     }
 }
 
@@ -576,20 +578,35 @@ fn thread_params(l: &Launch, thread: &Value) -> Res<Value> {
 }
 
 impl App {
+    fn send(&mut self,message:&Value,until:Option<Instant>)->Res<()> {
+        if self.owned {self.writer.as_ref().ok_or("control-owner-required")?.control()?;}
+        self.transport.as_mut().ok_or("app-server transport ended")?.send_until(message,until)
+    }
     fn observe(&mut self, m: Value, until: Option<Instant>) -> Res<()> {
         if let Err(error)=self.observe_inner(m,until) {self.closed=Some(error.clone());return Err(error);}Ok(())
     }
     fn observe_inner(&mut self, m: Value, until: Option<Instant>) -> Res<()> {
         if let Some((_,log))=&mut self.control {writeln!(log,"{m}").map_err(|e|format!("control-log-unknown: {e}"))?;}
         self.session.observe(&m)?;
+        if m["method"]=="serverRequest/resolved" && self.control.is_some() {
+            let id=&m["params"]["requestId"];
+            if m.get("id").is_none() && self.session.session().is_some() && m["params"]["threadId"].as_str()==self.session.session() && m["params"].get("turnId").is_none_or(|t|t.as_str()==self.session.turn_id()) && (id.is_string() || id.is_i64() || id.is_u64()) {
+                let (requests,log)=self.control.as_mut().unwrap();
+                requests.retire_native(log,self.session.session().unwrap(),id,self.session.turn_id(),&m)?;
+                self.requests.retain(|r|r["id"]!=*id || r["params"]["threadId"].as_str()!=self.session.session());
+                self.pending.push((m,None));
+            }else{self.pending.push((m,Some(Event::Unsupported{reason:"request-resolution-scope-unknown"})));}
+            return Ok(());
+        }
         if m.get("id").is_some() && m["method"].is_string() {
             if self.control.is_some() && self.cancelling {
-                self.transport.as_mut().ok_or("app-server transport ended")?.send_until(&json!({"id":m["id"],"error":{"code":-32800,"message":"Turn cancellation requested"}}),until)?;
+                self.session.control_scope(&m)?;
+                self.send(&json!({"id":m["id"],"error":{"code":-32800,"message":"Turn cancellation requested"}}),until)?;
                 self.pending.push((m,None));
             }else if self.control.is_some() {self.requests.push(m);}
             else if self.owned {
                 let reply = json!({"id":m["id"],"error":{"code":-32601,"message":"No approval or native tool handler for this turn"}});
-                self.transport.as_mut().ok_or("app-server transport ended")?.send_until(&reply, until)?;
+                self.send(&reply,until)?;
             } else { self.requests.push(m); }
         } else { self.pending.push((m,None)); }
         if self.session.report().is_some() {
@@ -602,7 +619,7 @@ impl App {
                     let event=requests.register(log,self.session.session().ok_or("control-session-unknown")?,event,request.clone(),self.session.turn_id().map(String::from))?;
                     self.pending.push((request,Some(event)));
                 }else{
-                    self.transport.as_mut().ok_or("app-server transport ended")?.send_until(&json!({"id":request["id"],"error":{"code":-32601,"message":"Native request unsupported"}}),until)?;
+                    self.send(&json!({"id":request["id"],"error":{"code":-32601,"message":"Native request unsupported"}}),until)?;
                     self.pending.push((request,None));
                 }
             }
@@ -611,7 +628,7 @@ impl App {
     }
     /// Exchange one client request and read until its reply; every message read stays pending for `progress`.
     fn exchange(&mut self, request: Value, until: Instant) -> Res<()> {
-        self.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)?;
+        self.send(&request,Some(until))?;
         loop {
             let m = self.transport.as_mut().ok_or("app-server transport ended")?.receive(until)?.ok_or("app-server reply deadline; session state unknown")?;
             let reply = m["id"] == request["id"] && m.get("method").is_none();
@@ -634,7 +651,7 @@ impl App {
             #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
             Some((super::control::Requests::new(),options.open(&l.log).map_err(|e|format!("control-log: {e}"))?))
         }else{None};
-        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),cancelling:false,approval:l.policy.approval };
+        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval };
         let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
@@ -646,7 +663,7 @@ impl App {
         let request = self.session.initialize(initialize.clone())?;
         self.exchange(request, until)?;
         let initialized = self.session.initialized()?;
-        self.transport.as_mut().ok_or("app-server transport ended")?.send(&initialized, until)?;
+        self.send(&initialized,Some(until))?;
         let request = self.session.open(params)?;
         self.exchange(request, until)?;
         if !self.session.ready() { return Err("app-server thread not ready".into()); }
@@ -672,7 +689,7 @@ impl App {
         if let Some(m) = &self.model { params["model"] = json!(m); }
         if let Some(e) = &self.effort { params["effort"] = json!(e); }
         let request = self.session.start_turn(params)?;
-        self.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)
+        self.send(&request,Some(until))
     }
 
     /// One read-only `account/read` without token refresh; its reply stays private to the caller of `account`.
@@ -713,18 +730,16 @@ impl App {
 
     fn respond(&mut self,control:Control,until:Option<Instant>)->Res<()> {
         if self.closed.is_some() || self.session.report().is_some() {return Err("control-turn-unavailable".into());}
-        let Some(Transport::Plain(server))=&mut self.transport else {return Err("respond-transport-unsupported".into());};
+        let session=self.session.session().ok_or("control-session-unknown")?.to_string();
         let (requests,log)=self.control.as_mut().ok_or("respond-transport-unsupported")?;
-        let session=self.session.session().ok_or("control-session-unknown")?;
         let reply=self.session.control_reply(requests.native(&control)?,&control)?;
-        let request=requests.begin(log,session,&control,&reply)?;
-        if let Err(error)=server.send_until(&reply,until) {requests.fail(log,session,&request);return Err(error);}
-        requests.sent(log,session,&request,&reply)
+        let request=requests.begin(log,&session,&control,&reply)?;
+        if let Err(error)=self.send(&reply,until) {let (requests,log)=self.control.as_mut().unwrap();requests.fail(log,&session,&request);return Err(error);}
+        let (requests,log)=self.control.as_mut().unwrap();requests.sent(log,&session,&request,&reply)
     }
 
     fn control_exchange(&mut self,request:Value,until:Option<Instant>)->Res<()> {
-        let Some(Transport::Plain(server))=&mut self.transport else {return Err("control-transport-unsupported".into());};
-        if let Err(error)=server.send_until(&request,until) {self.closed=Some(error.clone());return Err(error);}
+        if let Err(error)=self.send(&request,until) {self.closed=Some(error.clone());return Err(error);}
         loop {
             let message=match self.transport.as_mut() {Some(Transport::Plain(server))=>server.wait(until),_=>Err("control-transport-unsupported".into())};
             let message=match message {Ok(message)=>message,Err(error)=>{self.closed=Some(error.clone());return Err(error);}};
@@ -1341,7 +1356,7 @@ impl Runtime for Adapter {
                 let until = Instant::now() + Duration::from_secs(5);
                 if let Some((requests,log))=&mut a.control {owner.control()?;a.cancelling=true;requests.retire(log,a.session.session().ok_or("control-session-unknown")?,"cancelled")?;a.requests.clear();}
                 if let Ok(request) = a.session.interrupt() {
-                    a.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)?;
+                    a.send(&request,Some(until))?;
                     return Ok(false);
                 }
                 match a.transport.as_mut().ok_or("app-server transport ended")? {
@@ -1537,7 +1552,7 @@ impl Runtime for Adapter {
             let app = &saved["app"];
             let (spec, optimization) = me.spec(l, app["session"].as_str().ok_or("run recovery session invalid")?.into(), app["session"] != "-")?;
             let session = AppSession::recover(&spec, app)?;
-            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),cancelling:false,approval:l.policy.approval };
+            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),writer:None,cancelling:false,approval:l.policy.approval };
             let mut run=me.run(Body::App(Box::new(a)),0,optimization,l);run.owner=Some(acquire()?);return run.restored(saved);
         }
         let session = saved["session"].as_str().filter(|s| native::plain_id(s)).ok_or("run recovery session invalid")?;
@@ -1711,7 +1726,7 @@ mod tests {
         let mut session=AppSession::new(&spec).unwrap();let initialize=session.initialize(json!({})).unwrap();session.observe(&json!({"id":initialize["id"],"result":{}})).unwrap();
         let open=session.open(json!({})).unwrap();session.observe(&json!({"id":open["id"],"result":{"thread":{"id":"session"}}})).unwrap();
         let before=session.checkpoint();
-        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,cancelling:false,approval:Approval::Native};
+        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,writer:None,cancelling:false,approval:Approval::Native};
         assert_eq!(app.start(json!([]),Instant::now()).unwrap_err(),"control-state-unknown");assert_eq!(app.session.checkpoint(),before);
         drop((app,readonly));std::fs::remove_dir_all(root).unwrap();
     }
@@ -1769,7 +1784,7 @@ mod tests {
             }
             probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
             let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
-            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,cancelling:false,approval:Approval::Native}));
+            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native}));
             let mut run=adapter.run(body,0,Optimization {intent:Intent::Off,effective:"off",reason:"optimization_retired"},&launch());
             probes.insert("account",!matches!(runtime.account(&mut run),Err(Failure::Refused(Cause("account-unsupported")))));
             probes.insert("respond",matches!(runtime.respond(&mut run,Control::Reply{id:json!("missing"),option:None}),Err(Failure::Refused(Cause("respond-transport-unsupported")))));

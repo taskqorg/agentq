@@ -319,7 +319,8 @@ impl SessionOwner {
         if report.session.as_deref().zip(o.row["session"].as_str()).is_some_and(|(seen,owned)|seen!=owned) {return Err("session-owner-unknown: native session differs".into());}
         if o.guard.is_none() {return Ok(());}
         if stopped(&o.root,&o.row)? {o.row["phase"]=json!("stop-unresolved");o.row["native_reason"]=json!("native-subtree-stop-unverified");return save(&o.path,&o.row);}
-        if report.session.is_none() || report.outcome=="unknown" || report.background_job || matches!(report.error,"interrupted"|"timeout"|"exit"|"no-end") {
+        let interrupted=retain && report.outcome=="cancelled" && report.error=="interrupted";
+        if report.session.is_none() || report.outcome=="unknown" || report.background_job || matches!(report.error,"timeout"|"exit"|"no-end") || report.error=="interrupted" && !interrupted {
             o.row["phase"]=json!("unconfirmed");o.row["native_reason"]=json!("native-completion-unverified");return save(&o.path,&o.row);
         }
         o.row["phase"]=json!(if retain {"controlled"}else{"idle"});save(&o.path,&o.row)?;if !retain {o.guard=None;}Ok(())

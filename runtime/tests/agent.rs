@@ -57,6 +57,8 @@ pub(crate) fn main() {
         ("account_login_retains_home_until_native_transport_cleanup",signin::transport_cleanup),
         ("live_codex_controls_keep_occurrence_and_owner_scope",control::codex),
         ("live_codex_controls_preserve_original_denial_policy",control::policy),
+        ("codex_pump_refusals_preserve_owner_and_native_scope",control::pump_authority),
+        ("codex_resolution_retires_only_the_original_request_occurrence",control::resolution),
         #[cfg(unix)]
         ("controlled_writer_survives_controller_loss_and_recovered_completion",control::controller_loss),
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),

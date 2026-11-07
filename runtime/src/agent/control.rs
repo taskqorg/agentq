@@ -66,6 +66,14 @@ impl Requests {
         self.uncertain=true;let _=self.journal(log,session,request,"unknown",&request.native);
     }
 
+    pub fn retire_native(&mut self,log:&mut File,session:&str,native_id:&Value,turn:Option<&str>,native:&Value)->Res<()> {
+        let key=self.pending.iter().find(|(_,p)|p.native_id==*native_id && p.turn.as_deref()==turn).map(|(id,_)|id.clone());
+        if let Some(key)=key {
+            let request=self.pending.remove(&key).expect("matched native request");
+            if let Err(error)=self.journal(log,session,&request,"cancelled",native) {self.uncertain=true;return Err(error);}
+        }Ok(())
+    }
+
     pub fn retire(&mut self,log:&mut File,session:&str,state:&str) -> Res<()> {
         let pending=std::mem::take(&mut self.pending);let mut error=None;
         for request in pending.values() {if let Err(e)=self.journal(log,session,request,state,&request.native) {self.uncertain=true;error.get_or_insert(e);}}

@@ -3,6 +3,47 @@ use super::*;
 use agent::{Answer,Control,Event,Part,Runtime};
 use std::io::{BufRead,Write};
 
+pub fn resolution() {
+    for mode in ["foreign-resolved","resolved"] {
+        let root=scratch("control-resolution");let runtime=agent::runtime("codex").unwrap();let mut l=fake_launch("codex",&root,"first",&[]);l.controls=true;
+        l.env.extend([("AGENTQ_CONTROL_FIXTURE".into(),"1".into()),("AGENTQ_CONTROL_EXTRA".into(),mode.into())]);
+        let mut run=runtime.launch(&l).unwrap();let first=loop {if let Some(Event::Request{id,..})=runtime.progress(&mut run).unwrap().into_iter().find(|e|matches!(e,Event::Request{..})) {break id;}std::thread::yield_now();};
+        std::fs::write(root.join("inject"),"").unwrap();wait_for(&root.join("emitted"));let until=Instant::now()+Duration::from_secs(30);let mut later=vec![];
+        loop {
+            later.extend(runtime.progress(&mut run).unwrap().into_iter().filter_map(|e|if let Event::Request{id,..}=e {Some(id)}else{None}));
+            let rows:Vec<Value>=std::fs::read_to_string(&l.log).unwrap().lines().map(|s|serde_json::from_str(s).unwrap()).collect();
+            if mode=="resolved" && rows.iter().any(|r|r["type"]=="agentq_control" && r["generation"]==3 && r["state"]=="pending") || mode=="foreign-resolved" && rows.iter().filter(|r|r["method"]=="serverRequest/resolved").count()==2 {break;}
+            assert!(Instant::now()<until,"resolution not observed");std::thread::yield_now();
+        }
+        if mode=="resolved" {
+            assert!(runtime.respond(&mut run,Control::Reply{id:first.clone(),option:Some("accept".into())}).is_err());assert_eq!(later.len(),2);
+            assert!(later.iter().all(|id|id!=&first));assert_ne!(later[0],later[1]);
+            for id in later {runtime.respond(&mut run,Control::Reply{id,option:Some("decline".into())}).unwrap();}
+        }else{runtime.respond(&mut run,Control::Reply{id:first,option:Some("decline".into())}).unwrap();}
+        finish(runtime,&mut run);drop(run);
+        let audit:Vec<Value>=std::fs::read_to_string(root.join("control-input.jsonl")).unwrap().lines().map(|s|serde_json::from_str(s).unwrap()).filter(|r:&Value|r.get("method").is_none()).collect();
+        assert_eq!(audit.len(),if mode=="resolved" {2}else{1});assert!(audit.iter().all(|r|r["result"]["decision"]=="decline"),"resolved old handle sent no accept; unrelated/fresh occurrence still answered");teardown(root);
+    }
+}
+
+pub fn pump_authority() {
+    for mode in ["owned","foreign","cancel-pump"] {
+        let root=scratch("control-pump-owner");let runtime=agent::runtime("codex").unwrap();let mut l=fake_launch("codex",&root,"first",&[]);l.controls=true;
+        l.env.extend([("AGENTQ_CONTROL_FIXTURE".into(),"1".into()),("AGENTQ_CONTROL_EXTRA".into(),mode.into())]);
+        let mut run=runtime.launch(&l).unwrap();
+        loop {if runtime.progress(&mut run).unwrap().iter().any(|e|matches!(e,Event::Request{..})) {break;}std::thread::yield_now();}
+        if mode=="cancel-pump" {runtime.cancel(&mut run).unwrap();wait_for(&root.join("interrupt-seen"));}
+        let path=std::fs::read_dir(&l.session_store.path).unwrap().map(|e|e.unwrap().path()).find(|p|p.extension().is_some_and(|e|e=="json")).unwrap();
+        let original=std::fs::read(&path).unwrap();let mut changed:Value=serde_json::from_slice(&original).unwrap();changed["token"]=json!("foreign-token");
+        let before=std::fs::read(root.join("control-input.jsonl")).unwrap();std::fs::write(&path,changed.to_string()).unwrap();std::fs::write(root.join("inject"),"").unwrap();
+        wait_for(&root.join("emitted"));let until=Instant::now()+Duration::from_secs(30);
+        let error=loop {if let Err(error)=runtime.progress(&mut run) {break error;}assert!(Instant::now()<until,"callback not observed");std::thread::yield_now();};
+        assert!(error=="control-owner-changed" || error=="control-native-request-scope-differs","{error}");
+        std::fs::write(path,original).unwrap();drop(run);
+        assert_eq!(std::fs::read(root.join("control-input.jsonl")).unwrap(),before,"pump refusal sends no input with a changed owner, including foreign callbacks");teardown(root);
+    }
+}
+
 pub fn policy() {
     let root=scratch("live-codex-deny");let runtime=agent::runtime("codex").unwrap();let mut l=fake_launch("codex",&root,"denied",&[]);
     l.controls=true;l.policy.approval=agent::Approval::Deny;l.env.push(("AGENTQ_CONTROL_FIXTURE".into(),"1".into()));
@@ -60,12 +101,15 @@ pub fn codex() {
     assert_eq!(std::fs::read(root.join("control-input.jsonl")).unwrap(),before,"changed durable owner sends no native input");
     std::fs::write(&owner,durable).unwrap();
     runtime.cancel(&mut run).unwrap();
-    assert!(runtime.respond(&mut run,Control::Reply{id:next,option:Some("accept".into())}).is_err());
+    assert!(runtime.respond(&mut run,Control::Reply{id:next.clone(),option:Some("accept".into())}).is_err());
     while runtime.poll(&mut run).unwrap()==agent::State::Running {std::thread::yield_now();}
     assert_eq!(runtime.report(&run).unwrap().outcome,"cancelled");
+    runtime.input(&mut run,&[Part::Text("after confirmed interruption".into())]).unwrap();
+    let Event::Request{id:after_cancel,..}=request(&mut run) else {unreachable!()};assert_ne!(after_cancel,next);
+    runtime.cancel(&mut run).unwrap();finish(runtime,&mut run);
     let rows:Vec<Value>=std::fs::read_to_string(&l.log).unwrap().lines().map(|s|serde_json::from_str::<Value>(s).unwrap()).filter(|r|r["type"]=="agentq_control").collect();
     assert!(rows.iter().all(|r|r["run_id"]==saved["stop_id"] && r["session_id"]==session));
-    assert_eq!(rows.iter().filter(|r|r["state"]=="pending").map(|r|r["generation"].as_u64().unwrap()).collect::<Vec<_>>(),[1,2,3]);
+    assert_eq!(rows.iter().filter(|r|r["state"]=="pending").map(|r|r["generation"].as_u64().unwrap()).collect::<Vec<_>>(),[1,2,3,4]);
     assert!(rows.iter().any(|r|r["state"]=="cancelled" && r["generation"]==3));
     let transcript=runtime.transcript(&run).unwrap();assert_eq!(transcript,l.log);
     let mut history=runtime.history(&session,None,Some(&transcript),None).unwrap();
@@ -137,7 +181,24 @@ pub fn server() {
                 if std::env::var_os("AGENTQ_CONTROL_TERMINAL").is_some() {emit(json!({"method":"turn/completed","params":{"threadId":"control-thread","turn":{"id":format!("control-turn-{turn}"),"status":"completed"}}}));continue;}
                 let mut params=json!({"threadId":"control-thread","turnId":format!("control-turn-{turn}"),"itemId":"tool"});params["command"]=json!("owned fixture");params["availableDecisions"]=json!(["accept","decline","cancel"]);
                 emit(json!({"id":"native-reused","method":"item/commandExecution/requestApproval","params":params}));
+                if let Some(mode)=std::env::var_os("AGENTQ_CONTROL_EXTRA") {
+                    let root=std::env::current_dir().unwrap();let mode=mode.to_string_lossy().into_owned();
+                    std::thread::spawn(move|| {wait_for(&root.join("inject"));
+                        if mode=="resolved" || mode=="foreign-resolved" {
+                            println!("{}",json!({"method":"serverRequest/resolved","params":{"threadId":"foreign","requestId":"native-reused"}}));
+                            println!("{}",json!({"method":"serverRequest/resolved","params":{"threadId":"control-thread","requestId":[]}}));
+                            if mode=="resolved" {
+                                let params=json!({"threadId":"control-thread","turnId":"control-turn-1","itemId":"tool","availableDecisions":["accept","decline","cancel"]});
+                                println!("{}",json!({"id":"unrelated","method":"item/commandExecution/requestApproval","params":params}));
+                                println!("{}",json!({"method":"serverRequest/resolved","params":{"threadId":"control-thread","requestId":"native-reused"}}));
+                                println!("{}",json!({"id":"native-reused","method":"item/commandExecution/requestApproval","params":params}));
+                            }
+                        }else{println!("{}",json!({"id":"extra","method":"future/nativeRequest","params":{"threadId":if mode=="foreign" {"foreign"}else{"control-thread"},"turnId":if mode=="foreign" {"foreign"}else{"control-turn-1"}}}));}
+                        std::io::stdout().flush().unwrap();std::fs::write(root.join("emitted"),"").unwrap();
+                    });
+                }
             },
+            None if id=="unrelated"=>assert_eq!(value["result"]["decision"],"decline"),
             None if id=="native-reused"=>match phase {
                 "approval"=>{
                     if value["result"]["decision"]=="decline" {emit(json!({"method":"turn/completed","params":{"threadId":"control-thread","turn":{"id":format!("control-turn-{turn}"),"status":"completed"}}}));continue;}
@@ -155,7 +216,10 @@ pub fn server() {
                 emit(json!({"id":id,"result":{"turnId":format!("control-turn-{turn}")}}));emit(json!({"method":"turn/completed","params":{"threadId":"control-thread","turn":{"id":format!("control-turn-{turn}"),"status":"completed"}}}));
             },
             Some("thread/compact/start")=>{assert_eq!(value["params"]["threadId"],"control-thread");emit(json!({"id":id,"result":{}}));},
-            Some("turn/interrupt")=>{emit(json!({"id":id,"result":{}}));emit(json!({"method":"turn/completed","params":{"threadId":"control-thread","turn":{"id":format!("control-turn-{turn}"),"status":"interrupted"}}}));},
+            Some("turn/interrupt")=>{emit(json!({"id":id,"result":{}}));
+                if std::env::var("AGENTQ_CONTROL_EXTRA").as_deref()==Ok("cancel-pump") {std::fs::write(std::env::current_dir().unwrap().join("interrupt-seen"),"").unwrap();}
+                else{emit(json!({"method":"turn/completed","params":{"threadId":"control-thread","turn":{"id":format!("control-turn-{turn}"),"status":"interrupted"}}}));}
+            },
             _=>panic!("unexpected owned control fixture message: {value}"),
         }
     }

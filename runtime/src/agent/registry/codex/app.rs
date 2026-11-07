@@ -85,8 +85,12 @@ impl AppSession {
     pub(crate) fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
     pub(crate) fn control_pending(&self)->bool {self.pending.is_some_and(|(_,method)|matches!(method,"turn/steer"|"thread/compact/start"))}
 
-    pub(crate) fn control_request(&self,value:&Value)->Res<Option<Event>> {
+    pub(crate) fn control_scope(&self,value:&Value)->Res<()> {
         if !self.active || self.terminal.is_some() || self.fault.is_some() {return Err("control-turn-unavailable".into());}
+        if self.thread.is_none() || self.turn.is_none() || value["params"]["threadId"].as_str()!=self.thread.as_deref() || value["params"]["turnId"].as_str()!=self.turn.as_deref() {return Err("control-native-request-scope-differs".into());}Ok(())
+    }
+    pub(crate) fn control_request(&self,value:&Value)->Res<Option<Event>> {
+        self.control_scope(value)?;
         super::control::request(value,self.thread.as_deref().ok_or("control-session-unknown")?,self.turn.as_deref().ok_or("control-turn-unknown")?)
     }
     pub(crate) fn control_reply(&self,native:&Value,control:&Control)->Res<Value> {super::control::reply(native,control)}
