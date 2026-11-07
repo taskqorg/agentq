@@ -428,6 +428,8 @@ struct Queued {
 struct Checkpoint {
     #[serde(default)]
     authority: Option<Authority>,
+    #[serde(default)]
+    history: Option<CallerHistory>,
     source: String,
     owner: String,
     paths: Vec<PathBuf>,
@@ -705,8 +707,36 @@ fn caller_snapshot(data: &Path, src: &Source) -> Res<(ReadPath, String)> {
     Ok((snapshot, identity))
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallerHistory {
+    runtime: String,
+    format: String,
+    source: String,
+    binding: String,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    native_session: Option<String>,
+}
+impl CallerHistory {
+    fn digest(&self) -> String {
+        crate::sha256_hex(
+            json!([
+                "agentq-archive-caller-history/1",
+                self.runtime,
+                self.format,
+                self.source,
+                self.binding,
+                self.native_session
+            ])
+            .to_string()
+            .as_bytes(),
+        )
+    }
+}
+
 // The snapshot digest ties native validation and media origins to the bytes actually queued.
 struct NativeBytes {
+    history: Option<CallerHistory>,
     bytes: Vec<u8>,
     identity: String,
     media: MediaCatalog,
@@ -780,7 +810,7 @@ fn native_bytes(
     caller: bool,
     saved: Option<&Value>,
 ) -> Res<NativeBytes> {
-    let (media, page, bytes, identity, base) = if caller {
+    let (media, page, bytes, identity, base, history) = if caller {
         let (snapshot, identity) = caller_snapshot(data, src)?;
         let inferred = if session == "unknown" {
             let bytes = fs::read(&snapshot.0).map_err(|_| "archive source snapshot unavailable")?;
@@ -813,13 +843,20 @@ fn native_bytes(
         let bytes = reader
             .read_bytes(&snapshot.0, 0, end)
             .map_err(|_| "archive caller source changed")?;
-        (media, page, bytes, Some(identity), src.start)
+        let history = CallerHistory {
+            runtime: c.runtime.clone(),
+            format: src.format.clone(),
+            source: source_label,
+            binding: c.id.clone(),
+            native_session: inferred,
+        };
+        (media, page, bytes, Some(identity), src.start, Some(history))
     } else {
         let (reader, page, bytes) = native_reader(c, &src.path, session, saved)?;
         let media = reader
             .media()
             .map_err(|_| "archive native media unavailable")?;
-        (media, page, bytes, None, 0)
+        (media, page, bytes, None, 0, None)
     };
     if page.checkpoint["prefix"] != crate::sha256_hex(&bytes) {
         return Err("archive native source changed".into());
@@ -874,6 +911,7 @@ fn native_bytes(
         }
     }
     Ok(NativeBytes {
+        history,
         format: page.checkpoint["format"]
             .as_str()
             .ok_or("archive format unknown")?
@@ -1153,17 +1191,22 @@ fn upload(
     let raw = &raw[base..end];
     let end = raw.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
     let raw = &raw[..end];
+    let history = native.and_then(|n| n.history.clone());
     let mut st = saved.unwrap_or_else(|| {
-        fresh(
+        let mut st = fresh(
             grant,
             &identity,
             manifest,
             &c.capture,
             &src.format,
             wire.now(),
-        )
+        );
+        st.history = history.clone();
+        st
     });
     if st.identity != identity
+        || st.history.as_ref().map(CallerHistory::digest)
+            != history.as_ref().map(CallerHistory::digest)
         || st.format != src.format
         || st.raw > raw.len() as u64
         || crate::sha256_hex(&raw[..st.raw.min(raw.len() as u64) as usize]) != st.prefix
@@ -1177,6 +1220,7 @@ fn upload(
             &src.format,
             wire.now(),
         );
+        st.history = history.clone();
         st.authority = old.authority;
         st.owner = old.owner;
         st.paths = old.paths;
@@ -1203,7 +1247,7 @@ fn upload(
         vec![src.path.clone(), target],
         json!({"path":src.path,"start":src.start,"end":src.end,
         "format":src.format,"identity":identity,"prefix":crate::sha256_hex(raw),
-        "reader":native.map(|n| &n.checkpoint)}),
+        "reader":native.map(|n| &n.checkpoint),"history":history}),
     )?);
     st.paths = st.authority.as_ref().unwrap().paths.clone();
     if let Some(predecessor) = predecessor {
@@ -1275,6 +1319,9 @@ fn queue_bytes(
         let mut body = json!({"protocol":1,"schema":SCHEMA,"manifest":st.manifest,"manifest_sha256":st.manifest_hash,
             "capture":st.capture,"source":st.source,"format":st.format,"start":start,"end":start,
             "sha256":"","bytes":"","scrubbed":if offset==0{count}else{0},"observed_at":at});
+        if let Some(history) = &st.history {
+            body["history"] = json!(history);
+        }
         if let Some(total) = total {
             body["media"] = json!(true);
             body["total"] = json!(total);
@@ -1328,6 +1375,7 @@ fn fresh(
     super::scrub::manifest(&mut manifest);
     Checkpoint {
         authority: None,
+        history: None,
         source: crate::incident::uuid(),
         owner: String::new(),
         paths: vec![],
@@ -1371,6 +1419,7 @@ fn send(
             || proof.evidence.is_null()
             || proof.paths.is_empty()
             || queued.body["capture"] != proof.capture
+            || queued.body["history"] != proof.evidence["history"]
         {
             return Err("archive queued authority changed".into());
         }

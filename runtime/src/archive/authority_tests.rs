@@ -394,3 +394,172 @@ fn observed_native_handoff_preserves_segment_and_revalidates_delayed_proof() {
         let _ = fs::remove_dir_all(data.parent().unwrap());
     }
 }
+
+// Caller reconstruction must use the exact producer constructor identities, never archive labels.
+#[test]
+fn caller_descriptor_selected_readback_and_source_loss_replay() {
+    let (data, mut c) = setup("archive-caller-descriptor");
+    c.runtime = "codex".into();
+    c.manifest["runtime"] = json!("codex");
+    c.sources[0].format = "codex-app-server-selected/1".into();
+    let bytes = b"{\"method\":\"item/completed\",\"params\":{\"threadId\":\"s-1\",\"turnId\":\"t-1\",\"item\":{\"id\":\"own\",\"type\":\"agentMessage\",\"text\":\"selected only\"}}}\n";
+    fs::write(&c.sources[0].path, bytes).unwrap();
+    register(&data, c.clone()).unwrap();
+    let mut sink = Sink {
+        lose: true,
+        ..Sink::default()
+    };
+    pass(&data, &mut sink).unwrap();
+    let body = sink.requests[0].clone();
+    assert_eq!(
+        body["history"],
+        json!({"runtime":"codex","format":c.sources[0].format,
+        "source":enroll::digest(&json!([c.id,c.sources[0].path,0])),"binding":c.id,"native_session":"s-1"})
+    );
+    assert_ne!(body["source"], body["history"]["source"]);
+    assert_eq!(body["manifest"].as_object().unwrap().len(), 15);
+    let h = &body["history"];
+    let mut reader = agent::history::History::caller(
+        h["runtime"].as_str().unwrap(),
+        h["format"].as_str().unwrap(),
+        h["source"].as_str().unwrap(),
+        h["binding"].as_str().unwrap(),
+        h["native_session"].as_str(),
+    )
+    .unwrap();
+    let copy = data.join("sink-selected.jsonl");
+    fs::write(&copy, bytes).unwrap();
+    let page = reader.steps(&copy, u64::MAX).unwrap();
+    assert_eq!(page.steps.len(), 1);
+    assert_eq!(page.checkpoint["session"], c.id);
+    assert_eq!(
+        reader.read_bytes(&copy, 0, bytes.len() as u64).unwrap(),
+        bytes
+    );
+    fs::remove_file(&c.sources[0].path).unwrap();
+    pass(&data, &mut sink).unwrap();
+    assert_eq!(sink.requests[1], body);
+    let states: Vec<Checkpoint> = files(&root(&data).join("sources"))
+        .unwrap()
+        .iter()
+        .map(|p| read(p).unwrap())
+        .collect();
+    assert!(states.iter().all(|s| s.pending.is_empty()));
+    let _ = fs::remove_dir_all(data.parent().unwrap());
+}
+
+#[test]
+fn caller_descriptor_golden_and_explicit_null() {
+    let history = CallerHistory {
+        runtime: "codex".into(),
+        format: "codex-app-server-selected/1".into(),
+        source: "source-λ".into(),
+        binding: "run\"\\\n".into(),
+        native_session: None,
+    };
+    assert_eq!(
+        history.digest(),
+        "1e54d3b287e1de46cd7cf6d49858c02d6a45bb622a5ae612e2f8f78c6a2208e7"
+    );
+    let value = json!(history);
+    assert_eq!(value.as_object().unwrap().len(), 5);
+    assert_eq!(value.get("native_session"), Some(&Value::Null));
+    let mut omitted = value.clone();
+    omitted.as_object_mut().unwrap().remove("native_session");
+    assert!(serde_json::from_value::<CallerHistory>(omitted).is_err());
+}
+
+// Generation changes preserve old pending bodies; descriptors cannot adopt earlier ranges.
+#[test]
+fn caller_descriptor_generation_and_original_pending() {
+    for field in [
+        "absent",
+        "runtime",
+        "format",
+        "source",
+        "binding",
+        "native_session",
+    ] {
+        let (data, mut c) = setup(&format!("archive-descriptor-generation-{field}"));
+        c.sources[0].format = "claude-native".into();
+        register(&data, c.clone()).unwrap();
+        let grant = active(&data).unwrap().unwrap();
+        c.grant = identity(&grant);
+        let mut native = native_bytes(&data, &c, &c.sources[0], "s-1", true, None).unwrap();
+        let actual = json!(native.history);
+        // A retained earlier source generation has its own immutable descriptor (or legacy absence).
+        if field == "absent" {
+            native.history = None;
+        } else {
+            let mut previous = actual.clone();
+            previous[field] = if field == "native_session" {
+                Value::Null
+            } else {
+                json!("earlier")
+            };
+            native.history = Some(serde_json::from_value(previous).unwrap());
+        }
+        let mut manifest = c.manifest.clone();
+        let mut sink = Sink {
+            lose: true,
+            ..Sink::default()
+        };
+        assert!(
+            upload(
+                &data,
+                &grant,
+                &c,
+                &c.sources[0],
+                &mut manifest,
+                None,
+                Some(&native),
+                &mut sink
+            )
+            .is_err()
+        );
+        let old = sink.requests[0].clone();
+        native.history = Some(serde_json::from_value(actual.clone()).unwrap());
+        upload(
+            &data,
+            &grant,
+            &c,
+            &c.sources[0],
+            &mut manifest,
+            None,
+            Some(&native),
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(sink.requests.len(), 3);
+        assert_eq!(sink.requests[1], old);
+        assert_ne!(sink.requests[2]["source"], old["source"]);
+        assert_eq!(sink.requests[2]["start"], 0);
+        assert_eq!(sink.requests[2]["history"], actual);
+        let paths = files(&root(&data).join("sources")).unwrap();
+        let state: Checkpoint = read(&paths[0]).unwrap();
+        assert!(
+            state
+                .previous
+                .contains(&old["source"].as_str().unwrap().to_string())
+        );
+        assert!(state.pending.is_empty());
+        let count = sink.requests.len();
+        upload(
+            &data,
+            &grant,
+            &c,
+            &c.sources[0],
+            &mut manifest,
+            None,
+            Some(&native),
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(
+            sink.requests.len(),
+            count,
+            "same-context exact generation does not recapture"
+        );
+        let _ = fs::remove_dir_all(data.parent().unwrap());
+    }
+}
