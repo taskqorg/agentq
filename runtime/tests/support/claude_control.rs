@@ -12,6 +12,31 @@ fn request(runtime:&dyn agent::Runtime,run:&mut agent::Run)->Event {
     }
 }
 
+// M12.25: an observed Claude item never grants a native fork or rewind capability.
+fn branch_refusals(runtime:&dyn agent::Runtime,run:&mut agent::Run,l:&agent::Launch) {
+    assert!(!runtime.descriptor().has("fork") && !runtime.descriptor().has("rewind"));
+    let saved=runtime.checkpoint(run);let log=std::fs::read(&l.log).unwrap();
+    let input=std::fs::read(l.root.join("claude-input.jsonl")).unwrap();
+    let report=format!("{:?}",runtime.report(run));
+    let owners=|| std::fs::read_dir(&l.session_store.path).unwrap().map(|e| {let path=e.unwrap().path();let bytes=std::fs::read(&path).unwrap();(path,bytes)}).collect::<std::collections::BTreeMap<_,_>>();
+    let before=owners();let sentinel=l.root.join("branch-working-file");std::fs::write(&sentinel,b"unchanged").unwrap();
+    let session=runtime.session_id(run).unwrap();let mut history=runtime.history(&session,None,Some(&l.log),None).unwrap();
+    let steps=match history.steps(log.len() as u64) {Ok(page)=>page.steps,Err(error)=>{assert_eq!(error,"history native session differs");vec![]}};
+    let selected=steps.iter().find(|s|s.author=="assistant");
+    if l.deltas {assert!(selected.is_some(),"exercise an observed assistant Step, not only None");}
+    let claimed=selected.cloned().map(|mut step| {step.state="completed".into();step});
+    let mut child=l.clone();child.log=l.root.join("forbidden-child.log");child.input="never submit".into();
+    child.process.configure=Some(std::sync::Arc::new(|_|panic!("unsupported Claude branch reached child preparation")));
+    for through in [None,selected,claimed.as_ref()] {
+        assert!(matches!(runtime.fork(run,through,&child),Err(agent::Failure::Refused(agent::Cause("fork-unsupported")))));
+        assert!(matches!(runtime.rewind(run,through),Err(agent::Failure::Refused(agent::Cause("rewind-unsupported")))));
+    }
+    assert_eq!(runtime.checkpoint(run),saved);assert_eq!(owners(),before);
+    assert_eq!(format!("{:?}",runtime.report(run)),report);
+    assert_eq!(std::fs::read(&l.log).unwrap(),log);assert_eq!(std::fs::read(l.root.join("claude-input.jsonl")).unwrap(),input);
+    assert_eq!(std::fs::read(sentinel).unwrap(),b"unchanged");assert!(!child.log.exists());
+}
+
 #[cfg(unix)]
 pub fn owner(root:&Path) {
     let runtime=agent::runtime("claude").unwrap();let mut l=fake_launch("claude",root,"first",&[]);l.controls=true;
@@ -35,6 +60,7 @@ pub fn recovery() {
     let session=value["saved"]["claude"]["session"].as_str().unwrap();assert_eq!(agent::NativeProcess::read(native.pid).unwrap(),Some(native.clone()));
     assert!(runtime.adopt(session,&l,&[]).is_err());let before=std::fs::read(root.join("claude-input.jsonl")).unwrap();
     let mut recovered=runtime.recover(&value["saved"],&l).unwrap();assert_eq!(runtime.poll(&mut recovered).unwrap(),State::Finished);
+    branch_refusals(runtime,&mut recovered,&l);
     assert!(runtime.progress(&mut recovered).unwrap().is_empty(),"saved progress does not replay drained native events");
     let ctx=Context {product:"fixtureq",version:"test",project:"other",task:None,route:None,account:"other"};let snapshot=recovered.snapshot(&ctx).unwrap().save();assert!(snapshot["records"][0]["observation"]["duration_us"].is_null(),"recovery does not fabricate a duration from replay time");
     assert!(runtime.respond(&mut recovered,Control::Reply{id:value["old_request"].clone(),option:Some("allow".into())}).is_err());
@@ -54,6 +80,7 @@ pub fn controls() {
     let mut initial=vec![];let until=Instant::now()+Duration::from_secs(30);
     let (first,choices)=loop {initial.extend(runtime.progress(&mut run).unwrap());if let Some(Event::Request{id,choices,..})=initial.iter().find(|e|matches!(e,Event::Request{..})) {break (id.clone(),choices.clone());}assert!(Instant::now()<until);std::thread::yield_now();};
     assert!(initial.iter().any(|e|matches!(e,Event::Text{delta,..} if delta=="streamed")),"declared deltas must survive the owned control transport");
+    branch_refusals(runtime,&mut run,&l);
     assert_ne!(first,json!("native-reused"));assert_eq!(choices.iter().map(|c|c.id.as_str()).collect::<Vec<_>>(),["allow","deny"]);
     assert!(runtime.respond(&mut run,Control::Reply{id:first.clone(),option:Some("invented".into())}).is_err());
     runtime.respond(&mut run,Control::Reply{id:first.clone(),option:Some("allow".into())}).unwrap();
@@ -63,6 +90,7 @@ pub fn controls() {
     let answers=std::collections::BTreeMap::from([("q1".into(),vec![Answer::Choice("A".into()),Answer::Choice("B".into())]),("q2".into(),vec![Answer::Text("typed answer".into())])]);
     runtime.respond(&mut run,Control::Answers{id:question,answers}).unwrap();finish(runtime,&mut run);
     assert_eq!(runtime.report(&run).unwrap().outcome,"ok");let original=run.snapshot(&ctx).unwrap().save();
+    branch_refusals(runtime,&mut run,&l);
     assert!(runtime.resume(&session,&l).is_err(),"native result retains live controlled writer");
     assert!(runtime.steer(&mut run,&[Part::Text("not a steer".into())]).is_err());
     runtime.set_option(&mut run,Control::Model("sonnet".into())).unwrap();
@@ -76,6 +104,7 @@ pub fn controls() {
     runtime.input(&mut run,&[Part::Text("after terminal".into())]).unwrap();let Event::Request{id:pending,..}=request(runtime,&mut run) else {unreachable!()};
     let owner=std::fs::read_dir(&l.session_store.path).unwrap().map(|e|e.unwrap().path()).find(|p|p.extension().is_some_and(|e|e=="json")).unwrap();
     let original_owner=std::fs::read(&owner).unwrap();let mut row:Value=serde_json::from_slice(&original_owner).unwrap();row["token"]=json!("foreign");std::fs::write(&owner,row.to_string()).unwrap();
+    branch_refusals(runtime,&mut run,&l);
     let before=std::fs::read(root.join("claude-input.jsonl")).unwrap();
     assert!(runtime.respond(&mut run,Control::Reply{id:pending.clone(),option:Some("allow".into())}).is_err());assert!(runtime.set_option(&mut run,Control::Model("haiku".into())).is_err());
     assert!(runtime.cancel(&mut run).is_err());assert!(runtime.input(&mut run,&[Part::Text("foreign".into())]).is_err());assert_eq!(std::fs::read(root.join("claude-input.jsonl")).unwrap(),before);
@@ -108,7 +137,7 @@ pub fn boundaries() {
                 runtime.respond(&mut run,Control::Reply{id:next,option:None}).unwrap();finish(runtime,&mut run);
             }else{
                 let until=Instant::now()+Duration::from_secs(30);loop {if runtime.progress(&mut run).is_err() {break;}assert!(Instant::now()<until,"unknown native record not refused");std::thread::yield_now();}
-                assert_eq!(runtime.poll(&mut run).unwrap(),State::Unknown);assert!(runtime.respond(&mut run,Control::Reply{id:first,option:Some("allow".into())}).is_err());
+                assert_eq!(runtime.poll(&mut run).unwrap(),State::Unknown);branch_refusals(runtime,&mut run,&l);assert!(runtime.respond(&mut run,Control::Reply{id:first,option:Some("allow".into())}).is_err());
                 assert!(runtime.input(&mut run,&[Part::Text("unknown".into())]).is_err());assert!(runtime.set_option(&mut run,Control::Model("sonnet".into())).is_err());
                 assert!(runtime.compact(&mut run).is_err());assert!(runtime.cancel(&mut run).is_err());assert_eq!(std::fs::read(root.join("claude-input.jsonl")).unwrap(),before,"foreign/unknown protocol never generates an automatic native reply");
             }
@@ -135,6 +164,7 @@ pub fn progress_recovery() {
         let saved=runtime.checkpoint(&run).unwrap();let session=runtime.session_id(&run).unwrap();drop(run);
         let before=std::fs::read(root.join("claude-input.jsonl")).unwrap();let mut recovered=runtime.recover(&saved,&l).unwrap();
         assert_eq!(runtime.poll(&mut recovered).unwrap(),State::Unknown,"a recovered transport without a native result does not prove running execution");
+        branch_refusals(runtime,&mut recovered,&l);
         append(&l.log,&[json!({"type":"result","subtype":"success","is_error":false,"session_id":session,"result":"repeated answer"})]);
         let events=runtime.progress(&mut recovered).unwrap();assert_eq!(events.iter().filter(|e|matches!(e,Event::Message{text,..} if text=="repeated answer")).count(),usize::from(!delivered),"recovery preserves delivered text deduplication within its original turn only");
         assert!(events.iter().any(|e|matches!(e,Event::TurnEnd{outcome:"ok"})));assert_eq!(runtime.poll(&mut recovered).unwrap(),State::Finished);
