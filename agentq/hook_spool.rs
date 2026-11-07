@@ -307,9 +307,10 @@ mod tests {
     fn growing_source_after_checkpoint_loss_keeps_new_calls() {
         let f=Fixture::new("growth");f.transcript();f.outage();f.capture();
         let original_file=f.files().pop().unwrap();let original=fs::read(&original_file).unwrap();
-        let source=f.root.join("rollout.jsonl");
+        let source=canonical(&f.root.join("rollout.jsonl")).unwrap();
         let name=crate::session::event_id("transcript",&source.to_string_lossy())[..16].to_string();
         let checkpoint=f.delivery().state.join(name);
+        assert!(checkpoint.is_file(),"corrupt the checkpoint actually written by capture");
         fs::write(&checkpoint,"corrupt").unwrap();
         assert!(crate::observe::stop(&f.data,"codex",&f.input(),false,Instant::now()+Duration::from_secs(3)).is_err());
         fs::remove_file(checkpoint).unwrap();
