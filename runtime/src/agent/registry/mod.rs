@@ -276,6 +276,8 @@ mod tests {
             l.env=vec![("AGENTQ_STRUCTURED_FIXTURE".into(),if runtime.ops.rpc.is_some(){"rpc"}else{"acp"}.into())];
             l.home=Some(work.join("home"));std::fs::create_dir_all(l.home.as_ref().unwrap()).unwrap();l.deadline=Some(Instant::now()+Duration::from_secs(20));l.deltas=true;
             l.process.configure=Some(std::sync::Arc::new(|command|assert!(command.get_envs().any(|(k,v)|k=="XAI_API_KEY" && v.is_none()),"native spawn retains account cleaning")));
+            let mut scoped=l.clone();scoped.lifetime=Lifetime::StopWithOwner;
+            assert_eq!(runtime.launch(&scoped).err().as_deref(),Some("lifetime-unsupported: native submission scope"),"{name}: unsupported owner-death policy refuses before spawn");
             assert!(runtime.resume("untracked",&l).err().unwrap().starts_with("session-owner-unknown"));
             let mut blocked=l.clone();blocked.home=Some(work.join("missing-account"));
             let readiness=runtime.preflight(&blocked,&Repair::default());
