@@ -6,6 +6,10 @@ use serde::{Deserialize,Serialize};
 #[serde(rename_all="kebab-case")]
 pub enum Lifetime {#[default] Recoverable,StopWithOwner}
 
+pub(super) fn validate(scope:&Value,native:&NativeProcess)->Res<()> {
+    if scope["native"]!=json!(native) {return Err("orphan-scope-native-changed".into());}Ok(())
+}
+
 #[cfg(any(target_os="macos",target_os="linux"))]
 mod platform {
     use super::*;
@@ -126,15 +130,17 @@ mod platform {
     }
 
     pub fn verified(scope:&Value,native:&NativeProcess)->Res<()> {
+        validate(scope,native)?;
         if NativeProcess::read(native.pid)?.as_ref()!=Some(native) {return Err("orphan-native-identity-changed".into());}
         if scope["kind"]!="posix-group" || scope["group"].as_u64()!=Some(u64::from(native.pid)) {return Err("orphan-scope-unknown".into());}
         let guard:NativeProcess=serde_json::from_value(scope["guardian"].clone()).map_err(|_|"orphan-scope-unknown")?;
         if NativeProcess::read(guard.pid)?.as_ref()!=Some(&guard) || unsafe {libc::getpgid(guard.pid as i32)}!=native.pid as i32 {return Err("orphan-scope-unknown".into());}
         Ok(())
     }
-    pub fn absent(scope:&Value)->Res<bool> {
+    pub fn absent(scope:&Value,native:&NativeProcess)->Res<bool> {
         if scope["kind"]!="posix-group" {return Err("orphan-scope-unknown".into());}
         let group=scope["group"].as_u64().filter(|n|*n>1 && *n<=i32::MAX as u64).ok_or("orphan-scope-unknown")? as i32;
+        if group as u32!=native.pid {return Err("orphan-scope-unknown".into());}
         if unsafe {libc::kill(-group,0)}==0 {return Ok(false);}
         let error=std::io::Error::last_os_error();if error.raw_os_error()==Some(libc::ESRCH) {Ok(true)} else {Err(format!("orphan-scope-unknown: {error}"))}
     }
@@ -250,7 +256,7 @@ mod platform {
         if NativeProcess::read(native.pid)?.as_ref()!=Some(native) {return Err("orphan-native-identity-changed".into());}
         let mut inside=0;if unsafe {IsProcessInJob(process.as_raw_handle(),job.as_raw_handle(),&mut inside)}==0 || inside==0 {return Err("orphan-scope-unknown".into());}Ok(())
     }
-    pub fn verified(scope:&Value,native:&NativeProcess)->Res<()> {let job=open(scope,4)?.ok_or("orphan-scope-absent")?;member(&job,native)}
+    pub fn verified(scope:&Value,native:&NativeProcess)->Res<()> {validate(scope,native)?;let job=open(scope,4)?.ok_or("orphan-scope-absent")?;member(&job,native)}
     fn active(job:&OwnedHandle)->Res<u32> {
         let mut accounting=Accounting::default();
         if unsafe {QueryInformationJobObject(job.as_raw_handle(),1,(&mut accounting as *mut Accounting).cast(),std::mem::size_of::<Accounting>() as u32,std::ptr::null_mut())}==0 {return Err(std::io::Error::last_os_error().to_string());}Ok(accounting.active)
@@ -273,12 +279,15 @@ mod platform {
         Ok(Stop {job,port})
     }
     pub fn stop(scope:&Value,native:&NativeProcess)->Res<Option<Stop>> {
+        validate(scope,native)?;
         let job=open(scope,2|4|8)?.ok_or("orphan-scope-unavailable")?;member(&job,native)?;
         let stop=notification(job)?;
         if unsafe {TerminateJobObject(stop.job.as_raw_handle(),1)}==0 {return Err(std::io::Error::last_os_error().to_string());}Ok(Some(stop))
     }
-    pub fn absent(scope:&Value)->Res<bool> {
-        let job=open(scope,4)?.ok_or("orphan-scope-unavailable")?;active(&job).map(|n|n==0)
+    pub fn absent(scope:&Value,native:&NativeProcess)->Res<bool> {
+        let job=open(scope,4)?.ok_or("orphan-scope-unavailable")?;
+        if NativeProcess::read(native.pid)?.as_ref()==Some(native) {member(&job,native)?;return Ok(false);}
+        active(&job).map(|n|n==0)
     }
 }
 
@@ -296,7 +305,7 @@ mod platform {
     pub struct Stop;
     impl Stop {pub fn wait(&self)->Res<()> {Err("orphan-scope-unknown".into())}}
     pub fn stop(_:&Value,_:&NativeProcess)->Res<Option<Stop>> {Err("orphan-scope-unknown".into())}
-    pub fn absent(_:&Value)->Res<bool> {Err("orphan-scope-unknown".into())}
+    pub fn absent(_:&Value,_:&NativeProcess)->Res<bool> {Err("orphan-scope-unknown".into())}
 }
 
 pub(super) use platform::{Setup,verified,stop,absent};

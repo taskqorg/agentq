@@ -44,6 +44,7 @@ impl SessionStore {
                 scope(&row,spec)?;
                 if stopped(&root,&row)? {return Err("session-owner-unknown: unresolved native stop".into());}
                 let _pending=lock(&pending.with_extension("lock")).map_err(|e|format!("session-owner-unknown: pending admission: {e}"))?;
+                require_scope_absent(&root,&row)?;
                 if process(&row["native"])?.map(|n|n.live()).transpose()?.unwrap_or(false) {
                     return Err("session-owner-unknown: pending native session must be bound before adoption".into());
                 }
@@ -54,9 +55,10 @@ impl SessionStore {
             scope(&row,spec)?;
             if stopped(&root,&row)? {return Err("session-owner-unknown: unresolved native stop".into());}
             if row["phase"]!="idle" {
-                if !row["process_scope"].is_null() && !scope_absent(&root,&row)? {return Err("session-owner-unknown: native scope still occupied".into());}
+                require_scope_absent(&root,&row)?;
                 if let Some(native)=process(&row["native"])? {if native.live()? {return Err("session-busy: live native writer".into());}}
             }
+            retain_scope(&root,&row)?;
         }
         for process in native {if process.live()? {return Err("session-busy: live native writer".into());}}
         let reason=Some("native-writer-unverifiable".to_string());
@@ -110,6 +112,7 @@ impl SessionStore {
         row["native_reason"]=old.as_ref().map(|r|r["native_reason"].clone()).unwrap_or(Value::Null);
         row["binding"]=old.as_ref().map(|r|r["binding"].clone()).unwrap_or(Value::Null);
         if stopped(&root,&row)? {row["phase"]=json!("stop-unresolved");row["native_reason"]=json!("native-subtree-stop-unverified");}
+        if saved.is_none() {if let Some(old)=&old {retain_scope(&root,old)?;}}
         save(&file,&row)?;
         if alias_guard.is_some() {std::fs::remove_file(&alias).map_err(|e|e.to_string())?;}
         Ok(SessionOwner(Arc::new(Mutex::new(Owned {root,path:file,row,previous:old,guard,binding:None}))))
@@ -135,12 +138,16 @@ fn inventory(root:&Path,row:&Value)->Orphan {
 impl SessionStore {
     fn entries(&self,root:&Path,spec:&Spec)->Res<Vec<(PathBuf,Value)>> {
         let expected=binding(spec)?;let mut entries=vec![];
-        for entry in std::fs::read_dir(root).map_err(|e|e.to_string())? {
-            let path=entry.map_err(|e|e.to_string())?.path();if path.extension().is_none_or(|s|s!="json") {continue;}
-            let row=read(&path)?.ok_or("orphan-record-disappeared")?;
-            if !row["runtime"].is_string() || !row["root"].is_string() || !(row["home"].is_string() || row["home"].is_null()) {return Err("orphan-binding-unreadable".into());}
-            if ["runtime","root","home"].iter().any(|k|row[*k]!=expected[*k]) {continue;}
-            scope(&row,spec)?;entries.push((path,row));
+        let operations=root.join("operations");
+        for directory in [root,operations.as_path()] {
+            let listing=match std::fs::read_dir(directory) {Ok(listing)=>listing,Err(e) if directory==operations && e.kind()==std::io::ErrorKind::NotFound=>continue,Err(e)=>return Err(e.to_string())};
+            for entry in listing {
+                let path=entry.map_err(|e|e.to_string())?.path();if path.extension().is_none_or(|s|s!="json") {continue;}
+                let row=read(&path)?.ok_or("orphan-record-disappeared")?;
+                if !row["runtime"].is_string() || !row["root"].is_string() || !(row["home"].is_string() || row["home"].is_null()) {return Err("orphan-binding-unreadable".into());}
+                if ["runtime","root","home"].iter().any(|k|row[*k]!=expected[*k]) {continue;}
+                scope(&row,spec)?;entries.push((path,row));
+            }
         }
         Ok(entries)
     }
@@ -182,11 +189,24 @@ impl SessionStore {
 }
 
 fn empty_proof(row:&Value)->Value {json!({"token":row["token"],"runtime":row["runtime"],"root":row["root"],"home":row["home"],"native":row["native"],"process_scope":row["process_scope"],"lifetime_owner":row["lifetime_owner"]})}
+fn require_scope_absent(root:&Path,row:&Value)->Res<()> {
+    if !row["process_scope"].is_null() && !scope_absent(root,row).map_err(|e|format!("session-owner-unknown: {e}"))? {return Err("session-owner-unknown: native scope still occupied".into());}Ok(())
+}
+fn retain_scope(root:&Path,row:&Value)->Res<()> {
+    if row["process_scope"].is_null() {return Ok(());}
+    let token=row["token"].as_str().filter(|s|native::plain_id(s) && !s.starts_with('-')).ok_or("orphan-token-unknown")?;
+    let path=root.join("operations").join(format!("{token}.json"));
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e|e.to_string())?;
+    if let Some(existing)=read(&path)? {if empty_proof(&existing)!=empty_proof(row) {return Err("orphan-retained-scope-changed".into());}return Ok(());}
+    save(&path,row)
+}
 fn scope_absent(root:&Path,row:&Value)->Res<bool> {
+    let native=process(&row["native"])?.ok_or("orphan-native-unknown")?;
+    lifetime::validate(&row["process_scope"],&native)?;
     let proof=empty_proof(row);
     let path=absence_path(root,&proof)?;
     if let Some(receipt)=read(&path)? {if receipt==proof {return Ok(true);}return Err("orphan-absence-scope-changed".into());}
-    lifetime::absent(&row["process_scope"])
+    lifetime::absent(&row["process_scope"],&native)
 }
 fn absence_path(root:&Path,proof:&Value)->Res<PathBuf> {
     let token=proof["token"].as_str().filter(|s|native::plain_id(s) && !s.starts_with('-')).ok_or("orphan-token-unknown")?;
@@ -310,8 +330,8 @@ impl SessionOwner {
                 if let Some(previous)=&previous {previous(child)?;}
                 owner.spawned(child.id())?;
                 if let Some(setup)=&setup {
-                    let scope=setup.started(child)?;
-                    owner.with(|o| {let mut row=o.row.clone();row["process_scope"]=scope;save(&o.path,&row)?;o.row=row;Ok(())})?;
+                    let mut scope=setup.started(child)?;
+                    owner.with(|o| {scope["native"]=o.row["native"].clone();let mut row=o.row.clone();row["process_scope"]=scope;save(&o.path,&row)?;o.row=row;Ok(())})?;
                 }
                 owner.submit()?;
                 if let Some(setup)=&setup {

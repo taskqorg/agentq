@@ -1310,7 +1310,8 @@ impl Runtime for Adapter {
             let (spec, optimization) = me.spec(l, resumed.map_or_else(|| new_session(self.client), String::from), resumed.is_some())?;
             let turn = Turn::recover(&spec, &l.log, &saved["turn"])?;
             let start = turn.start;
-            let mut run=me.run(Body::Turn(turn),start,optimization,l);run.owner=Some(acquire()?);return run.restored(saved);
+            let owner=acquire()?;
+            let mut run=me.run(Body::Turn(turn.owned(owner.clone())),start,optimization,l);run.owner=Some(owner);return run.restored(saved);
         }
         if kind == "app" {
             // Observation only: the transport ended with its process, so the run reports and records but takes no input.
