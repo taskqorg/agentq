@@ -731,7 +731,10 @@ unknown reply scope. History never creates a reply handle, restores a callback o
 grants respond authority; replies require the original live owned run and its
 pending registry. A historical request alone cannot authorize input. Native raw
 records remain retained separately; a missing physical link to the original native
-record stays unknown rather than creating an invented origin.
+record stays unknown rather than creating an invented origin. Native payload fields
+named `unknown` remain native data; they cannot supply runtime unknown annotations.
+The selected runtime validates its registered source formats at both initial open
+and checkpoint recovery; a journal session identity cannot select another parser.
 
 Native item/call IDs determine stable step IDs within a source/session. Revisions
 carry the source offset and are self-contained: command, cwd, kind and completed
