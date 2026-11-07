@@ -146,16 +146,21 @@ fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Bound
                             let tool=block["id"].as_str().filter(|s|!s.is_empty()).ok_or("fork-server-tool-id-unknown")?;
                             if block["type"]=="mcp_tool_use" && !block["server_name"].as_str().is_some_and(|s|!s.is_empty()) {return Err("fork-mcp-tool-server-unknown".into());}
                             let result=if block["type"]=="mcp_tool_use" {"mcp_tool_result"}else{match block["name"].as_str() {
-                                Some("web_search")=>"web_search_tool_result",Some("web_fetch")=>"web_fetch_tool_result",Some("code_execution")=>"code_execution_tool_result",
+                                Some("advisor")=>"advisor_tool_result",Some("web_search")=>"web_search_tool_result",Some("web_fetch")=>"web_fetch_tool_result",Some("code_execution")=>"code_execution_tool_result",
                                 Some("bash_code_execution")=>"bash_code_execution_tool_result",Some("text_editor_code_execution")=>"text_editor_code_execution_tool_result",
                                 Some("tool_search_regex"|"tool_search_bm25")=>"tool_search_tool_result",_=>return Err("fork-server-tool-kind-unmapped".into()),
                             }};
                             if !seen_tools.insert(tool.to_string()) || server_tools.insert(tool.to_string(),result).is_some() {return Err("fork-tool-id-duplicate".into());}
                         },
-                        Some("web_search_tool_result"|"web_fetch_tool_result"|"code_execution_tool_result"|"bash_code_execution_tool_result"|"text_editor_code_execution_tool_result"|"tool_search_tool_result"|"mcp_tool_result")=>{
+                        Some("advisor_tool_result"|"web_search_tool_result"|"web_fetch_tool_result"|"code_execution_tool_result"|"bash_code_execution_tool_result"|"text_editor_code_execution_tool_result"|"tool_search_tool_result"|"mcp_tool_result")=>{
                             let tool=block["tool_use_id"].as_str().filter(|s|!s.is_empty()).ok_or("fork-server-tool-result-unknown")?;
                             if block.get("content").is_none() || server_tools.remove(tool)!=block["type"].as_str() {return Err("fork-server-tool-result-unassociated".into());}
                         },
+                        // Native API passthrough blocks retain their enclosing row's chain, not a new turn/cursor.
+                        Some("container_upload"|"mid_conv_system")=>{},
+                        Some("fallback") if block["from"]["model"].as_str().is_some_and(|s|!s.is_empty()) && block["to"]["model"].as_str().is_some_and(|s|!s.is_empty())=>{},
+                        Some("fallback")=>return Err("fork-fallback-model-unknown".into()),
+                        Some("compaction")=>return Err("fork-compaction-cursor-unmapped".into()),
                         _=>return Err("fork-native-block-unmapped".into()),
                     }
                 }
@@ -386,15 +391,20 @@ mod retained_tool_tail_tests {
     fn server_results_and_prompt_associated_furniture_keep_exact_chain() {
         let base=include_str!("../../../../tests/fixtures/history/claude-fork-tool-chain.jsonl");
         let original=base.lines().map(|line|serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>();
-        for mcp in [false,true] {
+        for native_kind in ["web_search", "mcp", "advisor", "container_upload", "mid_conv_system", "fallback"] {
+            let mcp=native_kind=="mcp";
             for bad in ["", "foreign-result", "missing-result", "queued-command", "foreign-prompt"] {
                 let root=crate::scratch("claude-server-tail");let path=root.join("native.jsonl");
                 let mut rows=original.clone();
-                let call=if mcp {json!({"type":"mcp_tool_use","id":"server-one","name":"lookup","server_name":"fixture","input":{}})}else{json!({"type":"server_tool_use","id":"server-one","name":"web_search","input":{}})};
-                let result=json!({"type":if mcp {"mcp_tool_result"}else{"web_search_tool_result"},"tool_use_id":if bad=="foreign-result" {"foreign"}else{"server-one"},"content":[]});
+                let call=if mcp {json!({"type":"mcp_tool_use","id":"server-one","name":"lookup","server_name":"fixture","input":{}})}else{json!({"type":"server_tool_use","id":"server-one","name":if native_kind=="advisor" {"advisor"}else{"web_search"},"input":{}})};
+                let result=json!({"type":if mcp {"mcp_tool_result"}else if native_kind=="advisor" {"advisor_tool_result"}else{"web_search_tool_result"},"tool_use_id":if bad=="foreign-result" {"foreign"}else{"server-one"},"content":[]});
                 rows[1]["message"]["content"]=json!([call]);
                 rows[2]["type"]=json!("assistant");rows[2]["message"]["role"]=json!("assistant");
                 rows[2]["message"]["content"]=if bad=="missing-result" {json!([{"type":"text","text":"done"}])}else{json!([result,{"type":"text","text":"done"}])};
+                if matches!(native_kind,"container_upload"|"mid_conv_system"|"fallback") {
+                    let block=if native_kind=="fallback" {json!({"type":"fallback","from":{"model":"original"},"to":{"model":"next"}})}else{json!({"type":native_kind})};
+                    rows[2]["message"]["content"].as_array_mut().unwrap().insert(0,block);
+                }
                 rows[3]["attachment"]=json!({"type":if bad=="queued-command" {"queued_command"}else{"hook_success"},"content":"hook completed"});
                 rows[3]["promptId"]=if bad=="foreign-prompt" {json!("00000000-0000-4000-8000-000000000012")}else{rows[0]["promptId"].clone()};
                 let fixture=rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n";
