@@ -729,6 +729,28 @@ subagent, image, question, approval, compaction, usage and unknown. Each step ke
 its raw record, source byte range and digest; normalization happens at read time.
 Nothing writes a native transcript or stores a second canonical history.
 
+Approval and question history projects the same `Event::Request`, `Choice` and
+`Question` data emitted by live control ([shared proposal](https://github.com/taskqorg/specq/issues/132)).
+Runtime-authored `agentq_control` records retain full request snapshots. The source,
+session, original run identity, request generation and opaque request ID bind one
+logical step; later physical records replace that observation authoritatively,
+including null or missing content. Every revision retains its exact physical origin.
+Native request IDs reused by another run or generation remain separate steps.
+`Step.id` is the derived upsert identity. The preserved `data.event.Request.id`
+is the original opaque control ID, validated only by the original live owned run;
+neither `Step.id` nor `native_id` is a replacement reply handle.
+
+Request states are `pending`, `reply-pending`, `reply-sent`, `cancelled` and
+`unknown`, distinguishing an ask, reply intent, reply pipe receipt, cancellation
+and uncertain delivery. A pipe receipt is never provider acceptance or application.
+Unknown states and malformed scope remain visible as unknown. Native-only controls
+without verified run/generation use physical occurrence identity and explicitly
+unknown reply scope. History never creates a reply handle, restores a callback or
+grants respond authority; replies require the original live owned run and its
+pending registry. A historical request alone cannot authorize input. Native raw
+records remain retained separately; a missing physical link to the original native
+record stays unknown rather than creating an invented origin.
+
 Native item/call IDs determine stable step IDs within a source/session. Revisions
 carry the source offset and are self-contained: command, cwd, kind and completed
 output survive later result records. Output deltas accumulate into output; clients
