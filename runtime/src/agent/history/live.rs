@@ -219,7 +219,7 @@ fn assemble(history:&History,steps:Vec<Step>,context:Context,windows:Vec<super::
             file_steps.push(rollup);files.push(data);
         }
         let mut unknown=BTreeMap::new();
-        if let Some(reason)=calls.iter().find_map(|c|c.accounting_unknown){unknown.insert("usage".into(),reason.into());}
+        if let Some(reason)=calls.iter().find_map(|c|c["accounting_unknown"].as_str()){unknown.insert("usage".into(),reason.into());}
         if cost.is_none(){unknown.insert("cost_usd".into(),"native turn cost not reported".into());}
         if plan.is_null(){unknown.insert("plan".into(),"native plan not reported".into());}
         if todos.is_null(){unknown.insert("todos".into(),"native todos not reported".into());}

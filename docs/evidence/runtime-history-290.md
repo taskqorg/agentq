@@ -120,3 +120,24 @@ native/paid turn, full local suite, login or working configuration change occurr
 The prior OpenCode fresh-turn 404/402 and all native Windows/WSL, archive-export and
 viewer gaps remain. Raw database/WAL/index source parts can contain other sessions;
 local session selection still grants no off-host export authority.
+
+## Copied-family and mandatory ownership integration
+
+Kimi parent/child resolution now requires a unique parent within the same verified
+physical session root. Copied session trees keep separate opaque source IDs and
+family links, including after checkpoint recovery; unresolved duplicate parents
+refuse instead of choosing the first source. Contradictory state metadata naming
+two primary agents also refuses before publishing or advancing a checkpoint.
+Three focused source-authority regressions cover copied families/recovery,
+contradictory primaries and duplicate parents without a proven physical family.
+
+The stack incorporates mandatory SessionStore/adoption from #325 and preserves
+required stop_id and #327 reason/termination/reaped evidence. History-only readers
+implement the current argument boundary by refusing execution, and report unknown
+owner/activity without inventing authority. No compatibility opt-out is added.
+
+Ownership integration passed 51 focused source, authority, media, accounting,
+usage-scope and step tests. After incorporating the latest-result-only cost fix,
+33 affected source/authority/media/live checks passed again, including Kimi
+recovery and all six cost cases. Offline selftest, pinned lint and diff check
+passed. Full suites remain CI-only; no new native/paid turn or live change occurred.
