@@ -162,7 +162,7 @@ pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&L
         let observed=json!({"child":child,"retained":&turns[..keep]});
         owner.branch_finish(&intent,&observed)?;child_owner.branch_finish(&intent,&observed)?;Ok(())
     };
-    Ok(me.start_lineage(launch,None,Some(&lineage),Some(&mut verify))?)
+    Ok(me.start_lineage(launch,None,Some(&lineage),Some(&mut verify)).map_err(|e|Failure::Failed(e.detail))?)
 }
 
 pub(super) fn rewind(adapter:&Adapter,run:&mut Run,through:Option<&Step>)->Result<(),Failure> {

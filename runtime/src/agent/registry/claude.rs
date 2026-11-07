@@ -98,11 +98,29 @@ fn login(command: Command,_subscription:bool) -> Check {
             }
 }
 fn protected(home: PathBuf) -> Vec<PathBuf> { vec![home.clone(), if home.file_name().is_some_and(|n| n == ".claude") { home.with_file_name(".claude.json") } else { home.join(".claude.json") }] }
-fn refusal(text: &str) -> Option<Cause> {
-    Some(Cause(if text.contains("Workspace not trusted") { "workspace-untrusted" }
-    else if text.contains("No conversation found with session ID") { "session-missing" }
-    else if text.contains("Not logged in") || text.contains("/login") { "login-required" } else { return None }))
+/// CLI stderr rejection, not an assistant/result JSON string quoting it.
+pub(crate) fn missing_session(text:&str)->Option<(&str,&str)> {
+    text.lines().find_map(|line| {
+        let line=line.trim();
+        let session=line.strip_prefix("No conversation found with session ID: ")?;
+        if native::plain_id(session) && session!="-" {Some((session,line))} else {None}
+    })
 }
+pub(crate) fn start_failure(text:&str,events:&[Value],requested:Option<&str>,observed:Option<&str>)->Option<LaunchError> {
+    let (session,detail)=missing_session(text)?;
+    if requested!=Some(session) || observed!=Some(session)
+        || text.lines().any(|line|!line.trim().is_empty() && serde_json::from_str::<Value>(line).is_err() && line.trim()!=detail)
+        || events.iter().any(|v|v["type"]!="system" || v["subtype"]!="init" || v["session_id"].as_str().is_some_and(|id|id!=session)) {return None;}
+    Some(LaunchError {stage:InputStage::BeforeInput,cause:Some(Cause("session-missing")),session:Some(session.into()),detail:detail.into(),native:None})
+}
+fn refusal(text: &str) -> Option<Cause> {
+    if missing_session(text).is_some() {return Some(Cause("session-missing"));}
+    text.lines().filter(|line|serde_json::from_str::<Value>(line).is_err()).find_map(|line| {
+        Some(Cause(if line.contains("Workspace not trusted") {"workspace-untrusted"}
+        else if line.contains("Not logged in") || line.contains("/login") {"login-required"} else {return None}))
+    })
+}
+
 fn transcript(_: &str, _: Option<&Path>) -> Option<PathBuf> { None }
 fn link(run: &Run) -> Result<String, native::Absence> {
         let none = |c| Err((Cause(c), None));

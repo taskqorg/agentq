@@ -101,6 +101,9 @@ pub(super) fn classify_report(
     {
         status.2 = Some(detail.into());
     }
+    if status.0=="unknown" {
+        if let Some((_,detail))=super::missing_session(text) {status=("refused","session-missing",Some(detail.into()));}
+    }
     let mut result=report(Client::Claude, text, events, rollout, status, live);
     if let Some(cost)=end_index.and_then(|i|crate::agent::history::live::native_cost(&events[i])) {result.usage.cost_usd=Some(cost);}
     result

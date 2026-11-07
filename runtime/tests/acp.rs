@@ -34,20 +34,20 @@ fn main() {
     }));
     l.model=Some("model-1".into());
     l.policy.approval=agent::Approval::Edits;
-    assert!(r.resume("untracked",&l).err().unwrap().starts_with("session-owner-unknown"));
+    assert!(r.resume("untracked",&l).err().unwrap().detail.starts_with("session-owner-unknown"));
     let mut scoped=l.clone();scoped.lifetime=agent::Lifetime::StopWithOwner;
-    assert_eq!(r.launch(&scoped).err().as_deref(),Some("lifetime-unsupported: native submission scope"));
+    assert_eq!(r.launch(&scoped).err().as_ref().map(|e|e.detail.as_str()),Some("lifetime-unsupported: native submission scope"));
     let mut bad_store=l.clone();bad_store.session_store=agent::SessionStore::new("relative-owners");
-    assert_eq!(r.launch(&bad_store).err().unwrap(),"session-store-requires-absolute-path");
+    assert_eq!(r.launch(&bad_store).err().unwrap().detail,"session-store-requires-absolute-path");
     l.inactivity=Some(Duration::from_secs(20));
     let mut run=r.launch(&l).unwrap();
     assert!(run.owner().is_some(),"ACP must retain the mandatory owner handle");
     let session=r.session_id(&run).unwrap();
     assert_eq!(run.owner().unwrap().checkpoint().unwrap()["session"],session,"native identity binds before input");
-    assert!(r.resume(&session,&l).err().unwrap().starts_with("session-busy"));
+    assert!(r.resume(&session,&l).err().unwrap().detail.starts_with("session-busy"));
     let mut conflicting=l.clone();conflicting.log=root.join("conflicting.jsonl");
     conflicting.env.push(("AGENTQ_FAKE_ACP_SESSION".into(),session.clone().into()));
-    assert!(r.launch(&conflicting).err().unwrap().starts_with("session-busy"));
+    assert!(r.launch(&conflicting).err().unwrap().detail.starts_with("session-busy"));
     let raw=std::fs::read_to_string(&conflicting.log).unwrap();
     assert!(!raw.lines().filter_map(|row|serde_json::from_str::<Value>(row).ok()).any(|row|row["outgoing"]==true && row["message"]["method"]=="session/prompt"),"failed binding cannot submit input");
     #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;assert_eq!(std::fs::metadata(&l.log).unwrap().permissions().mode() & 0o777,0o600);}
@@ -192,7 +192,7 @@ fn main() {
     }
     l.deadline=Some(Instant::now()+Duration::from_secs(20));
     l.env.push(("AGENTQ_FAKE_ACP_BAD_VERSION".into(),"1".into()));
-    assert!(r.launch(&l).err().unwrap().contains("workspace write defect"));
+    assert!(r.launch(&l).err().unwrap().detail.contains("workspace write defect"));
     l.env.pop();
     for version in ["1.4.2","1.4.3","1.4.4","1.4.5","1.5.1","unknown"] {
         let mut old=l.clone();old.env.push(("AGENTQ_FAKE_ACP_PROBE_VERSION".into(),version.into()));

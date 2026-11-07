@@ -234,6 +234,24 @@ impl std::fmt::Display for Cause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
 }
 
+/// Affirmative native rejection before acceptance/execution, or no such proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputStage { BeforeInput, Unknown }
+
+/// Start failure; detail/native are operator-local and never metadata telemetry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchError {
+    pub stage: InputStage,
+    pub cause: Option<Cause>,
+    pub session: Option<String>,
+    pub detail: String,
+    pub native: Option<Value>,
+}
+impl From<String> for LaunchError {
+    fn from(detail:String)->Self {Self {stage:InputStage::Unknown,cause:None,session:None,detail,native:None}}
+}
+impl From<&str> for LaunchError {fn from(detail:&str)->Self {String::from(detail).into()}}
+
 /// A typed operation error: `Refused` before any native write, `Failed` after a native or transport error (never retried).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure { Refused(Cause), Failed(String) }
@@ -681,10 +699,10 @@ impl App {
 
     /// Initialize, open the thread and, with input, start the first turn.
     /// A failed handshake stops a plain child; a protected frontend stays with its host.
-    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch, owner:&SessionOwner,lineage:Option<&Value>,branch_check:Option<&mut dyn FnMut(&mut App,branching::Phase)->Res<()>>) -> Res<App> {
+    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch, owner:&SessionOwner,lineage:Option<&Value>,branch_check:Option<&mut dyn FnMut(&mut App,branching::Phase)->Res<()>>) -> Result<App,LaunchError> {
         let mut session = match AppSession::new(spec) {
             Ok(s) => s,
-            Err(e) => { if let Transport::Plain(s) = &mut transport { let _ = s.kill(); } return Err(e); }
+            Err(e) => { if let Transport::Plain(s) = &mut transport { let _ = s.kill(); } return Err(e.into()); }
         };
         if let Transport::Plain(server) = &transport { session.sample(server.id()); }
         let owned = matches!(transport, Transport::Plain(_));
@@ -696,7 +714,7 @@ impl App {
         let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval,capture:owned.then(||crate::archive::stream_path(l.install.as_deref(),&l.log)) };
         let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner,lineage,branch_check);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
-        opened.map(|_| app)
+        match opened {Ok(())=>Ok(app),Err(detail)=>Err(app.session.start_failure().unwrap_or_else(||detail.into()))}
     }
 
     fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch, descriptor: &Descriptor,owner:&SessionOwner,lineage:Option<&Value>,mut branch_check:Option<&mut dyn FnMut(&mut App,branching::Phase)->Res<()>>) -> Res<()> {
@@ -878,8 +896,8 @@ pub trait Runtime: Send + Sync {
     fn preflight(&self, launch: &Launch, repair: &Repair) -> Readiness {
         let _ = (launch, repair); Readiness::unsupported()
     }
-    fn launch(&self, launch: &Launch) -> Res<Run>;
-    fn resume(&self, session: &str, launch: &Launch) -> Res<Run>;
+    fn launch(&self, launch: &Launch) -> Result<Run,LaunchError>;
+    fn resume(&self, session: &str, launch: &Launch) -> Result<Run,LaunchError>;
     /// Native conversation prefix operations; selection is observation, never writer authority.
     fn fork(&self, _source: &mut Run, _through: Option<&super::history::Step>, _launch: &Launch) -> Result<Run, Failure> {Err(Failure::Refused(Cause("fork-unsupported")))}
     fn rewind(&self, _source: &mut Run, _through: Option<&super::history::Step>) -> Result<(), Failure> {Err(Failure::Refused(Cause("rewind-unsupported")))}
@@ -1231,12 +1249,12 @@ impl Adapter {
         let mut run = self.run(body, progress, optimization, l); run.readiness = readiness.clone(); run
     }
 
-    fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {self.start_lineage(l,session,None,None)}
+    fn start(&'static self, l: &Launch, session: Option<&str>) -> Result<Run,LaunchError> {self.start_lineage(l,session,None,None).map_err(|mut e|{e.session=session.map(String::from);e})}
 
-    fn start_lineage(&'static self, l: &Launch, session: Option<&str>, lineage: Option<&Value>, mut branch_check:Option<&mut dyn FnMut(&mut App,branching::Phase)->Res<()>>) -> Res<Run> {
+    fn start_lineage(&'static self, l: &Launch, session: Option<&str>, lineage: Option<&Value>, mut branch_check:Option<&mut dyn FnMut(&mut App,branching::Phase)->Res<()>>) -> Result<Run,LaunchError> {
         let name = self.descriptor.name;
         if l.controls && (l.mode!=Mode::Turn || !self.descriptor.has("respond")) {return Err("controls-unsupported".into());}
-        if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability())); }
+        if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability()).into()); }
         if matches!(l.mode, Mode::AppServer { .. }) { return Err("app-server requires explicit protected host; state needs in Launch".into()); }
         if l.lifetime==Lifetime::StopWithOwner && (!matches!(l.mode,Mode::Turn) || !self.descriptor.has("process-lifetime")) {return Err("lifetime-unsupported: native submission scope".into());}
         let readiness = self.preflight(l, &Repair::default());
@@ -1341,9 +1359,9 @@ impl Runtime for Adapter {
     }
     fn preflight(&self, launch: &Launch, repair: &Repair) -> Readiness { preflight::check(self, launch, repair) }
 
-    fn launch(&self, launch: &Launch) -> Res<Run> { table(self.client).start(launch, None) }
+    fn launch(&self, launch: &Launch) -> Result<Run,LaunchError> { table(self.client).start(launch, None) }
 
-    fn resume(&self, session: &str, launch: &Launch) -> Res<Run> { table(self.client).start(launch, Some(session)) }
+    fn resume(&self, session: &str, launch: &Launch) -> Result<Run,LaunchError> { table(self.client).start(launch, Some(session)) }
 
     fn input(&self, run: &mut Run, parts: &[Part]) -> Result<(), Failure> {
         let run = self.own_mut(run)?;
@@ -1813,7 +1831,7 @@ pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, 
     owner.spawned(server.id())?;
     if !l.input.is_empty() || !l.parts.is_empty() {owner.submit()?;}
     let optimization = server.optimization();
-    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner,None,None)?;
+    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner,None,None).map_err(|e|e.detail)?;
     let mut run=adapter.run(Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);Ok(run)
 }
 
@@ -1918,13 +1936,13 @@ mod tests {
                 probes.insert(capability,supported(adapter.spec(&l,"session-1".into(),false).map(|_|())));
             }
             // A missing caller-owned executable reaches spawn failure without ever starting a native agent.
-            probes.insert("turn",supported(runtime.launch(&launch()).map(|_|())));
+            probes.insert("turn",supported(runtime.launch(&launch()).map(|_|()).map_err(|e|e.detail)));
             let mut scoped=launch();scoped.lifetime=Lifetime::StopWithOwner;
-            probes.insert("process-lifetime",supported(runtime.launch(&scoped).map(|_|())));
-            probes.insert("resume",supported(runtime.resume("session-1",&launch()).map(|_|())));
+            probes.insert("process-lifetime",supported(runtime.launch(&scoped).map(|_|()).map_err(|e|e.detail)));
+            probes.insert("resume",supported(runtime.resume("session-1",&launch()).map(|_|()).map_err(|e|e.detail)));
             for (capability,mode) in [("background",Mode::Background),("app-queue",Mode::Queue {transcript:root.join("transcript")}),("app-server",Mode::AppServer {initialize:json!({}),thread:json!({})})] {
                 let mut l=launch(); l.mode=mode;
-                probes.insert(capability,supported(runtime.resume("session-1",&l).map(|_|())));
+                probes.insert(capability,supported(runtime.resume("session-1",&l).map(|_|()).map_err(|e|e.detail)));
             }
             let native=NativeSpec {root:root.clone(),session:"session-1".into(),home:Some(root.clone()),..NativeSpec::default()};
             let native_args=runtime.native_arguments(&native).unwrap();

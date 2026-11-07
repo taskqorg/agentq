@@ -105,11 +105,19 @@ fn login(mut command: Command,subscription:bool) -> Check {
 }
 fn protected(home: PathBuf) -> Vec<PathBuf> { vec![home] }
 fn refusal(text: &str) -> Option<Cause> {
-    let lower = text.to_ascii_lowercase();
-    Some(Cause(if lower.contains("already has an active writer") { "session-busy" }
-    else if text.contains("app-server thread/resume refused") { "session-missing" }
-    else if ["401", "login", "log in"].iter().any(|m| lower.contains(m)) { "login-required" } else { return None }))
+    text.lines().find_map(|line| {
+        let diagnostic=match serde_json::from_str::<Value>(line) {
+            Ok(v) if matches!(v["type"].as_str(),Some("error"|"turn.failed")) || v.get("id").is_some() && v.get("method").is_none() && v["error"]["code"].is_i64()=>v["error"]["message"].as_str().or(v["message"].as_str())?.to_string(),
+            Ok(_)=>return None,
+            Err(_)=>line.to_string(),
+        };
+        let lower=diagnostic.to_ascii_lowercase();
+        Some(Cause(if lower.contains("already has an active writer") {"session-busy"}
+        else if lower.trim()=="thread not found" {"session-missing"}
+        else if ["401","login","log in"].iter().any(|m|lower.contains(m)) {"login-required"} else {return None}))
+    })
 }
+
 fn transcript(session: &str, home: Option<&Path>) -> Option<PathBuf> { rollout(session,home) }
 fn link(_: &Run) -> Result<String,native::Absence> { Err((Cause("no-session-url"),None)) }
 fn session_link(_: &NativeSpec, _: Option<&str>) -> Result<String,native::Absence> { Err((Cause("no-session-url"),None)) }

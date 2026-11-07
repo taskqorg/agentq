@@ -39,12 +39,14 @@ pub(crate) struct AppSession {
     process: Option<super::capture::ProcessUse>,
     early: Vec<NativeFrame>,
     fault: Option<String>,
+    start_failure: Option<LaunchError>,
     scope: String,
     worked: bool,
     failure: Option<Value>,
 }
 
 impl AppSession {
+    pub(crate) fn start_failure(&self)->Option<LaunchError> {self.start_failure.clone()}
     pub(crate) fn history_home(&self)->Option<PathBuf> {spec_home(&self.spec)}
     pub fn new(spec: &Spec) -> Res<Self> {
         if spec.client != Client::Codex || spec.resume && (!native::plain_id(&spec.session) || spec.session == "-") {
@@ -52,7 +54,7 @@ impl AppSession {
         }
         Ok(Self { spec: spec.clone(), next: 1, pending: None, initialized: false, ready: false,
             thread: None, turn: None, active: false, terminal: None, model: None, text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0, sampler: None, process: None,
-            early:vec![],fault:None,scope:native::scope(spec),worked:false,failure:None, windows:limits::unknown("not-reported"), latest_windows:limits::unknown("not-reported"), window_groups:BTreeMap::new() })
+            early:vec![],fault:None,start_failure:None,scope:native::scope(spec),worked:false,failure:None, windows:limits::unknown("not-reported"), latest_windows:limits::unknown("not-reported"), window_groups:BTreeMap::new() })
     }
 
     /// Native catalogue/account methods share the same transport; caller handlers consume their raw responses.
@@ -198,6 +200,10 @@ impl AppSession {
                             if self.active && self.terminal.is_none() {self.limits=None;self.windows=self.latest_windows.clone();}
                         }
                         self.pending=None;return Ok(());
+                    }
+                    if method=="thread/resume" && self.turn.is_none() && !self.worked && message["error"]["code"].is_i64() && message["error"]["message"].is_string() {
+                        let detail=message["error"]["message"].as_str().unwrap_or("native resume refusal").to_string();
+                        self.start_failure=Some(LaunchError {stage:InputStage::BeforeInput,cause:super::refusal(&detail),session:Some(self.spec.session.clone()),detail,native:Some(message.clone())});
                     }
                     return Err(format!("app-server {method} refused; original session retained"));
                 }
@@ -392,6 +398,18 @@ impl AppSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resume_rejection_stage_requires_correlated_well_formed_native_error() {
+        let spec=Spec {client:Client::Codex,root:std::env::temp_dir(),session:"original".into(),resume:true,args:vec![],env:vec![],home:None};
+        for error in [json!({"message":"thread not found"}),json!("thread not found"),json!({"code":-32001,"message":"thread not found"})] {
+            let mut app=AppSession::new(&spec).unwrap();
+            let init=app.initialize(json!({})).unwrap();app.observe(&json!({"id":init["id"],"result":{}})).unwrap();
+            let open=app.open(json!({})).unwrap();
+            app.observe(&json!({"id":999,"error":error})).unwrap();assert!(app.start_failure().is_none());
+            assert!(app.observe(&json!({"id":open["id"],"error":error})).is_err());
+            assert_eq!(app.start_failure().is_some(),error["code"].is_i64());
+        }
+    }
     // S283: exact inbound lines need positive native correlation; Value/checkpoint evidence cannot mint bytes.
     #[test]
     fn app_server_frame_selection_keeps_exact_bytes_scope_and_checkpoints() {

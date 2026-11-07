@@ -24,7 +24,7 @@ fn main() {
     let process=NativeProcess::read(pid).unwrap().unwrap();let _cleanup=Cleanup(process.clone());
     let mut independent=launch.clone();independent.session_store=SessionStore::new(root.join("independent-store"));
     assert!(rt.adopt(&session,&independent,&[process.clone()]).unwrap_err().starts_with("session-busy"));
-    assert!(rt.resume(&session,&launch).err().is_some_and(|e|e.starts_with("session-busy")));
+    assert!(rt.resume(&session,&launch).err().is_some_and(|e|e.detail.starts_with("session-busy")));
     let checkpoint=rt.checkpoint(&run).unwrap();assert!(rt.recover(&checkpoint,&launch).is_err());drop(run);
     let mut recovered=rt.recover(&checkpoint,&launch).unwrap();assert_eq!(recovered.id(),Some(pid));
     std::thread::sleep(Duration::from_millis(30));

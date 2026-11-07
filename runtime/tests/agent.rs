@@ -57,6 +57,7 @@ pub(crate) fn main() {
     }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
+        ("native_start_refusal_proof_preserves_stage_cause_and_session",native_start_refusal_proof_preserves_stage_cause_and_session),
         ("codex_branch_prefix_keeps_parent_files_and_frozen_report",branching::prefix),
         ("codex_branch_refusals_precede_native_mutation",branching::refusals),
         ("codex_branch_unknown_mutation_stays_durably_fenced",branching::uncertain),
@@ -160,7 +161,7 @@ fn automatic_codex_turns_select_transport() {
     let codex = agent::runtime("codex").unwrap();
     let mut launch = fake_launch("codex", &root, "private request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref())]);
     launch.deltas = true;
-    let mut run = codex.launch(&launch).unwrap_or_else(|e| panic!("neutral deltas launch refused: {e}"));
+    let mut run = codex.launch(&launch).unwrap_or_else(|e| panic!("neutral deltas launch refused: {e:?}"));
     let session=codex.session_id(&run).unwrap();
     assert_eq!(codex.checkpoint(&run).unwrap()["owner"]["session"],session,"native thread binds before first poll and input");
     assert!(codex.adopt(&session,&launch,&[]).is_err());
@@ -324,6 +325,21 @@ fn fake(client: &str) {
         std::fs::write("terminal.json",json!({"args":args,"pid":std::process::id()}).to_string()).unwrap();
         while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}return;
     }
+    if let Ok(mode)=std::env::var("AGENTQ_FAKE_START_REFUSAL") {
+        let mut input=String::new();std::io::stdin().read_to_string(&mut input).unwrap();
+        let session=args.windows(2).find(|a|a[0]=="--resume").map(|a|a[1].as_str()).unwrap();
+        let missing=format!("No conversation found with session ID: {session}");
+        match mode.as_str() {
+            "quoted"=>{println!("{}",json!({"type":"result","subtype":"success","is_error":false,"result":missing}));return},
+            "foreign"=>eprintln!("No conversation found with session ID: foreign-session"),
+            "generic"=>eprintln!("permission denied"),
+            "live"=>{eprintln!("{missing}");std::fs::write("refusal-ready","").unwrap();wait_for(Path::new("refusal-release"));},
+            "replaced"=>{eprintln!("{missing}");std::fs::write("replacement.log",format!("{missing}\n{missing}\n")).unwrap();std::fs::rename("replacement.log","worker.log").unwrap();},
+            "work"=>{println!("{}",json!({"type":"assistant","session_id":session,"message":{"content":[{"type":"text","text":"work"}]}}));eprintln!("{missing}");},
+            _=>eprintln!("{missing}"),
+        }
+        std::process::exit(if mode=="zero" {0} else {1});
+    }
     if client=="antigravity" && args.last().is_some_and(|a|a=="--version") {println!("agy 1.5.2");return;}
     if args.first().is_some_and(|a|a=="acp") {return fake_acp(&args);}
     let mut input = String::new();
@@ -486,6 +502,10 @@ fn fake_app_server() {
                 println!("{}",json!({"id":id,"result":{"thread":{"id":"native-thread"},"model":"fixture-model"}}));
             },
             Some("thread/resume")=>{
+                if let Ok(message)=std::env::var("AGENTQ_FAKE_NATIVE_REFUSAL") {
+                    println!("{}",json!({"id":id,"error":{"code":-32001,"message":message,"data":{"native":"preserved"}}}));continue;
+                }
+
                 assert_eq!(value["params"]["threadId"],std::fs::read_to_string("app-native-thread").unwrap());
                 // Native semantics measured in docs/research/253.md: `thread.turns` carries the history unless excluded.
                 if let Ok(frame)=std::env::var("AGENTQ_FAKE_RESUME_FRAME") {
@@ -612,11 +632,12 @@ fn app_resume_frames_stay_bounded_and_named() {
         match (codex.resume("native-thread", &l), refusal) {
             (Ok(mut run), None) => assert_eq!(finish(codex, &mut run), agent::State::Finished, "{frame}"),
             (Err(e), Some(refusal)) => {
-                let e = e.to_string();
+                assert_eq!((e.stage,e.cause,e.session.as_deref()),(agent::InputStage::Unknown,None,Some("native-thread")));
+                let e = e.detail;
                 assert!(e.contains(refusal), "{frame}: {e}");
                 assert!(!requests().iter().any(|v|v["method"]=="turn/start"), "{frame}: no input follows a failed open");
             }
-            (opened, _) => panic!("{frame}: {:?}", opened.map(|_| "opened").map_err(|e| e.to_string())),
+            (opened, _) => panic!("{frame}: {:?}", opened.map(|_| "opened").map_err(|e| e.detail)),
         }
         assert_eq!(requests().iter().find(|v|v["method"]=="thread/resume").unwrap()["params"]["excludeTurns"], true, "{frame}");
     }
@@ -698,12 +719,12 @@ fn session_ownership_and_stall_signal() {
     let cleanup=Gates(vec![gate.clone(),terminal_gate.clone()]);
     let rt=agent::runtime("claude").unwrap();let mut l=fake_launch("claude",&root,"exactly once",&[("COREQ_FAKE_GATE",gate.as_os_str())]);
     l.home=Some(home);l.inactivity=Some(Duration::from_millis(20));
-    assert!(rt.resume("untracked",&l).err().is_some_and(|e|e.starts_with("session-owner-unknown")));
+    assert!(rt.resume("untracked",&l).err().is_some_and(|e|e.detail.starts_with("session-owner-unknown")));
     let adopted=agentq_runtime::cli::adopt(&json!({"client":"claude","session":"imported-json","root":root,"log":l.log,"home":l.home,"session_store":l.session_store.path}).to_string()).unwrap();
     assert_eq!(adopted["reason"],"native-writer-unverifiable");
     let mut run=rt.launch(&l).unwrap();wait_for(&root.join("fake-turn-1.json"));
     let saved=rt.checkpoint(&run).unwrap();let session=saved["owner"]["session"].as_str().unwrap().to_string();let pid=run.id();
-    assert!(rt.resume(&session,&l).err().is_some_and(|e|e.starts_with("session-busy")));
+    assert!(rt.resume(&session,&l).err().is_some_and(|e|e.detail.starts_with("session-busy")));
     assert!(rt.recover(&saved,&l).err().is_some_and(|e|e.starts_with("session-busy")));
     assert_eq!(rt.observe(&mut run).activity.state,"unknown","silence before native evidence is not a stall");
     drop(run);let mut run=rt.recover(&saved,&l).unwrap();assert_eq!(run.id(),pid);
@@ -725,7 +746,7 @@ fn session_ownership_and_stall_signal() {
     assert!(rt.descriptor().history_resume(&session,&terminal,&[]).is_err());
     let mut child=command.spawn().unwrap();wait_for(&root.join("terminal.json"));
     assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Finished,"an old terminal poll must never overwrite the next owner");
-    assert!(rt.resume(&session,&l).err().is_some_and(|e|e.starts_with("session-busy")),"the durable native identity outlives the resume command handle");
+    assert!(rt.resume(&session,&l).err().is_some_and(|e|e.detail.starts_with("session-busy")),"the durable native identity outlives the resume command handle");
     std::fs::write(&terminal_gate,"").unwrap();assert!(child.wait().unwrap().success());
     drop(rt.descriptor().history_resume(&session,&terminal,&[]).unwrap());
     drop(rt.session_owner(Some(&session),&terminal).unwrap());
@@ -843,8 +864,8 @@ fn process_lifetime_and_orphan_cleanup() {
         teardown(root);
     }
     let root=scratch("lifetime-refusal");let mut launch=fake_launch("claude",&root,"never submitted",&[]);launch.lifetime=agent::Lifetime::StopWithOwner;
-    launch.process.configure=Some(std::sync::Arc::new(|_|{}));assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));assert!(!root.join("fake-turn-1.json").exists());
-    launch.process=agent::Process::default();launch.mode=agent::Mode::Background;assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));
+    launch.process.configure=Some(std::sync::Arc::new(|_|{}));assert!(rt.launch(&launch).err().unwrap().detail.starts_with("lifetime-unsupported"));assert!(!root.join("fake-turn-1.json").exists());
+    launch.process=agent::Process::default();launch.mode=agent::Mode::Background;assert!(rt.launch(&launch).err().unwrap().detail.starts_with("lifetime-unsupported"));
     teardown(root);
     let root=scratch("lifetime-json-native");let bin=root.join("bin");std::fs::create_dir_all(&bin).unwrap();let home=root.join("account");std::fs::create_dir_all(&home).unwrap();
     let native=bin.join(if cfg!(windows) {"claude.exe"} else {"claude"});std::fs::copy(exe(),&native).unwrap();
@@ -1139,7 +1160,7 @@ fn native_control_readiness_and_large_history_stay_owned() {
     assert!(codex.progress(&mut app).unwrap().len()==6 && codex.progress(&mut app).unwrap().is_empty(),"progress reads the native transcript once");
     assert!(codex.cancel(&mut app).unwrap_err().starts_with("cancel-unsupported"));
     assert!(codex.resume("unsafe & command",&q).is_err());
-    assert_eq!(claude.resume("native-thread",&q).err().as_deref(),Some("mode app-queue unsupported by claude"));
+    assert_eq!(claude.resume("native-thread",&q).err().as_ref().map(|e|e.detail.as_str()),Some("mode app-queue unsupported by claude"));
     teardown(root);
 }
 
@@ -1189,7 +1210,7 @@ fn background_commands_preserve_native_mode() {
     finish(claude,&mut recovered);claude.resume("native-session", &l).unwrap();
     let record:Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
     assert_eq!(record["args"],json!(["--bg","--resume","native-session"]));
-    assert_eq!(agent::runtime("codex").unwrap().launch(&l).err().as_deref(), Some("mode background unsupported by codex"));
+    assert_eq!(agent::runtime("codex").unwrap().launch(&l).err().as_ref().map(|e|e.detail.as_str()), Some("mode background unsupported by codex"));
     teardown(root);
 }
 
@@ -1211,14 +1232,14 @@ fn host_args_reach_codex_turns_only() {
     let refused = |l: &agent::Launch, name: &str| agent::runtime(name).unwrap().launch(l).err();
     let mut policy = l.clone();
     policy.policy.write = agent::Scope::Project;
-    assert_eq!(refused(&policy, "codex").as_deref(), Some("host-args require the native policy on codex; next: select a supported policy"));
-    assert_eq!(refused(&l, "claude").as_deref(), Some("host-args unsupported by claude; next: select a supported policy"));
+    assert_eq!(refused(&policy, "codex").as_ref().map(|e|e.detail.as_str()), Some("host-args require the native policy on codex; next: select a supported policy"));
+    assert_eq!(refused(&l, "claude").as_ref().map(|e|e.detail.as_str()), Some("host-args unsupported by claude; next: select a supported policy"));
     let mut acp = fake_launch("antigravity", &root, "x", &[]);
     acp.host_args = l.host_args.clone();
-    assert_eq!(refused(&acp, "antigravity").as_deref(), Some("host-args unsupported by antigravity; next: select a supported policy"));
+    assert_eq!(refused(&acp, "antigravity").as_ref().map(|e|e.detail.as_str()), Some("host-args unsupported by antigravity; next: select a supported policy"));
     let mut queue = l.clone();
     queue.mode = agent::Mode::Queue { transcript: root.join("t.jsonl") };
-    assert_eq!(codex.resume(&thread, &queue).err().as_deref(), Some("host-args unsupported by codex; next: select a supported policy"));
+    assert_eq!(codex.resume(&thread, &queue).err().as_ref().map(|e|e.detail.as_str()), Some("host-args unsupported by codex; next: select a supported policy"));
     assert!(!root.join("native-control.json").exists(), "a refusal starts nothing");
     teardown(root);
 }
@@ -1277,10 +1298,10 @@ fn settings_env_reaches_the_session() {
     assert!(!turn["args"].as_array().unwrap().iter().any(|a| a == "--settings"), "Codex has no settings flag");
     let mut queue = c.clone();
     queue.mode = agent::Mode::Queue { transcript: codex_root.join("t.jsonl") };
-    assert_eq!(codex.resume(&codex.session_id(&run).unwrap(), &queue).err().as_deref(), Some("settings-env unsupported by codex; next: select a supported policy"));
+    assert_eq!(codex.resume(&codex.session_id(&run).unwrap(), &queue).err().as_ref().map(|e|e.detail.as_str()), Some("settings-env unsupported by codex; next: select a supported policy"));
     let mut acp = fake_launch("antigravity", &codex_root, "x", &[]);
     acp.settings_env = c.settings_env.clone();
-    assert_eq!(agent::runtime("antigravity").unwrap().launch(&acp).err().as_deref(), Some("settings-env unsupported by antigravity; next: select a supported policy"));
+    assert_eq!(agent::runtime("antigravity").unwrap().launch(&acp).err().as_ref().map(|e|e.detail.as_str()), Some("settings-env unsupported by antigravity; next: select a supported policy"));
     teardown(root);
     teardown(codex_root);
     if let Some(task) = task { unsafe { std::env::set_var("TASKQ_TASK", task); } }
@@ -1644,10 +1665,10 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         assert_eq!(observations(&store)[0]["runtime"].as_str(), Some(d.name));
         let mut refused = l.clone();
         refused.policy = agent::Policy { read: agent::Scope::Project, ..agent::Policy::default() };
-        assert!(r.launch(&refused).is_err_and(|e| e.starts_with("policy read unsupported")), "{}", d.name);
+        assert!(r.launch(&refused).is_err_and(|e| e.detail.starts_with("policy read unsupported")), "{}", d.name);
         refused.policy = agent::Policy::default();
         refused.accounts = Some(agent::Accounts { list: vec![agent::Entry { label: "default".into(), enabled: false }], limits: Default::default() });
-        assert_eq!(r.launch(&refused).err().as_deref(), Some("quota-exhausted"));
+        assert_eq!(r.launch(&refused).err().as_ref().map(|e|e.detail.as_str()), Some("quota-exhausted"));
         drop(store);
         teardown(root);
     }
@@ -1737,7 +1758,7 @@ fn process_hooks_shape_the_child() {
     assert_eq!(record(&root, 1)["extra"], "hooked", "configure runs after the adapter's environment");
     let before = codex.running();
     l.process.spawned = Some(Arc::new(|_: &std::process::Child| Err("job object refused".into())));
-    assert_eq!(codex.launch(&l).err().as_deref(), Some("job object refused"));
+    assert_eq!(codex.launch(&l).err().as_ref().map(|e|e.detail.as_str()), Some("job object refused"));
     assert_eq!(codex.running(), before);
     teardown(root);
 }
@@ -2340,7 +2361,7 @@ fn runtime_trait_exposes_native_seams() {
     assert_eq!(codex.launch_refusal("Error: Workspace not trusted"),None);
     for (rt,text,cause) in [(&claude,"Not logged in · Please run /login",Some("login-required")),(&claude,"No conversation found with session ID: x",Some("session-missing")),
         (&codex,"unexpected status 401 Unauthorized",Some("login-required")),(&codex,"Please Log In again",Some("login-required")),
-        (&codex,"app-server thread/resume refused: gone",Some("session-missing")),(&codex,"rate limited",None),(&claude,"Please log in",None)] {
+        (&codex,"app-server thread/resume refused: gone",None),(&codex,"thread not found",Some("session-missing")),(&codex,"rate limited",None),(&claude,"Please log in",None)] {
         assert_eq!(rt.launch_refusal(text).map(|c|c.0),cause,"{text}");
     }
     assert_eq!(codex.background_launch(Command::new(exe()),&bg,"x",Duration::from_secs(1)).unwrap_err(),"background unsupported by codex");
@@ -2444,7 +2465,7 @@ fn preflight_checks_order_and_journals_exact_trust() {
     assert!(unknown.permit(agent::ReadinessMode::Strict).is_err());
     launch.env.push(("COREQ_FAKE_GATE".into(),root.join("gate").into()));
     let mut secret=launch.clone();secret.settings_env=vec![("ANTHROPIC_API_KEY".into(),"invented-caller-key".into())];
-    assert!(runtime.launch(&secret).err().is_some_and(|e|e.starts_with("secret-in-argv")));
+    assert!(runtime.launch(&secret).err().is_some_and(|e|e.detail.starts_with("secret-in-argv")));
     let mut sandbox=fake_launch("codex",&root,"never submitted",&[]);sandbox.policy.write=agent::Scope::Project;sandbox.policy.unelevated=cfg!(windows);
     let codex=agent::runtime("codex").unwrap();
     // A readable fake version enables the native no-model sandbox start probe.
@@ -2454,7 +2475,7 @@ fn preflight_checks_order_and_journals_exact_trust() {
     sandbox.env.push(("FAKE_SANDBOX_REFUSED".into(),"1".into()));
     assert_eq!(codex.preflight(&sandbox,&agent::Repair::default()).checks[4].cause.as_deref(),Some("sandbox-unavailable"));
     let mut bypass=fake_launch("codex",&root,"never submitted",&[]);bypass.host_args=vec!["--dangerously-bypass-hook-trust".into()];
-    assert!(agent::runtime("codex").unwrap().launch(&bypass).err().is_some_and(|e|e.starts_with("hook-trust-bypass-refused")));
+    assert!(agent::runtime("codex").unwrap().launch(&bypass).err().is_some_and(|e|e.detail.starts_with("hook-trust-bypass-refused")));
     let inherited=std::env::var_os("OPENAI_API_KEY");
     unsafe {std::env::set_var("OPENAI_API_KEY","invented-parent-key");}
     launch.env.push(("GIT_ASKPASS".into(),"caller-helper".into()));
@@ -2695,4 +2716,57 @@ fn archive_capture_and_failure_never_change_work() {
         assert_eq!(run.snapshot(&ctx).unwrap(),frozen);assert_eq!(rt.report(&run).unwrap().outcome,"ok");
         drop(run);let _=std::fs::remove_dir_all(root);
     }
+}
+
+// Native rejection proves stage; no-work, generic errors and quoted content cannot prove missing input.
+fn native_start_refusal_proof_preserves_stage_cause_and_session() {
+    use agent::{Cause,InputStage};
+    let codex=agent::runtime("codex").unwrap();let claude=agent::runtime("claude").unwrap();
+    for (message,cause) in [("thread not found",Some(Cause("session-missing"))),("invented permission denied",None),("Please log in",Some(Cause("login-required")))] {
+        let root=scratch("native-start-codex");
+        let mut l=fake_launch("codex",&root,"never submit",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_NATIVE_REFUSAL",message.as_ref())]);
+        l.deltas=true;
+        codex.adopt("original-thread",&l,&[]).unwrap();
+        let e=codex.resume("original-thread",&l).err().unwrap();
+        assert_eq!((e.stage,e.cause,e.session.as_deref(),e.detail.as_str()),(InputStage::BeforeInput,cause,Some("original-thread"),message));
+        assert_eq!(e.native.unwrap()["error"]["data"]["native"],"preserved");
+        let requests=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
+        let methods:Vec<_>=requests.lines().map(|l|serde_json::from_str::<Value>(l).unwrap()["method"].clone()).collect();
+        assert_eq!(methods.iter().filter(|m|*m=="thread/resume").count(),1);
+        assert!(!methods.iter().any(|m|m=="thread/start" || m=="turn/start"));
+    }
+    for mode in ["missing","foreign","generic","quoted","work","zero","replaced"] {
+        let root=scratch("native-start-claude");
+        let l=fake_launch("claude",&root,"never replay",&[("AGENTQ_FAKE_START_REFUSAL",mode.as_ref())]);
+        claude.adopt("original-session",&l,&[]).unwrap();
+        // An earlier matching log is outside this run's boundary.
+        std::fs::write(&l.log,"No conversation found with session ID: original-session\n").unwrap();
+        let mut run=claude.resume("original-session",&l).unwrap();finish(claude,&mut run);
+        let r=claude.report(&run).unwrap();
+        assert_eq!(r.start_failure.is_some(),mode=="missing","{mode}: {r:?}");
+        if let Some(e)=r.start_failure {
+            assert_eq!((e.stage,e.cause,e.session.as_deref()),(InputStage::BeforeInput,Some(Cause("session-missing")),Some("original-session")));
+            assert_eq!(e.detail,"No conversation found with session ID: original-session");
+            let metadata=claude.classify(&e.detail);assert!(metadata.start_failure.is_none());
+        }
+        let raw=std::fs::read_to_string(&l.log).unwrap();
+        assert!(claude.classify(&raw).start_failure.is_none(),"log-only never stage proof");
+    }
+    let root=scratch("native-start-live");
+    let l=fake_launch("claude",&root,"never replay",&[("AGENTQ_FAKE_START_REFUSAL","live".as_ref())]);
+    claude.adopt("original-session",&l,&[]).unwrap();
+    let mut run=claude.resume("original-session",&l).unwrap();
+    wait_for(&root.join("refusal-ready"));
+    assert_eq!(claude.report(&run).unwrap_err(),"running","diagnostic alone is not owned exit proof");
+    assert!(agent::NativeProcess::read(run.id().unwrap()).unwrap().is_some());
+    std::fs::write(root.join("refusal-release"),"").unwrap();finish(claude,&mut run);
+    assert!(claude.report(&run).unwrap().start_failure.is_some());
+    let diagnostic="No conversation found with session ID: original-session";
+    let quoted=json!({"type":"result","subtype":"success","is_error":false,"result":diagnostic}).to_string();
+    assert_eq!(claude.launch_refusal(&quoted),None);assert_eq!(claude.classify(&quoted).outcome,"ok");
+    assert_eq!(claude.classify(diagnostic).detail.as_deref(),Some(diagnostic));
+    assert_eq!(codex.launch_refusal("app-server thread/resume refused; original session retained"),None);
+    assert_eq!(codex.launch_refusal(&json!({"type":"item.completed","item":{"text":"thread not found"}}).to_string()),None);
+    let root=scratch("native-start-unknown");let l=fake_launch("codex",&root,"never replay",&[]);
+    let e=codex.resume("untracked",&l).err().unwrap();assert_eq!((e.stage,e.session.as_deref()),(InputStage::Unknown,Some("untracked")));
 }

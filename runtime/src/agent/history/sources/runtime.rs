@@ -12,8 +12,8 @@ const CAUSE:Cause=Cause("history-only");
 impl Runtime for Reader {
     fn descriptor(&self)->&Descriptor {&self.descriptor}
     fn stop_event(&self,_:&mut Run,_:u64)->Res<Option<super::super::stop::StopEvent>> {unavailable()}
-    fn launch(&self,_:&Launch)->Res<Run> {unavailable()}
-    fn resume(&self,_:&str,_:&Launch)->Res<Run> {unavailable()}
+    fn launch(&self,_:&Launch)->Result<Run,agent::LaunchError> {unavailable().map_err(Into::into)}
+    fn resume(&self,s:&str,_:&Launch)->Result<Run,agent::LaunchError> {Err(agent::LaunchError {session:Some(s.into()),.."history-only runtime; execution operation unsupported".into()})}
     fn input(&self,_:&mut Run,_:&[Part])->Result<(),Failure>{Err(Failure::Refused(CAUSE))}
     fn account(&self,_:&mut Run)->Result<Account,Failure>{Err(Failure::Refused(CAUSE))}
     fn catalogue_with_executable(&self,_:Option<&Path>,_:Option<&Path>)->Res<Vec<Model>>{unavailable()}

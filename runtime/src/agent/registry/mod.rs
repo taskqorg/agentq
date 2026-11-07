@@ -282,16 +282,16 @@ mod tests {
             l.home=Some(work.join("home"));std::fs::create_dir_all(l.home.as_ref().unwrap()).unwrap();l.deadline=Some(Instant::now()+Duration::from_secs(20));l.deltas=true;
             l.process.configure=Some(std::sync::Arc::new(|command|assert!(command.get_envs().any(|(k,v)|k=="XAI_API_KEY" && v.is_none()),"native spawn retains account cleaning")));
             let mut scoped=l.clone();scoped.lifetime=Lifetime::StopWithOwner;
-            assert_eq!(runtime.launch(&scoped).err().as_deref(),Some("lifetime-unsupported: native submission scope"),"{name}: unsupported owner-death policy refuses before spawn");
-            assert!(runtime.resume("untracked",&l).err().unwrap().starts_with("session-owner-unknown"));
+            assert_eq!(runtime.launch(&scoped).err().as_ref().map(|e|e.detail.as_str()),Some("lifetime-unsupported: native submission scope"),"{name}: unsupported owner-death policy refuses before spawn");
+            assert!(runtime.resume("untracked",&l).err().unwrap().detail.starts_with("session-owner-unknown"));
             let mut blocked=l.clone();blocked.home=Some(work.join("missing-account"));
             let readiness=runtime.preflight(&blocked,&Repair::default());
             assert!(readiness.checks.iter().any(|c|c.check=="account" && c.state=="blocked"));
-            assert!(runtime.launch(&blocked).err().unwrap().contains("account-home-missing"));
-            let mut run=runtime.launch(&l).unwrap_or_else(|e|panic!("{name}: launch: {e}"));
+            assert!(runtime.launch(&blocked).err().unwrap().detail.contains("account-home-missing"));
+            let mut run=runtime.launch(&l).unwrap_or_else(|e|panic!("{name}: launch: {e:?}"));
             let native=runtime.session_id(&run).unwrap();
             assert_eq!(run.owner().unwrap().checkpoint().unwrap()["session"],native,"{name}: owner binds before prompt");
-            assert!(runtime.resume(&native,&l).err().unwrap().starts_with("session-busy"),"{name}: one admitted writer");
+            assert!(runtime.resume(&native,&l).err().unwrap().detail.starts_with("session-busy"),"{name}: one admitted writer");
             while runtime.poll(&mut run).unwrap()==State::Running {std::thread::yield_now();}
             let report=runtime.report(&run).unwrap();
             assert_eq!(report.owner.state,"idle","{name}: known native settlement permits finish");
@@ -305,7 +305,7 @@ mod tests {
             assert!(events.iter().any(|e|matches!(e,Event::ToolStart{..})),"{name}");
             assert!(events.iter().any(|e|matches!(e,Event::ToolEnd{..})),"{name}");
             let session=runtime.session_id(&run).unwrap();l.input="wait".into();
-            let mut resumed=runtime.resume(&session,&l).unwrap_or_else(|e|panic!("{name}: resume: {e}"));
+            let mut resumed=runtime.resume(&session,&l).unwrap_or_else(|e|panic!("{name}: resume: {e:?}"));
             if runtime.ops.rpc.is_some() {
                 while !runtime.progress(&mut resumed).unwrap().iter().any(|e|matches!(e,Event::Metadata{kind,..} if kind=="agent_end")) {assert!(Instant::now()<l.deadline.unwrap());std::thread::yield_now();}
                 assert_eq!(runtime.poll(&mut resumed).unwrap(),State::Running,"agent_end is not settlement");
@@ -328,7 +328,7 @@ mod tests {
                 assert_eq!(stop.exit_code,Some(0));assert_ne!(stop.outcome,"ok");
                 assert_eq!(runtime.stop_event(&mut lost,u64::MAX).unwrap().unwrap().id,stop.id);
                 l.policy.write=Scope::Project;
-                assert!(runtime.launch(&l).err().unwrap().contains("policy unsupported"));
+                assert!(runtime.launch(&l).err().unwrap().detail.contains("policy unsupported"));
             }
         }
         std::fs::remove_dir_all(root).unwrap();
@@ -573,3 +573,5 @@ pub(super) use codex::{codex_read_command,exchange,credential_snapshot};
 
 /// Passive profile/service inspection never starts a native process.
 pub fn hook_status(agent:&str,home:&Path,journal:Option<&Path>)->Option<LaunchCheck> {Some((entry(agent)?.builtin?.ops.hook_status?)(home,journal))}
+
+pub(crate) use claude::start_failure as claude_start_failure;

@@ -8,7 +8,7 @@ pub fn owner_transitions() {
         let root=scratch("control-owner-transition");let runtime=agent::runtime("codex").unwrap();let mut l=fake_launch("codex",&root,"first",&[]);l.controls=true;
         l.env.extend([("AGENTQ_CONTROL_FIXTURE".into(),"1".into()),("AGENTQ_CONTROL_EXTRA".into(),mode.into())]);
         if mode=="bind-owner" {
-            assert_eq!(runtime.launch(&l).err().unwrap(),"control-owner-changed");
+            assert_eq!(runtime.launch(&l).err().unwrap().detail,"control-owner-changed");
         }else{
             let mut run=runtime.launch(&l).unwrap();
             loop {if runtime.progress(&mut run).unwrap().iter().any(|e|matches!(e,Event::Request{..})) {break;}std::thread::yield_now();}
@@ -110,7 +110,7 @@ pub fn codex() {
     runtime.steer(&mut run,&[Part::Text("steer".into())]).unwrap();
     while runtime.poll(&mut run).unwrap()==agent::State::Running {std::thread::yield_now();}
     assert_eq!(runtime.report(&run).unwrap().outcome,"ok");
-    assert!(runtime.resume(&session,&l).err().unwrap().starts_with("session-busy"),"a live controlled writer retains its owner between turns");
+    assert!(runtime.resume(&session,&l).err().unwrap().detail.starts_with("session-busy"),"a live controlled writer retains its owner between turns");
     runtime.compact(&mut run).unwrap();
     runtime.input(&mut run,&[Part::Text("second".into())]).unwrap();
     let Event::Request{id:next,..}=request(&mut run) else {unreachable!()};

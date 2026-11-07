@@ -4,7 +4,7 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 
 fn finish(runtime: &dyn agent::Runtime, launch: &Launch, resume: Option<&str>) -> Result<(agent::Report, Vec<Event>), String> {
-    let mut run = match resume { Some(s) => runtime.resume(s, launch), None => runtime.launch(launch) }?;
+    let mut run = match resume { Some(s) => runtime.resume(s, launch), None => runtime.launch(launch) }.map_err(|e|e.detail)?;
     let mut events = vec![];
     loop {
         events.extend(runtime.progress(&mut run)?);
