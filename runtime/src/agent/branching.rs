@@ -200,7 +200,7 @@ mod tests {
             let Some(descriptor)=entry.descriptor() else {continue;};
             let adapter=registry::builtin(Client(descriptor.name));
             let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
-            let app=App {transport:None,session:AppSession::new(&spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,capture:None};
+            let app=App {transport:None,session:AppSession::new(&spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None};
             let mut run=adapter.run(Body::App(Box::new(app)),0,&launch);
             let supported=adapter.client==Client::Codex;
             assert_eq!(adapter.descriptor.has("fork"),supported);assert_eq!(adapter.descriptor.has("rewind"),supported);

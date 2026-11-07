@@ -219,6 +219,11 @@ impl ProtectedAppServer {
         result
     }
 
+    pub(crate) fn verify_home(&mut self,home:Option<&Path>,until:Instant)->Res<()> {
+        if self.prepared.is_none() || home!=Some(self.expected.account_home.as_path()) {return Err("protected prepared account home differs".into());}
+        self.verify(until).map(|_|())
+    }
+
     pub fn receive(&mut self, until: Instant) -> Res<Option<Value>> { self.server.receive(until) }
     pub fn poll(&mut self) -> Res<Option<i32>> { self.server.poll() }
     pub fn cancel(&self, until: Instant) -> Res<Value> { self.host.cancel(&self.request, until) }
@@ -229,6 +234,9 @@ impl ProtectedAppServer {
 
     /// Protected-host protocol only: take pending server requests, preserving their original native IDs.
     pub fn requests(run: &mut super::Run) -> Res<Vec<Value>> { super::adapter::protected_requests(run) }
+
+    /// Fixed denial only; missing/foreign scope and unknown delivery retain occupancy.
+    pub fn deny_requests(run:&mut super::Run,until:Instant)->Result<(),super::Failure> {super::adapter::protected_deny_requests(run,until)}
 
     /// Reply only to a protected host request; every write retains the host's authority verification.
     pub fn reply(run: &mut super::Run, reply: &Value, until: Instant) -> Res<()> { super::adapter::protected_reply(run, reply, until) }

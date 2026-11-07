@@ -478,6 +478,7 @@ pub(crate) use codex::codex_identity;
 pub(crate) use antigravity::{code_assist,project_identity};
 
 pub(crate) use codex::app;
+pub(crate) use codex::{image as codex_image,catalogue_page as codex_catalogue_page};
 pub(in crate::agent) use codex::image_kind as codex_image_kind;
 pub(in crate::agent) use antigravity::{input_state as antigravity_input_state,retained_source as antigravity_retained_source};
 

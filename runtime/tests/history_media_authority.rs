@@ -87,7 +87,7 @@ fn native_generated_image_spellings_agree_across_events_steps_and_media() {
  let r=root("aliases");let file=r.join("image.png");fs::write(&file,b"\x89PNG\r\n\x1a\nalias").unwrap();
  for name in ["imageGeneration","image_generation","ImageGeneration"] {
   let row=json!({"type":"event_msg","payload":{"type":"item_completed","item":{"id":"generated","type":name,"savedPath":file}}});let mut s=session(&r,&[row.clone()]);
-  assert!(agent::runtime("codex").unwrap().log_events(&row.to_string()).iter().any(|e|matches!(e,agent::Event::Image{generated:true,..})),"{name}");
+  assert!(agent::runtime("codex").unwrap().log_events(&row.to_string()).iter().any(|e|matches!(e,agent::Event::Image(agent::Image{generated:true,..}))),"{name}");
   assert!(s.steps(u64::MAX).unwrap().steps.iter().any(|s|s.kind==agent::history::StepKind::Image),"{name}");assert!(s.media().unwrap().items.iter().any(|m|m.state=="available" && m.source["path"]==file.to_str().unwrap()),"{name}");
  }
  fs::remove_dir_all(r).unwrap();

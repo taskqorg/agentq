@@ -277,12 +277,17 @@ pub enum Control {
 }
 
 /// How a session's native account is signed in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Login { Subscription, ApiKey, None }
 
 /// Read-only login identity of a session; it carries no credential, token or email.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Account { pub login: Login, pub plan: Option<String> }
+
+/// Same native session/provider and non-refreshing native account observation; never billing identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Binding {pub session:String,pub provider:String,pub account:Account}
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State { Running, Finished, Failed, Unknown }
@@ -559,6 +564,7 @@ struct App {
     cancelling: bool,
     approval: Approval,
     capture:Option<PathBuf>,
+    binding:Option<Binding>,
 }
 
 impl Drop for App {
@@ -641,6 +647,15 @@ impl App {
         let m=frame.value.clone();
         if let Some((_,log))=&mut self.control {writeln!(log,"{m}").map_err(|e|format!("control-log-unknown: {e}"))?;}
         let selected=self.session.observe_frame(frame)?;
+        for image in self.session.take_images() {
+            // Early frames keep their original position; drained early progress is emitted upon acceptance.
+            let at=self.pending.iter().position(|(raw,event)|event.is_none() && raw["method"]=="item/completed"
+                && raw["params"]["threadId"].as_str()==image.session.as_deref() && raw["params"]["turnId"].as_str()==image.turn.as_deref()
+                && raw["params"]["item"]["type"].as_str().and_then(registry::codex_image_kind).is_some_and(|generated|
+                    registry::codex_image(&raw["params"]["item"],generated,image.session.clone(),image.turn.clone(),true)==image));
+            if let Some(at)=at {self.pending[at].1=Some(Event::Image(image));}
+            else {self.pending.push((Value::Null,Some(Event::Image(image))));}
+        }
         if let Some(path)=&self.capture {for line in selected {if Some(line.session.as_str())==self.session.session() && line.turn.as_deref()==self.session.turn_id() {crate::archive::stream(path,&line.raw);}}}
 
         if m["method"]=="serverRequest/resolved" && self.control.is_some() {
@@ -683,7 +698,7 @@ impl App {
     }
     /// Exchange one client request and read until its reply; every message read stays pending for `progress`.
     fn exchange(&mut self, request: Value, until: Instant) -> Res<()> {
-        self.send(&request,Some(until))?;
+        if let Err(error)=self.send(&request,Some(until)) {self.closed=Some(error.clone());return Err(error);}
         loop {
             let m = self.transport.as_mut().ok_or("app-server transport ended")?.receive_frame(until)?.ok_or("app-server reply deadline; session state unknown")?;
             let reply = m.value["id"] == request["id"] && m.value.get("method").is_none();
@@ -706,7 +721,7 @@ impl App {
             #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
             Some((super::control::Requests::new(),options.open(&l.log).map_err(|e|format!("control-log: {e}"))?))
         }else{None};
-        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval,capture:owned.then(||crate::archive::stream_path(l.install.as_deref(),&l.log)) };
+        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval,binding:None,capture:owned.then(||crate::archive::stream_path(l.install.as_deref(),&l.log)) };
         let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner,lineage,branch_check);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         match opened {Ok(())=>Ok(app),Err(detail)=>Err(app.session.start_failure().unwrap_or_else(||detail.into()))}
@@ -749,6 +764,10 @@ impl App {
     /// Start the next turn with exactly `items`; a failed write stays uncertain and is never resent.
     fn start(&mut self, items: Value, until: Instant) -> Res<()> {
         self.writable()?;
+        if let Some(binding)=&self.binding {
+            if self.session.session()!=Some(binding.session.as_str()) || self.session.provider()!=Some(binding.provider.as_str()) {return Err("binding-session-differs".into());}
+            if let Some(Transport::Protected(server))=&mut self.transport {server.verify_home(self.session.history_home().as_deref(),until)?;}
+        }
         if self.session.report().is_some() { self.session.finish_turn()?; }
         self.cancelling=false;
         let mut params = json!({"input": items});
@@ -765,6 +784,31 @@ impl App {
         self.exchange(request, until)?;
         let at = self.pending.iter().rposition(|(m,_)| m["id"] == id && m.get("method").is_none()).ok_or("account/read reply missing")?;
         account_of(&self.pending.remove(at).0)
+    }
+
+    fn binding(&mut self,until:Instant)->Result<Binding,Failure> {
+        self.writable()?;
+        if !self.session.preinput() || self.transport.is_none() || !self.requests.is_empty() {return Err(Failure::Refused(Cause("binding-before-input-required")));}
+        let session=self.session.session().ok_or(Failure::Refused(Cause("binding-session-unknown")))?.to_string();
+        let provider=self.session.provider().ok_or(Failure::Refused(Cause("binding-provider-unknown")))?.to_string();
+        if let Some(Transport::Protected(server))=&mut self.transport {server.verify_home(self.session.history_home().as_deref(),until)?;}
+        let account=match self.account(until) {Ok(account)=>account,Err(error)=>{self.binding=None;self.closed=Some(error.to_string());return Err(error);}};
+        let binding=Binding {session,provider,account};self.binding=Some(binding.clone());Ok(binding)
+    }
+
+    fn catalogue_in(&mut self,until:Instant)->Result<Vec<Model>,Failure> {
+        self.writable()?;
+        if !self.session.query_ready() || self.transport.is_none() {return Err(Failure::Refused(Cause("catalogue-connection-unavailable")));}
+        let mut models=vec![];let mut cursor=Value::Null;
+        for _ in 0..100 {
+            let request=self.session.request("model/list",json!({"cursor":cursor,"limit":100,"includeHidden":false}))?;
+            let id=request["id"].clone();self.exchange(request,until)?;
+            let at=self.pending.iter().position(|(m,_)|m["id"]==id && m.get("method").is_none()).ok_or("catalogue reply missing")?;
+            let reply=self.pending.remove(at).0;
+            let (page,next)=match registry::codex_catalogue_page(&reply,&cursor) {Ok(page)=>page,Err(error)=>{self.closed=Some(error.clone());return Err(Failure::Failed(error));}};
+            models.extend(page);if next.is_null() {return Ok(models);}cursor=next;
+        }
+        self.closed=Some("catalogue page bound exceeded".into());Err(Failure::Failed("catalogue page bound exceeded".into()))
     }
 
     /// Read every message available now.
@@ -847,7 +891,7 @@ impl Native {
 fn account_of(reply: &Value) -> Result<Account, Failure> {
     if !reply["error"].is_null() { return Err(Failure::Failed("account/read refused; identity unknown".into())); }
     let a = &reply["result"]["account"];
-    if a.is_null() && reply["result"].is_object() { return Ok(Account { login: Login::None, plan: None }); }
+    if reply["result"].get("account")==Some(&Value::Null) { return Ok(Account { login: Login::None, plan: None }); }
     let login = match a["type"].as_str() { Some("chatgpt") => Login::Subscription, Some("apiKey") => Login::ApiKey, _ => return Err(Failure::Failed("account login unknown".into())) };
     let plan = a["planType"].as_str().filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')).map(String::from);
     Ok(Account { login, plan })
@@ -900,6 +944,8 @@ pub trait Runtime: Send + Sync {
     fn input(&self, run: &mut Run, parts: &[Part]) -> Result<(), Failure>;
     /// Read-only login identity of a session run (capability `account`); never refreshes or writes a credential.
     fn account(&self, run: &mut Run) -> Result<Account, Failure>;
+    fn binding(&self, _run:&mut Run)->Result<Binding,Failure> {Err(Failure::Refused(Cause("binding-unsupported")))}
+    fn catalogue_in(&self, _run:&mut Run, _until:Instant)->Result<Vec<Model>,Failure> {Err(Failure::Refused(Cause("catalogue-in-unsupported")))}
     /// Read the login's model catalogue; no turn or product protocol handler is needed.
     fn catalogue(&self, home: Option<&Path>) -> Res<Vec<Model>> { self.catalogue_with_executable(home, None) }
     /// Read with the caller-configured native executable, using normal lookup only when absent.
@@ -1126,7 +1172,15 @@ impl Adapter {
             Body::Native(_) => return Ok(vec![]),
             Body::App(a) => {
                 a.pump()?;run.activity.pending_seen=0;let mut events=vec![];
-                for (raw,event) in std::mem::take(&mut a.pending) {if let Some(event)=event {events.push(event);}else{events.extend(run.events.read_owned(self.client,vec![raw],a.session.session(),a.session.turn_id()));}}
+                for (raw,event) in std::mem::take(&mut a.pending) {
+                    if a.session.turn_id().is_none() && raw["params"]["threadId"].as_str()==a.session.session()
+                        && raw["method"].as_str().is_some_and(|method|method.starts_with("item/") || method.starts_with("turn/")) {
+                        a.pending.push((raw,event));continue;
+                    }
+                    let parse=event.as_ref().is_none_or(|event|matches!(event,Event::Image(..)));
+                    if let Some(event)=event {events.push(event);}
+                    if parse && !raw.is_null() {events.extend(run.events.read_owned(self.client,vec![raw],a.session.session(),a.session.turn_id()).into_iter().filter(|e|!matches!(e,Event::Image(..))));}
+                }
                 return Ok(events);
             }
         };
@@ -1436,6 +1490,15 @@ impl Runtime for Adapter {
         }
     }
 
+    fn binding(&self,run:&mut Run)->Result<Binding,Failure> {
+        let run=self.own_mut(run)?;let until=run.deadline.unwrap_or_else(||Instant::now()+Duration::from_secs(30));
+        match &mut run.body {Body::App(a)=>a.binding(until),_=>Err(Failure::Refused(Cause("binding-unsupported")))}
+    }
+    fn catalogue_in(&self,run:&mut Run,until:Instant)->Result<Vec<Model>,Failure> {
+        let run=self.own_mut(run)?;let until=run.deadline.map_or(until,|deadline|deadline.min(until));
+        match &mut run.body {Body::App(a)=>a.catalogue_in(until),_=>Err(Failure::Refused(Cause("catalogue-in-unsupported")))}
+    }
+
     fn catalogue_with_executable(&self, home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> { self.needs("catalogue")?; (self.ops.catalogue)(home, executable) }
 
     fn log_limits(&self, log: &str, session: Option<&str>, home: Option<&Path>) -> Vec<Window> {
@@ -1688,7 +1751,7 @@ impl Runtime for Adapter {
             let app = &saved["app"];
             let spec = me.spec(l, app["session"].as_str().ok_or("run recovery session invalid")?.into(), app["session"] != "-")?;
             let session = AppSession::recover(&spec, app)?;
-            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),writer:None,cancelling:false,approval:l.policy.approval,capture:None };
+            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),writer:None,cancelling:false,approval:l.policy.approval,binding:None,capture:None };
             let mut run=me.run(Body::App(Box::new(a)),0,l);run.owner=Some(acquire()?);return run.restored(saved);
         }
         let session = saved["session"].as_str().filter(|s| native::plain_id(s)).ok_or("run recovery session invalid")?;
@@ -1826,6 +1889,27 @@ pub(super) fn protected_requests(run: &mut Run) -> Res<Vec<Value>> {
     a.pump()?; Ok(std::mem::take(&mut a.requests))
 }
 
+pub(super) fn protected_deny_requests(run:&mut Run,until:Instant)->Result<(),Failure> {
+    let until=run.deadline.map_or(until,|deadline|deadline.min(until));
+    loop {
+        let Body::App(a)=&mut run.body else {return Err(Failure::Refused(Cause("protected-host-required")));};
+        if !matches!(a.transport,Some(Transport::Protected(_))) {return Err(Failure::Refused(Cause("protected-host-required")));}
+        a.writable()?;a.pump()?;
+        let Some(request)=a.requests.first() else {return Ok(());};
+        a.session.control_scope(request)?;
+        let id=&request["id"];
+        if a.requests.iter().any(|other|other["id"]==*id && other!=request) {return Err(Failure::Failed("protected request identity conflicts".into()));}
+        if !(id.is_string() || id.is_i64() || id.is_u64()) {return Err(Failure::Failed("protected request identity unknown".into()));}
+        let reply=json!({"id":id,"error":{"code":-32601,"message":"Native request unsupported"}});
+        // Do not retire the request until the original protected write guard succeeds.
+        if let Err(error)=protected_reply(run,&reply,until) {
+            if let Body::App(a)=&mut run.body {a.closed=Some(error.clone());}
+            return Err(Failure::Failed(error));
+        }
+        if let Body::App(a)=&mut run.body {a.requests.retain(|request|request["id"]!=reply["id"]);}
+    }
+}
+
 pub(super) fn protected_reply(run: &mut Run, reply: &Value, until: Instant) -> Res<()> {
     let Body::App(a) = &mut run.body else { return Err("protected-host-required".into()); };
     if reply.get("method").is_some() || reply.get("id").is_none() || (reply.get("result").is_some() == reply.get("error").is_some()) { return Err("protected server-request reply required".into()); }
@@ -1883,7 +1967,7 @@ mod tests {
         let mut session=AppSession::new(&spec).unwrap();let initialize=session.initialize(json!({})).unwrap();session.observe(&json!({"id":initialize["id"],"result":{}})).unwrap();
         let open=session.open(json!({})).unwrap();session.observe(&json!({"id":open["id"],"result":{"thread":{"id":"session"}}})).unwrap();
         let before=session.checkpoint();
-        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,writer:None,cancelling:false,approval:Approval::Native,capture:None};
+        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None};
         assert_eq!(app.start(json!([]),Instant::now()).unwrap_err(),"control-state-unknown");assert_eq!(app.session.checkpoint(),before);
         drop((app,readonly));std::fs::remove_dir_all(root).unwrap();
     }
@@ -1941,7 +2025,7 @@ mod tests {
             }
             probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
             let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
-            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,capture:None}));
+            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None}));
             let mut run=adapter.run(body,0,&launch());
             probes.insert("account",!matches!(runtime.account(&mut run),Err(Failure::Refused(Cause("account-unsupported")))));
             probes.insert("respond",matches!(runtime.respond(&mut run,Control::Reply{id:json!("missing"),option:None}),Err(Failure::Refused(Cause("respond-transport-unsupported")))));
@@ -2116,6 +2200,7 @@ mod tests {
         assert_eq!(read(json!({"id": 1, "result": {"account": {"type": "chatgpt", "planType": "e@example.invalid"}}})).unwrap().plan, None, "plan is a plain name");
         assert!(matches!(read(json!({"id": 1, "result": {"account": {"type": "other"}}})), Err(Failure::Failed(_))), "unknown login is never guessed");
         assert!(matches!(read(json!({"id": 1, "error": {"code": -1}})), Err(Failure::Failed(_))));
+        for result in [json!({}),json!({"account":42}),Value::Null] {assert!(read(json!({"id":1,"result":result})).is_err(),"missing/malformed account is not a native None login");}
     }
 
     // #210 A1/A3: descriptors are the only metadata; every runtime answers session_url and home/quota operations or names a

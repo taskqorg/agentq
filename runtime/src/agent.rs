@@ -25,12 +25,12 @@ pub(crate) use adapter::test_receipts;
 pub(crate) mod capture;
 mod events;
 mod limits;
-pub use events::{Answer,Question,AssistantFailure, Choice, Event, LogRecord, Model, RecordTime, RequestKind, TimeFault, ToolKind};
+pub use events::{Answer,Question,AssistantFailure, Choice, Image, Event, LogRecord, Model, RecordTime, RequestKind, TimeFault, ToolKind};
 pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
-pub use adapter::{InputStage,LaunchError,BackgroundLocator,LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession,Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{InputStage,LaunchError,BackgroundLocator,LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession,Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Binding,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use registry::{BackgroundCandidate,BackgroundKind,BackgroundState,BackgroundActivity,BackgroundPid};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
@@ -649,6 +649,8 @@ pub struct Report {
     pub readiness: Option<Readiness>,
     pub owner:OwnerObservation,
     pub session: Option<String>,
+    pub turn: Option<String>,
+    pub images: Vec<Image>,
     pub usage: Usage,
     pub limit: Snapshot,
     /// Every reported quota window; an unavailable snapshot names its reason.
@@ -973,7 +975,7 @@ use registry::claude_settings;
 fn protocol(client:Client)->&'static registry::Protocol {registry::protocol(client)}
 
 impl Report {
-    fn empty()->Self {Report {start_failure:None,owner:OwnerObservation::default(),readiness:None,session:None,usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,reason:None,text:None,exit:None,termination:ProcessTermination::Unknown {reason:"native-process-exit-not-observed"},started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
+    fn empty()->Self {Report {start_failure:None,owner:OwnerObservation::default(),readiness:None,session:None,turn:None,images:vec![],usage:sum_usage(&[],None,false),limit:Snapshot {unknown:Some("not-reported"),..Snapshot::default()},limits:limits::unknown("not-reported"),reached:None,background_job:false,live_background:vec![],outcome:"unknown",error:"no-end",detail:None,reason:None,text:None,exit:None,termination:ProcessTermination::Unknown {reason:"native-process-exit-not-observed"},started_ms:unix_ms(),duration_us:0,recorded:Ok(()),calls:vec![],process:ProcessUse::default()}}
 }
 
 #[cfg(test)]

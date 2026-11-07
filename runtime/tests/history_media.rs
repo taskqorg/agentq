@@ -45,7 +45,7 @@ fn signatures_range_reads_and_changed_or_missing_files_are_explicit() {
     fs::write(&image,b"\x89PNG\r\n\x1a\nchanged").unwrap();assert!(media.read(&generated.id,0,1).unwrap_err().contains("changed"));
     let absent=media.items.iter().find(|m|m.source["path"]==missing.to_str().unwrap()).unwrap();assert_eq!(absent.state,"missing");assert!(media.read(&absent.id,0,1).is_err());
     let log=json!({"method":"item/completed","params":{"item":{"id":"generated","type":"imageGeneration","savedPath":"/fixture/generated.png","status":"completed"}}}).to_string();
-    assert!(agent::runtime("codex").unwrap().log_events(&log).iter().any(|e|matches!(e,Event::Image {generated:true,saved_path:Some(p),native,..} if p=="/fixture/generated.png" && native["type"]=="imageGeneration")));
+    assert!(agent::runtime("codex").unwrap().log_events(&log).iter().any(|e|matches!(e,Event::Image(agent::Image {generated:true,saved_path:Some(p),evidence:Some(_),..}) if p=="/fixture/generated.png")));
     fs::remove_dir_all(root).unwrap();
 }
 

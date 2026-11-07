@@ -96,7 +96,10 @@ pub fn fake_host() {
             if root.join("scope-mode").exists() {
                 let frontend=coreq::process::identity(std::process::id()).unwrap().unwrap();
                 save(&root.join("frontend.json"),&json!({"pid":frontend.pid,"started":frontend.started}));
-                let status=Command::new(std::env::current_exe().unwrap()).args([if modern {"agent"}else{"service"},if modern {"host"}else{"app-server"},"--action","fake-scope","--request",&wire.to_string()]).status().unwrap();
+                let mut scope=Command::new(std::env::current_exe().unwrap()).args([if modern {"agent"}else{"service"},if modern {"host"}else{"app-server"},"--action","fake-scope","--request",&wire.to_string()]).spawn().unwrap();
+                #[cfg(unix)]
+                if std::fs::read_to_string(root.join("finite-mode")).ok().as_deref()==Some("write-unknown") {unsafe {libc::close(0);}}
+                let status=scope.wait().unwrap();
                 std::process::exit(status.code().unwrap_or(1));
             }
             native_scope(&r,&root,&receipt);
@@ -129,7 +132,11 @@ fn native_scope(r:&Value,root:&Path,receipt:&Path) {
             let mut command=Command::new(&exe);
             command.args(["app-server","--disable","apps"]).env("COREQ_FAKE_AGENT","codex").env("COREQ_FAKE_APP_SERVER","1")
                 .env_remove("COREQ_FAKE_LINGER").env_remove("COREQ_FAKE_HANG").current_dir(&root);
+            if root.join("finite-env.json").exists() {for (key,value) in read(&root.join("finite-env.json")).as_object().unwrap() {command.env(key,value.as_str().unwrap());}}
+            if root.join("finite-mode").exists() {command.env("AGENTQ_FAKE_ONE_TURN","1").env("AGENTQ_FINITE_PROVIDER","openai").env("AGENTQ_FINITE_DENIAL",std::fs::read_to_string(root.join("finite-mode")).unwrap());}
             let mut child=command.spawn().unwrap();
+            #[cfg(unix)]
+            if std::fs::read_to_string(root.join("finite-mode")).ok().as_deref()==Some("write-unknown") {unsafe {libc::close(0);}}
             let supervisor=coreq::process::identity(std::process::id()).unwrap().unwrap();let native=coreq::process::identity(child.id()).unwrap().unwrap();
             save(&root.join("child.json"),&json!({"pid":native.pid,"started":native.started}));
             let effective=json!({"state":"verified-effective","scope":"invented process double, no native enforcement",
@@ -419,4 +426,70 @@ fn retained_scenario() {
     assert!(!root.join("app-input.jsonl").exists());assert!(!root.join("request.json").exists());
     assert_eq!(std::fs::read_to_string(root.join("retained-receipt")).unwrap(),receipt);
     teardown(root);
+}
+
+// Same prepared authority/home must bind pre-input evidence and fixed denial; no fixture signs or grants authority.
+pub fn finite_protected_binding_and_denial() {
+    let mut modes=vec!["ok","home","birth","foreign","unknown","duplicate","conflict"];
+    if cfg!(unix) {modes.push("write-unknown");}
+    for mode in modes {
+        let root=fresh("finite-protected");let exe=std::env::current_exe().unwrap().canonicalize().unwrap();
+        let home=root.join("account");std::fs::create_dir(&home).unwrap();save(&root.join("expected.json"),&json!({"profile_sha256":"b".repeat(64),"account_home":home,"approver":"invented-operator"}));
+        std::fs::write(root.join("scope-mode"),"invented scope").unwrap();std::fs::write(root.join("finite-mode"),mode).unwrap();
+        let host=ProtectedHost::new(&exe,&digest(&exe)).unwrap();let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
+        let slot=json!({"binding":{"schema":"taskq.slots/1","caller":"invented-consumer","op_id":"finite","root":root,"runtime":"codex","pid":owner.pid,"started":owner.started,"boot":10,"expires_at":9999999999u64},"key":"a".repeat(64)});
+        let preparation=host.prepare(&slot,until()).unwrap();let mut server=host.launch_prepared(&preparation,&root.join("private.log")).unwrap();
+        let deadline=until();while !root.join("receipt.json").exists() {assert!(Instant::now()<deadline);std::thread::yield_now();}
+        server.verify(until()).unwrap();let good=read(&root.join("receipt.json"));
+        let mut l=agent::Launch::new(&root,root.join("run.log"),"","fixtureq");l.home=Some(if mode=="home" {root.clone()}else{home.clone()});l.deltas=true;
+        l.mode=agent::Mode::AppServer {initialize:json!({}),thread:json!({})};
+        let codex=agent::runtime("codex").unwrap();let mut run=server.open(None,&l).unwrap();
+        let binding=codex.binding(&mut run);
+        if mode=="home" {assert!(binding.is_err());}
+        else {
+            let binding=binding.unwrap();assert_eq!(binding.provider,"openai");assert_eq!(binding.account.login,agent::Login::Subscription);
+            assert_eq!(codex.catalogue_in(&mut run,until()).unwrap()[0].id,"fixture-model");
+            if mode=="birth" {
+                let mut changed=good.clone();changed["launch"]["native"]["started"]=json!("foreign-birth");save(&root.join("receipt.json"),&changed);
+                assert!(codex.input(&mut run,&[agent::Part::Text("never".into())]).is_err());save(&root.join("receipt.json"),&good);
+                assert!(codex.input(&mut run,&[agent::Part::Text("never".into())]).is_err());
+            }else {
+                codex.input(&mut run,&[agent::Part::Text("fixture".into())]).unwrap();
+                let deadline=until();while !root.join("request-emitted").exists() {codex.poll(&mut run).unwrap();assert!(Instant::now()<deadline);std::thread::yield_now();}
+                // The ordered marker proves every preceding request crossed the same transport.
+                while !codex.progress(&mut run).unwrap().iter().any(|e|matches!(e,agent::Event::Text{delta,..} if delta=="denial-ready")) {assert!(Instant::now()<deadline);std::thread::yield_now();}
+                if mode=="ok" {assert_eq!(codex.catalogue_in(&mut run,until()).unwrap()[0].id,"fixture-model");assert!(codex.progress(&mut run).unwrap().iter().any(|e|matches!(e,agent::Event::Text{delta,..} if delta=="catalogue-progress")));}
+                if mode=="unknown" {std::fs::write(root.join("lost-reply"),"unknown denial readback").unwrap();}
+                let denial=agent::ProtectedAppServer::deny_requests(&mut run,until());
+                if matches!(mode,"foreign"|"unknown"|"write-unknown"|"conflict") {
+                    if mode=="write-unknown" {assert!(denial.as_ref().unwrap_err().to_string().contains("write outcome unknown"));assert!(agent::ProtectedAppServer::deny_requests(&mut run,until()).is_err());}
+                    assert!(denial.is_err());assert!(codex.report(&run).is_err());
+                }
+                else {denial.unwrap();assert_eq!(finish(codex,&mut run),agent::State::Finished);assert_eq!(codex.report(&run).unwrap().outcome,"ok");}
+                if mode=="unknown" {std::fs::remove_file(root.join("lost-reply")).unwrap();assert!(agent::ProtectedAppServer::deny_requests(&mut run,until()).is_err());}
+            }
+        }
+        save(&root.join("receipt.json"),&good);
+        let rows=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();let values:Vec<Value>=rows.lines().map(|r|serde_json::from_str(r).unwrap()).collect();
+        assert_eq!(values.iter().filter(|v|v["method"]=="turn/start").count(),usize::from(!matches!(mode,"home"|"birth")));
+        assert_eq!(values.iter().filter(|v|v["id"]==999 && v.get("method").is_none()).count(),usize::from(matches!(mode,"ok"|"duplicate")));
+        if mode=="write-unknown" {assert!(codex.cancel(&mut run).is_err());host.cancel(preparation.request(),until()).unwrap();}
+        else {codex.cancel(&mut run).unwrap();}
+        if let Ok(receipt)=host.reconcile(&preparation,until()) {assert_eq!(receipt["state"],"unknown","native outcome never proves descendant cleanup or releases occupancy");}
+        drop(run);teardown(root);
+    }
+}
+
+// Reuse the existing prepared host double for idle same-connection producer fixtures.
+pub fn finite_open(root:&Path,env:Value)->(agent::Run,agent::Launch) {
+    let canonical=root.canonicalize().unwrap();let root=canonical.as_path();
+    let exe=std::env::current_exe().unwrap().canonicalize().unwrap();let home=root.join("account");std::fs::create_dir(&home).unwrap();
+    save(&root.join("expected.json"),&json!({"profile_sha256":"b".repeat(64),"account_home":home,"approver":"invented-operator"}));
+    std::fs::write(root.join("scope-mode"),"invented scope").unwrap();save(&root.join("finite-env.json"),&env);
+    let host=ProtectedHost::new(&exe,&digest(&exe)).unwrap();let owner=coreq::process::identity(std::process::id()).unwrap().unwrap();
+    let slot=json!({"binding":{"schema":"taskq.slots/1","caller":"invented-consumer","op_id":"finite","root":root,"runtime":"codex","pid":owner.pid,"started":owner.started,"boot":10,"expires_at":9999999999u64},"key":"a".repeat(64)});
+    let preparation=host.prepare(&slot,until()).unwrap();let mut server=host.launch_prepared(&preparation,&root.join("private.log")).unwrap();
+    let deadline=until();while !root.join("receipt.json").exists() {assert!(Instant::now()<deadline);std::thread::yield_now();}server.verify(until()).unwrap();
+    let mut l=agent::Launch::new(root,root.join("run.log"),"","fixtureq");l.home=Some(home);l.deltas=true;l.mode=agent::Mode::AppServer {initialize:json!({}),thread:json!({})};
+    (server.open(None,&l).unwrap(),l)
 }

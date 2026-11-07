@@ -32,6 +32,10 @@ pub(crate) struct AppSession {
     active: bool,
     terminal: Option<String>,
     model: Option<String>,
+    provider: Option<String>,
+    images: Vec<Image>,
+    image_items: Vec<Value>,
+    image_events: Vec<Image>,
     text: Option<String>,
     usage: Vec<Value>,
     limits: Option<Value>,
@@ -60,7 +64,7 @@ impl AppSession {
             return Err("app-server session invalid".into());
         }
         Ok(Self { spec: spec.clone(), next: 1, pending: None, initialized: false, ready: false,
-            thread: None, turn: None, active: false, terminal: None, model: None, text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0, sampler: None, process: None,
+            thread: None, turn: None, active: false, terminal: None, model: None, provider:None, images:vec![],image_items:vec![],image_events:vec![], text: None, usage: vec![], limits: None, latest_limits:None, started_ms: 0, sampler: None, process: None,
             early:vec![],fault:None,start_failure:None,scope:native::scope(spec),worked:false,failure:None, windows:limits::unknown("not-reported"), latest_windows:limits::unknown("not-reported"), window_groups:BTreeMap::new() })
     }
 
@@ -103,6 +107,10 @@ impl AppSession {
     pub(crate) fn branch_scope(&self,spec:&Spec)->Res<()> {
         if self.spec.root!=spec.root || spec_home(&self.spec)!=spec_home(spec) || self.spec.env!=spec.env {return Err("branch-source-scope-differs".into());}Ok(())
     }
+    pub(crate) fn provider(&self)->Option<&str> {self.provider.as_deref()}
+    pub(crate) fn preinput(&self)->bool {self.ready() && self.pending.is_none() && !self.active && self.turn.is_none()}
+    pub(crate) fn query_ready(&self)->bool {self.ready() && self.pending.is_none()}
+    pub(crate) fn take_images(&mut self)->Vec<Image> {std::mem::take(&mut self.image_events)}
     pub(crate) fn idle(&self)->bool {self.ready() && self.pending.is_none() && (!self.active || self.terminal.is_some())}
     pub(crate) fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
     pub(crate) fn control_pending(&self)->bool {self.pending.is_some_and(|(_,method)|matches!(method,"turn/steer"|"thread/compact/start"))}
@@ -134,6 +142,7 @@ impl AppSession {
         params["threadId"] = json!(thread);
         let changed_model = params.get("model").is_some_and(|m| m.as_str() != self.model.as_deref());
         let request = self.request("turn/start", params)?;
+        self.images.clear();self.image_items.clear();self.image_events.clear();
         self.active = true; self.turn = None; self.terminal = None; self.text = None; self.usage.clear(); self.limits = self.latest_limits.clone(); self.started_ms = unix_ms();
         self.windows = self.latest_windows.clone();
         self.process = None;
@@ -229,6 +238,7 @@ impl AppSession {
                         let thread = result["thread"]["id"].as_str().filter(|s| native::plain_id(s)).ok_or("app-server returned no thread")?;
                         if self.spec.resume && thread != self.spec.session { return Err("app-server resumed another session".into()); }
                         self.thread = Some(thread.into()); self.ready = true;
+                        self.provider = matches!(method,"thread/start"|"thread/resume").then(||result["modelProvider"].as_str()).flatten().filter(|s| !s.is_empty() && s.trim()==*s && !s.chars().any(char::is_control)).map(String::from);
                         self.model = result["model"].as_str().filter(|s| model_code(s)).map(String::from);
                     }
                     "turn/start" => {
@@ -262,6 +272,9 @@ impl AppSession {
         if !self.active { return Ok(()); }
         if p["threadId"].as_str() != self.thread.as_deref() { return Ok(()); }
         let id = p["turnId"].as_str().or(p["turn"]["id"].as_str());
+        if p.get("turnId").is_some_and(|value|value.as_str()!=id)
+            || p.get("turn").is_some_and(|turn|turn["id"].as_str()!=id)
+            || p.get("thread").is_some_and(|thread|thread["id"].as_str()!=self.thread.as_deref()) {return Ok(());}
         if self.turn.is_none() && self.pending.is_some_and(|(_, m)| m == "turn/start") {
             if self.early.len()>=256 || self.early.iter().map(|e|e.value.to_string().len()).sum::<usize>()+message.to_string().len()>8*1024*1024 {
                 return Err("app-server early notifications exceed bound; reconcile original submission".into());
@@ -269,6 +282,15 @@ impl AppSession {
             self.early.push(frame);return Ok(());
         }
         if self.turn.is_none() || id != self.turn.as_deref() { return Ok(()); }
+        if self.terminal.is_none() && method == "item/completed"
+            && p["turnId"].as_str()==self.turn.as_deref() {
+            if let Some(generated)=p["item"]["type"].as_str().and_then(super::image_kind) {
+                let image=super::image(&p["item"],generated,self.thread.clone(),self.turn.clone(),true);
+                if !self.images.contains(&image) {
+                    self.image_items.push(message.clone());self.images.push(image.clone());self.image_events.push(image);
+                }
+            }
+        }
         let capturable=self.terminal.is_none() && match method {
             "item/started"|"item/completed"=>p["item"].is_object() && super::history::normalize("codex-app-server",message).4=="none",
             "item/agentMessage/delta"=>p["itemId"].as_str().is_some_and(|s|!s.is_empty()) && p["delta"].is_string(),
@@ -323,7 +345,7 @@ impl AppSession {
         }
         let mut r = Report::read(Client::Codex, "", &events, None);
         r.limits = self.windows.clone();
-        r.session = self.thread.clone(); r.usage.model = self.model.clone(); r.text = self.text.clone(); r.started_ms = self.started_ms;
+        r.session = self.thread.clone(); r.turn=self.turn.clone();r.images=self.images.clone(); r.usage.model = self.model.clone(); r.text = self.text.clone(); r.started_ms = self.started_ms;
         r.process = super::capture::ProcessUse { exit_unknown: "session-process", ..self.process.clone().unwrap_or_default() };
         for call in &mut r.calls { if call.model.is_none() { call.model = self.model.clone(); } }
         (r.outcome, r.error) = match status { "completed" => ("ok","none"), "interrupted" => ("cancelled","interrupted"), _ => ("failed","turn-failed") };
@@ -368,7 +390,7 @@ impl AppSession {
     pub fn checkpoint(&self) -> Value {
         json!({"schema":"coreq-app-session/1", "root":self.spec.root, "home":self.spec.home, "session":self.spec.session,
             "next":self.next, "pending":self.pending.map(|(id, method)| json!([id,method])), "initialized":self.initialized, "ready":self.ready,
-            "thread":self.thread,"turn":self.turn,"active":self.active,"terminal":self.terminal,"model":self.model,"text":self.text,
+            "thread":self.thread,"turn":self.turn,"provider":self.provider,"images":self.images,"image_items":self.image_items,"active":self.active,"terminal":self.terminal,"model":self.model,"text":self.text,
             "usage":self.usage,"limits":self.limits,"latest_limits":self.latest_limits,"windows":self.windows,"latest_windows":self.latest_windows,"window_groups":self.window_groups,"started_ms":self.started_ms,"early":self.early.iter().map(|e|&e.value).collect::<Vec<_>>(),"fault":self.fault,"scope":self.scope,"worked":self.worked,"failure":self.failure})
     }
 
@@ -379,14 +401,27 @@ impl AppSession {
         let mut s = Self::new(spec)?;
         s.next = v["next"].as_u64().filter(|n| *n > 0).ok_or("app-server recovery request invalid")?;
         if !v["pending"].is_null() {
-            let method = match v["pending"][1].as_str() { Some("initialize") => "initialize", Some("thread/start") => "thread/start", Some("thread/resume") => "thread/resume", Some("turn/start") => "turn/start", Some("turn/interrupt") => "turn/interrupt", Some("turn/steer")=>"turn/steer",Some("thread/compact/start")=>"thread/compact/start",Some("thread/read")=>"thread/read",Some("thread/turns/list")=>"thread/turns/list",Some("thread/goal/get")=>"thread/goal/get",Some("thread/fork")=>"thread/fork",Some("thread/revert")=>"thread/revert",_ => return Err("app-server recovery method invalid".into()) };
+            let method = match v["pending"][1].as_str() { Some("initialize") => "initialize", Some("thread/start") => "thread/start", Some("thread/resume") => "thread/resume", Some("turn/start") => "turn/start", Some("turn/interrupt") => "turn/interrupt", Some("turn/steer")=>"turn/steer",Some("thread/compact/start")=>"thread/compact/start",Some("thread/read")=>"thread/read",Some("thread/turns/list")=>"thread/turns/list",Some("thread/goal/get")=>"thread/goal/get",Some("thread/fork")=>"thread/fork",Some("thread/revert")=>"thread/revert",Some("model/list")=>"model/list",Some("account/read")=>"account/read",_ => return Err("app-server recovery method invalid".into()) };
             s.pending = Some((v["pending"][0].as_u64().ok_or("app-server recovery id invalid")?,method));
         }
         s.initialized = v["initialized"].as_bool().ok_or("app-server recovery state invalid")?;
         s.ready = v["ready"].as_bool().ok_or("app-server recovery state invalid")?;
         s.active = v["active"].as_bool().ok_or("app-server recovery state invalid")?;
-        for (field, target) in [("thread", &mut s.thread),("turn", &mut s.turn),("terminal", &mut s.terminal),("model", &mut s.model),("text", &mut s.text)] {
+        for (field, target) in [("provider", &mut s.provider),("thread", &mut s.thread),("turn", &mut s.turn),("terminal", &mut s.terminal),("model", &mut s.model),("text", &mut s.text)] {
             *target = if v[field].is_null() { None } else { Some(v[field].as_str().ok_or("app-server recovery field invalid")?.into()) };
+        }
+        if let Some(images)=v.get("images") {
+            s.images=serde_json::from_value(images.clone()).map_err(|_|"app-server recovery images invalid")?;
+            s.image_items=v["image_items"].as_array().ok_or("app-server recovery image evidence missing")?.clone();
+            if s.images.len()!=s.image_items.len() {return Err("app-server recovery image evidence differs".into());}
+            for (image,item) in s.images.iter().zip(&s.image_items) {
+                let p=&item["params"];
+                if s.thread.is_none() || s.turn.is_none() || p["threadId"].as_str()!=s.thread.as_deref() || p["turnId"].as_str()!=s.turn.as_deref() || item["method"]!="item/completed"
+                    || p.get("thread").is_some_and(|thread|thread["id"].as_str()!=s.thread.as_deref()) || p.get("turn").is_some_and(|turn|turn["id"].as_str()!=s.turn.as_deref())
+                    || p["item"]["type"].as_str().and_then(super::image_kind).is_none_or(|generated|*image!=super::image(&p["item"],generated,s.thread.clone(),s.turn.clone(),true)) {
+                    return Err("app-server recovery image scope or evidence differs".into());
+                }
+            }
         }
         s.usage = v["usage"].as_array().ok_or("app-server recovery usage invalid")?.clone(); s.limits = (!v["limits"].is_null()).then(|| v["limits"].clone());
         s.latest_limits=(!v["latest_limits"].is_null()).then(||v["latest_limits"].clone());
@@ -413,6 +448,62 @@ impl AppSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Finite producer: accepted scope, explicit outcome, conflicts and recovery cannot mint success or wire bytes.
+    #[test]
+    fn finite_images_share_accepted_scope_duplicates_and_recovery() {
+        let spec=Spec {client:Client::Codex,root:std::env::temp_dir(),session:"-".into(),resume:false,args:vec![],env:vec![],home:None};
+        let mut app=AppSession::new(&spec).unwrap();
+        let init=app.initialize(json!({})).unwrap();app.observe(&json!({"id":init["id"],"result":{}})).unwrap();
+        let open=app.open(json!({})).unwrap();
+        app.observe(&json!({"id":999,"result":{"thread":{"id":"foreign"},"modelProvider":"foreign"}})).unwrap();assert!(app.provider().is_none());
+        app.observe(&json!({"id":open["id"],"result":{"thread":{"id":"thread"},"modelProvider":"openai"}})).unwrap();assert_eq!(app.provider(),Some("openai"));
+        let start=app.start_turn(json!({"input":[]})).unwrap();
+        let row=|thread:Value,turn:Value,item:Value|json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":item}});
+        let item=json!({"id":"image","type":"imageGeneration","status":"completed","savedPath":"/never/open.png","private":{"b":2,"a":1}});
+        for (thread,turn) in [(json!("foreign"),json!("turn")),(json!("thread"),json!("foreign")),(Value::Null,json!("turn")),(json!("thread"),Value::Null),(json!("thread"),json!(42))] {
+            app.observe(&row(thread,turn,item.clone())).unwrap();
+        }
+        app.observe(&row(json!("thread"),json!("turn"),item.clone())).unwrap();assert!(app.take_images().is_empty());
+        app.observe(&json!({"method":"turn/completed","params":{"threadId":"foreign","turn":{"id":"turn","status":"completed"}}})).unwrap();
+        app.observe(&json!({"id":start["id"],"result":{"turn":{"id":"turn"}}})).unwrap();
+        let early=app.take_images();assert_eq!(early.len(),1);assert_eq!(early[0].outcome.as_deref(),Some("ok"));assert!(app.report().is_none());
+        let mut reordered=item.clone();reordered["private"]=serde_json::from_str(r#"{"a":1,"b":2}"#).unwrap();
+        app.observe(&row(json!("thread"),json!("turn"),reordered)).unwrap();assert!(app.take_images().is_empty());
+        let mut conflict=item.clone();conflict["private"]["a"]=json!(3);app.observe(&row(json!("thread"),json!("turn"),conflict)).unwrap();assert_eq!(app.images.len(),2);
+        for (status,error,expected) in [(json!("completed"),json!({}),None),(json!("failed"),Value::Null,Some("failed")),(json!("interrupted"),Value::Null,Some("cancelled")),(Value::Null,Value::Null,None),(json!(42),Value::Null,None),(json!("future"),Value::Null,None)] {
+            let mut next=item.clone();next["status"]=status;next["error"]=error;
+            app.observe(&row(json!("thread"),json!("turn"),next)).unwrap();assert_eq!(app.images.last().unwrap().outcome.as_deref(),expected);
+        }
+        app.observe(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"foreign","status":"completed"}}})).unwrap();assert!(app.report().is_none());
+        for turn_id in [json!("turn"),Value::Null,json!(42)] {
+            app.observe(&json!({"method":"turn/completed","params":{"threadId":"thread","turnId":turn_id,"turn":{"id":"foreign","status":"completed"}}})).unwrap();assert!(app.report().is_none());
+        }
+        app.observe(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}})).unwrap();
+        let report=app.report().unwrap();assert_eq!(report.turn.as_deref(),Some("turn"));assert_eq!(report.images,app.images);assert_eq!(report.outcome,"ok");
+        let saved=app.checkpoint();let recovered=AppSession::recover(&spec,&saved).unwrap();assert_eq!(recovered.report().unwrap().images,report.images);
+        assert!(recovered.image_events.is_empty());
+        for pointer in ["/images/0/turn","/images/0/evidence","/image_items/0/params/threadId"] {
+            let mut forged=saved.clone();*forged.pointer_mut(pointer).unwrap()=json!("foreign");assert!(AppSession::recover(&spec,&forged).is_err(),"{pointer}");
+        }
+        let metadata=report.observation(Client::Codex,&Context {product:"fixture",version:"1",project:"other",task:None,route:None,account:"default"}).to_string();
+        assert!(!metadata.contains("never/open") && !metadata.contains(early[0].evidence.as_ref().unwrap()));
+        let serialized=crate::cli::report_json(&report);assert_eq!(serialized["turn"],"turn");assert!(serialized["images"][0].get("native").is_none());
+    }
+
+    #[test]
+    fn finite_provider_and_pending_query_recovery_never_infer_or_replay() {
+        let spec=Spec {client:Client::Codex,root:std::env::temp_dir(),session:"-".into(),resume:false,args:vec![],env:vec![],home:None};
+        for provider in [Value::Null,json!(42),json!(""),json!("bad\n"),json!("agentq")] {
+            let mut app=AppSession::new(&spec).unwrap();let init=app.initialize(json!({})).unwrap();app.observe(&json!({"id":init["id"],"result":{}})).unwrap();
+            let open=app.open(json!({"modelProvider":"guessed"})).unwrap();app.observe(&json!({"id":open["id"],"result":{"thread":{"id":"thread"},"modelProvider":provider}})).unwrap();
+            assert_eq!(app.provider(),(provider=="agentq").then_some("agentq"));
+            for method in ["model/list","account/read"] {
+                let query=app.request(method,json!({})).unwrap();let saved=app.checkpoint();let cold=AppSession::recover(&spec,&saved).unwrap();assert!(!cold.query_ready());
+                assert!(app.request(method,json!({})).is_err());app.observe(&json!({"id":query["id"],"result":{}})).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn resume_rejection_stage_requires_correlated_well_formed_native_error() {
         let spec=Spec {client:Client::Codex,root:std::env::temp_dir(),session:"original".into(),resume:true,args:vec![],env:vec![],home:None};

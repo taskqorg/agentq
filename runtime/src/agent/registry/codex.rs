@@ -267,6 +267,21 @@ impl Client { pub(crate) const Codex: Self=Self("codex"); }
 pub(crate) fn image_kind(name:&str)->Option<bool> {
     match name {"imageGeneration"|"image_generation"|"ImageGeneration"=>Some(true),"imageView"|"image_view"|"ImageView"=>Some(false),_=>None}
 }
+// Hash parsed native item values with sorted keys; this is not original wire-byte evidence.
+pub(crate) fn image(item:&Value,generated:bool,session:Option<String>,turn:Option<String>,completed:bool)->Image {
+    fn canonical(v:&Value)->Value {match v {
+        Value::Object(o)=>{let sorted:std::collections::BTreeMap<_,_>=o.iter().map(|(k,v)|(k.clone(),canonical(v))).collect();Value::Object(sorted.into_iter().collect())},
+        Value::Array(a)=>Value::Array(a.iter().map(canonical).collect()), _=>v.clone(),
+    }}
+    let outcome=match item["status"].as_str() {
+        Some("completed") if generated && completed && ["error","failure"].iter().all(|k|item[*k].is_null())=>Some("ok"),
+        Some("failed")=>Some("failed"),Some("interrupted"|"cancelled")=>Some("cancelled"),_=>None,
+    };
+    Image {session,turn,item:string(&item["id"]),generated,outcome:outcome.map(String::from),
+        saved_path:string(&item["savedPath"]).or_else(||string(&item["saved_path"])).or_else(||string(&item["path"])),
+        evidence:Some(crate::sha256_hex(canonical(item).to_string().as_bytes()))}
+}
+
 fn parse_event(cursor: &mut events::Cursor,v: &Value,out: &mut Vec<Event>,thread: Option<&str>) {
         let method = v["method"].as_str().unwrap_or("");
         let p = &v["params"];
@@ -295,7 +310,7 @@ fn parse_event(cursor: &mut events::Cursor,v: &Value,out: &mut Vec<Event>,thread
         let native = i["type"].as_str().unwrap_or("");
         let id = string(&i["id"]);
         if let Some(generated)=image_kind(native).filter(|_|completed) {
-            out.push(Event::Image {item:id.clone(),generated,saved_path:string(&i["savedPath"]).or_else(||string(&i["saved_path"])).or_else(||string(&i["path"])),native:i.clone()});
+            out.push(Event::Image(image(i, generated, string(&p["threadId"]), string(&p["turnId"]), method == "item/completed")));
         }
         if !start && !end { return; }
         if matches!(native, "agentMessage" | "agent_message") {
@@ -456,20 +471,28 @@ pub(crate) fn credential_snapshot(path: &Path) -> Res<Option<Vec<u8>>> {
     }
 }
 
+pub(crate) fn catalogue_page(reply:&Value,cursor:&Value)->Res<(Vec<Model>,Value)> {
+    if !reply["error"].is_null() {return Err("catalogue native error".into());}
+    let mut models=vec![];
+    for m in reply["result"]["data"].as_array().ok_or("catalogue data missing")? {
+        let id=m["model"].as_str().filter(|m|model_code(m)).ok_or("catalogue model invalid")?;
+        models.push(Model {id:id.into(),name:m["displayName"].as_str().unwrap_or(id).into()});
+    }
+    let next=&reply["result"]["nextCursor"];
+    if !next.is_null() && (!next.is_string() || next==cursor) {return Err("catalogue cursor invalid".into());}
+    Ok((models,next.clone()))
+}
+
 pub(crate) fn catalogue(home: Option<&Path>, executable: Option<&Path>) -> Res<Vec<Model>> {
     codex_read(home, executable, |server,session,until| {
         let mut models=vec![]; let mut cursor=Value::Null;
         for _ in 0..100 {
             let request=session.request("model/list",json!({"cursor":cursor,"limit":100,"includeHidden":false}))?;
             let reply=exchange(server,session,request,until)?;
-            for m in reply["result"]["data"].as_array().ok_or("catalogue data missing")? {
-                let id=m["model"].as_str().filter(|m|model_code(m)).ok_or("catalogue model invalid")?;
-                models.push(Model {id:id.into(),name:m["displayName"].as_str().unwrap_or(id).into()});
-            }
-            let next=&reply["result"]["nextCursor"];
+            let (page,next)=catalogue_page(&reply,&cursor)?;
+            models.extend(page);
             if next.is_null() {return Ok(models);}
-            if !next.is_string() || *next==cursor {return Err("catalogue cursor invalid".into());}
-            cursor=next.clone();
+            cursor=next;
         }
         Err("catalogue page bound exceeded".into())
     })

@@ -18,6 +18,18 @@ pub struct Question {pub id:String,pub prompt:String,pub choices:Vec<Choice>,pub
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Answer {Choice(String),Text(String)}
 
+/// Local native item evidence; paths and digests grant no file or source authority.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Image {
+    pub session: Option<String>,
+    pub turn: Option<String>,
+    pub item: Option<String>,
+    pub generated: bool,
+    pub outcome: Option<String>,
+    pub saved_path: Option<String>,
+    pub evidence: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum Event {
     Text { item: Option<String>, delta: String },
@@ -39,7 +51,7 @@ pub enum Event {
     /// Native session metadata, capabilities or an update without a neutral mapping.
     Metadata { kind: String, data: Value },
     /// Native image evidence is local content; never telemetry or completion authority.
-    Image { item:Option<String>, generated:bool, saved_path:Option<String>, native:Value },
+    Image(Image),
     Activity,
     Stalled { idle_ms:u64 },
 }
@@ -214,7 +226,10 @@ impl Cursor {
             }
             let before = out.len();
             if let Some(w) = limits::reported(client, &v, (unix_ms()/1000).max(0) as u64) { out.push(Event::Quota(w)); }
-            (protocol(client).parse_event)(self,&v,&mut out,thread);
+            let item_scope = client == Client::Codex && matches!(v["method"].as_str(), Some("item/started"|"item/completed"))
+                && (thread.is_some() || turn.is_some())
+                && (thread.is_none() || turn.is_none() || v["params"]["threadId"].as_str()!=thread || v["params"]["turnId"].as_str()!=turn);
+            if !item_scope {(protocol(client).parse_event)(self,&v,&mut out,thread);}
             let terminal=(protocol(client).terminal)(self,&v,&mut out,thread,turn);
             if let Some(outcome)=terminal {out.push(Event::TurnEnd {outcome});}
             if out.len() == before { out.push(Event::Activity); }
@@ -609,7 +624,7 @@ mod tests {
                         Event::Unsupported{reason}=>self.error=Some(reason),
                         Event::Message{..}|Event::Progress=>self.done(at),
                         Event::TurnEnd{..}=>{self.tools.clear();self.error=None;self.done(at);}
-                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Request{..}|Event::Metadata{..}|Event::Stalled{..}|Event::Image{..}|Event::Activity=>{}
+                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Request{..}|Event::Metadata{..}|Event::Stalled{..}|Event::Image(..)|Event::Activity=>{}
                     }
                 }
             }
@@ -814,8 +829,16 @@ mod tests {
         for kind in ["commandExecution", "command_execution", "mcpToolCall", "mcp_tool_call", "webSearch", "web_search", "fileChange", "file_change", "dynamicToolCall", "dynamic_tool_call", "collabAgentToolCall", "collab_tool_call", "imageView", "image_view", "imageGeneration", "image_generation"] {
             let events=Cursor::default().read(Client::Codex, vec![json!({"method":"item/started","params":{"item":{"type":kind,"id":"tool"}}}),json!({"method":"item/completed","params":{"item":{"type":kind,"id":"tool","status":"completed"}}})]);
             if kind.starts_with("image") {
-                assert!(matches!(&events[..], [Event::ToolStart{..}, Event::Image{..}, Event::ToolEnd{..}]), "{kind}: {events:?}");
+                assert!(matches!(&events[..], [Event::ToolStart{..}, Event::Image(..), Event::ToolEnd{..}]), "{kind}: {events:?}");
             }else{assert!(matches!(&events[..], [Event::ToolStart{..}, Event::ToolEnd{..}]), "{kind}: {events:?}");}
+        }
+            for scope in [("owned","turn"),("foreign","turn"),("owned","foreign")] {
+            for (status,expected) in [(json!("completed"),Some("ok")),(json!("failed"),Some("failed")),(json!("interrupted"),Some("cancelled")),(Value::Null,None),(json!("future"),None)] {
+                let row=json!({"method":"item/completed","params":{"threadId":scope.0,"turnId":scope.1,"item":{"type":"imageGeneration","status":status,"savedPath":"/never/open"}}});
+                let events=Cursor::default().read_owned(Client::Codex,vec![row],Some("owned"),Some("turn"));
+                let image=events.iter().find_map(|e|if let Event::Image(image)=e {Some(image)}else{None});
+                if scope==("owned","turn") {assert_eq!(image.unwrap().outcome.as_deref(),expected);}else{assert!(image.is_none());}
+            }
         }
     }
 

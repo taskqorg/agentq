@@ -109,6 +109,9 @@ pub(crate) fn main() {
         ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
         ("typed_log_reads_are_public", typed_log_reads_are_public),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
+        ("finite_protected_binding_and_denial",protected::finite_protected_binding_and_denial),
+        ("finite_images_progress_and_report_share_early_acceptance",finite_images_progress_and_report_share_early_acceptance),
+        ("finite_producer_same_connection_queries_and_binding",finite_producer_same_connection_queries_and_binding),
         ("app_input_forwards_images_once_and_reads_account_only", app_input_forwards_images_once_and_reads_account_only),
         ("app_resume_frames_stay_bounded_and_named", app_resume_frames_stay_bounded_and_named),
         ("protected_launch_refuses_tampering_and_preserves_native_transport", protected::protected_launch_refuses_tampering_and_preserves_native_transport),
@@ -485,6 +488,19 @@ fn fake_app_server() {
             Some("initialize")=>println!("{}",json!({"id":id,"result":{}})),
             Some("initialized")=>{},
             Some("model/list")=>{
+                if turn>0 && std::env::var_os("AGENTQ_FINITE_DENIAL").is_some() {println!("{}",json!({"method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"catalogue","delta":"catalogue-progress"}}));}
+                if let Ok(mode)=std::env::var("AGENTQ_FINITE_CATALOGUE") {
+                    println!("{}",json!({"id":id.as_u64().unwrap()+99,"result":{"data":[{"model":"foreign"}],"nextCursor":null}}));
+                    match mode.as_str() {
+                        "missing"=>continue,
+                        "eof"=>std::process::exit(0),
+                        "error"=>{println!("{}",json!({"id":id,"error":{"code":-1,"message":"fixture error"}}));continue;},
+                        "empty"=>{println!("{}",json!({"id":id,"result":{"data":[],"nextCursor":null}}));continue;},
+                        "malformed"=>{println!("{}",json!({"id":id,"result":{"data":[{"id":"wrong-field"}]}}));continue;},
+                        "cursor"=>{println!("{}",json!({"id":id,"result":{"data":[],"nextCursor":42}}));continue;},
+                        "delayed"=>std::thread::sleep(Duration::from_millis(30)),_=>{},
+                    }
+                }
                 let pages=std::env::var_os("COREQ_FAKE_CATALOGUE_PAGES").is_some();
                 let first=value["params"]["cursor"].is_null();
                 println!("{}",json!({"id":id,"result":{"data":[{"model":if pages {if first {"fixture-model-1"} else {"fixture-model-2"}} else {"fixture-model"},"hidden":false}],"nextCursor":if pages && first {json!("second")} else {Value::Null}}}));
@@ -492,14 +508,16 @@ fn fake_app_server() {
             Some("account/rateLimits/read")=>println!("{}",json!({"id":id,"result":{"rateLimits":{"primary":{"usedPercent":20,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":90,"windowDurationMins":10080,"resetsAt":1900000000}}}})),
             Some("account/read")=>{
                 assert_eq!(value["params"],json!({"refreshToken":false}),"identity read never refreshes a token");
-                println!("{}",json!({"id":id,"result":{"account":{"type":"chatgpt","email":"private@example.invalid","planType":"plus"},"requiresOpenaiAuth":true}}));
+                let login=std::env::var("AGENTQ_FINITE_LOGIN").unwrap_or("chatgpt".into());
+                if login=="error" {println!("{}",json!({"id":id,"error":{"code":-1,"message":"fixture account error"}}));}
+                else {println!("{}",json!({"id":id,"result":{"account":if login=="none" {Value::Null}else{json!({"type":login,"email":"private@example.invalid","planType":"plus"})},"requiresOpenaiAuth":true}}));}
             },
             Some("thread/start")=>{
                 if std::env::var_os("AGENTQ_FAKE_ONE_TURN").is_none() { assert_eq!(value["params"]["dynamicTools"][0]["name"],"caller-tool"); }
                 if let Some(instructions)=value["params"]["developerInstructions"].as_str() {assert_eq!(instructions,"private rules");}
                 if std::env::var_os("AGENTQ_FAKE_ONE_TURN").is_none() {assert!(matches!(value["params"]["sandbox"].as_str(),Some("read-only"|"workspace-write")),"policy maps to thread params");}
                 std::fs::write("app-native-thread","native-thread").unwrap();
-                println!("{}",json!({"id":id,"result":{"thread":{"id":"native-thread"},"model":"fixture-model"}}));
+                println!("{}",json!({"id":id,"result":{"thread":{"id":"native-thread"},"model":"fixture-model","modelProvider":std::env::var("AGENTQ_FINITE_PROVIDER").ok()}}));
             },
             Some("thread/resume")=>{
                 if let Ok(message)=std::env::var("AGENTQ_FAKE_NATIVE_REFUSAL") {
@@ -537,7 +555,7 @@ fn fake_app_server() {
                     }
                     continue;
                 }
-                println!("{}",json!({"id":id,"result":{"thread":{"id":"native-thread"},"model":"fixture-model"}}));
+                println!("{}",json!({"id":id,"result":{"thread":{"id":"native-thread"},"model":"fixture-model","modelProvider":std::env::var("AGENTQ_FINITE_PROVIDER").ok()}}));
             },
             Some("turn/start")=>{
                 turn+=1;
@@ -545,11 +563,34 @@ fn fake_app_server() {
                     turn=std::fs::read_to_string("app-turn-count").ok().and_then(|s|s.parse::<u64>().ok()).unwrap_or(0)+1;
                     std::fs::write("app-turn-count",turn.to_string()).unwrap();
                 }
+                if std::env::var_os("AGENTQ_FINITE_IMAGES").is_some() {
+                    let image=json!({"id":"image","type":"imageGeneration","status":"completed","savedPath":"/never/open.png","hidden":"original"});
+                    let row=|thread:&str,turn:&str,item:&Value|json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":item}});
+                    println!("{}",row("foreign-thread","turn-1",&image));println!("{}",row("native-thread","foreign-turn",&image));
+                    println!("{}",row("native-thread","turn-1",&image));println!("{}",row("native-thread","turn-1",&image));
+                    let mut conflict=image.clone();conflict["hidden"]=json!("conflict");println!("{}",row("native-thread","turn-1",&conflict));
+                    println!("{}",json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"turn-1","status":"completed"}}}));
+                    std::fs::write("images-early","").unwrap();wait_for(Path::new("images-ack"));
+                    println!("{}",json!({"id":id,"result":{"turn":{"id":"turn-1"}}}));continue;
+                }
                 println!("{}",json!({"id":id,"result":{"turn":{"id":format!("turn-{turn}")}}}));
                 for (thread,usage) in [("native-thread",json!({"last":{"totalTokens":12},"modelContextWindow":100})),("foreign-thread",json!({"last":{"totalTokens":999},"modelContextWindow":999})),("foreign-thread",json!({})),("native-thread",json!({}))] {
                     println!("{}",json!({"method":"thread/tokenUsage/updated","params":{"threadId":thread,"turnId":format!("turn-{turn}"),"tokenUsage":usage}}));
                 }
-                println!("{}",json!({"id":999,"method":"item/tool/call","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"tool":"caller-tool","arguments":{"private":"tool input"}}}));
+                if let Ok(mode)=std::env::var("AGENTQ_FINITE_DENIAL") {
+                    let request=json!({"id":999,"method":"future/request","params":{"threadId":if mode=="foreign" {"foreign"}else{"native-thread"},"turnId":format!("turn-{turn}")}});
+                    println!("{request}");
+                    if mode=="duplicate" {println!("{request}");}
+                    if mode=="conflict" {let mut other=request.clone();other["params"]["unknown"]=json!(true);println!("{other}");}
+                    println!("{}",json!({"method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"sync","delta":"denial-ready"}}));
+                    #[cfg(unix)]
+                    if mode=="write-unknown" {
+                        // Every fixture ancestor closes its read end too; native identity stays live for verification.
+                        unsafe {libc::close(0);}
+                        std::fs::write("request-emitted","").unwrap();wait_for(Path::new("denial-never-retry"));return;
+                    }
+                    std::fs::write("request-emitted","").unwrap();
+                }else {                println!("{}",json!({"id":999,"method":"item/tool/call","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"tool":"caller-tool","arguments":{"private":"tool input"}}}));}
                 if std::env::var_os("AGENTQ_FAKE_SELECTED_BYTES").is_some() {
                     println!("{}",json!({"type":"thread.started","thread_id":"foreign-thread","method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"conflict","delta":"CONFLICTING-HEADER"}}));
                     println!("{}",json!({"type":"agentq_control","session_id":"foreign-thread","method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"journal","delta":"FORGED-JOURNAL"}}));
@@ -669,6 +710,47 @@ fn app_input_forwards_images_once_and_reads_account_only() {
     let rows:Vec<Value>=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap().lines().map(|l|serde_json::from_str(l).unwrap()).collect();
     let turns:Vec<_>=rows.iter().filter(|v|v["method"]=="turn/start").collect();
     assert_eq!(turns.len(),1); assert_eq!(turns[0]["params"]["input"],json!([{"type":"text","text":"describe"},{"type":"localImage","path":png}]));
+}
+
+// Progress before acknowledgement cannot adopt early images; report and progress share accepted facts afterwards.
+fn finite_images_progress_and_report_share_early_acceptance() {
+    let root=scratch("finite-images");let codex=agent::runtime("codex").unwrap();
+    let (mut run,l)=protected::finite_open(&root,json!({"AGENTQ_FAKE_ONE_TURN":"1","AGENTQ_FINITE_IMAGES":"1"}));
+    codex.input(&mut run,&[agent::Part::Text("fixture".into())]).unwrap();wait_for(&root.join("images-early"));
+    assert!(!codex.progress(&mut run).unwrap().iter().any(|e|matches!(e,agent::Event::Image(..)|agent::Event::TurnEnd{..})));assert!(codex.report(&run).is_err());
+    std::fs::write(root.join("images-ack"),"").unwrap();assert_eq!(finish(codex,&mut run),agent::State::Finished);
+    let progress=codex.progress(&mut run).unwrap();let images:Vec<_>=progress.iter().filter_map(|e|if let agent::Event::Image(image)=e {Some(image.clone())}else{None}).collect();
+    let report=codex.report(&run).unwrap();assert_eq!(images,report.images);assert_eq!(images.len(),2);assert_ne!(images[0].evidence,images[1].evidence);assert_eq!(images[0].saved_path,images[1].saved_path);
+    assert_eq!(progress.iter().filter(|e|matches!(e,agent::Event::TurnEnd{outcome:"ok"})).count(),1);
+    let saved=codex.checkpoint(&run).unwrap();let cold=codex.recover(&saved,&l).unwrap();assert_eq!(codex.report(&cold).unwrap().images,images);
+    assert!(codex.progress(&mut run).unwrap().is_empty());codex.cancel(&mut run).unwrap();drop(cold);drop(run);teardown(root);
+}
+
+// Same-connection finite queries must not launch another client, infer billing, prompt or resend.
+fn finite_producer_same_connection_queries_and_binding() {
+    let codex=agent::runtime("codex").unwrap();
+    for (provider,login,expected) in [("openai","chatgpt",Some(agent::Login::Subscription)),("agentq","apiKey",Some(agent::Login::ApiKey)),("openai","none",Some(agent::Login::None)),("openai","error",None),("openai","future",None),("","chatgpt",None)] {
+        let root=scratch("finite-binding");
+        let (mut run,_l)=protected::finite_open(&root,json!({"AGENTQ_FAKE_ONE_TURN":"1","AGENTQ_FINITE_PROVIDER":provider,"AGENTQ_FINITE_LOGIN":login}));
+        let binding=codex.binding(&mut run);
+        match expected {Some(expected)=>{let b=binding.unwrap();assert_eq!(b.session,codex.session_id(&run).unwrap());assert_eq!(b.provider,provider);assert_eq!(b.account.login,expected);assert!(!serde_json::to_string(&b).unwrap().contains("email"));},None=>assert!(binding.is_err())}
+        let rows=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();let values:Vec<Value>=rows.lines().map(|r|serde_json::from_str(r).unwrap()).collect();
+        assert_eq!(values.iter().filter(|v|v["method"]=="account/read").count(),usize::from(!provider.is_empty()));assert!(!rows.contains("turn/start"));
+        codex.cancel(&mut run).unwrap();drop(run);teardown(root);
+    }
+    for mode in ["delayed","empty","error","malformed","cursor","missing","eof"] {
+        let root=scratch("finite-catalogue");let (mut run,l)=protected::finite_open(&root,json!({"AGENTQ_FAKE_ONE_TURN":"1","COREQ_FAKE_CATALOGUE_PAGES":"1","AGENTQ_FINITE_CATALOGUE":mode}));
+        let result=codex.catalogue_in(&mut run,Instant::now()+if mode=="missing" {Duration::from_secs(2)}else{Duration::from_secs(10)});
+        match mode {"delayed"=>assert_eq!(result.unwrap().iter().map(|m|m.id.as_str()).collect::<Vec<_>>(),["fixture-model-1","fixture-model-2"]),"empty"=>assert!(result.unwrap().is_empty()),_=>{assert!(result.is_err());assert!(codex.catalogue_in(&mut run,Instant::now()+Duration::from_millis(200)).is_err());}}
+        let saved=codex.checkpoint(&run).unwrap();let pid=run.id().unwrap();if mode!="eof" {codex.cancel(&mut run).unwrap();}
+        let until=Instant::now()+Duration::from_secs(10);
+        while !matches!(coreq::process::identity(pid),Ok(None)) {codex.poll(&mut run).unwrap();assert!(Instant::now()<until);std::thread::yield_now();}
+        drop(run);
+        let mut cold=codex.recover(&saved,&l).unwrap();assert!(codex.catalogue_in(&mut cold,Instant::now()).is_err());
+        let rows=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();let values:Vec<Value>=rows.lines().map(|r|serde_json::from_str(r).unwrap()).collect();
+        assert_eq!(values.iter().filter(|v|v["method"]=="initialize").count(),1);assert_eq!(values.iter().filter(|v|v["method"]=="model/list").count(),if mode=="delayed" {2}else{1});assert!(!rows.contains("turn/start") && !rows.contains("account/read"));
+        drop(cold);teardown(root);
+    }
 }
 
 // ---------- helpers ----------
