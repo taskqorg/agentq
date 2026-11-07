@@ -107,7 +107,7 @@ fn protected(home: PathBuf) -> Vec<PathBuf> { vec![home] }
 fn refusal(text: &str) -> Option<Cause> {
     text.lines().find_map(|line| {
         let diagnostic=match serde_json::from_str::<Value>(line) {
-            Ok(v) if matches!(v["type"].as_str(),Some("error"|"turn.failed")) || v.get("id").is_some() && v.get("method").is_none() && v["error"]["code"].is_i64()=>v["error"]["message"].as_str().or(v["message"].as_str())?.to_string(),
+            Ok(v) if matches!(v["type"].as_str(),Some("error"|"turn.failed")) || v.get("id").is_some() && app::error_response(&v)=>v["error"]["message"].as_str().or(v["message"].as_str())?.to_string(),
             Ok(_)=>return None,
             Err(_)=>line.to_string(),
         };

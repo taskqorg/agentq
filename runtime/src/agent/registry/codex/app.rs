@@ -3,6 +3,13 @@ use super::*;
 pub(crate) use crate::agent::stdio::Stdio as AppServer;
 use crate::agent::stdio::NativeFrame;
 
+/// Qualify an already decoded native error, never contradictory success or server requests.
+pub(super) fn error_response(value:&Value)->bool {
+    value["id"].as_u64().is_some() && value.get("result").is_none() && value.get("method").is_none()
+        && value.get("jsonrpc").is_none_or(|v|v=="2.0")
+        && value["error"].is_object() && value["error"]["code"].is_i64() && value["error"]["message"].is_string()
+}
+
 pub(crate) struct SessionLine {pub(crate) session:String,pub(crate) turn:Option<String>,pub(crate) raw:Vec<u8>}
 
 /// Caller-owned server transport: preserve all policy arguments and the account, without CLI `exec` flags.
@@ -193,6 +200,14 @@ impl AppSession {
         }
         if let Some((id, method)) = self.pending {
             if message["id"].as_u64() == Some(id) {
+                if method=="thread/resume" && (message.get("method").is_some()
+                    || message.get("jsonrpc").is_some_and(|v|v!="2.0")
+                    || message.get("error").is_some() && !error_response(message)
+                    || message.get("error").is_none() && message.get("result").is_none()) {
+                    let detail="app-server thread/resume response ambiguous; original session retained".to_string();
+                    self.start_failure=Some(LaunchError {stage:InputStage::Unknown,cause:None,session:Some(self.spec.session.clone()),detail:detail.clone(),native:Some(message.clone())});
+                    return Err(detail);
+                }
                 if !message["error"].is_null() {
                     if matches!(method,"model/list"|"account/read"|"account/rateLimits/read") {
                         if method=="account/rateLimits/read" {
@@ -201,7 +216,7 @@ impl AppSession {
                         }
                         self.pending=None;return Ok(());
                     }
-                    if method=="thread/resume" && self.turn.is_none() && !self.worked && message["error"]["code"].is_i64() && message["error"]["message"].is_string() {
+                    if method=="thread/resume" && self.turn.is_none() && !self.worked && error_response(message) {
                         let detail=message["error"]["message"].as_str().unwrap_or("native resume refusal").to_string();
                         self.start_failure=Some(LaunchError {stage:InputStage::BeforeInput,cause:super::refusal(&detail),session:Some(self.spec.session.clone()),detail,native:Some(message.clone())});
                     }
@@ -401,13 +416,55 @@ mod tests {
     #[test]
     fn resume_rejection_stage_requires_correlated_well_formed_native_error() {
         let spec=Spec {client:Client::Codex,root:std::env::temp_dir(),session:"original".into(),resume:true,args:vec![],env:vec![],home:None};
-        for error in [json!({"message":"thread not found"}),json!("thread not found"),json!({"code":-32001,"message":"thread not found"})] {
+        let pending=|| {
             let mut app=AppSession::new(&spec).unwrap();
             let init=app.initialize(json!({})).unwrap();app.observe(&json!({"id":init["id"],"result":{}})).unwrap();
-            let open=app.open(json!({})).unwrap();
-            app.observe(&json!({"id":999,"error":error})).unwrap();assert!(app.start_failure().is_none());
-            assert!(app.observe(&json!({"id":open["id"],"error":error})).is_err());
-            assert_eq!(app.start_failure().is_some(),error["code"].is_i64());
+            let open=app.open(json!({})).unwrap();(app,open["id"].clone())
+        };
+        let error=json!({"code":-32001,"message":"thread not found"});
+        let mut malformed=vec![
+            json!({"error":error,"result":{"thread":{"id":"original"}}}),
+            json!({"error":error,"result":null}),json!({"error":null,"result":{"thread":{"id":"original"}}}),
+            json!({"error":null}),json!({"error":[]}),json!({"error":true}),json!({"error":"thread not found"}),
+            json!({}),json!({"result":null}),json!({"result":{"thread":{"id":"foreign"}}}),
+            json!({"error":error,"method":null}),json!({"error":error,"method":42}),
+            json!({"error":error,"jsonrpc":"1.0"}),json!({"error":error,"jsonrpc":null}),
+        ];
+        for code in [Value::Null,json!("-32001"),json!(true),json!(-32001.5),json!(u64::MAX)] {malformed.push(json!({"error":{"code":code,"message":"thread not found"}}));}
+        malformed.push(json!({"error":{"message":"thread not found"}}));
+        for message in [Value::Null,json!(17),json!([])] {malformed.push(json!({"error":{"code":-32001,"message":message}}));}
+        malformed.push(json!({"error":{"code":-32001}}));
+        for mut response in malformed {
+            let (mut app,id)=pending();response["id"]=id.clone();
+            assert!(app.observe(&response).is_err(),"{response}");
+            if let Some(failure)=app.start_failure() {
+                assert_eq!((failure.stage,failure.cause,failure.session.as_deref()),(InputStage::Unknown,None,Some("original")),"{response}");
+                assert_eq!(failure.native.as_ref(),Some(&response));
+            }
+            // An ambiguous exchange is faulted; a later valid refusal cannot upgrade it.
+            assert!(app.observe(&json!({"id":id,"error":error})).is_err());
+            assert!(app.start_failure().is_none_or(|e|e.stage==InputStage::Unknown && e.cause.is_none()));
+        }
+        for (message,cause) in [("thread not found",Some(Cause("session-missing"))),("permission denied",None),("",None)] {
+            for data in [Value::Null,json!(false),json!(7),json!("opaque"),json!([]),json!({"native":"retained"})] {
+                let (mut app,id)=pending();let response=json!({"jsonrpc":"2.0","id":id,"error":{"code":-32001,"message":message,"data":data}});
+                assert!(app.observe(&response).is_err());
+                let failure=app.start_failure().unwrap();
+                assert_eq!((failure.stage,failure.cause,failure.session.as_deref()),(InputStage::BeforeInput,cause,Some("original")));
+                assert_eq!(failure.native.as_ref(),Some(&response));
+            }
+        }
+        let (mut app,id)=pending();
+        for foreign in [Value::Null,json!("2"),json!(2.0),json!(-1),json!(true),json!([]),json!(999)] {
+            app.observe(&json!({"id":foreign,"error":error})).unwrap();assert!(app.start_failure().is_none());
+        }
+        // A coinciding server-request ID is still caller control, not a client-response error.
+        app.observe(&json!({"id":id,"method":"caller/request","error":error})).unwrap();assert!(app.start_failure().is_none());
+        app.observe(&json!({"id":id,"result":{"thread":{"id":"original"}}})).unwrap();assert!(app.ready());
+        app.observe(&json!({"id":id,"error":error})).unwrap();assert!(app.start_failure().is_none(),"late response has no pending resume");
+        for code in [i64::MIN,-32001,0,i64::MAX] {
+            let (mut app,id)=pending();assert!(app.observe(&json!({"id":id,"error":{"code":code,"message":"thread not found"}})).is_err());
+            assert_eq!(app.start_failure().unwrap().stage,InputStage::BeforeInput,"ordinary signed native code without optional data/version remains valid");
         }
     }
     // S283: exact inbound lines need positive native correlation; Value/checkpoint evidence cannot mint bytes.

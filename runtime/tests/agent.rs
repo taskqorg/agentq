@@ -503,7 +503,16 @@ fn fake_app_server() {
             },
             Some("thread/resume")=>{
                 if let Ok(message)=std::env::var("AGENTQ_FAKE_NATIVE_REFUSAL") {
-                    println!("{}",json!({"id":id,"error":{"code":-32001,"message":message,"data":{"native":"preserved"}}}));continue;
+                    let mut response=json!({"id":id,"error":{"code":-32001,"message":message,"data":{"native":"preserved"}}});
+                    match std::env::var("AGENTQ_FAKE_NATIVE_ENVELOPE").as_deref() {
+                        Ok("both")=>response["result"]=json!({"thread":{"id":value["params"]["threadId"]}}),
+                        Ok("result-null")=>response["result"]=Value::Null,
+                        Ok("error-null")=>{response["error"]=Value::Null;response["result"]=json!({"thread":{"id":value["params"]["threadId"]}});},
+                        Ok("method-null")=>response["method"]=Value::Null,
+                        Ok("code-string")=>response["error"]["code"]=json!("-32001"),
+                        _=>{},
+                    }
+                    println!("{response}");continue;
                 }
 
                 assert_eq!(value["params"]["threadId"],std::fs::read_to_string("app-native-thread").unwrap());
@@ -2730,6 +2739,18 @@ fn native_start_refusal_proof_preserves_stage_cause_and_session() {
         let e=codex.resume("original-thread",&l).err().unwrap();
         assert_eq!((e.stage,e.cause,e.session.as_deref(),e.detail.as_str()),(InputStage::BeforeInput,cause,Some("original-thread"),message));
         assert_eq!(e.native.unwrap()["error"]["data"]["native"],"preserved");
+        let requests=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
+        let methods:Vec<_>=requests.lines().map(|l|serde_json::from_str::<Value>(l).unwrap()["method"].clone()).collect();
+        assert_eq!(methods.iter().filter(|m|*m=="thread/resume").count(),1);
+        assert!(!methods.iter().any(|m|m=="thread/start" || m=="turn/start"));
+    }
+    for envelope in ["both","result-null","error-null","method-null","code-string"] {
+        let root=scratch("native-envelope-codex");
+        let mut l=fake_launch("codex",&root,"never submit",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_NATIVE_REFUSAL","thread not found".as_ref()),("AGENTQ_FAKE_NATIVE_ENVELOPE",envelope.as_ref())]);
+        l.deltas=true;codex.adopt("original-thread",&l,&[]).unwrap();
+        let e=codex.resume("original-thread",&l).err().unwrap();
+        assert_eq!((e.stage,e.cause,e.session.as_deref()),(InputStage::Unknown,None,Some("original-thread")),"{envelope}");
+        let native=e.native.unwrap();assert_eq!(codex.launch_refusal(&native.to_string()),None,"{envelope}");
         let requests=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
         let methods:Vec<_>=requests.lines().map(|l|serde_json::from_str::<Value>(l).unwrap()["method"].clone()).collect();
         assert_eq!(methods.iter().filter(|m|*m=="thread/resume").count(),1);
