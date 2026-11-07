@@ -159,7 +159,7 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
 }
 
 pub(crate) fn resume(runtime:&str, session:&str)->Res<Vec<String>> {
-    if session.is_empty() || session.starts_with('-') {return Err("history session invalid".into());}
+    if !super::super::native::cli_id(session) {return Err("history session invalid".into());}
     Ok(match runtime {
         "codex"=>vec!["codex".into(),"resume".into(),session.into()],
         "claude"=>vec!["claude".into(),"--resume".into(),session.into()],

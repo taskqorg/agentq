@@ -2,6 +2,7 @@
 use super::*;
 
 pub(super) fn plain_id(id: &str) -> bool { !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') }
+pub(super) fn cli_id(id:&str)->bool {!id.starts_with('-') && plain_id(id)}
 
 pub(super) fn scope(spec: &Spec) -> String {
     let mut bytes = spec.client.code().as_bytes().to_vec();bytes.push(u8::from(spec.resume));
