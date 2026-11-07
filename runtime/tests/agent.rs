@@ -8,8 +8,14 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 #[path="support/protected.rs"]
 mod protected;
+#[path="support/signin.rs"]
+mod signin;
 
 pub(crate) fn main() {
+    if std::env::args().nth(1).as_deref()==Some("--login-home-controller") {return signin::home_controller();}
+    if std::env::args().nth(1).as_deref()==Some("--login-controller") {return signin::controller();}
+    if std::env::var_os("AGENTQ_FAKE_LOGIN").is_some() {return signin::fake();}
+    if std::env::var_os("AGENTQ_NATIVE_LOGIN_PROOF").is_some() {return signin::native_proof();}
     #[cfg(windows)]
     if std::env::args().nth(1).as_deref()==Some("--receipt-unwind") {return receipt_unwind_fixture(Path::new(&std::env::args_os().nth(2).unwrap()));}
     if std::env::args().nth(1).as_deref()==Some("--lifetime-reexec") {let root=PathBuf::from(std::env::args_os().nth(2).unwrap());std::fs::write(root.join("owner-reexec"),"").unwrap();return wait_for(&root.join("owner-release"));}
@@ -37,6 +43,12 @@ pub(crate) fn main() {
     }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
+        ("account_login_controller_loss_never_reopens_a_live_home_writer",signin::home_processes),
+        ("account_login_callback_authority_is_shared_between_processes",signin::callback_processes),
+        ("account_login_startup_and_pipe_completion_stay_distinct",signin::startup_and_pipes),
+        ("account_login_pipes_remain_private_and_owned",signin::pipes),
+        ("account_login_cancel_fences_changed_or_unknown_credentials",signin::cancel_guards),
+        ("account_login_retains_home_until_native_transport_cleanup",signin::transport_cleanup),
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("session_ownership_and_stall_signal", session_ownership_and_stall_signal),
         ("process_lifetime_and_orphan_cleanup",process_lifetime_and_orphan_cleanup),
