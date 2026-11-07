@@ -48,15 +48,37 @@ pub struct Capture {
     pub grant: Value,
 }
 
+/// Physical evidence copied only after a NativeTurn successfully observes its own accepted input.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NativeSource {
+    pub runtime: String,
+    pub root: PathBuf,
+    pub home: Option<PathBuf>,
+    pub session: String,
+    pub path: PathBuf,
+    pub start: u64,
+    pub identity: String,
+    pub observed_end: u64,
+    pub prefix: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum NativeCandidate {
+    Hook(PathBuf),
+    Observed(NativeSource),
+}
+
 /// Optional asynchronous capture metadata. It has no effect on native work or its result.
 #[derive(Clone)]
 pub(crate) struct Handle {
     data: PathBuf,
     capture: Capture,
+    native: Option<NativeCandidate>,
+    native_run: Option<String>,
 }
 
 enum Job {
-    Capture(PathBuf, Capture, Option<PathBuf>),
+    Capture(PathBuf, Capture, Option<NativeCandidate>),
     Bytes(PathBuf, Vec<u8>),
 }
 fn queue(job: Job) {
@@ -120,12 +142,12 @@ impl Handle {
             turn: None,
             grant: Value::Null,
         };
-        let handle = Self {
+        Self {
             data: install.join("data"),
             capture,
-        };
-        handle.save();
-        handle
+            native: None,
+            native_run: None,
+        }
     }
     pub(crate) fn legacy(
         spec: &crate::agent::Spec,
@@ -154,9 +176,20 @@ impl Handle {
         handle.save();
         handle
     }
-    fn save(&self) {
+    pub(crate) fn bind_native(&mut self, run: &str) {
+        self.native_run = Some(run.into());
+        self.capture.id = run.into();
+    }
+    pub(crate) fn save(&self) {
+        if self.native_run.is_some() && self.native.is_none() {
+            return;
+        }
         if self.data.is_absolute() {
-            queue(Job::Capture(self.data.clone(), self.capture.clone(), None));
+            queue(Job::Capture(
+                self.data.clone(),
+                self.capture.clone(),
+                self.native.clone(),
+            ));
         }
     }
     pub(crate) fn observe(&mut self, session: Option<String>, end: Option<u64>) {
@@ -170,6 +203,26 @@ impl Handle {
             }
         }
         if before != serde_json::to_value(&self.capture).ok() {
+            self.save();
+        }
+    }
+    pub(crate) fn observe_native(&mut self, source: NativeSource, end: Option<u64>) {
+        if source.runtime != self.capture.runtime
+            || source.root != self.capture.root
+            || source.home != self.capture.home
+            || self.capture.sources.len() != 1
+        {
+            return;
+        }
+        let before = serde_json::to_value(&self.capture).ok();
+        self.capture.manifest["session"] = json!(source.session);
+        let segment = &mut self.capture.sources[0];
+        segment.path = source.path.clone();
+        segment.start = source.start;
+        segment.end = end;
+        let candidate = Some(NativeCandidate::Observed(source));
+        if self.native != candidate || before != serde_json::to_value(&self.capture).ok() {
+            self.native = candidate;
             self.save();
         }
     }
@@ -285,5 +338,9 @@ pub fn hook(data: &Path, runtime: &str, input: &Value, launched: bool, project: 
         turn: None,
         grant: Value::Null,
     };
-    queue(Job::Capture(data.into(), capture, path));
+    queue(Job::Capture(
+        data.into(),
+        capture,
+        path.map(NativeCandidate::Hook),
+    ));
 }

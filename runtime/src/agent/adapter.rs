@@ -408,6 +408,7 @@ impl Run {
     }
     fn restored(mut self, saved: &Value) -> Res<Self> {
         self.stop_id=saved["stop_id"].as_str().filter(|s|native::plain_id(s)).ok_or("run stop identity invalid")?.into();
+        if matches!(self.body,Body::Native(_)) {self.archive.bind_native(&self.stop_id);}
         if let Some(value)=saved.get("activity") {self.activity=serde_json::from_value(value.clone()).map_err(|_|"activity checkpoint invalid")?;}
         if let Some(value)=saved.get("readiness") {self.readiness=serde_json::from_value(value.clone()).map_err(|_|"run readiness checkpoint invalid")?;}
         if let Some(frozen)=saved.get("frozen") { self.frozen=Some(super::Frozen::restore(frozen)?); }
@@ -791,11 +792,11 @@ impl App {
 }
 
 impl Native {
-    fn poll(&mut self) -> Res<State> {
-        if let Some(r) = &self.report { return Ok(state(r)); }
+    fn poll(&mut self) -> Res<(State, Option<crate::archive::NativeSource>)> {
+        if let Some(r) = &self.report { return Ok((state(r), None)); }
         let waiting = if self.fault.is_some() { State::Unknown } else { State::Running };
         if !self.attached {
-            let Some(job) = discover(self)? else { return Ok(if self.job_id.is_none() && !self.spec.resume { State::Unknown } else { waiting }) };
+            let Some(job) = discover(self)? else { return Ok((if self.job_id.is_none() && !self.spec.resume { State::Unknown } else { waiting }, None)) };
             if !self.spec.resume {
                 let path = (table(self.spec.client).ops.background_transcript)(&self.spec, &job.session)?;
                 self.turn.attach_background(&job, &path)?;
@@ -804,11 +805,16 @@ impl Native {
             self.job = Some(job);
             self.attached = true;
         }
-        if !self.turn.path().exists() { return Ok(waiting); }
-        match self.turn.poll()? {
-            None => Ok(waiting),
-            Some(r) => { let s = state(&r); self.report = Some(r); Ok(s) }
-        }
+        if !self.turn.path().exists() { return Ok((waiting, None)); }
+        let report = self.turn.poll()?;
+        let proof = self.turn.identity.as_ref().filter(|_| self.turn.accepted && self.turn.protected_until > self.turn.start)
+            .map(|identity| crate::archive::NativeSource {
+                runtime: self.spec.client.code().into(), root: self.spec.root.clone(), home: spec_home(&self.spec),
+                session: self.turn.session().into(), path: self.turn.path().into(), start: self.turn.start(),
+                identity: identity.clone(), observed_end: self.turn.protected_until, prefix: self.turn.protected_hash.clone(),
+            });
+        let state = match report { None => waiting, Some(r) => { let s = state(&r); self.report = Some(r); s } };
+        Ok((state, proof))
     }
 }
 
@@ -1194,8 +1200,10 @@ impl Adapter {
             Body::Claude(a)=>(vec![],Some(a.session.clone())),
         };
         let home=match &body {Body::Turn(t)=>t.home.clone(),Body::Native(n)=>spec_home(&n.spec),Body::App(a)=>a.session.history_home(),Body::Acp(_)|Body::Rpc(_)|Body::Claude(_)=>l.home.clone()};
-        let archive=crate::archive::Handle::launch(self.descriptor.name,l,sources,session,home);
-        Run { stop_id: crate::incident::uuid(), runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
+        let mut archive=crate::archive::Handle::launch(self.descriptor.name,l,sources,session,home);
+        let stop_id=crate::incident::uuid();
+        if matches!(body,Body::Native(_)) {archive.bind_native(&stop_id);}else{archive.save();}
+        Run { stop_id, runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
             remote: l.title.is_some(), readiness: Readiness::default(), starting: Instant::now(),owner:None,activity:activity::Activity::new(progress),inactivity:l.inactivity,stop_on_stall:l.stop_on_stall,archive }
     }
 
@@ -1454,6 +1462,7 @@ impl Runtime for Adapter {
 
     fn poll(&self, run: &mut Run) -> Res<State> {
         let run = self.own_mut(run)?;
+        let mut native = None;
         let s = match &mut run.body {
             Body::Acp(a)=>a.poll()?,
             Body::Rpc(a)=>a.poll()?,
@@ -1468,7 +1477,7 @@ impl Runtime for Adapter {
                 let exited = t.poll()?.is_some() || t.timed_out && t.extension.is_submission() && t.exit.is_some();
                 if !exited {State::Running} else {t.freeze()?;state(&t.report())}
             }
-            Body::Native(n) => n.poll()?,
+            Body::Native(n) => { let (state, proof) = n.poll()?; native = proof; state },
             Body::App(a) => {
                 if a.owned && run.deadline.is_some_and(|d|Instant::now()>=d) && a.session.report().is_none() {
                     if let Some(Transport::Plain(s))=&mut a.transport {s.close()?;}
@@ -1487,10 +1496,11 @@ impl Runtime for Adapter {
         if s != State::Running && s != State::Unknown { run.live = None; }
         let end=if matches!(s,State::Finished|State::Failed) {match &run.body {
             Body::Turn(t)=>std::fs::metadata(&t.log).ok().map(|m|m.len()),
-            Body::Native(n)=>std::fs::metadata(n.turn.path()).ok().map(|m|m.len()),Body::App(_)|Body::Claude(_)=>None,
+            Body::Native(_)=>native.as_ref().map(|proof|proof.observed_end),Body::App(_)|Body::Claude(_)=>None,
             Body::Acp(a)=>std::fs::metadata(&a.path).ok().map(|m|m.len()),Body::Rpc(a)=>std::fs::metadata(&a.path).ok().map(|m|m.len()),
         }}else{None};
-        run.archive.observe(self.session_id(run),end);
+        if let Some(proof) = native { run.archive.observe_native(proof,end); }
+        else if !matches!(run.body,Body::Native(_)) { run.archive.observe(self.session_id(run),end); }
         Ok(s)
     }
 

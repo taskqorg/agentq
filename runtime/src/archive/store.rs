@@ -130,7 +130,7 @@ pub(super) fn register(data: &Path, capture: Capture) -> Res<()> {
 pub(super) fn register_candidate(
     data: &Path,
     mut capture: Capture,
-    candidate: Option<PathBuf>,
+    candidate: Option<NativeCandidate>,
 ) -> Res<()> {
     let Some(grant) = active(data)? else {
         return Ok(());
@@ -177,20 +177,51 @@ pub(super) fn register_candidate(
                 .or_else(|_| std::env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "unknown".into()))
         });
-    let native = candidate.and_then(|path| {
-        capture.sources.iter().find(|source| {
-            source.path == path
-                && source.format == "native"
-                && source.start == 0
-                && source.end.is_none()
-        })?;
-        if excluded(&capture.root, &path).ok()? {
+    let native = candidate.and_then(|candidate| {
+        let (path, observed) = match &candidate {
+            NativeCandidate::Hook(path) => {
+                capture.sources.iter().find(|source| {
+                    source.path == *path
+                        && source.format == "native"
+                        && source.start == 0
+                        && source.end.is_none()
+                })?;
+                (path, None)
+            }
+            NativeCandidate::Observed(proof) => {
+                if proof.runtime != capture.runtime
+                    || proof.root != capture.root
+                    || proof.home != capture.home
+                    || capture.manifest["session"] != proof.session
+                    || proof.observed_end <= proof.start
+                {
+                    return None;
+                }
+                capture
+                    .sources
+                    .iter()
+                    .find(|source| source.path == proof.path && source.start == proof.start)?;
+                (&proof.path, Some(proof))
+            }
+        };
+        if excluded(&capture.root, path).ok()? {
             return None;
         }
-        let (_, page, _) =
-            native_reader(&capture, &path, capture.manifest["session"].as_str()?, None).ok()?;
+        let (_, page, bytes) =
+            native_reader(&capture, path, capture.manifest["session"].as_str()?, None).ok()?;
+        if let Some(proof) = observed {
+            let prefix = usize::try_from(proof.observed_end)
+                .ok()
+                .and_then(|end| bytes.get(..end))?;
+            if page.checkpoint["identity"] != proof.identity
+                || crate::sha256_hex(prefix) != proof.prefix
+                || page.checkpoint["native_session"] != proof.session
+            {
+                return None;
+            }
+        }
         Some(NativeWitness {
-            path,
+            path: path.clone(),
             checkpoint: page.checkpoint,
         })
     });
@@ -543,9 +574,10 @@ fn session(
             c,
             &source,
             &mut manifest,
-            !(native_scope && witness.is_some_and(|w| w.path == source.path)),
+            !(native_scope
+                && witness.is_some_and(|w| w.path == source.path && source.format == "native")),
             witness
-                .filter(|w| native_scope && w.path == source.path)
+                .filter(|w| native_scope && w.path == source.path && source.format == "native")
                 .map(|w| &w.checkpoint),
             if index == 0 { c.turn.as_deref() } else { None },
             wire,
@@ -562,9 +594,19 @@ fn session(
     let session = session
         .as_str()
         .ok_or("archive native authority unavailable")?;
-    let sources = rt
+    let mut sources = rt
         .history_sessions(c.home.as_deref())
         .map_err(|_| "archive source discovery unavailable")?;
+    let explicit: agent::history::sessions::Source = serde_json::from_value(
+        witness
+            .ok_or("archive native authority unavailable")?
+            .checkpoint["resolved"]["source"]
+            .clone(),
+    )
+    .map_err(|_| "archive native authority unavailable")?;
+    if !sources.iter().any(|source| source.id == explicit.id) {
+        sources.push(explicit);
+    }
     let mut family = vec![session.to_string()];
     loop {
         let old = family.len();
@@ -1717,7 +1759,7 @@ mod tests {
             end: None,
         }];
         c.grant = identity(&active(data).unwrap().unwrap());
-        register_candidate(data, c.clone(), Some(path.clone())).unwrap();
+        register_candidate(data, c.clone(), Some(NativeCandidate::Hook(path.clone()))).unwrap();
         path
     }
     #[test]
@@ -2026,7 +2068,7 @@ mod tests {
             start: 0,
             end: None,
         }];
-        register_candidate(&data, c.clone(), Some(path.clone())).unwrap();
+        register_candidate(&data, c.clone(), Some(NativeCandidate::Hook(path.clone()))).unwrap();
         let mut sink = Sink::default();
         pass(&data, &mut sink).unwrap();
         assert!(sink.requests.is_empty());

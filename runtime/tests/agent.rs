@@ -2520,4 +2520,75 @@ fn archive_capture_and_failure_never_change_work() {
         // shortcut: the asynchronous writer can outlive fixture cleanup; add a drain if strict removal is needed.
         let _=std::fs::remove_dir_all(root);
     }
+    // Body::Native needs its own accepted-input observation; attachment and recovery alone are insufficient.
+    fn captured(data:&Path, ready:impl Fn(&Value)->bool)->Value {
+        let until=Instant::now()+Duration::from_secs(10);
+        loop {
+            if let Some(value)=std::fs::read_dir(data.join("archive/captures")).into_iter().flatten().flatten()
+                .filter(|e|e.path().extension().is_some_and(|s|s=="json"))
+                .filter_map(|e|std::fs::read(e.path()).ok()).filter_map(|b|serde_json::from_slice::<Value>(&b).ok()).find(|v|ready(v)) {return value;}
+            assert!(Instant::now()<until,"native archive handoff missing");std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    for background in [false,true] {
+        let root=scratch(if background {"archive-native-background"}else{"archive-native-queue"});
+        let home=root.join("home");std::fs::create_dir_all(&home).unwrap();let data=root.join("install/data");
+        std::fs::create_dir_all(data.join("connection")).unwrap();
+        std::fs::write(data.join("connection/connection.json"),json!({"installation":"fixture","active":{"destination":"https://fixture.invalid","workspace":"fixture","installation":"fixture","generation":1,"credential":"invented","schemas":["agent-history/1"],"capabilities":[]},"pending":null,"revoke":[]}).to_string()).unwrap();
+        let rows=json!([{"id":"c37eb75a","kind":"background","cwd":root,"sessionId":"native-thread","state":"working","pid":42}]).to_string();
+        let env=[("COREQ_FAKE_CONTROL","1".as_ref()),("COREQ_FAKE_BACKGROUND","1".as_ref()),("FAKE_JOB_ROWS",rows.as_ref())];
+        let name=if background {"claude"}else{"codex"};let rt=agent::runtime(name).unwrap();
+        let mut launch=fake_launch(name,&root,"owned archive input",if background {&env}else{&env[..1]});
+        launch.home=Some(home.clone());launch.install=Some(root.join("install"));
+        let explicit=root.join("external/sessions/native.jsonl");std::fs::create_dir_all(explicit.parent().unwrap()).unwrap();
+        let mut run=if background {launch.mode=agent::Mode::Background;rt.launch(&launch).unwrap()}else {
+            append(&explicit,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);
+            launch.mode=agent::Mode::Queue {transcript:explicit.clone()};rt.adopt("native-thread",&launch,&[]).unwrap();rt.resume("native-thread",&launch).unwrap()
+        };
+        let initial=rt.checkpoint(&run).unwrap();assert!(!data.join("archive/captures").exists());
+        assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Running);
+        let checkpoint=rt.checkpoint(&run).unwrap();let path=PathBuf::from(checkpoint["native"]["path"].as_str().unwrap());
+        if background {assert_ne!(initial["native"]["path"],json!(path));}
+        assert!(!data.join("archive/captures").exists(),"baseline/attachment cannot grant native scope");
+        let start=checkpoint["native"]["start"].as_u64().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if background {append(&path,&[json!({"type":"user","sessionId":"native-thread","message":{"content":launch.input}}),json!({"type":"assistant","sessionId":"native-thread","message":{"content":"native answer"}})]);}
+        else {append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"owned"}}),json!({"type":"event_msg","payload":{"type":"user_message","message":launch.input,"turn_id":"owned"}})]);}
+        assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Running);
+        let active=captured(&data,|v|!v["native"].is_null());
+        assert_eq!(active["sources"][0]["path"],json!(path));assert_eq!(active["sources"][0]["start"],start);assert!(active["sources"][0]["end"].is_null());
+        assert_eq!(active["sources"][0]["format"],if background {"claude-native"}else{"codex-rollout"});
+        let observed=std::fs::read(&path).unwrap();
+        { use std::io::Write; std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"{\"type\":").unwrap(); }assert!(rt.poll(&mut run).is_err());
+        assert_eq!(captured(&data,|v|!v["native"].is_null()),active,"observer error cannot publish a new witness");
+        std::fs::write(&path,&observed).unwrap();
+        // Recovery construction is caller-only even when its saved native identity is present.
+        let saved=rt.checkpoint(&run).unwrap();drop(run);let mut run=rt.recover(&saved,&launch).unwrap();
+        assert_eq!(captured(&data,|v|v["id"]==active["id"]),active,"recovery construction publishes no new evidence");
+        let next=if background {json!({"type":"assistant","sessionId":"native-thread","message":{"content":"after recovery"}})}else{json!({"type":"event_msg","payload":{"type":"agent_message","message":"after recovery","turn_id":"owned"}})};
+        append(&path,&[next]);let observed_end=std::fs::metadata(&path).unwrap().len();
+        assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Running);
+        captured(&data,|v|v["id"]==active["id"]&&v["native"]["checkpoint"]["offset"]==observed_end);
+        let image=root.join("external/generated_images/native-thread/only-native.png");
+        if !background {std::fs::create_dir_all(image.parent().unwrap()).unwrap();std::fs::write(&image,b"\x89PNG\r\n\x1a\nfixture-native-only").unwrap();}
+        if background {append(&path,&[json!({"type":"system","subtype":"turn_duration","sessionId":"native-thread","durationMs":1})]);}
+        else {append(&path,&[json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"owned"}})]);}
+        assert_eq!(finish(rt,&mut run),agent::State::Finished);assert_eq!(rt.report(&run).unwrap().outcome,"ok");
+        let terminal=std::fs::read(&path).unwrap();let end=terminal.len() as u64;
+        let ctx=Context {product:"fixture",version:"1",project:"fixture/native",task:Some((283,8)),route:None,account:"default"};
+        let frozen=run.snapshot(&ctx).unwrap();let event=frozen.events().unwrap()[0].id().to_string();
+        let final_capture=captured(&data,|v|v["turn"]==event&&!v["native"].is_null());
+        assert_eq!(final_capture["sources"][0]["end"],end);assert_eq!(final_capture["sources"][0]["start"],start);
+        // A cached report does not extend the per-turn end to newly appended physical bytes.
+        let later=if background {json!({"type":"assistant","sessionId":"native-thread","message":{"content":"later foreign turn"}})}else{json!({"type":"event_msg","payload":{"type":"agent_message","message":"later foreign turn"}})};
+        append(&path,&[later]);assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Finished);
+        assert_eq!(captured(&data,|v|v["turn"]==event)["sources"][0]["end"],end);
+        let mut sink=Sink::default();agentq_runtime::archive::pass(&data,&mut sink).unwrap();
+        assert!(sink.0.iter().any(|b|b["turns"][0]["event_id"]==event&&b["bytes"]==agent::encode_base64(&terminal[start as usize..end as usize])));
+        if !background {assert!(sink.0.iter().any(|b|b["media"]==true&&b["manifest"]["task"].is_null()&&b["source"]==crate::sha256_hex(&std::fs::read(&image).unwrap())));}
+        // A later archive-only write failure cannot change a native completion or frozen outcome.
+        std::fs::rename(data.join("archive"),data.join("archive-retained")).unwrap();std::fs::write(data.join("archive"),b"unavailable archive storage").unwrap();
+        assert_eq!(run.snapshot(&ctx).unwrap(),frozen);assert_eq!(rt.report(&run).unwrap().outcome,"ok");
+        drop(run);let _=std::fs::remove_dir_all(root);
+    }
 }

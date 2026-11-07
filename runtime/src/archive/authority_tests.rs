@@ -24,7 +24,12 @@ fn caller_scope_and_explicit_hook_witness() {
     assert_eq!(sink.requests[0]["bytes"], agent::encode_base64(selected));
     assert_eq!(sink.requests[0]["format"], "codex-app-server-selected/1");
     // Even an explicit selected file is not an independently valid native witness.
-    register_candidate(&data, c.clone(), Some(c.sources[0].path.clone())).unwrap();
+    register_candidate(
+        &data,
+        c.clone(),
+        Some(NativeCandidate::Hook(c.sources[0].path.clone())),
+    )
+    .unwrap();
     pass(&data, &mut sink).unwrap();
     assert_eq!(sink.requests.len(), 1);
     let explicit = c.root.join("hook-transcript.jsonl");
@@ -39,7 +44,12 @@ fn caller_scope_and_explicit_hook_witness() {
         1,
         "public native format is caller-only"
     );
-    register_candidate(&data, c.clone(), Some(explicit.clone())).unwrap();
+    register_candidate(
+        &data,
+        c.clone(),
+        Some(NativeCandidate::Hook(explicit.clone())),
+    )
+    .unwrap();
     let saved: Registration = read(&files(&root(&data).join("captures")).unwrap()[0]).unwrap();
     let witness = saved.native.unwrap();
     assert!(witness.checkpoint["identity"].is_string());
@@ -266,4 +276,121 @@ fn bounded_unknown_session_and_condition_format_activation() {
             .all(|b| b["manifest"].as_object().unwrap().len() == 15)
     );
     let _ = fs::remove_dir_all(data.parent().unwrap());
+}
+
+// The writer rechecks the observed physical tuple; a per-turn source is never relabeled as unbounded.
+#[test]
+fn observed_native_handoff_preserves_segment_and_revalidates_delayed_proof() {
+    for change in [
+        "append",
+        "identity",
+        "prefix",
+        "truncated",
+        "session",
+        "root",
+        "home",
+        "missing",
+    ] {
+        let (data, mut c) = setup(&format!("archive-observed-{change}"));
+        c.runtime = "codex".into();
+        c.manifest["runtime"] = json!("codex");
+        c.manifest["session"] = json!("native-session");
+        let path = c.root.join("external/sessions/native.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let header = format!(
+            "{}\n",
+            json!({"type":"session_meta","payload":{"id":"native-session","cwd":c.root}})
+        );
+        let own = format!(
+            "{}\n",
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"owned segment"}})
+        );
+        fs::write(&path, format!("{header}{own}")).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let file = fs::File::open(&path).unwrap();
+        let mut proof = NativeSource {
+            runtime: c.runtime.clone(),
+            root: c.root.clone(),
+            home: c.home.clone(),
+            session: "native-session".into(),
+            path: path.clone(),
+            start: header.len() as u64,
+            identity: agent::archive_file_identity(&file).unwrap(),
+            observed_end: bytes.len() as u64,
+            prefix: crate::sha256_hex(&bytes),
+        };
+        c.sources[0] = Source {
+            path: path.clone(),
+            format: "codex-rollout".into(),
+            start: proof.start,
+            end: Some(proof.observed_end),
+        };
+        let image = c
+            .root
+            .join("external/generated_images/native-session/own.png");
+        fs::create_dir_all(image.parent().unwrap()).unwrap();
+        fs::write(&image, b"\x89PNG\r\n\x1a\nonly native").unwrap();
+        match change {
+            "append" => {
+                let mut b = bytes.clone();
+                b.extend_from_slice(own.as_bytes());
+                fs::write(&path, b).unwrap();
+            }
+            "identity" => proof.identity = "wrong physical identity".into(),
+            "prefix" => proof.prefix = crate::sha256_hex(b"different bytes"),
+            "truncated" => proof.observed_end += 1,
+            "session" => proof.session = "foreign".into(),
+            "root" => proof.root = c.root.join("foreign"),
+            "home" => proof.home = Some(c.root.join("foreign-home")),
+            "missing" => {
+                fs::remove_file(&path).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        // Observe updates are pure when the handle has no absolute data root; writer validation is exercised below.
+        let mut handle = Handle {
+            data: PathBuf::new(),
+            capture: c.clone(),
+            native: None,
+            native_run: None,
+        };
+        let end = c.sources[0].end;
+        handle.observe_native(proof.clone(), end);
+        assert_eq!(handle.capture.sources[0].start, c.sources[0].start);
+        assert_eq!(handle.capture.sources[0].end, end);
+        register_candidate(&data, c.clone(), Some(NativeCandidate::Observed(proof))).unwrap();
+        let registration: Registration =
+            read(&files(&root(&data).join("captures")).unwrap()[0]).unwrap();
+        assert_eq!(
+            registration.native.is_some(),
+            change == "append",
+            "{change}"
+        );
+        let mut sink = Sink::default();
+        pass(&data, &mut sink).unwrap();
+        if change == "append" {
+            assert!(
+                sink.requests
+                    .iter()
+                    .any(|b| b["bytes"] == agent::encode_base64(own.as_bytes())
+                        && b["manifest"]["task"] == 283)
+            );
+            assert!(
+                sink.requests
+                    .iter()
+                    .any(|b| b["media"] == true && b["manifest"]["task"].is_null())
+            );
+            assert!(
+                sink.requests
+                    .iter()
+                    .all(|b| b["manifest"].as_object().unwrap().len() == 15)
+            );
+        } else {
+            assert!(
+                sink.requests.iter().all(|b| b["media"] != true),
+                "{change} broadened caller scope"
+            );
+        }
+        let _ = fs::remove_dir_all(data.parent().unwrap());
+    }
 }
