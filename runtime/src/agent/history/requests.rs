@@ -53,7 +53,7 @@ pub(super) fn decode(event:&Value,record:&Value)->Option<Step> {
 }
 
 pub(super) fn unscoped(step:&mut Step,event:&Value,record:&Value) {
-    let server_request=event["format"]=="codex-app-server" && record.get("id").is_some() && record["method"].is_string();
+    let server_request=super::interpretation(event["format"].as_str().unwrap_or_default())=="codex-app-server" && record.get("id").is_some() && record["method"].is_string();
     if !matches!(step.kind,StepKind::Approval|StepKind::Question) && !server_request {return;}
     step.id=format!("{}:{}:request",event["id"].as_str().unwrap_or_default(),step.part);
     if !step.data.is_object(){step.data=json!({});}
