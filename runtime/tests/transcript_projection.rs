@@ -113,11 +113,17 @@ fn runtime_resolved_session_keeps_physical_acp_paging_and_recovery_bound() {
     let rows=(0..260).map(|i|json!({"type":"acp","message":{"method":"session/update","params":{"sessionId":"fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":i.to_string()}}}}})).collect::<Vec<_>>();
     fs::write(&path,rows.iter().map(|v|format!("{v}\n")).collect::<String>()).unwrap();
     let runtime=agentq_runtime::agent::runtime("antigravity").unwrap();
-    let mut session=runtime.history("fixture",None,Some(&path),None).unwrap();let mut forwards=vec![];
+    let mut session=runtime.history("fixture",None,Some(&path),None).unwrap();
+    let source=session.source().clone();
+    assert_eq!((source.native_session.as_str(),source.session.as_str(),source.format.as_str()),("fixture","fixture","acp"));
+    assert_eq!(source.path,path);assert!(!source.id.is_empty());
+    let mut forwards=vec![];
     loop {let page=session.poll().unwrap();forwards.extend(page.events);if !page.more{break;}}
     let mut session=runtime.history("fixture",None,Some(&path),None).unwrap();let last=session.poll_before().unwrap();
     assert!(last.more);let checkpoint=session.checkpoint();
-    let mut session=runtime.history("fixture",None,Some(&path),Some(&checkpoint)).unwrap();let mut reverse=last.events;
+    let mut session=runtime.history("fixture",None,Some(&path),Some(&checkpoint)).unwrap();
+    assert_eq!(serde_json::to_value(session.source()).unwrap(),serde_json::to_value(&source).unwrap(),"recovery retains the already bound source");
+    let mut reverse=last.events;
     loop {let page=session.poll_before().unwrap();reverse.splice(0..0,page.events);if !page.more{break;}}
     assert_eq!(reverse,forwards);assert_eq!(reverse.len(),260);
     fs::write(&path,"{}\n").unwrap();assert!(runtime.history("fixture",None,Some(&path),Some(&checkpoint)).is_err());

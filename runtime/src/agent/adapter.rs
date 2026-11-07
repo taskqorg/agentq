@@ -958,6 +958,12 @@ pub trait Runtime: Send + Sync {
     fn background_launch(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Result<Output, crate::process::Failure>>;
     /// Capability `background`: native job rows; `filtered` limits them to `spec.root`.
     fn jobs(&self, base: Command, spec: &NativeSpec, filtered: bool, budget: Duration) -> Res<Vec<Value>>;
+    /// Read-only typed native candidates; never invokes `spec.owner` or grants control.
+    fn background_candidates(&self,base:Command,spec:&NativeSpec,filtered:bool,budget:Duration)->Res<Vec<BackgroundCandidate>>;
+    /// Lazy native intent witness only; debits the existing recovery-pass aggregate byte budget.
+    fn background_input(&self,candidate:&BackgroundCandidate,input:&str,remaining_bytes:&mut u64)->Res<bool>;
+    /// Lazy failure detail from the candidate's exact bound native locator.
+    fn background_failure(&self,candidate:&BackgroundCandidate)->Res<Option<AssistantFailure>>;
     /// Capability `background`: job `id` validated from one `jobs` row against `spec`.
     fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob>;
     /// Capability `background`: request the stop of `job`; the output acknowledges only the request.
@@ -1733,6 +1739,26 @@ impl Runtime for Adapter {
         self.needs("background")?;
         spec.validate_session()?;
         (self.ops.background_jobs)(base, &self.native(spec), filtered, budget)
+    }
+
+    fn background_candidates(&self,base:Command,spec:&NativeSpec,filtered:bool,budget:Duration)->Res<Vec<BackgroundCandidate>> {
+        self.needs("background")?;
+        spec.validate_session()?;
+        let mut native=self.native(spec);
+        native.home=Some(spec_home(&native).ok_or("background home unknown")?.canonicalize().map_err(|e|format!("background home unreadable: {e}"))?);
+        native.root=native.root.canonicalize().map_err(|e|format!("background project unreadable: {e}"))?;
+        let rows=(self.ops.background_jobs)(base,&native,filtered,budget)?;
+        registry::background_candidates(rows,&native)
+    }
+    fn background_input(&self,candidate:&BackgroundCandidate,input:&str,remaining_bytes:&mut u64)->Res<bool> {
+        self.needs("background")?;
+        if candidate.runtime()!=self.descriptor.name {return Err("foreign background candidate".into());}
+        candidate.input(input,remaining_bytes)
+    }
+    fn background_failure(&self,candidate:&BackgroundCandidate)->Res<Option<AssistantFailure>> {
+        self.needs("background")?;
+        if candidate.runtime()!=self.descriptor.name {return Err("foreign background candidate".into());}
+        candidate.failure()
     }
 
     fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob> {

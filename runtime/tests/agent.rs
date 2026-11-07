@@ -2236,6 +2236,88 @@ fn runtime_trait_exposes_native_seams() {
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("backgrounded · c37eb75a"));
     assert_eq!(claude.jobs(Command::new(exe()),&bg,true,Duration::from_secs(30)).unwrap(),vec![row.clone()]);
     assert_eq!(control(&root)["args"][3],"--cwd");
+    // Finite observation: native state is separate from status/PID, and never binds the supplied owner.
+    use agent::{BackgroundKind as Kind,BackgroundState as Work,BackgroundActivity as Activity,BackgroundPid as Pid};
+    fn ownership_files(path:&Path)->Vec<(PathBuf,Vec<u8>)> {
+        let mut files=vec![];
+        for entry in std::fs::read_dir(path).unwrap() {let path=entry.unwrap().path();if path.is_dir() {files.extend(ownership_files(&path));} else {files.push((path.clone(),std::fs::read(&path).unwrap()));}}
+        files.sort();files
+    }
+    let owner_before=bg.owner.as_ref().unwrap().checkpoint().unwrap();
+    let ownership_before=ownership_files(&root.join(".agentq-sessions"));
+    let list=|values:Vec<Value>| {
+        let mut query=bg.clone();query.env.push(("FAKE_JOB_ROWS".into(),json!(values).to_string().into()));
+        claude.background_candidates(Command::new(exe()),&query,false,Duration::from_secs(30))
+    };
+    let observed=list(vec![row.clone()]).unwrap().remove(0);
+    assert_eq!((observed.runtime(),observed.provenance(),observed.id(),observed.session()),("claude","native-background-jobs",Some("c37eb75a"),"native-session"));
+    assert_eq!((observed.home(),observed.project(),observed.cwd()),(bg.home.as_ref().unwrap().canonicalize().unwrap().as_path(),root.canonicalize().unwrap().as_path(),root.canonicalize().unwrap().as_path()));
+    assert_eq!((observed.kind(),observed.state(),observed.activity(),observed.pid()),(Kind::Background,Some(Work::Working),Activity::Unknown,Pid::Present(std::num::NonZeroU32::new(42).unwrap())));
+    assert_eq!(bg.owner.as_ref().unwrap().checkpoint().unwrap(),owner_before,"observation never invokes owner.bind");
+    for status in [Value::Null,json!("future"),json!(false)] {
+        let mut changed=row.clone();changed["status"]=status;
+        assert_eq!(list(vec![changed]).unwrap()[0].activity(),Activity::Unknown,"approved fail-closed correction: absent/unrecognized status cannot release occupancy");
+    }
+    for (status,activity) in [("busy",Activity::Busy),("idle",Activity::Idle)] {
+        let mut changed=row.clone();changed["status"]=json!(status);
+        assert_eq!(list(vec![changed]).unwrap()[0].activity(),activity,"working alone is not busy");
+    }
+    for pid in [json!(0),json!(-1),json!(4294967296u64),json!(1.5),json!("42"),json!(false)] {
+        let mut changed=row.clone();changed["pid"]=pid;
+        assert_eq!(list(vec![changed.clone()]).unwrap()[0].pid(),Pid::Malformed);
+        assert!(claude.job(&changed,&bg,"c37eb75a").is_err(),"execution validation still refuses malformed PID");
+    }
+    for state in ["working","idle","done","blocked","failed","crashed","stopped"] {
+        let mut changed=row.clone();changed["state"]=json!(state);assert_eq!(list(vec![changed]).unwrap()[0].state().unwrap().as_str(),state);
+    }
+    let mut filtered=bg.clone();filtered.env.push(("FAKE_CWD_FILTER_EMPTY".into(),"1".into()));
+    assert!(claude.background_candidates(Command::new(exe()),&filtered,true,Duration::from_secs(30)).unwrap().is_empty());
+    assert_eq!(claude.background_candidates(Command::new(exe()),&filtered,false,Duration::from_secs(30)).unwrap().len(),1,"caller retains the existing unfiltered fallback seam");
+    let mut absent=row.clone();absent.as_object_mut().unwrap().remove("pid");
+    assert_eq!(list(vec![absent.clone()]).unwrap()[0].pid(),Pid::Absent);absent["pid"]=Value::Null;
+    assert_eq!(list(vec![absent]).unwrap()[0].pid(),Pid::Absent);
+    for field in ["kind","id","sessionId","cwd","state"] {
+        let mut changed=row.clone();changed[field]=json!("?");
+        assert!(list(vec![row.clone(),changed]).is_err(),"invalid {field} must fail the whole observation, never silently drop a row");
+    }
+    let interactive=json!({"kind":"interactive","sessionId":"native-session","cwd":root});
+    let seen=list(vec![interactive]).unwrap().remove(0);
+    assert_eq!((seen.kind(),seen.id(),seen.state(),seen.activity()),(Kind::Interactive,None,None,Activity::Unknown));
+    assert!(claude.background_input(&seen,"owned input",&mut 8192).is_err());
+    let outside=scratch("background-other-project");let child=root.join(".claude/worktrees/fixture");std::fs::create_dir_all(&child).unwrap();
+    for cwd in [&outside,&child] {
+        let mut changed=row.clone();changed["cwd"]=json!(cwd);
+        let seen=list(vec![changed.clone()]).unwrap().remove(0);
+        assert_eq!(seen.cwd(),cwd.canonicalize().unwrap());
+        assert!(claude.job(&changed,&bg,"c37eb75a").is_err(),"subtree observation cannot create a control capability");
+    }
+    let path=observed.home().join("jobs/c37eb75a/state.json");std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let locator=json!({"cwd":root,"sessionId":"native-session","intent":"  owned input\n","state":"working","detail":"native failure","providerEnv":{"FIXTURE":"not returned"}});
+    let raw=locator.to_string();std::fs::write(&path,&raw).unwrap();let mut budget=(raw.len()*2) as u64;
+    assert!(claude.background_input(&observed,"owned input",&mut budget).unwrap());
+    assert_eq!(budget,raw.len() as u64);
+    assert!(!claude.background_input(&observed,"owned",&mut budget).unwrap(),"no substring matching");assert_eq!(budget,0);
+    assert!(claude.background_input(&observed,"owned input",&mut budget).is_err(),"the aggregate budget cannot reset per candidate");
+    let mut tiny=1;assert!(claude.background_input(&observed,"owned input",&mut tiny).is_err());assert_eq!(tiny,0,"failed reads cannot restore the caller byte budget");
+    assert!(!claude.background_input(&observed," owned input",&mut 8192).unwrap(),"only native text is trimmed");
+    assert_eq!(claude.background_failure(&observed).unwrap().unwrap().detail.as_deref(),Some("native failure"));
+    let mut changed=locator.clone();changed.as_object_mut().unwrap().remove("intent");changed.as_object_mut().unwrap().remove("detail");std::fs::write(&path,changed.to_string()).unwrap();
+    assert!(!claude.background_input(&observed,"owned input",&mut 8192).unwrap(),"complete valid negative locator remains false");
+    assert_eq!(claude.background_failure(&observed).unwrap(),None);
+    for (field,value) in [("sessionId",json!("different")),("cwd",json!(child)),("cwd",json!(outside)),("intent",json!([{"type":"text","text":"owned input"}]))] {
+        let mut changed=locator.clone();changed[field]=value;std::fs::write(&path,changed.to_string()).unwrap();
+        assert!(claude.background_input(&observed,"owned input",&mut 8192).is_err(),"changed/malformed locator stays unknown");
+    }
+    let mut changed=locator.clone();changed["state"]=json!("failed");std::fs::write(&path,changed.to_string()).unwrap();assert!(claude.background_failure(&observed).is_err());
+    std::fs::write(&path,&raw[..raw.len()-1]).unwrap();let mut budget=8192;assert!(claude.background_input(&observed,"owned input",&mut budget).is_err());assert!(budget<8192,"failed parsing also debits bytes");
+    std::fs::write(&path," ".repeat(1024*1024+1)).unwrap();assert!(claude.background_input(&observed,"owned input",&mut u64::MAX).is_err(),"existing 1 MiB locator limit retained");
+    std::fs::remove_file(&path).unwrap();assert!(claude.background_input(&observed,"owned input",&mut 8192).is_err());assert!(claude.background_failure(&observed).is_err());
+    std::fs::create_dir(&path).unwrap();assert!(claude.background_input(&observed,"owned input",&mut 8192).is_err(),"nonregular locator must refuse");std::fs::remove_dir(&path).unwrap();
+    let mut missing_home=bg.clone();missing_home.home=Some(root.join("missing-account"));assert!(claude.background_candidates(Command::new(exe()),&missing_home,false,Duration::from_secs(30)).is_err(),"explicit account never falls back");
+    assert!(codex.background_input(&observed,"owned input",&mut 8192).is_err());
+    assert_eq!(bg.owner.as_ref().unwrap().checkpoint().unwrap(),owner_before);
+    assert_eq!(ownership_files(&root.join(".agentq-sessions")),ownership_before,"all observation methods leave ownership files unchanged");
+    teardown(outside);
     let job=claude.job(&row,&bg,"c37eb75a").unwrap();
     assert_eq!((job.id.as_str(),job.session.as_str(),job.pid),("c37eb75a","native-session",Some(42)));
     claude.stop_job(Command::new(exe()),&bg,&job,Duration::from_secs(30)).unwrap();

@@ -564,6 +564,7 @@ fn migration_exact_input_and_identity_survive_restart() {
         let mut restarted = History::recover(&history.checkpoint()).unwrap();
         let partial = restarted.poll(&path).unwrap();
         assert!(partial.events.is_empty()); assert!(partial.more);
+        assert!(partial.pending_bytes>0,"approved fail-closed correction: partial transcript cannot be a complete negative input witness");
         fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&raw.as_bytes()[split..]).unwrap();
         let second = restarted.poll(&path).unwrap().events.remove(0);
         assert_eq!(first["blocks"], second["blocks"]);
@@ -574,7 +575,8 @@ fn migration_exact_input_and_identity_survive_restart() {
         assert!(History::recover(&saved).unwrap().poll(&path).unwrap().events.is_empty());
         let mut rewrite = fs::read(&path).unwrap(); rewrite[2] = b'X'; fs::write(&path, &rewrite).unwrap();
         assert!(restarted.poll(&path).is_err()); assert_eq!(restarted.checkpoint(), saved);
-        fs::remove_file(path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(History::new(format,"input-source","session").unwrap().poll(&path).is_err(),"approved fail-closed correction: missing transcript is unknown, never false");
     }
 }
 

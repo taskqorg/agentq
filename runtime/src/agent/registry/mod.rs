@@ -482,7 +482,8 @@ pub(in crate::agent) use codex::image_kind as codex_image_kind;
 pub(in crate::agent) use antigravity::input_state as antigravity_input_state;
 
 pub(super) use claude::control::Session as ClaudeControl;
-pub use claude::BackgroundJob;
+pub use claude::{BackgroundJob,BackgroundCandidate,BackgroundKind,BackgroundState,BackgroundActivity,BackgroundPid};
+pub(crate) use claude::background_candidates;
 pub(crate) use claude::{remote_url,claude_link,Absence};
 
 #[cfg(test)]

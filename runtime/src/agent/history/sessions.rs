@@ -8,6 +8,8 @@ pub struct Source { pub id:String, pub native_session:String, pub session: Strin
 
 pub struct Session { resolved:Source,pub(super) history: History, pub(super) path: PathBuf, pub(super) runtime:String, parent: Option<String>, parent_step: Option<String>, children:std::collections::BTreeMap<String,String> }
 impl Session {
+    /// Already resolved source; observing it grants no resume or control authority.
+    pub fn source(&self)->&Source {&self.resolved}
     /// Physical records through the already resolved native source and cursor.
     pub fn poll(&mut self)->Res<Page> {self.history.poll(&self.path)}
     pub fn poll_before(&mut self)->Res<Page> {self.history.poll_before(&self.path)}

@@ -32,6 +32,7 @@ pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
 pub use adapter::{BackgroundLocator,LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession,Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
+pub use registry::{BackgroundCandidate,BackgroundKind,BackgroundState,BackgroundActivity,BackgroundPid};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
 type Res<T> = Result<T, String>;

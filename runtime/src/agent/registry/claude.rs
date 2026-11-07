@@ -516,6 +516,102 @@ pub(crate) fn background_jobs(mut base: Command, spec: &Spec, filtered: bool, bu
     serde_json::from_slice::<Vec<Value>>(&output.stdout).map_err(|e| format!("background jobs invalid: {e}"))
 }
 
+/// Read-only native job kind; interactive rows remain visible to writer checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundKind { Background, Interactive }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundState { Working, Idle, Done, Blocked, Failed, Crashed, Stopped }
+impl BackgroundState {
+    pub fn as_str(self)->&'static str {match self {Self::Working=>"working",Self::Idle=>"idle",Self::Done=>"done",Self::Blocked=>"blocked",Self::Failed=>"failed",Self::Crashed=>"crashed",Self::Stopped=>"stopped"}}
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundActivity { Busy, Idle, Unknown }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundPid { Absent, Present(std::num::NonZeroU32), Malformed }
+
+#[derive(Clone, Debug)]
+struct BackgroundRow {kind:BackgroundKind,id:Option<String>,session:String,cwd:PathBuf,state:Option<BackgroundState>,activity:BackgroundActivity,pid:BackgroundPid}
+impl BackgroundRow {
+    fn read(row:&Value)->Res<Self> {
+        let kind=match row["kind"].as_str() {Some("background")=>BackgroundKind::Background,Some("interactive")=>BackgroundKind::Interactive,_=>return Err("background kind unknown".into())};
+        let session=row["sessionId"].as_str().filter(|s|plain_id(s)).ok_or("background session unknown")?.into();
+        let cwd=Path::new(row["cwd"].as_str().filter(|s|!s.is_empty()).ok_or("background cwd unknown")?).canonicalize().map_err(|e|format!("background cwd unreadable: {e}"))?;
+        let (id,state)=if kind==BackgroundKind::Background {
+            let id=row["id"].as_str().filter(|s|plain_id(s)).ok_or("background job identity unknown")?;
+            let state=match row["state"].as_str() {Some("working")=>BackgroundState::Working,Some("idle")=>BackgroundState::Idle,Some("done")=>BackgroundState::Done,Some("blocked")=>BackgroundState::Blocked,Some("failed")=>BackgroundState::Failed,Some("crashed")=>BackgroundState::Crashed,Some("stopped")=>BackgroundState::Stopped,_=>return Err("background state unknown".into())};
+            (Some(id.into()),Some(state))
+        } else {(None,None)};
+        let activity=match row["status"].as_str() {Some("busy")=>BackgroundActivity::Busy,Some("idle")=>BackgroundActivity::Idle,_=>BackgroundActivity::Unknown};
+        let pid=if row["pid"].is_null() {BackgroundPid::Absent} else {row["pid"].as_u64().and_then(|n|u32::try_from(n).ok()).and_then(std::num::NonZeroU32::new).map(BackgroundPid::Present).unwrap_or(BackgroundPid::Malformed)};
+        Ok(Self {kind,id,session,cwd,state,activity,pid})
+    }
+}
+
+/// Observation only: no public constructor, raw rows, checkpoint or conversion to execution authority.
+#[derive(Clone, Debug)]
+pub struct BackgroundCandidate {runtime:&'static str,home:PathBuf,project:PathBuf,row:BackgroundRow}
+impl BackgroundCandidate {
+    pub fn runtime(&self)->&str {self.runtime}
+    pub fn provenance(&self)->&str {"native-background-jobs"}
+    pub fn home(&self)->&Path {&self.home}
+    pub fn project(&self)->&Path {&self.project}
+    pub fn kind(&self)->BackgroundKind {self.row.kind}
+    pub fn id(&self)->Option<&str> {self.row.id.as_deref()}
+    pub fn session(&self)->&str {&self.row.session}
+    pub fn cwd(&self)->&Path {&self.row.cwd}
+    pub fn state(&self)->Option<BackgroundState> {self.row.state}
+    pub fn activity(&self)->BackgroundActivity {self.row.activity}
+    pub fn pid(&self)->BackgroundPid {self.row.pid}
+
+    fn locator<T:serde::de::DeserializeOwned>(&self,remaining:Option<&mut u64>)->Res<T> {
+        let id=self.id().filter(|id|plain_id(id)).ok_or("background input requires a background job")?;
+        let path=self.home.join("jobs").join(id).join("state.json");
+        if !std::fs::metadata(&path).map_err(|e|format!("background locator unavailable: {e}"))?.is_file() {return Err("background locator nonregular".into());}
+        let file=File::open(path).map_err(|e|format!("background locator unreadable: {e}"))?;
+        let meta=file.metadata().map_err(|e|e.to_string())?;
+        if !meta.is_file() {return Err("background locator nonregular".into());}
+        let value=if let Some(remaining)=remaining {
+            if meta.len()>1024*1024 {return Err("background input locator exceeds 1 MiB".into());}
+            let mut reader=file.take(remaining.saturating_add(1));let limit=reader.limit();
+            let value=serde_json::from_reader(&mut reader);
+            let consumed=limit-reader.limit();let exhausted=consumed>*remaining;
+            *remaining=remaining.saturating_sub(consumed);
+            if exhausted {return Err("background recovery byte budget exhausted".into());}
+            value.map_err(|e|format!("background locator invalid: {e}"))?
+        } else {serde_json::from_reader(file).map_err(|e|format!("background locator invalid: {e}"))?};
+        Ok(value)
+    }
+    fn validate_locator(&self,cwd:&str,session:&str)->Res<()> {
+        let cwd=Path::new(cwd).canonicalize().map_err(|e|format!("background locator cwd unreadable: {e}"))?;
+        if session!=self.session() || cwd!=self.cwd() || !cwd.starts_with(&self.project) {return Err("background locator identity differs".into());}
+        Ok(())
+    }
+    pub(crate) fn input(&self,input:&str,remaining:&mut u64)->Res<bool> {
+        let value:BackgroundInput=self.locator(Some(remaining))?;
+        self.validate_locator(&value.cwd,&value.session)?;
+        Ok(value.intent.as_deref().is_some_and(|text|text.trim()==input))
+    }
+    pub(crate) fn failure(&self)->Res<Option<AssistantFailure>> {
+        let value:BackgroundFailure=self.locator(None)?;
+        self.validate_locator(&value.cwd,&value.session)?;
+        if Some(value.state.as_str())!=self.state().map(BackgroundState::as_str) {return Err("background locator state differs".into());}
+        Ok(value.detail.map(|detail|AssistantFailure {error:"client-error",code:None,detail:Some(detail)}))
+    }
+}
+
+// Deserialize only observation fields; provider environment and unrelated native payloads are discarded.
+#[derive(serde::Deserialize)]
+struct BackgroundInput {cwd:String,#[serde(rename="sessionId")] session:String,intent:Option<String>}
+#[derive(serde::Deserialize)]
+struct BackgroundFailure {cwd:String,#[serde(rename="sessionId")] session:String,state:String,detail:Option<String>}
+
+pub(crate) fn background_candidates(rows:Vec<Value>,spec:&Spec)->Res<Vec<BackgroundCandidate>> {
+    if spec.client!=Client::Claude {return Err("background requires Claude".into());}
+    let home=spec.home.clone().ok_or("background home unknown")?;
+    let project=spec.root.clone();
+    rows.iter().map(|row|Ok(BackgroundCandidate {runtime:spec.client.code(),home:home.clone(),project:project.clone(),row:BackgroundRow::read(row)?})).collect()
+}
+
 /// Validated native readiness. This is neither accepted input nor an execution grant.
 #[derive(Clone, Debug)]
 pub struct BackgroundJob {
@@ -532,16 +628,13 @@ impl BackgroundJob {
         if spec.client != Client::Claude || !plain_id(job) || row["id"] != job || row["kind"] != "background" {
             return Err("background job identity differs".into());
         }
+        let decoded=BackgroundRow::read(row)?;
         let root = spec.root.canonicalize().map_err(|e| e.to_string())?;
-        if row["cwd"].as_str().and_then(|p| Path::new(p).canonicalize().ok()).as_ref() != Some(&root) {
-            return Err("background project differs".into());
-        }
-        let session = row["sessionId"].as_str().filter(|s| plain_id(s)).ok_or("background session unknown")?;
+        if decoded.cwd!=root {return Err("background project differs".into());}
+        let session=decoded.session;
         if spec.resume && session != spec.session { return Err("background resumed another session".into()); }
-        row["state"].as_str().filter(|s| matches!(*s, "working" | "idle" | "done" | "blocked" | "failed" | "crashed" | "stopped"))
-            .ok_or("background state unknown")?;
-        let pid = if row["pid"].is_null() { None } else { Some(row["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 0).ok_or("background pid invalid")?) };
-        Ok(Self { id: job.into(), session: session.into(), pid, root, home:spec_home(spec), scope:scope(spec) })
+        let pid=match decoded.pid {BackgroundPid::Absent=>None,BackgroundPid::Present(pid)=>Some(pid.get()),BackgroundPid::Malformed=>return Err("background pid invalid".into())};
+        Ok(Self { id: job.into(), session, pid, root, home:spec_home(spec), scope:scope(spec) })
     }
 }
 

@@ -105,6 +105,7 @@ Each adapter explicitly implements every required operation. `account_limits_wit
 | `session_link(&NativeSpec, job)` | Capability `session-url`: the session URL of caller-built session `spec.session` (background `job`, if any) in `spec.home`, or its absence cause with native detail (Session observation). `--remote-control` in `spec.args` marks Remote Control requested. Other runtimes read `no-session-url`. |
 | `prepare(intent, product, &mut NativeSpec, install)` | Compatible no-op optimization report and independent launcher attribution for a caller-built spec. |
 | `native_arguments(&NativeSpec)`, `turn(base, &NativeSpec, log, input, &Process)` | Native argument inspection (Arguments), and one owned `Turn`: `id`, `poll`, `kill`, `wait`, `report`. For a caller that adds native arguments of its own; `launch` stays the default. |
+| `background_candidates`, `background_input`, `background_failure` | Finite read-only candidate, intent and failure observations (Finite background observations); no owner callbacks or control authority. |
 | `background_launch`, `jobs`, `job`, `stop_job` | Capability `background`: the launcher exchange, the job list (`filtered` adds the project filter), one validated `BackgroundJob` row and its stop request (Compatibility sessions). Other runtimes refuse with `background unsupported by <name>`. |
 | `launch_refusal(text)` | The named cause of a launch failure, from its stderr or `launch`/`resume` error text: `workspace-untrusted` (Claude `Workspace not trusted`), `session-missing` (Claude `No conversation found with session ID`, Codex `app-server thread/resume refused`), `login-required` (Claude `Not logged in` or `/login`; Codex `401`, `login` or `log in`, any case); `session-busy` (Codex `already has an active writer`); otherwise none. Callers match the cause, never the text. |
 | `app_queue`, `app_server_arguments` | Capabilities `app-queue` and `app-server`: the desktop-thread queue exchange and read-only app-server argument inspection. Submission uses the owned runtime or protected-host path. Other runtimes refuse with `<capability> unsupported by <name>`. |
@@ -730,7 +731,39 @@ a lost-owner event. Other Runtime implementations may explicitly refuse stop obs
 `Runtime::background_job(run)` is a read-only locator from an already verified cached background job: runtime, source `native-background-jobs`, job ID, native session, canonical cwd, bound query home and optional native PID. It performs no lookup, mutation or checkpoint decoding; a provisional launcher ID is not evidence. Foreign runs refuse; unverified jobs
 remain unknown, including recovered runs without cached verified job evidence.
 
-The locator grants no ownership, stop, adoption, delivery or exit authority. It does not expose native candidate lists, state, unique-input witnesses, subtree/copy-session recovery or missing-versus-malformed row observations; their absence remains an explicit consumer adoption gap. Existing exact-root discovery and PID validation remain unchanged.
+The locator grants no ownership, stop, adoption, delivery or exit authority. Existing exact-root discovery and PID validation remain unchanged.
+
+### Finite background observations
+
+`Runtime::background_candidates(base, spec, filtered, budget)` runs only the existing read-only native job listing, under the resolved account home. `spec.owner` is never invoked.
+The filtered/unfiltered seam and caller budget remain unchanged; callers must retry unfiltered before concluding absence when the native filter omits worktrees.
+
+Candidates have private construction and read-only getters for runtime, provenance, bound home, query project, kind, job, native session, actual canonical cwd, work state, activity
+and PID. Unknown kinds, invalid background identities/states or unreadable cwd fail the whole list. Interactive rows retain session/cwd without fabricated background fields.
+Outside-project cwd remains visible for writer checks.
+
+PID distinguishes absent (missing or null), positive nonzero u32, and malformed. Activity uses native status independently of work state: busy, idle or unknown.
+Missing/unrecognized status is unknown and retains occupancy uncertainty; this intentionally corrects the earlier permissive missing-status behavior, rather than claiming parity.
+
+`background_input(candidate, input, remaining_bytes)` lazily reads only the bound native job locator. It preserves the existing 1 MiB locator limit and debits the caller's
+aggregate recovery-pass byte budget, including failed reads; it never resets that budget per candidate. Missing, unreadable, malformed or changed session/cwd evidence is an error,
+not false. Actual cwd must equal the candidate and remain within its query project.
+
+Intent matching preserves exactly `text.trim() == input`: native surrounding whitespace is trimmed, the submitted reference is unchanged. History matching accepts only one native
+text block or string with that comparison. Neither is byte equality; there is no substring, fuzzy or further normalization. Intent locates a candidate and never proves input
+acceptance.
+
+`background_failure(candidate)` lazily reads typed failure detail from the same bound locator and validates native state as well. These methods expose neither raw native rows nor
+checkpoint values, intent or provider environment. `Session::source()` returns its already resolved typed source, preserving native/saved session and explicit copied-source
+aliases; it performs no discovery.
+
+Missing, unreadable or partial transcript evidence remains unknown and retains input uncertainty. Only a readable, complete, valid negative History witness is false; this is an
+approved fail-closed correction to missing-as-false behavior. Source selection uses existing bound-home History readers and never another account or a guessed newest file.
+
+Descendant cwd is observation only: candidates cannot become `BackgroundJob` or mint execution/control capabilities. Launch, discovery, adopt and stop retain exact-root guards.
+Worktree execution parity remains an open adoption gate until an existing owned-run/process/session/source binding is separately validated. Subtree membership alone grants no
+authority; caller hand-in, Exit, admission and occupancy policy remain outside the runtime.
+
 
 ## Universal step history
 

@@ -49,6 +49,9 @@ impl Runtime for Reader {
     fn turn(&self,_:Command,_:&NativeSpec,_:&Path,_:&str,_:&Process)->Res<agent::Turn>{unavailable()}
     fn background_launch(&self,_:Command,_:&NativeSpec,_:&str,_:Duration)->Res<Result<Output,crate::process::Failure>>{unavailable()}
     fn jobs(&self,_:Command,_:&NativeSpec,_:bool,_:Duration)->Res<Vec<Value>>{unavailable()}
+    fn background_candidates(&self,_:Command,_:&NativeSpec,_:bool,_:Duration)->Res<Vec<agent::BackgroundCandidate>>{unavailable()}
+    fn background_input(&self,_:&agent::BackgroundCandidate,_:&str,_:&mut u64)->Res<bool>{unavailable()}
+    fn background_failure(&self,_:&agent::BackgroundCandidate)->Res<Option<agent::AssistantFailure>>{unavailable()}
     fn job(&self,_:&Value,_:&NativeSpec,_:&str)->Res<BackgroundJob>{unavailable()}
     fn stop_job(&self,_:Command,_:&NativeSpec,_:&BackgroundJob,_:Duration)->Res<Output>{unavailable()}
     fn launch_refusal(&self,_:&str)->Option<Cause>{Some(CAUSE)}
