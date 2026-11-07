@@ -294,7 +294,9 @@ impl SessionOwner {
     })}
     pub(super) fn branch_lineage(&self,lineage:&Value)->Res<()> {self.with(|o| {
         o.authority()?;mutation_clear(&o.row)?;
-        if o.row["session"]!="-" || o.row["phase"]!="submitted" || lineage["intent"]["operation"]!="fork" {return Err("child-admission-unavailable".into());}
+        // Claude reserves its requested UUID through the ordinary caller-session-ID owner path.
+        let requested_claude=o.row["runtime"]=="claude" && o.previous.is_none() && lineage["requested_child"].as_str().is_some_and(|id|o.row["session"]==id && lineage["intent"]["parent"]!=id && valid_session("claude",id).is_ok());
+        if (o.row["session"]!="-" && !requested_claude) || o.row["phase"]!="submitted" || lineage["intent"]["operation"]!="fork" {return Err("child-admission-unavailable".into());}
         let mut row=o.row.clone();row["lineage"]=json!([lineage]);row["branch_admission"]=json!(true);row["mutation"]=lineage["intent"].clone();row["mutation_evidence"]=Value::Null;save(&o.path,&row)?;o.row=row;Ok(())
     })}
     pub(super) fn branch_scope(&self,store:&SessionStore,spec:&Spec)->Res<()> {self.with(|o| {
@@ -887,5 +889,26 @@ mod tests {
         assert!(recovered.submit().unwrap_err().contains("unresolved native stop"));drop(recovered);
         assert!(store.adopt(&spec,"native",&[]).unwrap_err().contains("unresolved native stop"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod claude_branch_admission_tests {
+    use super::*;
+    // #300: reserving a requested child ID does not clear the native mutation fence.
+    #[test]
+    fn requested_claude_child_retains_exact_mutation_authority() {
+        let root=crate::scratch("claude-child-admission");let store=SessionStore {path:root.join("owners")};
+        let child="00000000-0000-4000-8000-000000000077";
+        let spec=Spec {client:Client::Claude,root:root.clone(),session:child.into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+        let owner=store.acquire(&spec,true,None,Lifetime::default()).unwrap();
+        owner.spawned(std::process::id()).unwrap();owner.submit().unwrap();
+        let intent=json!({"id":"fixture-operation","operation":"fork","parent":"00000000-0000-4000-8000-000000000099"});
+        assert!(owner.branch_lineage(&json!({"intent":intent,"requested_child":"foreign"})).is_err());
+        owner.branch_lineage(&json!({"intent":intent,"requested_child":child})).unwrap();
+        assert!(owner.control().is_err());owner.branch_authority(&intent).unwrap();
+        assert!(owner.branch_authority(&json!({"id":"another-operation"})).is_err());
+        assert!(owner.submit().is_err());assert_eq!(owner.observation().state,"unknown");
+        drop(owner);std::fs::remove_dir_all(root).unwrap();
     }
 }

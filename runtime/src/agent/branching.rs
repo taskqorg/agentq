@@ -112,8 +112,8 @@ impl App {
 
 pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&Launch)->Result<Run,Failure> {
     if adapter.client==Client::Claude && adapter.descriptor.has("fork") {
-        let run=adapter.own_mut(run)?;
-        return match &mut run.body {Body::Claude(session)=>session.fork(through,launch),_=>Err(refuse("branch-transport-unsupported"))};
+        let run=adapter.own_mut(run)?;let archive=run.archive.clone();
+        return match &mut run.body {Body::Claude(session)=>session.fork(through,launch,&archive),_=>Err(refuse("branch-transport-unsupported"))};
     }
     let until=run.deadline;
     let archive=run.archive.clone();
@@ -215,8 +215,8 @@ mod tests {
             let app=App {transport:None,session:AppSession::new(&spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,binding:None,capture:None,lineage_operation:None};
             let mut run=adapter.run(Body::App(Box::new(app)),0,&launch);
             let supported=adapter.client==Client::Codex;
-            assert_eq!(adapter.descriptor.has("fork"),supported);assert_eq!(adapter.descriptor.has("rewind"),supported);
-            assert!(matches!(adapter.fork(&mut run,None,&launch),Err(Failure::Refused(Cause(reason))) if reason==if supported {"branch-transport-unsupported"}else{"fork-unsupported"}));
+            assert_eq!(adapter.descriptor.has("fork"),supported || adapter.client==Client::Claude);assert_eq!(adapter.descriptor.has("rewind"),supported);
+            assert!(matches!(adapter.fork(&mut run,None,&launch),Err(Failure::Refused(Cause(reason))) if reason==if supported || adapter.client==Client::Claude {"branch-transport-unsupported"}else{"fork-unsupported"}));
             assert!(matches!(adapter.rewind(&mut run,None),Err(Failure::Refused(Cause(reason))) if reason==if supported {"branch-transport-unsupported"}else{"rewind-unsupported"}));
         }
         std::fs::remove_dir_all(root).unwrap();

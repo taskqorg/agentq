@@ -51,6 +51,9 @@ fn reply(v:&Value,control:&Control)->Res<Value> {
 
 pub(crate) struct Session {
     spec:Spec,
+    fork_intent:Option<Value>,
+    initialization:Value,
+    fork_identity:Option<Value>,
     native_turn:Option<native::NativeTurn>,
     native_generation:Option<Value>,
     server:Option<JsonStdio>,
@@ -82,11 +85,11 @@ impl Drop for Session {fn drop(&mut self) {if let Some(server)=&mut self.server 
 
 impl Session {
     pub fn open(base:Command,spec:&Spec,l:&Launch,owner:&SessionOwner)->Res<Self> {
-        let mut session=Self::boot(base,spec,l,owner)?;
+        let mut session=Self::boot(base,spec,l,owner,None)?;
         let parts=if l.parts.is_empty() {vec![Part::Text(l.input.clone())]}else{l.parts.clone()};session.input(&parts)?;Ok(session)
     }
     // Control-only initialization is separate from explicit input, not a native no-autonomy guarantee.
-    fn boot(base:Command,spec:&Spec,l:&Launch,owner:&SessionOwner)->Res<Self> {
+    fn boot(base:Command,spec:&Spec,l:&Launch,owner:&SessionOwner,lineage:Option<&Value>)->Res<Self> {
         let mut command=command(base,spec);
         if !spec.args.iter().any(|s|s=="--input-format") {command.args(["--input-format","stream-json"]);}
         command.args(["--permission-prompt-tool","stdio"]);
@@ -96,8 +99,9 @@ impl Session {
         let log=options.open(&l.log).map_err(|e|e.to_string())?;let boundary=log.metadata().map_err(|e|e.to_string())?.len();
         let server=JsonStdio::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?;let sampler=Some(capture::Sampler::start(server.id()));let native=NativeProcess::read(server.id())?.ok_or("control-native-identity-unknown")?;
         owner.hold_controls()?;
-        let mut session=Self {spec:spec.clone(),native_turn:None,native_generation:None,server:Some(server),native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified:false,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:false,cancelling:false,closed:None,deadline:l.deadline,started:Instant::now(),started_ms:unix_ms(),sampler,cursor:events::Cursor::new(l.deltas)};
-        session.exchange(json!({"subtype":"initialize","hooks":null}))?;
+        if let Some(lineage)=lineage {owner.branch_lineage(lineage)?;}
+        let mut session=Self {spec:spec.clone(),fork_intent:lineage.map(|v|v["intent"].clone()),initialization:Value::Null,fork_identity:None,native_turn:None,native_generation:None,server:Some(server),native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified:false,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:false,cancelling:false,closed:None,deadline:l.deadline,started:Instant::now(),started_ms:unix_ms(),sampler,cursor:events::Cursor::new(l.deltas)};
+        session.initialization=session.exchange(json!({"subtype":"initialize","hooks":null}))?;
         Ok(session)
     }
     pub fn id(&self)->u32 {self.native.pid}
@@ -113,12 +117,12 @@ impl Session {
         if NativeProcess::read(native.pid)?.is_some_and(|current|current!=native) {return Err("Claude control recovery native identity changed".into());}
         let started_ms=saved["started_ms"].as_i64().filter(|s|*s>=0).ok_or("Claude control recovery time invalid")?;
         let log=File::open(&l.log).map_err(|e|e.to_string())?;if log.metadata().map_err(|e|e.to_string())?.len()<boundary {return Err("Claude control recovery log truncated".into());}
-        Ok(Self {spec:spec.clone(),native_turn:None,native_generation:None,server:None,native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:true,cancelling:false,closed:None,deadline:None,started:Instant::now(),started_ms,sampler:None,cursor:events::Cursor::default()})
+        Ok(Self {spec:spec.clone(),fork_intent:None,initialization:Value::Null,fork_identity:None,native_turn:None,native_generation:None,server:None,native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:true,cancelling:false,closed:None,deadline:None,started:Instant::now(),started_ms,sampler:None,cursor:events::Cursor::default()})
     }
     pub fn run_id(&self)->&str {&self.requests.run}
     fn writable(&self)->Res<()> {
         if self.server.is_none() {return Err("control-transport-unavailable".into());}
-        self.owner.control()?;
+        if let Some(intent)=&self.fork_intent {self.owner.branch_authority(intent)?;}else{self.owner.control()?;}
         if self.closed.is_some() || self.requests.uncertain() {return Err("control-state-unknown".into());}Ok(())
     }
     fn write(&mut self,v:&Value)->Res<()> {
@@ -161,6 +165,11 @@ impl Session {
         if !v.is_object() {return Err("control-native-record-invalid".into());}
         if self.server.is_some() {writeln!(self.log,"{v}").map_err(|e|format!("control-journal-unknown: {e}"))?;}
         if v.get("session_id").is_some_and(|s|s!=&json!(self.session)) {return Err("control-native-session-differs".into());}
+        if self.fork_intent.is_some() && !self.active {
+            if matches!(v["type"].as_str(),Some("assistant"|"user"|"result"|"control_request"|"stream_event")) || v["type"]=="system" && v["subtype"]=="init" {return Err("fork-unexpected-native-turn-before-input".into());}
+            // These are native observations, never an ID copied from argv or our journal.
+            if v["type"]=="system" && matches!(v["subtype"].as_str(),Some("session_metadata"|"session_state_changed")) && v["session_id"]==self.session {self.fork_identity=Some(v.clone());}
+        }
         if v["type"]=="system" && v["subtype"]=="init" {
             if v["session_id"]!=self.session {return Err("control-native-session-unverified".into());}self.identified=true;
         }

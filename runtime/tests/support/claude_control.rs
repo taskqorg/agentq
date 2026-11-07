@@ -12,9 +12,9 @@ fn request(runtime:&dyn agent::Runtime,run:&mut agent::Run)->Event {
     }
 }
 
-// M12.25: an observed Claude item never grants a native fork or rewind capability.
+// M12.25: an observed stream item never substitutes for an owned native source boundary.
 fn branch_refusals(runtime:&dyn agent::Runtime,run:&mut agent::Run,l:&agent::Launch) {
-    assert!(!runtime.descriptor().has("fork") && !runtime.descriptor().has("rewind"));
+    assert!(runtime.descriptor().has("fork") && !runtime.descriptor().has("rewind"));
     let saved=runtime.checkpoint(run);let log=std::fs::read(&l.log).unwrap();
     let input=std::fs::read(l.root.join("claude-input.jsonl")).unwrap();
     let report=format!("{:?}",runtime.report(run));
@@ -28,7 +28,7 @@ fn branch_refusals(runtime:&dyn agent::Runtime,run:&mut agent::Run,l:&agent::Lau
     let mut child=l.clone();child.log=l.root.join("forbidden-child.log");child.input="never submit".into();
     child.process.configure=Some(std::sync::Arc::new(|_|panic!("unsupported Claude branch reached child preparation")));
     for through in [None,selected,claimed.as_ref()] {
-        assert!(matches!(runtime.fork(run,through,&child),Err(agent::Failure::Refused(agent::Cause("fork-unsupported")))));
+        assert!(runtime.fork(run,through,&child).is_err(),"missing native generation must refuse before child preparation");
         assert!(matches!(runtime.rewind(run,through),Err(agent::Failure::Refused(agent::Cause("rewind-unsupported")))));
     }
     assert_eq!(runtime.checkpoint(run),saved);assert_eq!(owners(),before);

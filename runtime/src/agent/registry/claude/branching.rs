@@ -9,7 +9,7 @@ fn uuid(value:&Value)->Res<&str> {
 
 /// Only measured identifiers, source generation and hashes may cross into later lineage projection.
 struct Boundary { descriptor:Value, generation:Value, path:PathBuf }
-struct PreparedFork { boundary:Boundary, intent:Value }
+struct PreparedFork { boundary:Boundary, intent:Value, child:Spec }
 impl Boundary {
     // Existing private producer intent; never an applied receipt or a portable archive anchor.
     fn intent(&self,step:&Step,owner:Value,launch:&Launch)->Value {
@@ -88,20 +88,114 @@ fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Bound
     boundary.revalidate()?;Ok(boundary)
 }
 
+// Use normal Claude launch mapping; the fresh ID is requested, not measured native identity.
+fn child_spec(launch:&Launch,parent:&str,boundary:&Value)->Res<Spec> {
+    uuid(&json!(parent))?;
+    if boundary["parent_session"]!=parent || boundary["whole_turn"]!=true {return Err("fork-parent-boundary-differs".into());}
+    let cursor=uuid(&boundary["last_chain_uuid"])?;
+    let id=new_session();if id==parent {return Err("fork-child-identity-differs-required".into());}
+    let mut child=ADAPTER.spec(launch,id,false)?;
+    child.args.extend(["--resume".into(),parent.into(),"--fork-session".into(),format!("--resume-session-at={cursor}").into()]);
+    Ok(child)
+}
+
+impl Boundary {
+    fn child_prefix(&self,spec:&Spec)->Res<Value> {
+        self.revalidate()?;
+        let path=claude_transcript(spec,&spec.session)?;source_unaliased(&path).map_err(|e|format!("fork-child-native-persistence-unavailable: {e}"))?;
+        let file=File::open(&path).map_err(|e|e.to_string())?;
+        let length=file.metadata().map_err(|e|e.to_string())?.len();
+        let mut history=History::new("claude-native",path.to_str().ok_or("fork-child-source-unknown")?,&spec.session)?;
+        let page=history.steps(&path,length.max(1))?;
+        if page.pending_bytes!=0 || page.more {return Err("fork-child-prefix-incomplete".into());}
+        let bytes=history.read_bytes(&path,0,length)?;
+        let original=History::recover(&self.generation)?.read_bytes(&self.path,0,self.descriptor["retained_end"].as_u64().ok_or("fork-boundary-unknown")?)?;
+        // Compare native conversation values, not byte serialization or copied display Steps.
+        let values=|bytes:&[u8],session:&str|->Res<Vec<Value>> {
+            let mut out=vec![];
+            for line in std::str::from_utf8(bytes).map_err(|_|"fork-prefix-invalid")?.lines() {
+                let row:Value=serde_json::from_str(line).map_err(|_|"fork-prefix-invalid")?;
+                if row["type"]=="system" && row["subtype"]=="turn_duration" {continue;}
+                if !matches!(row["type"].as_str(),Some("user"|"assistant")) || row["sessionId"]!=session || row["isSidechain"]!=false {return Err("fork-prefix-entry-unsupported".into());}
+                uuid(&row["uuid"])?;
+                out.push(json!({"uuid":row["uuid"],"parentUuid":row["parentUuid"],"promptId":row["promptId"],"type":row["type"],"message":row["message"],"isMeta":row["isMeta"],"isCompactSummary":row["isCompactSummary"]}));
+            }Ok(out)
+        };
+        if values(&bytes,&spec.session)?!=values(&original,self.descriptor["parent_session"].as_str().ok_or("fork-parent-unknown")?)? {return Err("fork-child-prefix-differs".into());}
+        History::recover(&page.checkpoint)?.read_bytes(&path,0,0)?;
+        if std::fs::metadata(&path).map_err(|e|e.to_string())?.len()!=length {return Err("fork-child-generation-changed".into());}
+        let first=std::str::from_utf8(&bytes).map_err(|_|"fork-child-identity-unknown")?.lines().find_map(|line| {
+            let row:Value=serde_json::from_str(line).ok()?;
+            matches!(row["type"].as_str(),Some("user"|"assistant")).then(||row["sessionId"].clone())
+        }).ok_or("fork-child-identity-unknown")?;
+        Ok(json!({"session_id":first,"path":path,"history":page.checkpoint}))
+    }
+}
+
 impl Session {
-    pub fn fork(&mut self,through:Option<&Step>,launch:&Launch)->Result<Run,Failure> {
+    pub fn fork(&mut self,through:Option<&Step>,launch:&Launch,archive:&crate::archive::Handle)->Result<Run,Failure> {
         let refuse=|cause|Failure::Refused(Cause(cause));
         if !ADAPTER.descriptor.has("fork") {return Err(refuse("fork-unsupported"));}
         let prepared=self.prepare_fork(through,launch)?;
-        // No guessed control/receipt: this backend has no established held local-fork admission.
-        self.owner.control()?;prepared.boundary.revalidate()?;
-        let _intent=prepared.intent;
-        Err(refuse("fork-native-held-receipt-unavailable"))
+        self.start_fork(prepared,launch,archive)
+    }
+
+    fn start_fork(&mut self,prepared:PreparedFork,launch:&Launch,archive:&crate::archive::Handle)->Result<Run,Failure> {
+        let PreparedFork {boundary,mut intent,child:spec}=prepared;
+        let canonical=ADAPTER.spec(launch,spec.session.clone(),false)?;
+        let readiness=ADAPTER.preflight(launch,&Repair::default());readiness.permit(launch.readiness)?;
+        if !readiness.checks.iter().any(|c|c.check=="client" && c.state=="ok" && version_parts(&c.detail)==Some(vec![2,1,284])) {return Err(Failure::Refused(Cause("fork-native-support-unknown")));}
+        let native_path=claude_transcript(&spec,&spec.session)?;
+        match std::fs::symlink_metadata(&native_path) {
+            Ok(_)=>return Err(Failure::Refused(Cause("fork-child-native-source-exists"))),
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string().into()),
+        }
+        intent["child_source"]=json!({"path":native_path,"before":"absent"});
+        let parts=if launch.parts.is_empty() {vec![Part::Text(launch.input.clone())]}else{launch.parts.clone()};
+        if parts.is_empty() || parts.iter().all(|p|matches!(p,Part::Text(text) if text.is_empty())) {return Err(Failure::Refused(Cause("input-empty")));}
+        stream_message(&parts)?;
+        let owner=launch.session_store.acquire(&spec,true,None,launch.lifetime)?;
+        let mut child_launch=launch.clone();child_launch.process=owner.process_hooks(&launch.process,true)?;
+        let command=preflight::launch_base(&ADAPTER,&child_launch)?;
+        self.writable()?;boundary.revalidate()?;
+        self.owner.branch_begin(&intent)?;
+        let lineage=json!({"intent":intent,"parent_owner":self.owner.checkpoint()?,"requested_child":spec.session});
+        // Existing process hooks track incarnation/lifetime before native control or explicit input.
+        let mut child=Session::boot(command,&spec,&child_launch,&owner,Some(&lineage))?;
+        self.owner.branch_authority(&intent)?;boundary.revalidate()?;
+        child.pump()?;
+        // The expected native path was absent before spawn. Read actual newly persisted session IDs.
+        let persistence=boundary.child_prefix(&spec)?;
+        let identity=child.fork_identity.clone();
+        if persistence["session_id"]!=spec.session || identity.as_ref().is_some_and(|v|v["session_id"]!=persistence["session_id"]) || spec.session==self.session || child.initialization["pid"].as_u64()!=Some(child.native.pid as u64) {return Err("fork-child-identity-unknown".into());}
+        if NativeProcess::read(child.native.pid)?.as_ref()!=Some(&child.native) {return Err("fork-child-process-unknown".into());}
+        owner.bind(persistence["session_id"].as_str().ok_or("fork-child-identity-unknown")?)?;
+        if child.initialization["session_state"]!="idle" {return Err("fork-child-native-idle-unknown".into());}
+        let settings=child.exchange(json!({"subtype":"get_settings"}))?;
+        let rules=child.exchange(json!({"subtype":"list_permission_rules"}))?;
+        let model=settings["applied"]["model"].as_str().filter(|m|!m.is_empty()).ok_or("fork-child-model-unknown")?;
+        if launch.model.as_ref().is_some_and(|m|m!=model) {return Err("fork-child-model-differs-or-alias-unresolved".into());}
+        let permission=match launch.policy.approval {Approval::Native=>None,Approval::Plan=>Some("plan"),Approval::Edits=>Some("acceptEdits"),Approval::Auto=>Some("auto"),Approval::Deny=>Some("dontAsk"),Approval::Bypass=>Some("bypassPermissions")};
+        if permission.is_some_and(|mode|child.initialization["current_permission_mode"]!=mode) {return Err("fork-child-permission-unknown".into());}
+        if boundary.child_prefix(&spec)?!=persistence {return Err("fork-child-generation-changed".into());}
+        self.owner.branch_authority(&intent)?;boundary.revalidate()?;
+        child.pump()?;
+        let native=json!({"claude":{"identity":identity,"persistence":persistence,"initialize":child.initialization,"settings":settings,"rules":rules,"process":child.native}});
+        let observed=json!({"child":spec.session,"boundary":boundary.descriptor});
+        self.owner.branch_observed(&intent,&native)?;owner.branch_observed(&intent,&native)?;
+        self.owner.branch_finish(&intent,&observed)?;owner.branch_finish(&intent,&observed)?;
+        child.fork_intent=None;child.identified=true;child.spec=canonical;child.scope=native::scope(&child.spec);
+        // Durable lineage and measured native ownership precede the one explicit Launch input.
+        archive.lineage(&intent,&native,&observed);
+        child.input(&parts)?;
+        let offset=child.boundary;let stop_id=child.run_id().to_string();
+        let mut run=ADAPTER.checked_run(&readiness,Body::Claude(Box::new(child)),offset,&child_launch);
+        run.stop_id=stop_id;run.owner=Some(owner);Ok(run)
     }
 
     fn prepare_fork(&mut self,through:Option<&Step>,launch:&Launch)->Result<PreparedFork,Failure> {
         let refuse=|cause|Failure::Refused(Cause(cause));
-        self.writable()?;
+        self.pump()?;self.writable()?;
         if self.active || self.cancelling || !self.identified || self.report.is_none() || !self.requests.ids().is_empty() {return Err(refuse("fork-source-not-idle"));}
         if NativeProcess::read(self.native.pid)?.as_ref()!=Some(&self.native) {return Err(refuse("fork-source-process-unknown"));}
         if launch.mode!=Mode::Turn || !launch.controls {return Err(refuse("fork-child-mode-unsupported"));}
@@ -116,10 +210,11 @@ impl Session {
             Ok(child) if native::file_id(&parent)?==native::file_id(&child)?=>return Err(refuse("fork-child-log-differs-required")),
             Ok(_)=>{},Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return Err(error.to_string().into()),
         }
-        // No admission, spawn, initialize or model input until the backend can hold all queue producers.
+        // Source preparation creates no owner/child and grants no native acceptance.
         self.owner.control()?;boundary.revalidate()?;
+        let child=child_spec(launch,&self.session,&boundary.descriptor)?;
         let intent=boundary.intent(step,self.owner.checkpoint()?,launch);
-        Ok(PreparedFork {boundary,intent})
+        Ok(PreparedFork {boundary,intent,child})
     }
 }
 
@@ -145,6 +240,18 @@ mod tests {
         assert_eq!(proof.descriptor["prompt_uuid"],"00000000-0000-4000-8000-000000000001");
         assert_eq!(proof.descriptor["chain"].as_array().unwrap().len(),2);
         let launch=Launch::new(&root,root.join("child.log"),"next","fixtureq");
+        let child=child_spec(&launch,session,&proof.descriptor).unwrap();
+        assert_ne!(child.session,session);assert!(!child.resume);
+        let args=native_args(&child);
+        assert!(args.windows(2).any(|a|a==[OsString::from("--resume"),OsString::from(session)]));
+        assert!(args.contains(&OsString::from("--fork-session")));
+        assert!(args.contains(&OsString::from("--resume-session-at=00000000-0000-4000-8000-000000000002")));
+        assert_eq!(args[args.len()-2],"--session-id");assert_eq!(args.last(),Some(&OsString::from(child.session.as_str())));
+        let child_path=claude_transcript(&child,&child.session).unwrap();std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        let retained=&fixture[..proof.descriptor["retained_end"].as_u64().unwrap() as usize];
+        std::fs::write(&child_path,retained.replace(session,&child.session)).unwrap();
+        assert_eq!(proof.child_prefix(&child).unwrap()["session_id"],child.session);
+        std::fs::write(&child_path,retained).unwrap();assert!(proof.child_prefix(&child).is_err());
         let intent=proof.intent(&step,json!({"session":session}),&launch);
         assert_eq!(intent["parent"],session);assert_eq!(intent["selected"],json!(step));
         assert_eq!(intent["physical"]["identity"],proof.generation["identity"]);

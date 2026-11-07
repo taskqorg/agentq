@@ -18,7 +18,7 @@ fn conditions(intent:&Value,native:&Value)->Conditions {
     c.effort.requested=Pair::new(None,condition::<String>(&intent["requested_conditions"]["effort"]).filter(|s|safe_label(s)));
     c.policy.requested=Pair::new(None,condition::<PortablePolicy>(&intent["requested_conditions"]["policy"]));
     // Only the exact verified fork acknowledgement supplies an effective child model.
-    if intent["operation"]=="fork" {c.model.observed=Pair::new(None,condition::<String>(&native["model"]).filter(|s|safe_label(s)));}
+    if intent["operation"]=="fork" {let model=if native["claude"].is_object() {&native["claude"]["settings"]["applied"]["model"]}else{&native["model"]};c.model.observed=Pair::new(None,condition::<String>(model).filter(|s|safe_label(s)));}
     // Invalid/unsafe policy disclosure withholds the whole cell, not selected fields.
     let probe=Record {record_type:"agentq_lineage".into(),version:1,operation_id:"disclosure".into(),revision:0,kind:Kind::Rewind,effect:Effect::Noop,session:"disclosure".into(),parent:Parent {session:"disclosure".into(),point:Point::Empty},predecessor:None,activation:Activation::Pending {reason:Pending::NoNativeBytes},conditions:c.clone()};
     if probe.validate("disclosure").is_err(){c.policy.requested=Pair::default();}
@@ -87,7 +87,19 @@ pub(super) fn publish(handle:&Handle,intent:&Value,native:&Value,observed:&Value
     if c.manifest["session"]!=parent{return Err("archive lineage parent label unavailable".into());}
     let kind=match intent["operation"].as_str(){Some("fork")=>Kind::Fork,Some("rewind")=>Kind::Rewind,_=>return Err("archive lineage operation unsupported".into())};
     let session=if kind==Kind::Fork {observed["child"].as_str().filter(|s|safe_label(s)).ok_or("archive lineage child identity unavailable")?}else{parent};
-    if kind==Kind::Fork && (native["thread"]["id"]!=session || session==parent){return Err("archive lineage child result unknown".into());}
+    if kind==Kind::Fork {
+        let matches=if c.runtime=="claude" {
+            let identity=&native["claude"]["identity"];
+            let persisted=&native["claude"]["persistence"];let history=&persisted["history"];
+            let observed=identity.is_null() || identity["type"]=="system" && matches!(identity["subtype"].as_str(),Some("session_metadata"|"session_state_changed")) && identity["session_id"]==session;
+            observed && persisted["session_id"]==session && history["session"]==session && history["native_session"]==session && history["format"]=="claude-native"
+                && history["source"]==persisted["path"] && history["identity"].as_str().is_some_and(|s|!s.is_empty()) && history["offset"].as_u64().is_some_and(|n|n>0)
+                && history["prefix"].as_str().is_some_and(|s|s.len()==64 && s.bytes().all(|b|b.is_ascii_hexdigit())) && history["native_session_alias"].is_null()
+                && intent["child_source"]["before"]=="absent" && intent["child_source"]["path"]==persisted["path"]
+                && native["claude"]["initialize"]["pid"].as_u64().is_some_and(|pid|Some(pid)==native["claude"]["process"]["pid"].as_u64())
+        }else{native["thread"]["id"]==session};
+        if !matches || session==parent {return Err("archive lineage child result unknown".into());}
+    }
     if kind==Kind::Rewind && native["thread"]["id"]!=session {return Err("archive lineage rewind result unknown".into());}
     let effect=if intent["effect"]=="noop" && observed["noop"]==true {Effect::Noop}else{Effect::Applied};
     let operation=intent["id"].as_str().filter(|s|safe_label(s)).ok_or("archive lineage operation identity unavailable")?;

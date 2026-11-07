@@ -88,3 +88,21 @@ This imports only actual partial functionality: original native physical generat
 5. Consumer snapshots TaskQ `1cf62612`, DashQ `83eb2ea` and AssetQ `473789` remain unverified. Central owns final immutable source/pin/caller convergence and later authorized qualification.
 
 Global functionality is NOT complete while the mandatory external Claude prerequisite and dependent AgentQ implementation remain absent. This continuation is successful source integration of partial work only, not successful Claude fork delivery. No tests/build/check/lint/probe/hash-verifier/review or native execution ran; no prior source archive/ref/evidence was rewritten.
+
+## Reachable Claude adapter continuation
+
+The exact cumulative `a8c696ff4ca4cb40f461d480da1b8e3c697b8bf7` to `6933fc5dc1ad4f00fcee8aa54b4c9990e95e0ec2` delta (5d57/999131/cd8e/6933) is integrated onto `182b4d29004d62f662f89ca0557c6e53892c39a0`. Nine contract/implementation/fixture files joined without textual conflict. Author reports: `/tmp/agentq-300-claude-reachable-fork-source.md` and `/tmp/agentq-300-claude-child-lifecycle-source.md`. Locator49580ae, typed errors/history/no-Intent, lineage selected journal and P1 scope_consistent remain present.
+
+This continuation supersedes earlier handoff statements that a blanket external startup hold is mandatory or Claude capability must remain absent. The corrected contract scopes the extra no-additional-turn clause to Codex. Claude now declares an actual owned adapter path using ordinary inspected native fork argv, normal preflight, requested-ID ownership, process/lifetime hooks, durable parent/child lineage and initialize before explicit input. Descriptor path availability is not evidence of native success.
+
+The exact expected child path must be absent before spawn. The same owned process must supply matching initialize PID/incarnation and actual newly persisted child conversation identity/prefix. Actual History generation, original source generation, native child identity and independent settings/rules must agree before binding/finish and exactly one explicit input. Unexpected native work, missing/foreign/partial/changed persistence or failed readback retain unknown fences and submit no caller prompt. No transcript copying, new vendor flag, fake event/thread.id, backend hold token or alternate provider is introduced. Recovery uses ordinary same-ID scope rather than replaying fork argv. The private archive hook accepts actual Claude persistence/PID/settings evidence and retains grant/capture-based unmapped/pending outcomes.
+
+### Remaining independent scope after this continuation
+
+- Actual Claude2.1.284 may not materialize pre-input JSONL; this source path exists but native success and persistence timing remain unknown. No successful fork functionality proof is claimed.
+- The finite source implementation still refuses unsupported original tool/carrier/attachment/compaction/side-chain and Windows alias domains; their mapping remains independent functional scope if required by full #300 coverage. No accepted physical Claude JSONL-selection/stream bridge is fabricated; absent mapping remains unmapped/pending.
+- #301 legacy removal remains an independent unfinished source scope; this Claude delta does not remove legacy model/hook/export/lifecycle callers. No exact #301 final removal delta was supplied or implemented in this dispatch, and the task is not declared complete by runtime convergence.
+- Affirmative background BeforeInput correlation remains unavailable in the existing exchange backend; observation tokens/process locators do not authorize no-start/replay.
+- Central still owns final TaskQ/DashQ/AssetQ immutable source/pin/caller alignment; their named snapshots remain unverified. This source freeze does not declare GLOBAL functional completion.
+
+No builds, checks, tests, lint, probes, hash generation/verifiers, review or native execution ran. The nine-file cumulative delta and regression SOURCE are uncompiled/unexecuted; prior refs, archives and historical reports remain unchanged.
