@@ -14,7 +14,7 @@ fn provision_home(path:&Path) {
     #[cfg(windows)] {
         // Elevated Windows defaults new directories to Administrators; that is not a proven account owner.
         let output=Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command", "$ErrorActionPreference='Stop'; $p=$env:AGENTQ_LOGIN_TEST_HOME; $acl=Get-Acl -LiteralPath $p; if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){$acl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User); Set-Acl -LiteralPath $p -AclObject $acl}"]).env("AGENTQ_LOGIN_TEST_HOME",path).output().unwrap();
-        assert!(output.status.success(),"temporary home owner preparation failed");
+        assert!(output.status.success(),"temporary home owner preparation failed ({:?}): {}",output.status.code(),String::from_utf8_lossy(&output.stderr));
     }
     #[cfg(not(windows))] let _=path;
 }
