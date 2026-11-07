@@ -1020,6 +1020,11 @@ refuse as history-only. The existing execution-runtime enumeration remains uncha
 on agent names. Each source has its own small Rust module, adapted from Orca's MIT
 scanner/decoder contracts and fixtures (NOTICE). Search remains outside the runtime.
 
+Initial open and checkpoint recovery validate the exact registered format for the
+selected runtime. History-only adapters bind their SourceSpec format; execution
+runtimes bind their native protocol formats. Another registered source or an
+unregistered format prefix never supplies an exception.
+
 Native JSONL records preserve exact ranges. Whole JSON documents and SQLite stores
 are read as source snapshots: each derived row carries its native JSON pointer or
 SQL table/key, physical file identity/hash and byte-range references. Reconstructed

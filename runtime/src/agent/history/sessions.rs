@@ -52,8 +52,15 @@ fn walk(root:&Path, out:&mut Vec<PathBuf>) -> Res<()> {
     Ok(())
 }
 
+fn source_format(runtime:&str,format:&str)->Res<()> {
+    let allowed=if let Some(spec)=super::sources::get(runtime).filter(|s|super::sources::external(s.format)) {
+        spec.format==format
+    }else{super::super::registry::protocol(client(runtime)?).history_formats.contains(&format)};
+    if allowed {Ok(())}else{Err("history source format differs from runtime".into())}
+}
+
 fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
-    let format = match runtime {"codex"=>"codex-rollout","claude"=>"claude-native",_=>"antigravity-sidecar"};
+    let mut format=super::super::registry::protocol(client(runtime)?).native_history;
     let mut reader=BufReader::new(File::open(path).map_err(|e|format!("history discovery: {e}"))?);
     let mut row=String::new();
     loop {
@@ -64,7 +71,8 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
         let v:Value=serde_json::from_str(&row).map_err(|e|format!("history discovery invalid JSON: {e}"))?;
         let acp=v["type"]=="acp";
         let rpc=v["type"]=="response" && v["command"]=="get_state" && v["data"]["sessionFile"].is_string();
-        let format=if acp {"acp"}else if rpc {"jsonl-rpc"}else{format};
+        if acp {format="acp";}else if rpc {format="jsonl-rpc";}
+        source_format(runtime,format)?;
         let id=if acp {v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str())}else if rpc {v["data"]["sessionFile"].as_str()}else{match runtime {
             "codex" if v["type"]=="session_meta"=>v["payload"]["id"].as_str(),
             "claude"=>v["agentId"].as_str().or(v["sessionId"].as_str()).or(v["session_id"].as_str()),
@@ -137,6 +145,7 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
         let requested_source=source;
         let resolved=&saved["resolved"];
         let source:Source=serde_json::from_value(resolved["source"].clone()).map_err(|_|"history checkpoint source invalid")?;
+        source_format(runtime,&source.format)?;
         if resolved["runtime"]!=runtime || ![source.id.as_str(),source.session.as_str()].contains(&session) || source.id!=super::sources::source_id(runtime,&source.path,&source.session) {
             return Err("history checkpoint binding differs".into());
         }
@@ -161,6 +170,7 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
         if let Some(parent)=parent_source(runtime,&family[0],&sources)? {family.push(parent.clone());link_parents(runtime,&mut family)?;}
         family.remove(0)
     };
+    source_format(runtime,&source.format)?;
     let label=source.path.to_str().ok_or("history source path invalid UTF-8")?;
     let mut history=if let Some(saved)=saved {
         let h=History::recover(saved)?;
