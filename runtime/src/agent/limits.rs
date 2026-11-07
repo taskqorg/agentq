@@ -237,6 +237,14 @@ pub(super) fn identity(client:Client,home:Option<&Path>)->Option<String> {(proto
 
 #[cfg(target_os="macos")]
 pub(crate) fn keychain(service:&str,account:Option<&str>)->Res<Option<String>> {
+    keychain_bytes(service,account)?.map(|bytes|String::from_utf8(bytes).map(|s|s.trim().into()).map_err(|_|"credential-invalid".into())).transpose()
+}
+#[cfg(target_os="macos")]
+pub(crate) fn keychain_fingerprint(service:&str,account:Option<&str>)->Res<Option<String>> {
+    Ok(keychain_bytes(service,account)?.map(|bytes|crate::sha256_hex(&bytes)))
+}
+#[cfg(target_os="macos")]
+fn keychain_bytes(service:&str,account:Option<&str>)->Res<Option<Vec<u8>>> {
         use std::sync::atomic::{AtomicBool,Ordering};
         static PROMPTED: AtomicBool = AtomicBool::new(false);
         if PROMPTED.load(Ordering::Relaxed) {return Err("keychain-would-prompt".into());}
@@ -249,7 +257,7 @@ pub(crate) fn keychain(service:&str,account:Option<&str>)->Res<Option<String>> {
             Err(_)=>return Err("credential-unreadable".into()),
         };
         match output.status.code() {
-            Some(0)=>return String::from_utf8(output.stdout).map(|s|Some(s.trim().into())).map_err(|_|"credential-invalid".into()),
+            Some(0)=>return Ok(Some(output.stdout)),
             Some(44)=>{}, Some(36)=>{PROMPTED.store(true,Ordering::Relaxed);return Err("keychain-would-prompt".into());},
             _=>return Err("credential-unreadable".into()),
         }

@@ -22,6 +22,9 @@ pub use lifetime::Lifetime;
 #[cfg(test)]
 pub(crate) use lifetime::test_receipts;
 pub use ownership::Orphan;
+#[path="signin.rs"]
+mod sign_in;
+pub use sign_in::{LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession};
 
 /// The only runtime metadata a caller reads. `name` is an opaque ID; `label` and `brand` are for people.
 #[derive(Debug, PartialEq, Eq)]
@@ -714,6 +717,11 @@ fn input_items(descriptor: &Descriptor, parts: &[Part]) -> Result<Value, Failure
 /// The one trait every runtime adapter implements (specq agent-runtimes § Runtime trait).
 pub trait Runtime: Send + Sync {
     fn descriptor(&self) -> &Descriptor;
+    /// Explicit owner-started native account sign-in; prompts are private relay data.
+    fn login_start(&self,_options:&LoginOptions)->Result<LoginSession,Failure> {Err(Failure::Refused(Cause("login-unsupported")))}
+    fn login_status(&self,session:&LoginSession)->Result<LoginStatus,Failure> {sign_in::status(self.descriptor().name,session)}
+    fn login_code(&self,session:&LoginSession,code:&str)->Result<(),Failure> {sign_in::code(self.descriptor().name,session,code)}
+    fn login_cancel(&self,session:&LoginSession)->Result<LoginStatus,Failure> {sign_in::cancel(self.descriptor().name,session)}
     fn stop_event(&self, _run: &mut Run, _bytes: u64) -> Res<Option<super::history::stop::StopEvent>> { Err("stop observation unsupported by this runtime".into()) }
     fn history_sessions(&self, home: Option<&Path>) -> Res<Vec<super::history::sessions::Source>> {
         super::history::sessions::list(self.descriptor().name, home)
@@ -866,6 +874,7 @@ struct NativeOps {
     environment: fn(&Launch, &mut Spec),
     settings: fn(&Launch, &mut Spec),
     login: fn(Command, bool) -> Check,
+    sign_in:Option<&'static sign_in::Protocol>,
     preparation: fn(&Launch, &Repair) -> (LaunchCheck, LaunchCheck),
     restore_preparation: Option<fn(&Value, bool) -> Res<()>>,
     sandbox:Option<fn(&Launch)->LaunchCheck>,
@@ -882,7 +891,7 @@ struct NativeOps {
 
 impl NativeOps {
     const fn structured(protocol:&'static registry::Protocol,home_var:&'static str,executable:fn(&OsStr)->Res<PathBuf>,home:fn()->Option<PathBuf>)->Self {
-        Self {acp:None,rpc:None,protocol,home_var,alternate_home_var:None,session_vars:&[],auth_vars:&[],executable,home,new_session:||"-".into(),
+        Self {sign_in:None,acp:None,rpc:None,protocol,home_var,alternate_home_var:None,session_vars:&[],auth_vars:&[],executable,home,new_session:||"-".into(),
             args:|_|vec![],mapped:|_|Err("native CLI mapping unsupported; use the structured session".into()),extras:|_|vec![],environment:|_,_|{},settings:|_,_|{},
             preparation:|_,_|(LaunchCheck::new("workspace","unknown",Some("workspace-trust-unknown"),"Native trust not qualified","qualify this runtime"),LaunchCheck::new("evidence","degraded",Some("hooks-unknown"),"Native hooks not qualified","qualify this runtime")),restore_preparation:None,sandbox:None,hook_status:None,limits_for:|_,_|limits::unknown("account-limits unsupported"),validate:|args,_,_|registry::validate_arguments(args),
             catalogue:|_,_|Err("catalogue unsupported".into()),login:|_,_|Check{state:"unknown",detail:"native login not qualified".into()},protected:|h|vec![h],
@@ -1126,6 +1135,7 @@ impl Adapter {
 }
 
 impl Runtime for Adapter {
+    fn login_start(&self,options:&LoginOptions)->Result<LoginSession,Failure> {sign_in::start(self,options)}
     fn stop_event(&self, run: &mut Run, bytes: u64) -> Res<Option<super::history::stop::StopEvent>> {
         super::history::stop::observe(self, run, bytes)
     }

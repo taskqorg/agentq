@@ -28,7 +28,7 @@ pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
-pub use adapter::{Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession,Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
