@@ -7,7 +7,8 @@ fn options(root:&Path,client:&str,mode:&str,flow:LoginFlow)->LoginOptions {
     let home=root.join(client);std::fs::create_dir_all(&home).unwrap();provision_home(&home);
     let mut options=LoginOptions::new(Some(home),flow);options.executable=Some(exe().into());
     let authority=root.join("callback-authority");std::fs::create_dir_all(&authority).unwrap();provision_home(&authority);options.callback_authority=Some(authority);
-    options.env=vec![("AGENTQ_FAKE_LOGIN".into(),mode.into()),("AGENTQ_LOGIN_CLIENT".into(),client.into()),("AGENTQ_LOGIN_ROOT".into(),root.as_os_str().into())];options
+    if client=="claude" {options.synthetic_credentials();}
+    options.env=vec![("USER".into(),"fixture-account".into()),("AGENTQ_FAKE_LOGIN".into(),mode.into()),("AGENTQ_LOGIN_CLIENT".into(),client.into()),("AGENTQ_LOGIN_ROOT".into(),root.as_os_str().into())];options
 }
 
 fn provision_home(path:&Path) {
@@ -228,4 +229,16 @@ pub fn home_processes() {
     let end=Instant::now()+Duration::from_secs(10);loop {match coreq::process::identity(pid) {Ok(Some(now)) if now!=identity=>break,Ok(None)=>break,_=>{assert!(Instant::now()<end,"owned original native identity remains unconfirmed");std::thread::yield_now();}}}
     assert!(replacement_exit.success());assert!(original_still_live,"counterexample requires original native writer after controller death");
     assert!(result["refused"].as_str().is_some_and(|s|s.contains("login-owner-unknown")),"replacement admission with original writer live: {result}");teardown(root);
+}
+
+// Unknown synthetic keychain state must refuse before the fake native login can start.
+pub fn fixture_credentials_unknown() {
+    let root=scratch("login-fixture-credentials");let runtime=agent::runtime("claude").unwrap();
+    let opts=options(&root,"claude","hold",LoginFlow::Browser);
+    let session=runtime.login_start(&opts).unwrap();until(runtime,&session,|s|s.phase==LoginPhase::Waiting);cancel_and_wait(runtime,&session);drop(session);
+    std::fs::remove_file(root.join("argv")).unwrap();
+    let unavailable=opts.home.as_ref().unwrap().join("fixture-keychain.json");std::fs::create_dir(&unavailable).unwrap();
+    let session=runtime.login_start(&opts).unwrap();let status=until(runtime,&session,terminal);
+    assert_eq!(status.phase,LoginPhase::Unknown);assert_eq!(status.reason,Some("login-credentials-unverified"));assert_eq!(status.pid,None);
+    assert!(!root.join("argv").exists(),"unknown snapshot must not spawn login");drop(session);teardown(root);
 }

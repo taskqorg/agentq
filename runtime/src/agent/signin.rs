@@ -9,6 +9,8 @@ pub(super) use home::Home;
 pub enum LoginFlow {Browser,Device}
 #[derive(Clone)]
 pub struct LoginOptions {
+    #[cfg(test)]
+    pub(crate) fixture_credentials:Option<fn(&Path)->Res<Vec<Option<String>>>>,
     pub executable:Option<PathBuf>,
     pub home:Option<PathBuf>,
     pub env:Vec<(OsString,OsString)>,
@@ -17,7 +19,12 @@ pub struct LoginOptions {
     pub callback_authority:Option<PathBuf>,
 }
 impl LoginOptions {
-    pub fn new(home:Option<PathBuf>,flow:LoginFlow)->Self {Self {executable:None,home,env:vec![],flow,callback_authority:None}}
+    #[cfg(test)]
+    pub(crate) fn synthetic_credentials(&mut self) {
+        self.fixture_credentials=Some(|home|[".credentials.json","fixture-keychain.json"].iter().map(|name|file_fingerprint(&home.join(name))).collect());
+    }
+
+    pub fn new(home:Option<PathBuf>,flow:LoginFlow)->Self {Self {#[cfg(test)] fixture_credentials:None,executable:None,home,env:vec![],flow,callback_authority:None}}
 }
 #[derive(Clone,PartialEq,Eq)]
 pub struct LoginPrompt {pub url:String,pub user_code:Option<String>,pub needs_code:bool}
@@ -33,8 +40,13 @@ impl LoginStatus {fn starting()->Self {Self {phase:LoginPhase::Starting,prompt:N
 pub struct LoginSession {runtime:&'static str,events:mpsc::Sender<Event>,status:Arc<Mutex<LoginStatus>>}
 impl Drop for LoginSession {fn drop(&mut self) {let _=self.events.send(Event::Cancel(None));}}
 
-pub(super) struct Context {pub home:PathBuf,pub explicit:bool,pub callback_authority:Option<PathBuf>,program:PathBuf,env:Vec<(OsString,OsString)>,home_var:&'static str,pin:Option<PathBuf>}
+pub(super) struct Context {#[cfg(test)] fixture_credentials:Option<fn(&Path)->Res<Vec<Option<String>>>>,pub home:PathBuf,pub explicit:bool,pub callback_authority:Option<PathBuf>,program:PathBuf,env:Vec<(OsString,OsString)>,home_var:&'static str,pin:Option<PathBuf>}
 impl Context {
+    fn credentials(&self,protocol:&Protocol)->Res<Vec<Option<String>>> {
+        #[cfg(test)] if let Some(snapshot)=self.fixture_credentials {return snapshot(&self.home);}
+        (protocol.credentials)(self)
+    }
+
     pub fn env_value(&self,key:&str)->Option<OsString> {self.env.iter().rev().find(|(k,_)|env_key(k,key)).map(|(_,v)|v.clone()).or_else(||std::env::var_os(key))}
     pub fn command(&self)->Command {
         let mut command=Command::new(&self.program);command.envs(self.env.iter().cloned());
@@ -73,7 +85,7 @@ pub(super) fn start(adapter:&Adapter,options:&LoginOptions)->Result<LoginSession
     let program=options.executable.clone().map(Ok).unwrap_or_else(||(adapter.ops.executable)(&path)).map_err(Failure::Failed)?;
     let program=(protocol.executable)(program).map_err(Failure::Failed)?;
     let guard=Arc::new(Home::open(&home).map_err(Failure::Failed)?);
-    let context=Context {home,explicit,callback_authority:options.callback_authority.clone(),program,env:options.env.clone(),home_var:adapter.ops.home_var,pin:options.home.clone()};
+    let context=Context {#[cfg(test)] fixture_credentials:options.fixture_credentials,home,explicit,callback_authority:options.callback_authority.clone(),program,env:options.env.clone(),home_var:adapter.ops.home_var,pin:options.home.clone()};
     let (events,receive)=mpsc::channel();let status=Arc::new(Mutex::new(LoginStatus::starting()));
     let result=status.clone();let send=events.clone();let flow=options.flow;let lease=guard.clone();let on_start_failure=guard.clone();
     std::thread::Builder::new().name("agentq-login".into()).spawn(move|| {
@@ -102,7 +114,7 @@ pub(super) fn cancel(runtime:&str,session:&LoginSession)->Result<LoginStatus,Fai
 
 fn run(context:Context,guard:Arc<Home>,protocol:&'static Protocol,flow:LoginFlow,events:mpsc::Sender<Event>,receive:mpsc::Receiver<Event>,state:&Arc<Mutex<LoginStatus>>)->Result<(),&'static str> {
     guard.check(&context.home).map_err(|_|"login-home-changed")?;
-    let before=(protocol.credentials)(&context);
+    let before=context.credentials(protocol);
     if before.is_err() {return Err("login-credentials-unverified");}
     guard.check(&context.home).map_err(|_|"login-home-changed")?;
     let mut command=context.command();let mut conversation=(protocol.configure)(&context,flow,&mut command)?;
@@ -127,7 +139,7 @@ fn run(context:Context,guard:Arc<Home>,protocol:&'static Protocol,flow:LoginFlow
     // A queued owner cancel before spawn must not start a native credential operation.
     for event in receive.try_iter() {match event {
         Event::Cancel(answer)=>{
-            let change=if guard.0.check(&context.home).is_ok() {changed(&before,&(protocol.credentials)(&context))}else{None};
+            let change=if guard.0.check(&context.home).is_ok() {changed(&before,&context.credentials(protocol))}else{None};
             drop(input_send);drop(out_send);drop(err_send);drop(child_send);
             for thread in [writing,output,error,waiting] {thread.join().map_err(|_|"login-transport-panicked")?;}
             guard.0.check(&context.home).map_err(|_|"login-home-changed")?;
@@ -176,7 +188,7 @@ fn run(context:Context,guard:Arc<Home>,protocol:&'static Protocol,flow:LoginFlow
             Event::Cancel(answer)=>{
                 let result=(|| {if cancelling {return Ok(());}guard.0.check(&context.home)?;
                     if completed || exited.is_some() {return Err("login-already-completed".into());}
-                    let now=(protocol.credentials)(&context);let changed=changed(&before,&now);
+                    let now=context.credentials(protocol);let changed=changed(&before,&now);
                     {let mut s=state.lock().unwrap();s.credentials_changed=changed;s.restart_required=changed;}
                     if changed!=Some(false) {return Err(if changed==Some(true) {"login-credentials-changed"}else{"login-credentials-unverified"}.into());}
                     if exited.is_none() {let native=native.as_ref().ok_or("login-process-unverified")?;crate::process::terminate(native).map_err(|_|"login-stop-unverified")?;}
@@ -191,7 +203,7 @@ fn run(context:Context,guard:Arc<Home>,protocol:&'static Protocol,flow:LoginFlow
     let exit=exited.unwrap().map_err(|_|"login-wait-unknown")?;
     conversation.cleanup().map_err(|_|"login-helper-cleanup-unknown")?;
     let unchanged_home=guard.0.check(&context.home).is_ok();
-    let after=if unchanged_home {(protocol.credentials)(&context)}else{Err("login-home-changed".into())};
+    let after=if unchanged_home {context.credentials(protocol)}else{Err("login-home-changed".into())};
     let change=changed(&before,&after);
     let verified=unchanged_home && failure.is_none() && (!cancelling || completed) && conversation.completed(exit) && (protocol.verify)(&context).state=="ok";
     let cancelled=cancelling && change==Some(false) && !completed && failure.is_none();
@@ -226,7 +238,7 @@ pub(super) fn tokens(text:&str)->impl Iterator<Item=&str> {text.split_inclusive(
 mod tests {
     use super::*;
     #[test] fn default_native_home_is_not_pinned_and_secrets_leave_no_debug_values() {
-        let context=Context {home:std::env::temp_dir(),explicit:false,callback_authority:None,program:"native-client".into(),env:vec![],home_var:"CLAUDE_CONFIG_DIR",pin:None};
+        let context=Context {fixture_credentials:None,home:std::env::temp_dir(),explicit:false,callback_authority:None,program:"native-client".into(),env:vec![],home_var:"CLAUDE_CONFIG_DIR",pin:None};
         assert!(!context.command().get_envs().any(|(key,_)|key=="CLAUDE_CONFIG_DIR"));
         let prompt=LoginPrompt {url:"https://auth.openai.com/oauth/authorize?state=private".into(),user_code:Some("secret-device-code".into()),needs_code:false};
         let debug=format!("{prompt:?}");assert!(!debug.contains("private"));assert!(!debug.contains("secret-device-code"));

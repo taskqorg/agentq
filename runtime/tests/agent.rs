@@ -75,6 +75,7 @@ pub(crate) fn main() {
         ("codex_branch_unknown_mutation_stays_durably_fenced",branching::uncertain),
         ("codex_branch_hooks_and_setup_refusals_preserve_original_admission",branching::admission_boundaries),
         ("account_login_controller_loss_never_reopens_a_live_home_writer",signin::home_processes),
+        ("account_login_fixture_credentials_keep_unknown",signin::fixture_credentials_unknown),
         ("account_login_callback_authority_is_shared_between_processes",signin::callback_processes),
         ("account_login_startup_and_pipe_completion_stay_distinct",signin::startup_and_pipes),
         ("account_login_pipes_remain_private_and_owned",signin::pipes),
