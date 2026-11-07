@@ -1,6 +1,6 @@
 # Session fork and rewind
 
-Proposed detail of M12.25 / [#300](https://github.com/taskqorg/agentq/issues/300), stage one only. No operation or capability described here is implemented or qualified by this document. Interface artifact **F300-20261107-1** needs central acknowledgement of its exact committed blob before launch, history or archive implementation consumes it. It does not replace **C285-20261107-1**, its shared types or its authority rules.
+Proposed detail of M12.25 / [#300](https://github.com/taskqorg/agentq/issues/300), stage one only. No operation or capability described here is implemented or qualified by this document. The Runtime interface in original artifact **F300-20261107-1**, commit `1af9b67e3081b02c5b555193a413cd48f1a6494e`, blob `20f490ead4055c94490741a976659e17ba511864`, has central technical acknowledgement; its signatures and authority semantics remain unchanged. Its original archive field proposal was not acknowledged and is replaced by the unacknowledged [F300-L20261107-2 wire proposal](SESSION-LINEAGE-WIRE.md). It does not replace **C285-20261107-1**, its shared types or its authority rules.
 
 Source boundary: accepted main `e28d0b94b9063e5d6afc3c961a111ba1259d9f96`; frozen control source `71ef4b28976e888cf8c25305af695643e9a705e3`; canonical shared definitions `fc885c87329c8668d9ec5db6f5cabfd0293330cf`. Claude/control `68fb6fa5ff84e288606a851ff27f45590ab8c112` is read-only development context, not accepted ancestry or proof of native behavior. Final coherent #285 integration remains a prerequisite.
 
@@ -51,18 +51,9 @@ Do not add Node/SDK execution or reimplement its transcript copy/remapping in Ru
 
 ## Shared history/archive linkage proposal
 
-These are proposed data semantics for central acknowledgement; history/archive owners retain their source paths and schemas. The methods above add no second reply authority.
+The original table at immutable blob `20f490ead4055c94490741a976659e17ba511864` is retained as historical proposal, not a compatible wire contract. Current `Source.parent_step` is a native call/item ID, and local `Step.id`/revision/origin domains do not equal sink reconstruction. Do not overwrite these fields or add the previously proposed keys to the exactly-15-key archive manifest.
 
-| Existing or proposed field | Meaning |
-|---|---|
-| `history::sessions::Source.parent` | Original parent native session for a confirmed fork; no guessed parent from matching content |
-| `Source.parent_step` and derived `Step.parent_session` / `Step.parent` | Stable selected parent `Step.id`, not its native cursor; retain native ancestry separately; empty prefix has known parent session and null parent step |
-| Private lineage `parent_revision`, `parent_source` | Selected revision plus source ID, byte start/end and SHA-256, using existing `Step.source`/`origins`; source content and request capabilities are not copied into authority |
-| Archive manifest `parent_session`, proposed `parent_step`, `parent_revision` | Same confirmed linkage; existing `parent_session` alone does not satisfy #300 A2 |
-| Proposed manifest `changed_conditions` | Per field `{before, after, changed}` for model, effort, policy, account label, CLI version and instructions hash; unknown values and unknown comparison are null, never guessed equal or changed |
-| Native source replacement/generation | Rewind preserves predecessor/raw accepted bytes and records the retained boundary; a child is a distinct session/source; copied prefix is provenance, not newly billable work |
-
-The child's first source segment/turn binds the lineage and its actual conditions. Existing manifest conditions remain versioned/append-only; later changes create their own exact segment, never rewrite earlier attribution. Model/conditions belong to the child, not the untouched parent. Unknown inherited effective settings remain unknown with reasons; no instruction text or environment/credential value enters manifest comparison. Root/home scope is already bound by owner admission. History and archive must agree on the exact parent step/revision before claiming lineage acceptance. No sink schema extension is assumed landed: the #283 archive owner and sink owner must acknowledge the proposed additional fields before implementation/upload. Archive unavailability keeps evidence degraded under P1; it never changes native fork success or authorizes a repeat. Required local owner/lineage durability is separate from optional archive delivery.
+[SESSION-LINEAGE-WIRE.md](SESSION-LINEAGE-WIRE.md), token **F300-L20261107-2**, is the single revised portable lineage/condition proposal. It reuses the existing archive range envelope for a read-only sidecar, separates private native evidence from scrubbed archive anchors, and requires centrally reviewed producer/reader integration. No ACK of the Runtime API acknowledges this new field set. Required local lineage durability stays independent of optional delivery.
 
 ## Connected caller and ownership inventory
 
@@ -72,7 +63,7 @@ The child's first source segment/turn binds the lineage and its actual condition
 | `registry/codex/app.rs`, Codex callbacks and shared owned App transport | Native fork/revert requests, correlated responses, prefix/readback, child admission and goal-continuation refusal; retain the one existing control connection |
 | `registry/claude.rs` and forthcoming #285 `claude/control.rs` | Native headless fork args, parent/child ID separation, last-chain cursor and input fencing; recovered transport stays observation-only |
 | `agent/history/{sessions,steps,requests}.rs`, held #315/#326 | History owner resolves stable point/source generation and projects confirmed lineage; never mint writer/reply authority or silently lose media/tail entries |
-| Draft #323 `runtime/src/archive/{mod,store}.rs`, `docs/spec/ARCHIVE.md`, DashQ archive wire | Archive owners integrate extra parent-step/revision/condition fields and immutable source generations under existing `agent-history/1` authority |
+| Draft #323 `runtime/src/archive/{mod,store}.rs`, `docs/spec/ARCHIVE.md`, DashQ archive wire | Archive owners consume only a centrally acknowledged lineage/wire artifact and immutable source generations under existing `agent-history/1` authority |
 | `runtime/src/cli.rs`, history JSON entry point, `agentq/main.rs`, examples/tests | Existing CLI currently exposes turn/adopt/history, not fork/rewind; no new CLI or raw native option escape in the first slice; capability/trait tests first |
 | Orca `codex-structured-rewind.ts`, `claude-rewind-{fork,transcript}.ts`, structured launch and shared session-rewind lifecycle | Future consumer adoption replaces runtime-specific mapping with trait calls/capabilities; keeps UI epochs/drafts locally; not changed here |
 | TaskQ `src/runtime.rs`, `runtime/{owner,owner_stream,protected_app_server}.rs`, `src/transcript.rs`; PilotQ `src/{host,manager,relay}.rs`; AssetQ `src/image_worker{,/protected}.rs` | Later canonical runtime adoption; no new native parsing/copy paths. TaskQ `conversations.rs::fork` forks an unsent product draft, not a native session; do not redirect it silently |
