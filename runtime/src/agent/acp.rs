@@ -247,7 +247,7 @@ impl Session {
                     let question=params["toolCall"]["toolCallId"].as_str().is_some_and(|id|self.question_prefixes.iter().any(|prefix|id.starts_with(prefix)));
                     self.requests.insert(v["id"].to_string(),v["params"].clone());
                     if self.cancelling {self.cancel_requests()?;return Ok(());}
-                    self.pending.push(Event::Request{id:v["id"].clone(),kind:if question {RequestKind::Question}else{RequestKind::Approval},prompt:params["toolCall"]["title"].as_str().map(String::from),choices});
+                    self.pending.push(Event::Request{id:v["id"].clone(),kind:if question {RequestKind::Question}else{RequestKind::Approval},prompt:params["toolCall"]["title"].as_str().map(String::from),choices,questions:vec![]});
                 } else {self.write(&json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32601,"message":"Client method not supported"}}))?;}
                 return Ok(());
             }
@@ -320,6 +320,7 @@ impl Session {
         match control {
             Control::Model(model)=>{self.exchange("session/set_model",json!({"sessionId":self.session,"modelId":model}),false)?;},
             Control::Mode(mode)=>{self.exchange("session/set_mode",json!({"sessionId":self.session,"modeId":mode}),false)?;},
+            Control::Answers{..}=>return Err("question-answers-unsupported".into()),
             Control::Reply{id,option}=>{
                 let request=self.requests.get(&id.to_string()).ok_or("request-unknown")?;
                 if option.as_ref().is_some_and(|id|!request["options"].as_array().into_iter().flatten().any(|o|o["optionId"].as_str()==Some(id))) {return Err("request-option-invalid".into());}

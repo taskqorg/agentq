@@ -57,6 +57,7 @@ fn main() {
     loop {
         let events=r.progress(&mut run).unwrap();
         for event in &events {if let Event::Request{id,..}=event {
+            assert!(matches!(r.control(&mut run,Control::Answers{id:id.clone(),answers:Default::default()}),Err(agent::Failure::Refused(agent::Cause("question-answers-unsupported")))));
             assert!(r.control(&mut run,Control::Reply{id:id.clone(),option:Some("invented".into())}).is_err());
             r.control(&mut run,Control::Reply{id:id.clone(),option:Some("once".into())}).unwrap();
             assert!(r.control(&mut run,Control::Reply{id:id.clone(),option:Some("once".into())}).is_err());

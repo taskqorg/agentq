@@ -5,11 +5,18 @@ use std::collections::HashSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum ToolKind { Shell, Mcp, Web, Other }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RequestKind { Approval, Question }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Choice {pub id:String,pub label:String,pub kind:String}
+
+/// Opaque question/choice IDs are returned to the adapter; free text is a separate answer kind.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Question {pub id:String,pub prompt:String,pub choices:Vec<Choice>,pub multiple:bool,pub free_text:bool}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Answer {Choice(String),Text(String)}
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum Event {
@@ -28,7 +35,7 @@ pub enum Event {
     Quota(Vec<Window>),
     Context { used: Option<u64>, window: Option<u64> },
     /// A native request. The original ID and choices stay opaque; no approval is inferred.
-    Request { id: Value, kind: RequestKind, prompt: Option<String>, choices: Vec<Choice> },
+    Request { id: Value, kind: RequestKind, prompt: Option<String>, choices: Vec<Choice>, questions: Vec<Question> },
     /// Native session metadata, capabilities or an update without a neutral mapping.
     Metadata { kind: String, data: Value },
     Activity,

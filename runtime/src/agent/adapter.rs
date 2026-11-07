@@ -249,6 +249,7 @@ pub enum Control {
     Model(String),
     Mode(String),
     Reply { id: Value, option: Option<String> },
+    Answers { id: Value, answers: BTreeMap<String,Vec<Answer>> },
 }
 
 /// How a session's native account is signed in.
@@ -1158,6 +1159,7 @@ impl Runtime for Adapter {
 
     fn control(&self,run:&mut Run,control:Control)->Result<(),Failure> {
         match &mut self.own_mut(run)?.body {
+            Body::Acp(_) if matches!(control,Control::Answers{..})=>Err(Failure::Refused(Cause("question-answers-unsupported"))),
             Body::Acp(a)=>a.control(control).map_err(Failure::Failed),
             _=>Err(Failure::Refused(Cause("control-unsupported"))),
         }
