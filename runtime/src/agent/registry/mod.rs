@@ -478,6 +478,7 @@ pub(crate) use codex::codex_identity;
 pub(crate) use antigravity::{code_assist,project_identity};
 
 pub(crate) use codex::app;
+pub(in crate::agent) use codex::image_kind as codex_image_kind;
 
 pub(super) use claude::control::Session as ClaudeControl;
 pub use claude::BackgroundJob;

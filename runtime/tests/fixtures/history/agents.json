@@ -1,0 +1,807 @@
+{
+  "hermes": {
+    "path": "sessions/session_fixture.json",
+    "session": "fixture",
+    "rows": {
+      "session_id": "fixture",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Hermes title"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": "answer",
+          "tool_calls": [
+            {
+              "id": "shell",
+              "function": {
+                "name": "terminal",
+                "arguments": "{\"command\":\"printf proof\",\"cwd\":\"/fixture\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "shell",
+          "content": "proof"
+        }
+      ]
+    },
+    "jsonl": false,
+    "assistant_text": "answer"
+  },
+  "gemini": {
+    "path": "tmp/project/chats/session-fixture.json",
+    "session": "fixture",
+    "rows": {
+      "sessionId": "fixture",
+      "messages": [
+        {
+          "type": "user",
+          "content": [
+            {
+              "text": "Gemini title"
+            }
+          ]
+        },
+        {
+          "type": "gemini",
+          "model": "fixture-model",
+          "thoughts": [
+            {
+              "subject": "Plan",
+              "description": "native thought"
+            }
+          ],
+          "content": [
+            {
+              "text": "answer"
+            }
+          ],
+          "toolCalls": [
+            {
+              "id": "shell",
+              "name": "run_shell_command",
+              "args": {
+                "command": "printf proof"
+              },
+              "result": {
+                "stdout": "proof",
+                "exit_code": 0
+              }
+            }
+          ],
+          "tokens": {
+            "input": 10,
+            "output": 5
+          }
+        }
+      ]
+    },
+    "jsonl": false,
+    "assistant_text": "answer"
+  },
+  "cursor": {
+    "path": "projects/project/agent-transcripts/fixture.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "role": "user",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Cursor title"
+            }
+          ]
+        }
+      },
+      {
+        "role": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "copilot": {
+    "path": "session-state/fixture/events.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "session.start",
+        "data": {
+          "sessionId": "fixture"
+        }
+      },
+      {
+        "type": "user.message",
+        "data": {
+          "transformedContent": "Copilot title"
+        }
+      },
+      {
+        "type": "assistant.message",
+        "data": {
+          "content": "answer"
+        }
+      },
+      {
+        "type": "tool.execution_start",
+        "data": {
+          "toolCallId": "shell",
+          "toolName": "bash",
+          "arguments": {
+            "command": "printf proof"
+          }
+        }
+      },
+      {
+        "type": "tool.execution_complete",
+        "data": {
+          "toolCallId": "shell",
+          "success": true,
+          "result": {
+            "stdout": "proof",
+            "exit_code": 0
+          }
+        }
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "cline": {
+    "path": "fixture/fixture.messages.json",
+    "session": "fixture",
+    "rows": {
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Cline title"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "modelInfo": {
+            "id": "fixture-model"
+          },
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "native thought"
+            },
+            {
+              "type": "tool_use",
+              "id": "shell",
+              "name": "Bash",
+              "input": {
+                "command": "printf proof"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "shell",
+              "content": "proof"
+            }
+          ],
+          "toolUseResult": {
+            "stdout": "proof",
+            "stderr": "",
+            "exitCode": 0
+          }
+        }
+      ]
+    },
+    "jsonl": false,
+    "assistant_text": "native thought"
+  },
+  "codebuddy": {
+    "path": "projects/project/fixture.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "message",
+        "role": "user",
+        "sessionId": "fixture",
+        "id": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "CodeBuddy title"
+          }
+        ]
+      },
+      {
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "answer"
+          }
+        ]
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "devin": {
+    "path": "transcripts/fixture.json",
+    "session": "fixture",
+    "rows": {
+      "session_id": "fixture",
+      "steps": [
+        {
+          "metadata": {
+            "is_user_input": true
+          },
+          "text": "Devin title"
+        },
+        {
+          "step_id": 2,
+          "source": "agent",
+          "message": "answer",
+          "tool_calls": [
+            {
+              "tool_call_id": "shell",
+              "function_name": "shell",
+              "arguments": {
+                "command": "printf proof"
+              }
+            }
+          ]
+        },
+        {
+          "step_id": 3,
+          "source": "agent",
+          "observation": {
+            "results": [
+              {
+                "source_call_id": "shell",
+                "content": "proof"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "jsonl": false,
+    "assistant_text": "answer"
+  },
+  "droid": {
+    "path": "sessions/fixture.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "system",
+        "session_id": "fixture"
+      },
+      {
+        "type": "message",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Droid title"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "grok": {
+    "path": "sessions/project/fixture/chat_history.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "<user_info>context</user_info><user_query>Grok title</user_query>"
+          }
+        ]
+      },
+      {
+        "type": "assistant",
+        "content": "answer"
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "jcode": {
+    "path": "sessions/session_fixture.json",
+    "session": "fixture",
+    "rows": {
+      "id": "fixture",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Jcode title"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      ]
+    },
+    "jsonl": false,
+    "assistant_text": "answer"
+  },
+  "kimi": {
+    "path": "sessions/project/session_fixture/agents/main/wire.jsonl",
+    "session": "session_fixture",
+    "rows": [
+      {
+        "type": "metadata",
+        "protocol_version": "1.4"
+      },
+      {
+        "type": "context.append_message",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Kimi title"
+            }
+          ],
+          "origin": {
+            "kind": "user"
+          }
+        }
+      },
+      {
+        "type": "context.append_loop_event",
+        "event": {
+          "type": "content.part",
+          "step": 1,
+          "part": {
+            "type": "text",
+            "text": "answer"
+          }
+        }
+      },
+      {
+        "type": "usage.record",
+        "model": "fixture-model",
+        "usage": {
+          "inputOther": 12,
+          "output": 18,
+          "inputCacheRead": 0,
+          "inputCacheCreation": 0
+        },
+        "usageScope": "turn"
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "kiro": {
+    "path": "sessions/cli/4243babe-c33c-4ca3-8245-689c9e34ba3b.jsonl",
+    "session": "4243babe-c33c-4ca3-8245-689c9e34ba3b",
+    "rows": [
+      {
+        "kind": "Prompt",
+        "data": {
+          "content": [
+            {
+              "kind": "text",
+              "data": "Kiro title"
+            }
+          ]
+        }
+      },
+      {
+        "kind": "AssistantMessage",
+        "data": {
+          "content": [
+            {
+              "kind": "text",
+              "data": "answer"
+            },
+            {
+              "kind": "toolUse",
+              "data": {
+                "name": "Bash",
+                "input": {
+                  "command": "printf proof"
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "muse": {
+    "path": "sessions/2000/01/01/fixture/session.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "session",
+        "id": "fixture"
+      },
+      {
+        "type": "message",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Muse title"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "omp": {
+    "path": "sessions/fixture.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "session",
+        "id": "fixture"
+      },
+      {
+        "type": "message",
+        "id": "prompt",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "omp title"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "id": "reply",
+        "message": {
+          "role": "assistant",
+          "model": "fixture-model",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "native thought"
+            },
+            {
+              "type": "toolCall",
+              "id": "shell",
+              "name": "bash",
+              "arguments": {
+                "command": "printf proof"
+              }
+            },
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "id": "result",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "shell",
+          "content": [
+            {
+              "type": "text",
+              "text": "proof"
+            }
+          ]
+        }
+      },
+      {
+        "type": "compaction",
+        "summary": "native summary"
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "pi": {
+    "path": "sessions/fixture.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "session",
+        "id": "fixture"
+      },
+      {
+        "type": "message",
+        "id": "prompt",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "pi title"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "id": "reply",
+        "message": {
+          "role": "assistant",
+          "model": "fixture-model",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "native thought"
+            },
+            {
+              "type": "toolCall",
+              "id": "shell",
+              "name": "bash",
+              "arguments": {
+                "command": "printf proof"
+              }
+            },
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "id": "result",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "shell",
+          "content": [
+            {
+              "type": "text",
+              "text": "proof"
+            }
+          ]
+        }
+      },
+      {
+        "type": "compaction",
+        "summary": "native summary"
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "openclaw": {
+    "path": "agents/default/sessions/fixture.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "session",
+        "id": "fixture"
+      },
+      {
+        "type": "message",
+        "id": "prompt",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "openclaw title"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "id": "reply",
+        "message": {
+          "role": "assistant",
+          "model": "fixture-model",
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": "native thought"
+            },
+            {
+              "type": "toolCall",
+              "id": "shell",
+              "name": "bash",
+              "arguments": {
+                "command": "printf proof"
+              }
+            },
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "id": "result",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "shell",
+          "content": [
+            {
+              "type": "text",
+              "text": "proof"
+            }
+          ]
+        }
+      },
+      {
+        "type": "compaction",
+        "summary": "native summary"
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "opencode": {
+    "path": "opencode.db",
+    "session": "fixture",
+    "rows": {
+      "sqlite": true
+    },
+    "jsonl": false,
+    "assistant_text": "answer"
+  },
+  "opencode2": {
+    "path": "opencode.db",
+    "session": "fixture",
+    "rows": {
+      "sqlite": true
+    },
+    "jsonl": false,
+    "assistant_text": "answer"
+  },
+  "zcode": {
+    "path": "db/db.sqlite",
+    "session": "fixture",
+    "rows": {
+      "sqlite": true
+    },
+    "jsonl": false,
+    "assistant_text": "answer"
+  },
+  "qoder": {
+    "path": "projects/project/fixture.jsonl",
+    "session": "fixture",
+    "rows": [
+      {
+        "type": "workspace-directories",
+        "sessionId": "fixture",
+        "directories": [
+          "/fixture"
+        ]
+      },
+      {
+        "type": "user",
+        "sessionId": "fixture",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Qoder title"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "jsonl": true,
+    "assistant_text": "answer"
+  },
+  "rovo": {
+    "path": "sessions/fixture/session_context.json",
+    "session": "fixture",
+    "rows": {
+      "message_history": [
+        {
+          "kind": "request",
+          "parts": [
+            {
+              "part_kind": "user-prompt",
+              "content": "Rovo title"
+            }
+          ]
+        },
+        {
+          "kind": "response",
+          "parts": [
+            {
+              "part_kind": "text",
+              "content": "answer"
+            }
+          ]
+        }
+      ]
+    },
+    "jsonl": false,
+    "assistant_text": "answer"
+  }
+}

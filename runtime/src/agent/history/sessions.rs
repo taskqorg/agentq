@@ -27,6 +27,7 @@ impl Session {
         checkpoint["resolved"]=json!({"runtime":self.runtime,"source":self.resolved,"parent":self.parent,"parent_step":self.parent_step,"children":self.children});
         checkpoint
     }
+    pub fn source_bytes(&self,key:&str,start:u64,length:u64)->Res<Vec<u8>> {super::sources::source_bytes(&self.history,&self.path,key,start,length)}
     pub fn read_bytes(&self, start:u64, length:u64)->Res<Vec<u8>> {self.history.read_bytes(&self.path,start,length)}
     /// Explicitly adopt and acquire terminal resume authority; source IDs resolve inside the adapter.
     pub fn resume_command(&self, launch:&super::super::Launch, native:&[super::super::NativeProcess])->Res<super::super::ResumeCommand> {
@@ -51,9 +52,11 @@ fn walk(root:&Path, out:&mut Vec<PathBuf>) -> Res<()> {
     Ok(())
 }
 
-fn source_format(runtime:&str,format:&str)->Res<()> {
-    if super::super::registry::protocol(client(runtime)?).history_formats.contains(&format) {Ok(())}
-    else {Err("history source format differs from runtime".into())}
+pub(super) fn source_format(runtime:&str,format:&str)->Res<()> {
+    let allowed=if let Some(spec)=super::sources::get(runtime).filter(|s|super::sources::external(s.format)) {
+        spec.format==format
+    }else{super::super::registry::protocol(client(runtime)?).history_formats.contains(&format)};
+    if allowed {Ok(())}else{Err("history source format differs from runtime".into())}
 }
 
 fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
@@ -85,6 +88,7 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
 }
 
 fn discover(runtime:&str, home:Option<&Path>) -> Res<Vec<Source>> {
+    if let Some(spec)=super::sources::get(runtime).filter(|s|super::sources::external(s.format)){return super::sources::list(spec.name,home);}
     let client=client(runtime)?;
     if !matches!(runtime,"codex"|"claude"|"antigravity") {return Err("history-discovery-unsupported; pass an explicit source".into());}
     let home=home.map(Path::to_path_buf).or_else(||super::super::base_home(client)).ok_or("history home unknown")?;
@@ -102,11 +106,22 @@ pub fn list(runtime:&str,home:Option<&Path>)->Res<Vec<Source>> {
     discover(runtime,home)
 }
 
+fn parent_source<'a>(runtime:&str,child:&Source,sources:&'a [Source])->Res<Option<&'a Source>> {
+    let Some(parent)=&child.parent else{return Ok(None)};let mut found=None;
+    for source in sources.iter().filter(|s|&s.session==parent) {
+        if runtime=="claude" && !child.path.starts_with(source.path.with_extension("")) {continue;}
+        if !super::sources::same_family(runtime,&source.path,&child.path)? {continue;}
+        if found.is_some(){return Err("history parent has multiple sources; native family ambiguous".into());}
+        found=Some(source);
+    }
+    Ok(found)
+}
+
 fn link_parents(runtime:&str,sources:&mut [Source])->Res<()> {
+    if super::sources::get(runtime).is_some_and(|s|super::sources::external(s.format)){return Ok(());}
     let mut parents=std::collections::BTreeMap::<PathBuf,Vec<usize>>::new();
     for (index,child) in sources.iter().enumerate() {
-        let Some(parent)=&child.parent else{continue};
-        if let Some(source)=sources.iter().find(|s|&s.session==parent && (runtime!="claude" || child.path.starts_with(s.path.with_extension("")))) {
+        if let Some(source)=parent_source(runtime,child,sources)? {
             parents.entry(source.path.clone()).or_default().push(index);
         }
     }
@@ -127,13 +142,13 @@ fn link_parents(runtime:&str,sources:&mut [Source])->Res<()> {
 }
 
 pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>, saved:Option<&Value>) -> Res<Session> {
-    client(runtime)?;
+    if super::sources::get(runtime).is_none(){return Err("history runtime unsupported".into());}
     if let Some(saved)=saved.filter(|s|s["resolved"].is_object()) {
         let requested_source=source;
         let resolved=&saved["resolved"];
         let source:Source=serde_json::from_value(resolved["source"].clone()).map_err(|_|"history checkpoint source invalid")?;
         source_format(runtime,&source.format)?;
-        if resolved["runtime"]!=runtime || ![source.id.as_str(),source.session.as_str()].contains(&session) || source.id!=crate::sha256_hex(source.path.to_string_lossy().as_bytes()) {
+        if resolved["runtime"]!=runtime || ![source.id.as_str(),source.session.as_str()].contains(&session) || source.id!=super::sources::source_id(runtime,&source.path,&source.session) {
             return Err("history checkpoint binding differs".into());
         }
         if requested_source.is_some_and(|p|p!=source.path) || !source.path.is_absolute() {return Err("history checkpoint source invalid".into());}
@@ -145,28 +160,32 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
     }
     let sources=if source.is_some(){vec![]}else{discover(runtime,home)?};
     let source=if let Some(path)=source {
-        let found=identify(runtime,path)?.ok_or("history session identity unavailable")?;
+        let found=if super::sources::get(runtime).is_some_and(|s|super::sources::external(s.format)) {
+            super::sources::identify(runtime,path)?.into_iter().find(|s|s.session==session || s.id==session).ok_or("history session identity unavailable")?
+        }else{identify(runtime,path)?.ok_or("history session identity unavailable")?};
         if found.session!=session && found.native_session!=session && found.id!=session {return Err("history native session differs".into());}found
     } else {
         let matches:Vec<_>=sources.iter().filter(|s|s.id==session || s.session==session).cloned().collect();
         if matches.len()!=1 {return Err(if matches.is_empty(){"history session not found"}else{"history session has multiple sources; pass a source id from history_sessions"}.into());}
         let selected=matches.into_iter().next().unwrap();
         let mut family=vec![selected];
-        if let Some(parent)=&family[0].parent {
-            if let Some(source)=sources.iter().find(|s|&s.session==parent && (runtime!="claude" || family[0].path.starts_with(s.path.with_extension("")))) {family.push(source.clone());}
-            link_parents(runtime,&mut family)?;
-        }
+        if let Some(parent)=parent_source(runtime,&family[0],&sources)? {family.push(parent.clone());link_parents(runtime,&mut family)?;}
         family.remove(0)
     };
+    source_format(runtime,&source.format)?;
     let label=source.path.to_str().ok_or("history source path invalid UTF-8")?;
     let mut history=if let Some(saved)=saved {
         let h=History::recover(saved)?;
         if h.source!=label || h.session!=source.session || h.native_session!=source.native_session || h.format!=source.format {return Err("history checkpoint binding differs".into());}h
     }else{History::new(&source.format,label,&source.session)?};
     history.native_session=source.native_session.clone();history.native_parent=if runtime=="claude" && source.parent.is_some(){source.parent.clone()}else{None};
-    let children=sources.iter().filter(|s|s.parent.as_ref()==Some(&source.native_session) && (runtime!="claude" || s.path.starts_with(source.path.with_extension(""))))
-        .map(|s|(s.native_session.clone(),s.id.clone())).collect();
-    let parent=source.parent.as_ref().and_then(|parent|sources.iter().find(|s|&s.session==parent && (runtime!="claude" || source.path.starts_with(s.path.with_extension(""))))).map(|s|s.id.clone()).or(source.parent.clone());
+    let mut children=std::collections::BTreeMap::new();
+    for child in sources.iter().filter(|s|s.parent.as_ref()==Some(&source.session)) {
+        if parent_source(runtime,child,&sources)?.is_some_and(|parent|parent.id==source.id) {
+            if children.insert(child.native_session.clone(),child.id.clone()).is_some(){return Err("history child has multiple sources; native family ambiguous".into());}
+        }
+    }
+    let parent=parent_source(runtime,&source,&sources)?.map(|s|s.id.clone()).or(source.parent.clone());
     Ok(Session {resolved:source.clone(),history,path:source.path,runtime:runtime.into(),parent,parent_step:source.parent_step,children})
 }
 
@@ -192,8 +211,21 @@ pub fn request(request:&str)->Res<Value> {
     if v["action"]=="list" {return serde_json::to_value(rt.history_sessions(home)?).map_err(|e|e.to_string());}
     let session=v["session"].as_str().ok_or("history session required")?;
     let mut reader=rt.history(session,home,path("source")?,v.get("checkpoint").filter(|v|!v.is_null()))?;
+    if v["action"]=="media" || v["action"]=="media_bytes" {
+        let media=reader.media()?;
+        if v["action"]=="media_bytes" {
+            let key=v["key"].as_str().ok_or("media key required")?;
+            let start=v["start"].as_u64().ok_or("media start required")?;
+            let length=v["length"].as_u64().ok_or("media length required")?;
+            return Ok(json!({"bytes":media.read(key,start,length)?,"checkpoint":reader.checkpoint()}));
+        }
+        return Ok(json!({"media":media.items,"steps":media.steps(),"checkpoint":reader.checkpoint()}));
+    }
     if v["action"]=="live" {
         return serde_json::to_value(reader.live_data(path("statusline")?)?).map_err(|e|e.to_string());
+    }
+    if v["action"]=="source_bytes" {
+        return Ok(json!({"bytes":reader.source_bytes(v["key"].as_str().ok_or("history source key required")?,v["start"].as_u64().ok_or("history start required")?,v["length"].as_u64().ok_or("history length required")?)?,"checkpoint":reader.checkpoint()}));
     }
     if v["action"]=="bytes" {
         let start=v["start"].as_u64().ok_or("history start required")?;

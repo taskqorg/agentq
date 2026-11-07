@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StepKind { Message, Thinking, Shell, FileChange, Tool, Mcp, Web, Subagent, Image, Question, Approval, Compaction, Usage, Context, Windows, Plan, Todo, FileRollup, Hook, ReadTruncation, Diagnostics, Queue, Link, Metadata, Stop, Unknown }
+pub enum StepKind { Message, Thinking, Shell, FileChange, Tool, Mcp, Web, Subagent, Image, Media, Question, Approval, Compaction, Usage, Context, Windows, Plan, Todo, FileRollup, Hook, ReadTruncation, Diagnostics, Queue, Link, Metadata, Model, Stop, Unknown }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn { pub id: Option<String>, pub native_id:Option<String>, pub session: String, pub unknown: Option<String> }
@@ -34,11 +34,12 @@ pub struct Step {
 }
 
 #[derive(Debug, Serialize)]
-pub struct StepPage { pub steps: Vec<Step>, pub more: bool, pub pending_bytes: u64, pub checkpoint: Value }
+pub struct StepPage { pub generation:Option<u64>, pub reset:bool, pub steps: Vec<Step>, pub more: bool, pub pending_bytes: u64, pub checkpoint: Value }
 
 impl History {
     /// Caller-selected source window. A record may cross the window; it is never cut or discarded.
     pub fn steps(&mut self, path: &Path, bytes: u64) -> Res<StepPage> {
+        if super::sources::external(&self.format){return super::sources::steps(self,path,bytes);}
         self.steps_from(path,bytes,0)
     }
 
@@ -95,7 +96,7 @@ impl History {
         let pending = file.metadata().map_err(|e|e.to_string())?.len().saturating_sub(end);
         self.offset = end; self.prefix = prefix; self.identity = Some(identity);
         let mut steps:Vec<_>=changed.into_values().collect();steps.sort_by_key(|s|(s.revision,s.part));
-        Ok(StepPage {steps, more:pending > 0, pending_bytes:pending, checkpoint:self.checkpoint()})
+        Ok(StepPage {steps,generation:None,reset:false, more:pending > 0, pending_bytes:pending, checkpoint:self.checkpoint()})
     }
 
     /// Exact bytes; no text decoding, clipping, timeout or extra storage.
@@ -111,6 +112,29 @@ impl History {
     }
 }
 
+pub(super) fn contextual_steps(format:&str,event:&Value,value:&Value,turn:&mut Option<Turn>,presentation:&mut Value)->Vec<Step> {
+            let p=value.get("payload").or(value.get("params")).unwrap_or(&value);
+            let prompt=value["promptId"].as_str().filter(|_|matches!(value["type"].as_str(),Some("user"|"assistant")));
+            let native=p["turn_id"].as_str().or(p["turnId"].as_str()).or(prompt);
+            let user=value["type"]=="user" && value["isMeta"]!=true && (value["message"]["content"].is_string()
+                || value["message"]["content"].as_array().is_some_and(|a|a.iter().any(|b|b["type"]=="text") && !a.iter().any(|b|b["type"]=="tool_result")));
+            let boundary=user || value["type"]=="turn.started" || value["type"]=="system" && value["subtype"]=="init"
+                || value["event"]=="init" || value["type"]=="USER_INPUT";
+            if native.is_some() || boundary {
+                *turn=Some(Turn {id:Some(native.map(String::from).unwrap_or_else(||format!("source:{}",event["id"].as_str().unwrap_or_default()))),native_id:native.map(String::from),session:event["session"].as_str().unwrap_or_default().into(),
+                    unknown:if native.is_none(){Some("native turn id not reported; grouping derived from the source boundary".into())}else{None}});
+            }
+            let facts=presentation_facts(&value);
+            if !facts["model"].is_null() && facts["model"]!=presentation["model"] {presentation["effort"]=Value::Null;}
+            for name in ["model","effort","cli_version"] {if !facts[name].is_null(){presentation[name]=facts[name].clone();}}
+    let mut out=decode(format,event,value);
+    for step in &mut out {
+                for name in ["model","effort","cli_version"] {if step.presentation[name].is_null() && !presentation[name].is_null() {step.presentation[name]=presentation[name].clone();step.presentation["unknown"].as_object_mut().unwrap().remove(name);}}
+                if step.turn.id.is_none() {if let Some(turn)=turn.as_ref() {step.turn=turn.clone();}}
+    }
+    out
+}
+
 fn merge(old:&mut Value,new:&Value) {
     if let (Some(old),Some(new))=(old.as_object_mut(),new.as_object()) {
         for (key,value) in new {if !value.is_null() {
@@ -119,7 +143,7 @@ fn merge(old:&mut Value,new:&Value) {
     }else if !new.is_null(){*old=new.clone();}
 }
 
-fn revise(previous:&Step,mut next:Step)->Step {
+pub(super) fn revise(previous:&Step,mut next:Step)->Step {
     if matches!(next.kind,StepKind::Tool) && !matches!(previous.kind,StepKind::Tool|StepKind::Unknown) {next.kind=previous.kind;}
     if next.kind!=StepKind::Usage && next.data["type"]!="agentq_control" {
     let mut data=previous.data.clone();
@@ -161,7 +185,7 @@ pub(super) fn base_step(event: &Value, record: &Value, item: &Value, kind: StepK
         else if matches!(item["type"].as_str(),Some("tool_result"|"function_call_output"|"custom_tool_call_output")) {"completed".into()}
         else {first(item, &["status", "state"]).as_str().map(String::from).unwrap_or_else(||
             if matches!(p["type"].as_str(),Some("item_completed")) || record["type"] == "item.completed" || record["method"] == "item/completed" || item["type"] == "tool_result" {"completed".into()} else {"unknown".into()})};
-    let author=event["author"].as_str().unwrap_or("unknown");
+    let author=if matches!(item["type"].as_str(),Some("tool_result"|"function_call_output"|"custom_tool_call_output")){"tool"}else{event["author"].as_str().unwrap_or("unknown")};
     let author=if author=="unknown" {match kind {
         StepKind::Thinking=>"assistant",StepKind::Shell|StepKind::FileChange|StepKind::Mcp=>"tool",StepKind::Compaction|StepKind::Usage=>"system",_=>author,
     }}else{author};
@@ -237,7 +261,7 @@ fn data(kind:StepKind, item:&Value, record:&Value)->Value {
             let changes=item.get("changes").cloned().unwrap_or_else(||json!([{
                 "path":if first(result,&["filePath","file_path","path"]).is_null(){first(input,&["file_path","path"])}else{first(result,&["filePath","file_path","path"])},
                 "before":input["old_string"],"after":first(input,&["new_string","content"]),
-                "patch":first(result,&["structuredPatch","diff","patch"])}]));
+                "patch":if first(result,&["structuredPatch","diff","patch","patchText"]).is_null(){first(input,&["patchText","diff","patch"])}else{first(result,&["structuredPatch","diff","patch","patchText"])}}]));
             json!({"changes":changes,"stdout":result["stdout"],"stderr":result["stderr"],"is_error":item["is_error"]})
         }
         StepKind::Usage if record["type"]=="token_usage_record" => json!({"request_id":item["response_id"],"usage":item["usage"],"turn_total":item["turn_token_usage"],"session_total":item["thread_token_usage"],"source":"native-request"}),
@@ -259,11 +283,11 @@ pub(super) fn structured(value:&Value)->Value {
 
 fn tool_kind(name: &str) -> StepKind {
     match name {
-        "Bash"|"bash"|"shell"|"exec_command"|"write_stdin"|"run_command"|"terminal" => StepKind::Shell,
-        "Edit"|"Write"|"MultiEdit"|"apply_patch" => StepKind::FileChange,
+        "Bash"|"bash"|"shell"|"Shell"|"powershell"|"shell_command"|"exec_command"|"write_stdin"|"run_command"|"terminal"|"run_shell_command"|"execute_command"|"ShellCommand"|"Execute" => StepKind::Shell,
+        "Edit"|"Write"|"MultiEdit"|"apply_patch"|"edit_file"|"write_file"|"replace" => StepKind::FileChange,
         "Task"|"Agent"|"spawn_agent"|"wait_agent"|"send_input"|"resume_agent" => StepKind::Subagent,
         "AskUserQuestion"|"request_user_input" => StepKind::Question,
-        "WebSearch"|"WebFetch"|"web_search"|"web_fetch" => StepKind::Web,
+        "WebSearch"|"WebFetch"|"web_search"|"web_fetch"|"websearch"|"webfetch" => StepKind::Web,
         n if n.starts_with("mcp__") => StepKind::Mcp,
         _ => StepKind::Tool,
     }
@@ -346,10 +370,13 @@ fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
                 "text"|"Text"|"input_text"|"output_text" => StepKind::Message,
                 "thinking"|"redacted_thinking"|"reasoning" => StepKind::Thinking,
                 "image"|"Image"|"input_image"|"image_url"|"local_image"|"LocalImage" => StepKind::Image,
+                "document"|"audio"|"video"=>StepKind::Media,
                 "server_tool_use"=>StepKind::Web,
                 "tool_search_tool_result"=>StepKind::Tool,
+                "tool_use" if block["_history_kind"]=="shell"=>StepKind::Shell,
+                "tool_use" if block["server"].is_string()=>StepKind::Mcp,
                 "tool_use" => tool_kind(block["name"].as_str().unwrap_or_default()),
-                "tool_result" if record["toolUseResult"].get("stdout").is_some() || record["toolUseResult"].get("stderr").is_some() => StepKind::Shell,
+                "tool_result" if record["toolUseResult"].get("stdout").is_some() || record["toolUseResult"].get("stderr").is_some() || record["toolUseResult"].get("exit_code").is_some() || record["toolUseResult"].get("exitCode").is_some() => StepKind::Shell,
                 "tool_result" if record["toolUseResult"].get("structuredPatch").is_some() => StepKind::FileChange,
                 "tool_result" => StepKind::Tool,
                 _ => StepKind::Unknown,
@@ -357,7 +384,7 @@ fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
             let data = data(kind,block,record);
             let mut identity = block.clone();
             if first(&identity,&["tool_use_id","call_id","id"]).is_null() {
-                if let Some(id)=item.get("id").or(record.get("uuid")) {if !identity.is_object(){identity=json!({});}identity["id"] = json!(format!("{}:{index}",id.as_str().unwrap_or_default()));}
+                if let Some(id)=item["id"].as_str().or(record["uuid"].as_str()) {if !identity.is_object(){identity=json!({});}identity["id"] = json!(format!("{id}:{index}"));}
             }
             out.push(base_step(event,record,&identity,kind,data,index));
         }
@@ -372,9 +399,10 @@ fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
         "WebSearch"|"web_search_call"|"webSearch" => StepKind::Web,
         "CollabAgentToolCall"|"collabAgentToolCall" => StepKind::Subagent,
         "SubAgentActivity" => StepKind::Subagent,
-        "ImageView"|"image_view"|"imageGeneration" => StepKind::Image,
+        name if super::super::registry::codex_image_kind(name).is_some() => StepKind::Image,
         "ContextCompaction"|"context_compacted"|"compaction" => StepKind::Compaction,
-        "token_count" => StepKind::Usage,
+        "token_count"|"usage" => StepKind::Usage,
+        "plan"=>StepKind::Plan,"todo"|"todos"=>StepKind::Todo,"model_change"|"model-change"|"model.change"=>StepKind::Model,"background_task"|"subagent"=>StepKind::Subagent,
         _ if record["type"]=="token_usage_record" => StepKind::Usage,
         "function_call"|"custom_tool_call"|"tool_use" => tool_kind(item["name"].as_str().unwrap_or_default()),
         "function_call_output"|"custom_tool_call_output"|"tool_result" => StepKind::Tool,

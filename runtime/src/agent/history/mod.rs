@@ -5,6 +5,8 @@ mod requests;
 pub mod sessions;
 pub mod stop;
 pub mod live;
+pub mod media;
+pub mod sources;
 pub use steps::{Step, StepKind, StepPage, Turn};
 use serde_json::{Value, json};
 use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
@@ -14,7 +16,8 @@ const FORMATS: &[&str] = &["codex-exec", "codex-rollout", "codex-app-server", "c
 
 /// Adapter support is distinct from native qualification. Version and OS are caller readback.
 pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res<Value> {
-    if !FORMATS.contains(&format) { return Err("history transport unsupported".into()); }
+    if !FORMATS.contains(&format) && !sources::external(format) { return Err("history transport unsupported".into()); }
+    if let Some(spec)=sources::SPECS.iter().find(|s|s.format==format && sources::external(format)){return sources::capability(spec.name);}
     let sidecar = format == "antigravity-sidecar";
     let app = format == "codex-app-server";
     let mut features = serde_json::Map::new();
@@ -49,9 +52,13 @@ pub struct History {
     native_session: String,
     native_session_alias: Option<String>,
     native_parent: Option<String>,
+    caller_runtime: Option<String>,
     offset: u64,
     identity: Option<String>,
     prefix: String,
+    snapshot_digest:Option<String>,
+    snapshot_revision:u64,
+    snapshot_next:u64,
 }
 
 #[derive(Debug)]
@@ -65,10 +72,21 @@ pub struct Page {
 
 impl History {
     pub fn new(format: &str, source: &str, session: &str) -> Res<Self> {
-        if super::registry::history_protocol(format).is_none() { return Err("history transport unsupported".into()); }
+        if super::registry::history_protocol(format).is_none() && !sources::external(format) { return Err("history transport unsupported".into()); }
         if source.is_empty() || session.is_empty() { return Err("history source/session required".into()); }
-        Ok(Self {format:format.into(), source:source.into(), session:session.into(), native_session:session.into(), native_session_alias:None, native_parent:None, offset:0,
-            identity:None, prefix:crate::sha256_hex(b"")})
+        Ok(Self {format:format.into(), source:source.into(), session:session.into(), native_session:session.into(), native_session_alias:None, native_parent:None, caller_runtime:None, offset:0,
+            identity:None, prefix:crate::sha256_hex(b""),snapshot_digest:None,snapshot_revision:0,snapshot_next:0})
+    }
+
+    /// Explicit caller observation; absent native identity is never inferred from the binding.
+    pub fn caller(runtime:&str,format:&str,source:&str,binding:&str,native_session:Option<&str>)->Res<Self> {
+        sessions::source_format(runtime,format)?;
+        if sources::external(format){return Err("caller history requires a native stream format".into());}
+        if native_session.is_some_and(str::is_empty){return Err("history native session invalid".into());}
+        let mut history=Self::new(format,source,binding)?;
+        history.caller_runtime=Some(runtime.into());
+        history.native_session=native_session.unwrap_or_default().into();
+        Ok(history)
     }
 
     /// Bind a caller-validated copied Claude job; this grants observation only.
@@ -83,27 +101,40 @@ impl History {
     pub fn checkpoint(&self) -> Value {
         let mut v=json!({"schema":1,"format":self.format,"source":self.source,"session":self.session,
             "native_session":self.native_session,"native_parent":self.native_parent,
-            "offset":self.offset,"identity":self.identity,"prefix":self.prefix});
+            "offset":self.offset,"identity":self.identity,"prefix":self.prefix,"snapshot_digest":self.snapshot_digest,"snapshot_revision":self.snapshot_revision,"snapshot_next":self.snapshot_next});
         if let Some(alias)=&self.native_session_alias {v["native_session_alias"]=json!(alias);}
+        if let Some(runtime)=&self.caller_runtime {
+            v["caller_runtime"]=json!(runtime);
+            if self.native_session.is_empty(){v["native_session"]=Value::Null;}
+        }
         v
     }
 
     pub fn recover(v: &Value) -> Res<Self> {
         if v["schema"] != 1 { return Err("history checkpoint schema invalid".into()); }
         let field = |k: &str| v[k].as_str().ok_or_else(|| format!("history checkpoint {k} invalid"));
-        let mut h = Self::new(field("format")?, field("source")?, field("session")?)?;
+        let mut h=match v.get("caller_runtime") {
+            None=>Self::new(field("format")?,field("source")?,field("session")?)?,
+            Some(Value::String(runtime))=>{
+                let native=match &v["native_session"] {Value::Null=>None,Value::String(s)=>Some(s.as_str()),_=>return Err("history checkpoint native session invalid".into())};
+                if v["native_session_alias"].is_string() || !v["native_parent"].is_null(){return Err("caller history cannot claim native provenance".into());}
+                Self::caller(runtime,field("format")?,field("source")?,field("session")?,native)?
+            },
+            _=>return Err("history checkpoint caller runtime invalid".into()),
+        };
         match v.get("native_session_alias") {
             None | Some(Value::Null) => {},
             Some(Value::String(alias)) => h=Self::with_native_session_alias(&h.format,&h.source,&h.session,alias)?,
             _ => return Err("history native session alias invalid".into()),
         }
-        if let Some(native)=v.get("native_session") {h.native_session=native.as_str().filter(|s|!s.is_empty()).ok_or("history checkpoint native session invalid")?.into();}
+        if let Some(native)=v.get("native_session").filter(|_|h.caller_runtime.is_none()) {h.native_session=native.as_str().filter(|s|!s.is_empty()).ok_or("history checkpoint native session invalid")?.into();}
         h.native_parent=match &v["native_parent"] {Value::Null=>None,Value::String(s) if !s.is_empty()=>Some(s.clone()),_=>return Err("history checkpoint native parent invalid".into())};
         h.offset = v["offset"].as_u64().ok_or("history checkpoint offset invalid")?;
         h.prefix = field("prefix")?.into();
         if h.prefix.len() != 64 || !h.prefix.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("history checkpoint prefix invalid".into()); }
-        h.identity = match &v["identity"] { Value::Null if h.offset == 0 => None,
+        h.identity = match &v["identity"] { Value::Null if h.offset == 0 || sources::external(&h.format) => None,
             Value::String(s) if !s.is_empty() => Some(s.clone()), _ => return Err("history checkpoint identity invalid".into()) };
+        h.snapshot_digest=v["snapshot_digest"].as_str().map(String::from);h.snapshot_revision=v["snapshot_revision"].as_u64().unwrap_or(0);h.snapshot_next=v["snapshot_next"].as_u64().unwrap_or(0);
         Ok(h)
     }
 
@@ -179,6 +210,7 @@ impl History {
         let mut file = File::open(path).map_err(|e| format!("history unavailable: {e}"))?;
         if !file.metadata().map_err(|e| e.to_string())?.is_file() { return Err("history not a regular file".into()); }
         let identity = native::file_id(&file)?;
+        if sources::external(&self.format){return Ok((file,identity));}
         if self.identity.as_ref().is_some_and(|id| *id != identity) { return Err("history replaced".into()); }
         if native::digest_prefix(&mut file, self.offset)? != self.prefix { return Err("history truncated or rewritten".into()); }
         if self.offset > 0 {
@@ -193,8 +225,9 @@ impl History {
     fn event(&self, v: &Value, raw: &str, offset: u64) -> Res<Value> {
         let protocol=super::registry::history_protocol(&self.format).ok_or("history transport unsupported")?;
         let native_session=requests::session(v).or_else(||(protocol.history_session)(&self.format,v,raw));
+        if self.caller_runtime.is_some() && native_session.as_deref()==Some(""){return Err("history native session invalid".into());}
         let provenance=(protocol.history_provenance)(&self.format,v,offset);
-        if !provenance && native_session.as_deref().is_some_and(|s|s!=self.native_session && Some(s)!=self.native_session_alias.as_deref()) {return Err("history native session differs".into());}
+        if (!provenance || self.caller_runtime.is_some()) && native_session.as_deref().is_some_and(|s|s!=self.native_session && Some(s)!=self.native_session_alias.as_deref()) {return Err("history native session differs".into());}
         if self.native_parent.as_ref().is_some_and(|parent|(protocol.history_parent)(v).as_ref().is_some_and(|id|id!=parent)) {return Err("history native parent differs".into());}
         let (author,kind,item,blocks,limited)=(protocol.history_normalize)(&self.format,v);
         let validity=(protocol.history_validity)(v);
@@ -211,6 +244,10 @@ impl History {
             "lifecycle":(protocol.lifecycle)(v),"permission_mode":(protocol.permission_mode)(v),
             "time":time,"author":author,"kind":kind,"item_id":item,"blocks":blocks,"limited":limited});
         if aliased {event["native_session"]=json!(native_session);}
+        if let Some(runtime)=&self.caller_runtime {
+            event["caller_runtime"]=json!(runtime);event["native_session"]=json!(native_session);
+            if native_session.is_none(){event["unknown"]=json!({"native_session":"native session not reported; caller binding only"});}
+        }
         Ok(event)
     }
 }

@@ -1,6 +1,7 @@
 //! agentq-runtime (agentq.md § 12, docs/spec/RUNTIME.md): Codex and Claude worker turns for every consumer, with
 //! optional AgentQ optimization per launch. Moved from CoreQ v0.18.0 `agent`; it depends only on CoreQ primitives.
 pub mod agent;
+pub mod archive;
 pub mod cli;
 pub mod optimization;
 

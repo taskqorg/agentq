@@ -1029,3 +1029,124 @@ Source-fixture provenance, adapter conclusions and remaining native gaps:
 - During adoption the CoreQ `agent` module stays frozen and compatible. Each consumer adopts an immutable runtime revision through its own contract and qualifies its real native paths; CoreQ retires its module only after every inventoried consumer adopted ([adoption](RUNTIME.md#adoption-and-rollback)).
 
 ACP and JSONL RPC candidates use the same unlimited stream transport and canonical history steps. Explicit-source history is available through the runtime trait; native source discovery for unqualified candidates reads unsupported rather than guessing a directory layout.
+
+## History media
+
+Caller-owned physical logs use `History::caller(runtime, format, source, binding,
+native_session)` with an explicit caller binding and optional expected native ID.
+Missing native identity stays null across steps, media origins and recovery; a
+native ID appearing without that binding, or contradicting it, refuses. Registered
+runtime/format binding is checked before reading and at recovery. This reader
+never creates a resolved native Session, resume/adopt/reply authority or a native
+session identity from its caller label.
+
+`History::media(path)` reads only positively typed media references in that explicit
+physical source through the shared catalog and byte/hash/range checks. It never
+scans session-wide generated-artifact directories, even when the caller label
+resembles a native ID or an expected native ID is supplied. `Session::media()`
+delegates to the same implementation with its separately validated native scope;
+only that scope retains existing native generated-artifact discovery. Arbitrary
+paths and quoted prose confer no additional file authority.
+
+`Session::media()` derives a `MediaCatalog` from the same complete native records as
+steps. Each descriptor has kind, MIME, name, size, SHA-256 and a source (inline,
+local path, generated asset or URL), native step/origin links and explicit unknown
+or missing reasons. Claude image/document and nested tool-result blocks, Codex
+input_image/local_image/ImageView/generated assets and Antigravity brain artifact
+references are supported. Codex generated_images/<native-session> and the selected
+Antigravity brain directory are additional native session sources. Structured tool/file-change path references are inspected;
+Only recognized native media blocks and structured tool/file-result fields authorize references; JSON in assistant/user prose or arbitrary nested objects does not. Quoted conversations and text/prose containers revoke inherited tool-result authority. Sidecar media/tool-call containers are recognized only at the root of a validated Antigravity sidecar record, never from fields in another runtime or nested content. Native event, step and media image spellings share the same native classifier. Each physical source revision is inspected and linked to its logical step, so completion cannot discard earlier references. Implicit generated-asset discovery rejects symlinked roots and ancestors, and rechecks the anchored session directory on reads. Assistant prose and filename extensions never establish media. Video and audio
+classification requires a real file signature. URLs are retained without fetching.
+
+The catalog decodes inline base64 once per read, deduplicates backing bytes by hash,
+and offers `read(key, start, length)` by descriptor ID, SHA-256 or an explicitly
+referenced path. Only references found in that session and native Antigravity brain
+artifacts enter the catalog. A requested arbitrary path refuses. File reads validate
+the content hash before returning a caller-selected byte range; changed, vanished,
+invalid or inaccessible sources remain explicit. No output ceiling, timeout or
+persistent media/steps cache is introduced. Clients choose display and stream ranges.
+Media catalog descriptors can be emitted as media steps without losing original raw
+source ranges. Archive #283 can copy catalog bytes once by hash while available;
+this API does not claim durable retention after files vanish, and does not write an
+archive or a viewer. Viewers treat media as untrusted content.
+
+Runtime `Event::Image` retains the native item identity, whether it is generated,
+its saved path and the full native image item. Codex imageGeneration/image_generation
+and savedPath/saved_path survive the trait boundary, including generation failure
+with no saved path; consumers need no native JSON parsing for those facts.
+
+## History sources
+
+Qualification record: [runtime-history-290.md](../evidence/runtime-history-290.md).
+
+The Runtime trait also resolves history-only adapters. These adapters advertise only
+history; launch, resume, input, control, account and process operations explicitly
+refuse as history-only. The existing execution-runtime enumeration remains unchanged;
+`history::sources::runtimes()` enumerates all history descriptors. No caller branches
+on agent names. Each source has its own small Rust module, adapted from Orca's MIT
+scanner/decoder contracts and fixtures (NOTICE). Search remains outside the runtime.
+
+Initial open and checkpoint recovery validate the exact registered format for the
+selected runtime. History-only adapters bind their SourceSpec format; execution
+runtimes bind their native protocol formats. Another registered source or an
+unregistered format prefix never supplies an exception.
+
+Native JSONL records preserve exact ranges. Whole JSON documents and SQLite stores
+are read as source snapshots: each derived row carries its native JSON pointer or
+SQL table/key, physical file identity/hash and byte-range references. Reconstructed
+rows are labeled as projections, never original file bytes. `source_bytes` reads only
+these native source parts. Snapshot changes produce a new monotonic generation; every page exposes that generation, and the first page of a changed snapshot carries `reset: true` so clients replace the previous view before applying its steps. Stable native row keys keep step identities across rewrites. Cursor revisions remain monotonic;
+client-selected page bytes choose the next rows, including a complete crossing row.
+Unknown native records remain unknown with exact source access; no record cap applies. Every session-bearing record, including recognized nested envelopes and metadata companions, must match the selected native session before any snapshot page is published. Companion bytes participate in the manifest, identity and generation. Identical-byte physical file replacement resets the view.
+
+SQLite native DB/WAL bytes are opened only as files for reading, copied into a private
+temporary directory, checked again for concurrent content or file-identity changes, and queried there. WAL header/frame salts, checksums and complete framing are validated before SQLite can ignore a damaged tail; an invalid committed WAL refuses with an explicit error, never a successful stale projection. A stable raw WAL-index header, when present, binds the committed frame count/checksum and permits excluding a previous generation's physical tail. The private query copy uses only that validated committed prefix; native DB/WAL/index bytes remain unchanged and bound in the source manifest. Native
+-shm files are neither opened for writes nor created. A changing source refuses rather
+than retrying or claiming a consistent snapshot. Temporary query files are removed
+when the read ends. No native checkpoint, vacuum, migration or schema change occurs.
+Derived SQL rows are session-scoped, but raw DB/WAL/index source parts can contain other
+sessions. This local reader grants no archive or sharing authority over those bytes;
+a selected session alone never authorizes sending its entire database off-host.
+
+Explicit home roots, runtime home variables and caller-supplied WSL/UNC homes share
+the same readers. Callers list each explicit home through the same generic request. Sources
+are chosen by opaque IDs; shared databases scope every row to the selected session.
+An absent native proof means fixture-only, even if a CLI happens to be installed.
+Native Mac qualification never claims native Windows or WSL qualification.
+
+| Agent | Default native source under user home | Format | Support target / reason |
+| --- | --- | --- | --- |
+| claude | `.claude/projects` (`CLAUDE_CONFIG_DIR` override) | native | limited: native Mac read proof; unknown shapes retained |
+| codex | `.codex/sessions` (`CODEX_HOME` override) | native | limited: native Mac read proof; unknown shapes retained |
+| antigravity | `.gemini/antigravity-cli/brain` (`ANTIGRAVITY_HOME` override) | native | limited: native Mac read proof; unknown shapes retained |
+| hermes | `.hermes/sessions; .hermes/state.db` (`HERMES_HOME` override) | json/sqlite | limited: native Mac read proof; unknown shapes retained |
+| gemini | `.gemini/tmp` (`GEMINI_CLI_HOME` override) | mixed | fixture-only until native read proof |
+| cursor | `.cursor/projects` (`CURSOR_HOME` override) | jsonl | fixture-only until native read proof |
+| copilot | `.copilot/session-state` (`COPILOT_HOME` override) | jsonl | fixture-only until native read proof |
+| cline | `.cline/data/sessions` (`CLINE_SESSION_DATA_DIR` override) | json | fixture-only until native read proof |
+| codebuddy | `.codebuddy/projects` (`CODEBUDDY_HOME` override) | jsonl | fixture-only until native read proof |
+| devin | `.local/share/devin/cli/transcripts; .local/share/devin/cli/agent_logs` (`DEVIN_HOME` override) | json | fixture-only until native read proof |
+| droid | `.factory/sessions; .factory/projects` (`FACTORY_HOME` override) | jsonl | fixture-only until native read proof |
+| grok | `.grok/sessions` (`GROK_HOME` override) | mixed | fixture-only until native read proof |
+| jcode | `.jcode/sessions` (`JCODE_HOME` override) | json | fixture-only until native read proof |
+| kimi | `.kimi-code/sessions` (`KIMI_CODE_HOME` override) | mixed | fixture-only until native read proof |
+| kiro | `.kiro/sessions/cli` (`KIRO_HOME` override) | mixed | fixture-only until native read proof |
+| muse | `.local/share/muse/sessions` (`XDG_DATA_HOME` override) | jsonl | fixture-only until native read proof |
+| omp | `.omp/agent/sessions` (`OMP_CODING_AGENT_DIR` override) | jsonl | fixture-only until native read proof |
+| openclaw | `.openclaw/agents` (`OPENCLAW_STATE_DIR` override) | jsonl | fixture-only until native read proof |
+| opencode | `.local/share/opencode/.` (`XDG_DATA_HOME` / `OPENCODE_DB` override) | mixed | limited: native Mac read proof; unknown shapes retained |
+| opencode2 | `.local/share/opencode/.` (`XDG_DATA_HOME` / `OPENCODE_DB` override) | sqlite | fixture-only until native read proof |
+| pi | `.pi/agent/sessions` (`PI_CODING_AGENT_DIR` override) | jsonl | fixture-only until native read proof |
+| qoder | `.qoder/projects` (`QODER_HOME` override) | jsonl | fixture-only until native read proof |
+| zcode | `.zcode/cli/db` (`ZCODE_HOME` override) | sqlite | fixture-only until native read proof |
+| rovo | `.rovodev/sessions` (`ROVODEV_HOME` override) | json | fixture-only until native read proof |
+
+Source-specific companions: Cline <id>.messages.json; Kiro <uuid>.jsonl beside its
+metadata; Grok chat_history.jsonl beside summary.json; Rovo session_context.json;
+Kimi agents/*/wire.jsonl beneath session_* with state.json agent identity/parent lineage; OpenCode session/message/part JSON stores
+or session/message/part SQLite tables; OpenCode 2 session_v2/session_message tables;
+ZCode its separate db.sqlite. OMP/Pi/OpenClaw message envelopes retain tool results,
+thinking and compactions. Kiro toolUseId joins call/result revisions, and OpenCode file parts preserve MIME-appropriate media kinds. Gemini thoughts/toolCalls, Copilot data envelopes, Devin
+ATIF observations, and OpenAI/Anthropic block variants retain their native fields.
+
+History-only native accounting retains reported token buckets and cost per message; absent buckets stay unknown. Session/model aggregates never become extra model calls. Snapshot pages preserve native parent-session fields independently of message chains. Resolved parent/child links require an unambiguous native source family; Kimi links stay within the same physical session directory and multiple root main agents refuse. Selecting an opaque source ID never authorizes linking a copied workspace's parent or child. Devin also resolves its native APPDATA location on Windows; Pi/OMP overrides accept the native sessions root.

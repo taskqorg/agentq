@@ -1,0 +1,2 @@
+{"type": "session_meta", "payload": {"id": "fixture-session"}}
+{"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP4z8BAEiJN9aiGUQ1DSgMAkPn/Afnh+ngAAAAASUVORK5CYII=", "detail": "high"}]}}

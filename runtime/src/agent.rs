@@ -21,7 +21,7 @@ pub mod host;
 mod adapter;
 #[cfg(test)]
 pub(crate) use adapter::test_receipts;
-mod capture;
+pub(crate) mod capture;
 mod events;
 mod limits;
 pub use events::{Answer,Question,AssistantFailure, Choice, Event, LogRecord, Model, RecordTime, RequestKind, TimeFault, ToolKind};
@@ -548,11 +548,11 @@ pub struct Context<'a> {
 
 /// Start, wait and report one turn, then append its `agent.turn` observation to `store`. A failed append is kept in
 /// `Report::recorded` and never changes the turn's result (R30).
-pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness,owner:SessionOwner,managed:bool) -> Res<Report> {
+pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness,owner:SessionOwner,managed:bool,archive:&mut crate::archive::Handle) -> Res<Report> {
     let mut turn = Turn::start(base, spec, log, text, &owner.process_hooks(&Process::default(),managed)?)?.owned(owner).prepared(readiness);
     turn.wait(deadline)?;
     let mut r = turn.report();
-    r.recorded = turn.snapshot(ctx).and_then(|f| f.append(store));
+    r.recorded = turn.snapshot(ctx).and_then(|f| {archive.record(&f);f.append(store)});
     Ok(r)
 }
 
@@ -957,3 +957,8 @@ impl Report {
 
 #[cfg(test)]
 fn test_usage(client:Client,events:&[Value])->Usage {let (calls,count,known)=(protocol(client).read_calls)(events);sum_usage(&calls,count,known)}
+/// Standard padded base64 for the archive wire.
+pub(crate) fn encode_base64(bytes: &[u8]) -> String { adapter::b64(bytes) }
+
+/// Private native identity for archive replacement detection; not execution authority.
+pub(crate) fn archive_file_identity(file:&File)->Res<String> {native::file_id(file)}
