@@ -538,6 +538,12 @@ fn fake_app_server() {
             Some("initialize") if std::env::var_os("AGENTQ_FAKE_INIT_REFUSED").is_some()=>println!("{}",json!({"id":id,"error":{"code":-32603,"message":"fixture startup refusal"}})),
             Some("initialize")=>println!("{}",json!({"id":id,"result":{}})),
             Some("initialized")=>{},
+            Some("config/read")=>{
+                assert_eq!(value["params"],json!({"includeLayers":true}));
+                let root=std::env::current_dir().unwrap().canonicalize().unwrap();
+                println!("{}",json!({"id":id,"result":{"config":{"projects":{root.to_string_lossy().as_ref():{"trust_level":"trusted"}}},"layers":[]}}));
+            },
+            Some("hooks/list")=>println!("{}",json!({"id":id,"result":{"data":[]}})),
             Some("model/list")=>{
                 if turn>0 && std::env::var_os("AGENTQ_FINITE_DENIAL").is_some() {println!("{}",json!({"method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"catalogue","delta":"catalogue-progress"}}));}
                 if let Ok(mode)=std::env::var("AGENTQ_FINITE_CATALOGUE") {
@@ -2710,7 +2716,7 @@ fn preflight_checks_order_and_journals_exact_trust() {
     launch.env.push(("COREQ_FAKE_GATE".into(),root.join("gate").into()));
     let mut secret=launch.clone();secret.settings_env=vec![("ANTHROPIC_API_KEY".into(),"invented-caller-key".into())];
     assert!(runtime.launch(&secret).err().is_some_and(|e|e.detail.starts_with("secret-in-argv")));
-    let mut sandbox=fake_launch("codex",&root,"never submitted",&[]);sandbox.policy.write=agent::Scope::Project;sandbox.policy.unelevated=cfg!(windows);
+    let mut sandbox=fake_launch("codex",&root,"never submitted",&[("COREQ_FAKE_APP_SERVER","1".as_ref())]);sandbox.policy.write=agent::Scope::Project;sandbox.policy.unelevated=cfg!(windows);
     let codex=agent::runtime("codex").unwrap();
     // A readable fake version enables the native no-model sandbox start probe.
     let sandbox_home=base.join("sandbox-home");std::fs::create_dir_all(&sandbox_home).unwrap();sandbox.home=Some(sandbox_home.clone());
@@ -2718,6 +2724,10 @@ fn preflight_checks_order_and_journals_exact_trust() {
     assert_eq!(codex.preflight(&sandbox,&agent::Repair::default()).checks[4].state,"ok");
     sandbox.env.push(("FAKE_SANDBOX_REFUSED".into(),"1".into()));
     assert_eq!(codex.preflight(&sandbox,&agent::Repair::default()).checks[4].cause.as_deref(),Some("sandbox-unavailable"));
+    let requests=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();
+    let requests:Vec<Value>=requests.lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    assert!(requests.iter().any(|row|row["method"]=="config/read"),"sandbox preflight reads native config");
+    assert!(requests.iter().all(|row|matches!(row["method"].as_str(),Some("initialize"|"initialized"|"config/read"|"hooks/list"))),"preflight never creates a thread or submits input");
     let mut bypass=fake_launch("codex",&root,"never submitted",&[]);bypass.host_args=vec!["--dangerously-bypass-hook-trust".into()];
     assert!(agent::runtime("codex").unwrap().launch(&bypass).err().is_some_and(|e|e.detail.starts_with("hook-trust-bypass-refused")));
     let inherited=std::env::var_os("OPENAI_API_KEY");
