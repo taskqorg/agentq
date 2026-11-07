@@ -1084,15 +1084,21 @@ fn native_control_readiness_and_large_history_stay_owned() {
     l.mode=agent::Mode::Background;
     let mut run=claude.launch(&l).unwrap();
     assert_eq!((claude.session_id(&run),claude.transcript(&run).unwrap_err()),(None,agent::Cause("transcript-unknown")),"launcher output is not a session");
+    assert_eq!(claude.background_job(&run).unwrap_err(),agent::Cause("background-job-unverified"),"provisional launcher IDs are not verified locators");
     let early=claude.checkpoint(&run).unwrap();
     assert_eq!(claude.poll(&mut run).unwrap(),Running,"readiness without native history is not completion");
     assert_eq!(control(&root)["args"],json!(["agents","--json","--all","--cwd",root]));assert_eq!(control(&root)["home"],json!(account));
     assert_eq!(claude.session_id(&run).as_deref(),Some("native-session"));
+    let locator=claude.background_job(&run).unwrap();
+    assert_eq!((locator.runtime,locator.source,locator.id.as_str(),locator.session.as_str(),locator.pid),("claude","native-background-jobs","c37eb75a","native-session",Some(42)));
+    assert_eq!(locator.cwd,root.canonicalize().unwrap());assert_eq!(locator.home.as_ref(),Some(&account));
+    assert_eq!(agent::runtime("codex").unwrap().background_job(&run).unwrap_err(),agent::Cause("foreign-run"));
     let history=claude.transcript(&run).unwrap();
     assert!(history.starts_with(account.join("projects")) && history.ends_with("native-session.jsonl"),"{}",history.display());
     let saved=claude.checkpoint(&run).unwrap();
     assert!(claude.recover(&saved,&l).is_err());drop(run);
     let mut cold=claude.recover(&saved,&l).unwrap();
+    assert_eq!(claude.background_job(&cold).unwrap_err(),agent::Cause("background-job-unverified"),"a restored job label does not restore verified native evidence");
     assert!(!claude.cancel(&mut cold).unwrap(),"a stop request never proves exit");
     assert_eq!(control(&root)["args"],json!(["stop","c37eb75a"]));
     assert_eq!(claude.poll(&mut cold).unwrap(),Running,"stop acknowledgment without native history never becomes completion");
@@ -1107,6 +1113,7 @@ fn native_control_readiness_and_large_history_stay_owned() {
     assert_eq!(claude.report(&cold).unwrap().outcome,"ok");
     let mut before=claude.recover(&early,&l).unwrap();
     assert_eq!(finish(claude,&mut before),Finished,"a checkpoint from before discovery rediscovers the same job");
+    assert_eq!(claude.background_job(&before).unwrap(),locator,"existing discovery, not this accessor, reacquires job evidence");
     let mut changed=l.clone();changed.policy.approval=agent::Approval::Auto;assert!(claude.recover(&saved,&changed).is_err());
     let late=claude.checkpoint(&cold).unwrap();
     let replacement=root.join("replacement.jsonl");std::fs::copy(&history,&replacement).unwrap();
@@ -1161,6 +1168,7 @@ fn background_commands_preserve_native_mode() {
     assert_eq!(record["inherited"],false); assert_eq!(record["extra"],"preserved");
     assert_eq!(claude.checkpoint(&run).unwrap()["job"], "c37eb75a", "the launcher names the job");
     claude.poll(&mut run).unwrap();
+    assert_eq!(claude.background_job(&run).unwrap().pid,None,"valid absent PID stays unknown, never zero");
     // #213 A2/A3: a background run names the Claude log cause, and its recovered run reads the job's URL without a launch.
     let seen = claude.observe(&mut run);
     assert_eq!((seen.session.as_deref(), seen.cause, seen.url), (Some("native-session"), Some(agent::Cause("unlogged")), None));

@@ -52,6 +52,7 @@ impl Runtime for Reader {
     fn job(&self,_:&Value,_:&NativeSpec,_:&str)->Res<BackgroundJob>{unavailable()}
     fn stop_job(&self,_:Command,_:&NativeSpec,_:&BackgroundJob,_:Duration)->Res<Output>{unavailable()}
     fn launch_refusal(&self,_:&str)->Option<Cause>{Some(CAUSE)}
+    fn background_job(&self,_:&Run)->Result<agent::BackgroundLocator,Cause>{Err(CAUSE)}
     fn app_queue(&self,_:Command,_:&NativeSpec,_:&str,_:Duration)->Res<Output>{unavailable()}
     fn app_server_arguments(&self,_:&NativeSpec)->Res<Vec<OsString>>{unavailable()}
 }

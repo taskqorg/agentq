@@ -296,7 +296,20 @@ fn tool_kind(name: &str) -> StepKind {
 pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
     if let Some(step)=super::requests::decode(event,record) {return vec![step];}
     let mut steps=decode_native(format,event,record);
-    for step in &mut steps {super::requests::unscoped(step,event,record);}
+    for step in &mut steps {
+        if let Some(block)=event["blocks"].as_array().and_then(|blocks|blocks.get(step.part)) {
+            let compatible=match block["type"].as_str() {
+                Some("text")=>matches!(step.kind,StepKind::Message|StepKind::Thinking),
+                Some("image")=>step.kind==StepKind::Image,
+                Some("tool_call"|"tool_result")=>matches!(step.kind,StepKind::Tool|StepKind::Shell|StepKind::FileChange|StepKind::Mcp|StepKind::Web|StepKind::Subagent|StepKind::Question|StepKind::Approval),
+                _=>false,
+            };
+            if compatible {for field in ["image","parts","input","input_kind","summary","text_mode","delivery","origin"] {
+                if let Some(value)=block.get(field) {step.data[field]=value.clone();}
+            }}
+        }
+        super::requests::unscoped(step,event,record);
+    }
     steps
 }
 
@@ -342,6 +355,9 @@ fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
         if step.turn.id.is_none(){step.turn=base_step(event,native,&item,StepKind::Message,Value::Null,0).turn;}
         return vec![step];
     }
+    if format=="agy-stream" && matches!(event["kind"].as_str(),Some("message"|"result")) && event["blocks"][0]["text"].is_string() {
+        return vec![base_step(event,record,&json!({}),StepKind::Message,json!({"text":event["blocks"][0]["text"]}),0)];
+    }
     let payload = if format == "codex-rollout" {&record["payload"]} else if super::interpretation(format) == "codex-app-server" {&record["params"]} else {record};
     let item = payload.get("item").unwrap_or(payload);
     if record["method"] == "item/commandExecution/outputDelta" {
@@ -376,7 +392,7 @@ fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
             let kind = match ty {
                 "text"|"Text"|"input_text"|"output_text" => StepKind::Message,
                 "thinking"|"redacted_thinking"|"reasoning" => StepKind::Thinking,
-                "image"|"Image"|"input_image"|"image_url"|"local_image"|"LocalImage" => StepKind::Image,
+                "image"|"Image"|"input_image"|"output_image"|"image_url"|"local_image"|"LocalImage" => StepKind::Image,
                 "document"|"audio"|"video"=>StepKind::Media,
                 "server_tool_use"=>StepKind::Web,
                 "tool_search_tool_result"=>StepKind::Tool,

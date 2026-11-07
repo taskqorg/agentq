@@ -8,6 +8,9 @@ pub struct Source { pub id:String, pub native_session:String, pub session: Strin
 
 pub struct Session { resolved:Source,pub(super) history: History, pub(super) path: PathBuf, pub(super) runtime:String, parent: Option<String>, parent_step: Option<String>, children:std::collections::BTreeMap<String,String> }
 impl Session {
+    /// Physical records through the already resolved native source and cursor.
+    pub fn poll(&mut self)->Res<Page> {self.history.poll(&self.path)}
+    pub fn poll_before(&mut self)->Res<Page> {self.history.poll_before(&self.path)}
     pub fn steps(&mut self, bytes: u64) -> Res<StepPage> {
         let mut page=self.history.steps(&self.path,bytes)?;
         for step in &mut page.steps {

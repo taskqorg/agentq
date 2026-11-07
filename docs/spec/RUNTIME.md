@@ -727,6 +727,11 @@ The same interface works after run recovery, retaining unknown exit provenance. 
 runtime-requested cleanup after native end keeps the native exit unknown and is not
 a lost-owner event. Other Runtime implementations may explicitly refuse stop observation.
 
+`Runtime::background_job(run)` is a read-only locator from an already verified cached background job: runtime, source `native-background-jobs`, job ID, native session, canonical cwd, bound query home and optional native PID. It performs no lookup, mutation or checkpoint decoding; a provisional launcher ID is not evidence. Foreign runs refuse; unverified jobs
+remain unknown, including recovered runs without cached verified job evidence.
+
+The locator grants no ownership, stop, adoption, delivery or exit authority. It does not expose native candidate lists, state, unique-input witnesses, subtree/copy-session recovery or missing-versus-malformed row observations; their absence remains an explicit consumer adoption gap. Existing exact-root discovery and PID validation remain unchanged.
+
 ## Universal step history
 
 `Runtime::history` reads live and finished sessions using the same `Turn`, `Step` and
@@ -735,12 +740,24 @@ subagent, image, question, approval, compaction, usage and unknown. Each step ke
 its raw record, source byte range and digest; normalization happens at read time.
 Nothing writes a native transcript or stores a second canonical history.
 
+`Session::poll` and `poll_before` forward the existing physical cursor through its runtime-resolved source, native format and session binding. `Session::checkpoint` retains that binding for recovery; callers do not decode native first records to select a transport. These methods preserve the same byte boundaries, identity checks and paging as `History`.
+
 Antigravity stream `step_update/user_input` projects native ACTIVE as `Step.state=started` and DONE as `completed`; missing or unsupported states remain `unknown`. Physical events expose the same input `state` on bounded forward/backward polling; unrelated records expose `unknown`.
 Only the completed user message observes accepted input.
 Session binding, reported native turn (else explicitly unknown) and exact physical source range remain attached; unrelated Activity/Progress, successful writes and liveness do not prove acceptance.
 
 Physical history events from forward and backward polling expose `presentation` through the same record-local projection as steps: model, effort, CLI version, sidechain and meta, with null and named unknowns for absent fields.
 Paging retains physical boundaries and IDs; it does not scan earlier records to infer presentation. Step context inheritance remains separate.
+
+Codex, Claude and Antigravity normalized physical blocks and matching Step data expose record-local presentation facts without reading referenced files or URLs. Image blocks carry `image` with reported name, reference URL, MIME, encoding and recorded inline base64 data; absent values stay null with named unknowns. Tool-result `parts` preserve ordered typed
+text, image and unknown parts at the result's physical record.
+Existing media collection retains its separate file-read policy.
+
+Antigravity text blocks distinguish `text_mode=delta` from `complete`. A caller-authored `event=user` with string message content projects user text with `delivery=intent`; it never grants input acceptance. Native `user_input` remains the only accepted-input observation. Codex user-role text with a recognized environment or AGENTS instruction wrapper carries
+`origin=injected_context` as a display convention, not proof of authorship; other user-role text carries `native_user`. Generic markup in user text is not an injection signal.
+
+Tool calls expose `input_kind=free_text`, `structured` or `unknown`, decoded input, and an optional unmasked `summary`. Codex owns its free-text exec/apply_patch interpretation and preserves incomplete-string tolerance; unknown code remains text, never an executable command claim. Reported tool names remain available even for otherwise unknown blocks.
+Consumers retain masking, preview limits and display policy; these projections grant no execution, delivery or native-source authority.
 
 Approval and question history projects the same `Event::Request`, `Choice` and
 `Question` data emitted by live control ([shared proposal](https://github.com/taskqorg/specq/issues/132)).

@@ -85,6 +85,18 @@ impl MediaCatalog {
     }
 }
 
+/// Recorded image fields only; never opens a reference or validates a preview.
+pub(in crate::agent) fn recorded_image(value:&Value)->Value {
+    let name=value["alt"].as_str().or(value["name"].as_str());
+    let url=value["image_url"].as_str().or(value["image_url"]["url"].as_str()).or(value["source"]["url"].as_str());
+    let inline=url.and_then(|url|url.strip_prefix("data:image/")).and_then(|url|url.split_once(";base64,"));
+    let data=inline.map(|(_,data)|data).or_else(||(value["source"]["type"]=="base64").then(||value["source"]["data"].as_str()).flatten());
+    let mime=inline.map(|(mime,_)|format!("image/{mime}")).or_else(||value["source"]["media_type"].as_str().map(String::from));
+    let mut image=json!({"name":name,"url":url.filter(|_|inline.is_none()),"mime":mime,"encoding":data.map(|_|"base64"),"data":data,"unknown":{}});
+    for field in ["name","url","mime","encoding","data"] {if image[field].is_null(){image["unknown"][field]=json!("native field not recorded");}}
+    image
+}
+
 fn digest(file:&mut File)->Res<(String,u64,Option<(MediaKind,&'static str)>)> {
     if !file.metadata().map_err(|e|e.to_string())?.is_file(){return Err("media reference is not a file".into());}
     file.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;

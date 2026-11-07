@@ -50,6 +50,9 @@ pub(super) fn normalize(
                     _ => {}
                 }
             }
+            Some("user") if v["message"]["content"].is_string() => {
+                author="user";kind="message";blocks=text(&v["message"]["content"]);limited="none";
+            }
             Some("init") => {
                 author = "system";
                 kind = "lifecycle";
@@ -117,7 +120,14 @@ pub(super) fn normalize(
         }
         _ => {}
     }
-    let blocks: Vec<Value> = blocks.into_iter().map(|v| block(format, v)).collect();
+    let mut blocks: Vec<Value> = blocks.into_iter().map(|v| block(format, v)).collect();
+    if format=="agy-stream" {
+        for block in &mut blocks {if block["type"]=="text" {
+            if v["event"]=="user" {block["delivery"]=json!("intent");}
+            if v["event"]=="result" {block["text_mode"]=json!("complete");}
+            if v["event"]=="step_update" && v["step_update"]["step_type"]=="agent_response" {block["text_mode"]=json!("delta");}
+        }}
+    }
     if limited == "none"
         && matches!(kind, "message" | "attachment" | "tool")
         && blocks.iter().any(|b| b["type"] == "unknown")
@@ -133,26 +143,36 @@ fn block(format: &str, v: Value) -> Value {
         "text" | "Text" | "input_text" | "output_text" => {
             json!({"type":"text","text":v["text"],"native":v})
         }
-        "image" | "Image" | "input_image" | "image_url" | "local_image" | "LocalImage" => {
-            json!({"type":"image","native":v})
+        "image" | "Image" | "input_image" | "output_image" | "image_url" | "local_image" | "LocalImage" => {
+            json!({"type":"image","image":crate::agent::history::media::recorded_image(&v),"native":v})
         }
         "document" | "attachment" | "file" | "input_file" => {
             json!({"type":"attachment","native":v})
         }
-        "tool_use" | "function_call" | "custom_tool_call" => json!({"type":"tool_call",
-            "id":v.get("call_id").or_else(||v.get("id")),"name":v["name"],
-            "input":v.get("input").or_else(||v.get("arguments")),"native":v}),
+        "tool_use" | "function_call" | "custom_tool_call" => {
+            let raw=v.get("input").or_else(||v.get("arguments")).cloned().unwrap_or(Value::Null);
+            let free=kind=="custom_tool_call" && raw.is_string();
+            let input=if free {raw.clone()}else{raw.as_str().and_then(|s|serde_json::from_str(s).ok()).unwrap_or(raw.clone())};
+            let input_kind=if kind=="custom_tool_call" {if free {"free_text"}else{"unknown"}}else if input.is_object() || input.is_array() {"structured"}else{"unknown"};
+            let summary=None::<String>;
+            json!({"type":"tool_call","id":v.get("call_id").or_else(||v.get("id")),"name":v["name"],
+                "input":input,"input_kind":input_kind,"summary":summary,"native":v})
+        },
         "tool_result" | "function_call_output" | "custom_tool_call_output" => {
-            json!({"type":"tool_result",
-            "id":v.get("tool_use_id").or_else(||v.get("call_id")),
-            "output":v.get("content").or_else(||v.get("output")),"native":v})
+            let output=v.get("content").or_else(||v.get("output")).cloned().unwrap_or(Value::Null);
+            let parts=output.as_array().map(|parts|parts.iter().cloned().map(|part|block(format,part)).collect::<Vec<_>>())
+                .or_else(||output.as_str().map(|_|text(&output).into_iter().map(|part|block(format,part)).collect::<Vec<_>>()));
+            json!({"type":"tool_result","id":v.get("tool_use_id").or_else(||v.get("call_id")),
+                "output":output,"parts":parts,"unknown":if parts.is_none(){json!({"parts":"native result content missing or unsupported"})}else{json!({})},"native":v})
         }
         "command_execution" | "commandExecution" | "CommandExecution" => {
-            json!({"type":"tool_result","id":v["id"],
-            "name":"shell","input":v["command"],"output":v.get("aggregated_output").or_else(||v.get("aggregatedOutput")),"native":v})
+            let output=v.get("aggregated_output").or_else(||v.get("aggregatedOutput")).cloned().unwrap_or(Value::Null);
+            let parts=output.as_array().map(|parts|parts.iter().cloned().map(|part|block(format,part)).collect::<Vec<_>>())
+                .or_else(||output.as_str().map(|_|text(&output).into_iter().map(|part|block(format,part)).collect::<Vec<_>>()));
+            json!({"type":"tool_result","id":v["id"],"name":"shell","input":v["command"],"output":output,"parts":parts,"unknown":if parts.is_none(){json!({"parts":"native result content missing or unsupported"})}else{json!({})},"native":v})
         }
         "mcp_tool_call" | "mcpToolCall" | "McpToolCall" | "dynamicToolCall" | "TOOL_RESPONSE" => {
-            json!({"type":"tool_result","native":v})
+            json!({"type":"tool_result","parts":null,"unknown":{"parts":"native result content not decoded"},"native":v})
         }
         _ if format == "antigravity-sidecar"
             && v.get("type").is_none()
@@ -165,7 +185,7 @@ fn block(format: &str, v: Value) -> Value {
             json!({"type":if v.get("output").is_some() || v.get("error").is_some(){"tool_result"}else{"tool_call"},
                 "name":v["name"],"input":v["parameters"],"output":v.get("output"),"error":v.get("error"),"native":v})
         }
-        _ => json!({"type":"unknown","native":v}),
+        _ => json!({"type":"unknown","name":v["name"].as_str(),"native":v}),
     }
 }
 

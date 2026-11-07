@@ -523,6 +523,7 @@ pub struct BackgroundJob {
     pub session: String,
     pub pid: Option<u32>,
     pub(crate) root: PathBuf,
+    pub(crate) home: Option<PathBuf>,
     pub(crate) scope: String,
 }
 
@@ -540,7 +541,7 @@ impl BackgroundJob {
         row["state"].as_str().filter(|s| matches!(*s, "working" | "idle" | "done" | "blocked" | "failed" | "crashed" | "stopped"))
             .ok_or("background state unknown")?;
         let pid = if row["pid"].is_null() { None } else { Some(row["pid"].as_u64().and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 0).ok_or("background pid invalid")?) };
-        Ok(Self { id: job.into(), session: session.into(), pid, root, scope:scope(spec) })
+        Ok(Self { id: job.into(), session: session.into(), pid, root, home:spec_home(spec), scope:scope(spec) })
     }
 }
 

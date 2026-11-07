@@ -271,6 +271,18 @@ pub struct Account { pub login: Login, pub plan: Option<String> }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State { Running, Finished, Failed, Unknown }
 
+/// A read-only locator, never a process identity or a stop/adoption capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundLocator {
+    pub runtime: &'static str,
+    pub source: &'static str,
+    pub id: String,
+    pub session: String,
+    pub cwd: PathBuf,
+    pub home: Option<PathBuf>,
+    pub pid: Option<u32>,
+}
+
 /// One runtime-neutral observation of a run (RUNTIME.md Session observation).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Observation {
@@ -952,6 +964,8 @@ pub trait Runtime: Send + Sync {
     fn stop_job(&self, base: Command, spec: &NativeSpec, job: &BackgroundJob, budget: Duration) -> Res<Output>;
     /// The named cause of a launcher refusal in `stderr`, if known.
     fn launch_refusal(&self, text: &str) -> Option<Cause>;
+    /// Already verified cached native background evidence only; never queries the native client.
+    fn background_job(&self, run: &Run) -> Result<BackgroundLocator,Cause>;
     /// Capability `app-queue`: queue `reference` into the desktop thread `spec.session`.
     fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output>;
     /// Capability `app-server`: read-only argument inspection; no spawnable command.
@@ -1735,6 +1749,14 @@ impl Runtime for Adapter {
         (self.ops.background_stop)(base, &self.native(spec), job, budget)
     }
 
+    fn background_job(&self, run:&Run)->Result<BackgroundLocator,Cause> {
+        let run=self.own(run).map_err(|_|Cause("foreign-run"))?;
+        let Body::Native(native)=&run.body else {return Err(Cause("no-background-job"));};
+        if native.queue {return Err(Cause("no-background-job"));}
+        let job=native.job.as_ref().ok_or(Cause("background-job-unverified"))?;
+        Ok(BackgroundLocator {runtime:run.runtime,source:"native-background-jobs",id:job.id.clone(),session:job.session.clone(),cwd:job.root.clone(),home:job.home.clone(),pid:job.pid})
+    }
+
     fn launch_refusal(&self, text: &str) -> Option<Cause> {
         (self.ops.refusal)(text)
     }
@@ -1805,7 +1827,7 @@ mod tests {
                     assert_eq!(runtime.background_launch(command(),&spec,"never",budget).err().as_deref(),error);
                     assert_eq!(runtime.jobs(command(),&spec,false,budget).err().as_deref(),error);
                     assert_eq!(runtime.job(&Value::Null,&spec,"job").err().as_deref(),error);
-                    let job=BackgroundJob {id:"job".into(),session:"safe".into(),pid:None,root:PathBuf::new(),scope:String::new()};
+                    let job=BackgroundJob {id:"job".into(),session:"safe".into(),pid:None,root:PathBuf::new(),home:None,scope:String::new()};
                     assert_eq!(runtime.stop_job(command(),&spec,&job,budget).err().as_deref(),error);
                 }
                 if runtime.descriptor().has("app-queue") {assert_eq!(runtime.app_queue(command(),&spec,"never",budget).err().as_deref(),error);}
