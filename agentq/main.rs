@@ -3,10 +3,12 @@
 #[cfg(test)]
 mod accounting;
 mod command_path;
+mod canary;
 mod configure;
 mod connect;
 mod control;
 mod hooks;
+mod hook_spool;
 mod host;
 mod executor;
 mod local;
@@ -32,7 +34,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROJECT: &str = "host";
 const PASS: u64 = 30;
 const UPDATE_EVERY: u64 = 3600;
-const USAGE: &str = "agentq status [--json] | disable|enable [agent] [--dry-run] | agent turn | agent preflight [--repair] | agent history | archive enroll|status | agent adopt | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
+const USAGE: &str = "agentq canary | status [--json] | hook-spool register|unregister <runtime> <project> <absolute-directory> | disable|enable [agent] [--dry-run] | agent turn | agent preflight [--repair] | agent history | archive enroll|status | agent adopt | agent host --action <action> --request <json> | profile [--json] | onboard [--yes] [agent..] | direct [agent..] | configure | hook <agent> <event> | update [--check] | selftest | service | doctor | langfuse | telemetry | enroll | connection | disconnect | uninstall [--dry-run] | --version";
 
 fn tool() -> Tool {
     let mut t = Tool::new("agentq", "AgentQ", "taskqorg/agentq", VERSION);
@@ -83,6 +85,12 @@ fn main() {
             Err(e) => fail(&format!("update: {e}"), "check the network and run `agentq update` again"),
         },
         ["selftest"] => selftest(&t),
+        ["canary"] => {
+            let report = std::io::read_to_string(std::io::stdin()).map(|raw|canary::request(&t.install.join("data"),&raw))
+                .unwrap_or_else(|_|serde_json::json!({"state":"unknown","reason":"input-unavailable"}));
+            println!("{report}");
+            if report["state"]=="pass" {0} else {1}
+        },
         ["setup-path"] => match command_path::register(&t.install) {
             Ok(()) => 0,
             Err(e) => fail(&e, "resolve the command registration error and run `agentq setup-path` again"),
@@ -200,6 +208,10 @@ fn main() {
             Ok(m) => println_code(&format!("disconnect: {m}")),
             Err(e) => fail(&format!("disconnect: {e}"), "run `agentq disconnect` again"),
         },
+        ["hook-spool", action @ ("register" | "unregister"), runtime, project, directory] => match hook_spool::register(&t.install.join("data"),runtime,project,Path::new(directory),*action=="unregister") {
+            Ok(()) => println_code(if *action=="register" {"hook spool: registered"} else {"hook spool: revoked; bytes retained"}),
+            Err(e) => fail(&e,"select the exact already-authorized private directory and scope"),
+        },
         ["doctor"] => doctor(&t),
         ["uninstall"] => uninstall(&t, false),
         ["uninstall", "--dry-run"] => uninstall(&t, true),
@@ -285,6 +297,8 @@ fn doctor(t: &Tool) -> i32 {
         Ok(n)=>line(true,format!("local telemetry: readable SQLite, {n} retained records")),
         Err(e)=>line(false,format!("local telemetry: unknown ({e})")),
     }
+    let spool=hook_spool::status(&t.install.join("data"));
+    line(spool["state"]=="none",format!("hook spool: {spool}"));
     if ok { 0 } else { 1 }
 }
 
@@ -745,6 +759,7 @@ fn serve(t: &Tool) -> ! {
             std::process::exit(75);
         }
         let mut s = status::common(t, &host(), PROJECT, now(), error.clone(), None);
+        s["hook_spool"]=hook_spool::status(&t.install.join("data"));
         s["retirement"] = onboard::retirement_state(&journal(t),migration.clone());
         s["legacy_route"] = profiles::legacy_route(&profiles::clients());
         s["release"] = release::observe(t, now());
@@ -779,6 +794,7 @@ fn selftest(t: &Tool) -> i32 {
         ("json bom", onboard::selftest()),
         ("single service run", single_instance_selftest()),
         ("configuration fixtures", configure::selftest()),
+        ("canary evidence", canary::selftest()),
         ("agent registry", agentq_runtime::agent::registry::validate().is_ok()),
         ("snapshot", snapshot::project("i", "linux", None, None, 0)["resource"]["unknown"] == "no sample yet"),
         ("local telemetry", local::selftest()),

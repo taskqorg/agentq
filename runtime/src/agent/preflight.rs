@@ -88,7 +88,15 @@ pub(super) fn ready(adapter:&Adapter,l:&Launch)->Ready {
     if !exe.is_file() {return Ready {install:check("missing",format!("{} not found",exe.display())),version:check("unknown","not installed".into()),login:check("unknown","not installed".into())};}
     let install=check("ok",exe.to_string_lossy().into());
     if explicit_home(adapter,&spec(adapter,l)).is_some_and(|h|!h.is_dir()) {return Ready {install,version:check("unknown","account home missing; no probe was run".into()),login:check("missing","account home missing".into())};}
-    let version=match self::command(adapter,l).and_then(|mut c| {c.arg("--version");crate::quiet(&mut c);crate::process::output("agent.ready",&mut c,Duration::from_secs(5)).map_err(|e|e.to_string())}) {
+    let version=version(adapter,l);
+    let login=self::command(adapter,l).map(|c|(adapter.ops.login)(c,l.policy.subscription)).unwrap_or_else(|e|check("unknown",e));
+    Ready {install,version,login}
+}
+
+/// The version-only probe shares the exact account/home/environment/cwd command boundary.
+pub(super) fn version(adapter:&Adapter,l:&Launch)->Check {
+    let check=|state,detail:String|Check {state,detail};
+    match self::command(adapter,l).and_then(|mut c| {c.arg("--version");crate::quiet(&mut c);crate::process::output("agent.ready",&mut c,Duration::from_secs(5)).map_err(|e|e.to_string())}) {
         Ok(o)=>match String::from_utf8_lossy(&o.stdout).lines().next().map(str::trim).filter(|s|!s.is_empty()) {
             None=>check("unknown","version not reported".into()),
             Some(v) if adapter.descriptor.minimum.is_empty()=>check("ok",v.into()),
@@ -97,9 +105,7 @@ pub(super) fn ready(adapter:&Adapter,l:&Launch)->Ready {
                 (Some(_),_)=>check("ok",v.into()),_=>check("unknown",format!("{v} is not a version")),
             }
         },Err(e)=>check("unknown",e),
-    };
-    let login=self::command(adapter,l).map(|c|(adapter.ops.login)(c,l.policy.subscription)).unwrap_or_else(|e|check("unknown",e));
-    Ready {install,version,login}
+    }
 }
 
 pub(super) fn catalogue(adapter:&Adapter,l:&Launch)->Res<Vec<Model>> {

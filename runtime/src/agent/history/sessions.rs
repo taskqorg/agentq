@@ -1,6 +1,6 @@
 //! Native locations stay behind the runtime boundary; discovery never launches a client.
 use super::*;
-use std::{path::PathBuf, io::{BufRead, BufReader}};
+use std::{path::PathBuf, io::{BufRead, BufReader}, time::Duration};
 use serde::{Serialize,Deserialize};
 
 #[derive(Clone, Debug, Serialize,Deserialize)]
@@ -10,6 +10,51 @@ pub struct Session { resolved:Source,pub(super) history: History, pub(super) pat
 impl Session {
     /// Already resolved source; observing it grants no resume or control authority.
     pub fn source(&self)->&Source {&self.resolved}
+    /// Explicit copied-source observation; physical identity and committed prefix are unchanged.
+    pub fn with_native_session_alias(mut self,native_session:&str,original:&str)->Res<Self> {
+        if self.runtime!="claude" || self.history.native_parent.is_some() || self.history.caller_runtime.is_some()
+            || self.history.native_session!=original || !super::super::native::cli_id(native_session) || !super::super::native::cli_id(original) {return Err("history native session alias invalid".into());}
+        let alias=History::with_native_session_alias(&self.history.format,&self.history.source,native_session,original)?;
+        self.history.session=native_session.into();self.history.native_session=native_session.into();self.history.native_session_alias=alias.native_session_alias;
+        self.resolved.session=native_session.into();self.resolved.native_session=native_session.into();
+        self.resolved.id=super::sources::source_id(&self.runtime,&self.path,native_session);
+        Ok(self)
+    }
+
+    pub(crate) fn control_validate(&self,file:&File)->Res<()> {
+        if self.runtime!="claude" || self.history.format!="claude-native" || self.history.identity.is_none() || self.history.native_parent.is_some() || self.history.caller_runtime.is_some() {return Err("background control source proof missing".into());}
+        let (mut file,_)=self.history.checked_file(file.try_clone().map_err(|e|e.to_string())?)?;
+        let length=file.metadata().map_err(|e|e.to_string())?.len();
+        if length==0 {return Err("background control source incomplete".into());}
+        file.seek(SeekFrom::End(-1)).map_err(|e|e.to_string())?;let mut last=[0];file.read_exact(&mut last).map_err(|e|e.to_string())?;
+        if last[0]!=b'\n' {return Err("background control source incomplete".into());}Ok(())
+    }
+
+    pub(crate) fn control_proof(&self,file:&File,native:&str,submitted:Option<&str>,input:&str,before:usize,required:bool,left:&impl Fn()->Res<Duration>)->Res<Value> {
+        self.control_validate(file)?;
+        if self.resolved.native_session!=native || self.history.native_session!=native {return Err("background control source session differs".into());}
+        let copied=submitted.is_some_and(|s|s!=native);
+        if copied && self.history.native_session_alias.as_deref()!=submitted || !copied && self.history.native_session_alias.is_some() {return Err("background control source alias differs".into());}
+        let mut reader=if let Some(alias)=&self.history.native_session_alias {History::with_native_session_alias(&self.history.format,&self.history.source,native,alias)?} else {History::new(&self.history.format,&self.history.source,native)?};
+        let mut count=0usize;let mut committed=0usize;let mut witness=None;
+        loop {
+            left()?;let page=reader.poll_file(file.try_clone().map_err(|e|e.to_string())?)?;
+            if page.more && page.events.is_empty() {return Err("background control source incomplete".into());}
+            for event in page.events {
+                if event["validity"]["status"]!="valid" {return Err("background control source invalid".into());}
+                if event["end"].as_u64().ok_or("background control source boundary unknown")?<=self.history.offset {
+                    committed+=1;
+                    let matches=event["author"]=="user" && event["kind"]=="message" && event["blocks"].as_array().is_some_and(|blocks|blocks.len()==1 && blocks[0]["type"]=="text" && blocks[0]["text"].as_str().is_some_and(|s|s.trim()==input));
+                    if count>=before && matches {if witness.is_some() {return Err("background control input ambiguous".into());}witness=Some(event["sha256"].clone());}
+                }
+                count=count.checked_add(1).ok_or("background control source count overflow")?;
+            }
+            if !page.more {break;}
+        }
+        if before>committed || (required || copied) && witness.is_none() {return Err("background control committed input proof missing".into());}
+        self.control_validate(file)?;
+        Ok(json!({"source":self.resolved,"identity":self.history.identity,"offset":self.history.offset,"prefix":self.history.prefix,"alias":self.history.native_session_alias,"before":before,"input_record":witness}))
+    }
     /// Physical records through the already resolved native source and cursor.
     pub fn poll(&mut self)->Res<Page> {self.history.poll(&self.path)}
     pub fn poll_before(&mut self)->Res<Page> {self.history.poll_before(&self.path)}
@@ -246,4 +291,41 @@ pub fn request(request:&str)->Res<Value> {
     }
     let bytes=v["bytes"].as_u64().ok_or("history bytes required; caller chooses the page window")?;
     serde_json::to_value(reader.steps(bytes)?).map_err(|e|e.to_string())
+}
+
+#[cfg(test)]
+mod background_control_tests {
+    use super::*;
+    #[test]
+    fn committed_control_input_uses_record_count_and_preserves_unknowns() {
+        let root=crate::scratch("background-control-source");let path=root.join("native-session.jsonl");
+        let user=|text:&str|json!({"type":"user","sessionId":"native-session","message":{"content":text}}).to_string()+"\n";
+        let first=user("older");let second=user("  protected reference\n");std::fs::write(&path,first.clone()+&second).unwrap();
+        let mut source=open("claude","native-session",Some(&root),Some(&path),None).unwrap();source.poll().unwrap();
+        let file=File::open(&path).unwrap();let left=||Ok(Duration::from_secs(1));
+        assert!(source.control_proof(&file,"native-session",Some("native-session"),"protected reference",1,true,&left).is_ok());
+        let alias=open("claude","native-session",Some(&root),Some(&path),Some(&source.checkpoint())).unwrap().with_native_session_alias("copied-session","native-session").unwrap();
+        assert!(alias.control_proof(&file,"copied-session",Some("native-session"),"protected reference",1,true,&left).is_ok());
+        assert!(alias.control_proof(&file,"copied-session",None,"protected reference",1,true,&left).is_err(),"copy requires explicit original session");
+        assert!(source.control_proof(&file,"native-session",None," protected reference",1,true,&left).is_err(),"only native text is trimmed");
+        assert!(source.control_proof(&file,"native-session",None,"protected",1,true,&left).is_err(),"no substring matching");
+        assert!(source.control_proof(&file,"native-session",None,"protected reference",2,true,&left).is_err(),"before is a complete-record count");
+        assert!(source.control_proof(&file,"native-session",None,"not yet accepted",2,false,&left).is_ok(),"exact original process can stop before acceptance");
+        assert!(source.control_proof(&file,"native-session",None,"not yet accepted",3,false,&left).is_err(),"missing baseline cannot be reconstructed");
+        use std::io::Write;
+        File::options().append(true).open(&path).unwrap().write_all(user("later accepted").as_bytes()).unwrap();
+        assert!(source.control_proof(&file,"native-session",None,"later accepted",2,true,&left).is_err(),"new appended evidence is outside the durable committed prefix");
+        File::options().append(true).open(&path).unwrap().write_all(b"{\"type\":").unwrap();
+        assert!(source.control_proof(&file,"native-session",None,"protected reference",1,true,&left).is_err(),"partial source remains unknown");
+        std::fs::write(&path,first+&user("changed prefix")).unwrap();
+        assert!(source.control_proof(&file,"native-session",None,"protected reference",1,true,&left).is_err());
+        for content in [json!([{"type":"text","text":"protected reference"},{"type":"text","text":"other"}]),json!([{"type":"tool_result","content":"protected reference"}])] {
+            std::fs::write(&path,json!({"type":"user","sessionId":"native-session","message":{"content":content}}).to_string()+"\n").unwrap();
+            let mut ambiguous=open("claude","native-session",Some(&root),Some(&path),None).unwrap();ambiguous.poll().unwrap();
+            assert!(ambiguous.control_proof(&File::open(&path).unwrap(),"native-session",None,"protected reference",0,true,&left).is_err(),"single text witness only");
+        }
+        std::fs::write(&path,second.clone()+&second).unwrap();let mut duplicate=open("claude","native-session",Some(&root),Some(&path),None).unwrap();duplicate.poll().unwrap();
+        assert!(duplicate.control_proof(&File::open(&path).unwrap(),"native-session",None,"protected reference",0,true,&left).unwrap_err().contains("ambiguous"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -150,7 +150,16 @@ impl History {
 
     /// A failed poll leaves the cursor untouched. No source is edited or input submitted.
     pub fn poll(&mut self, path: &Path) -> Res<Page> {
-        let (mut file, identity) = self.open(path)?;
+        let (file, identity) = self.open(path)?;
+        self.read_page(file,identity)
+    }
+
+    pub(super) fn poll_file(&mut self,file:File)->Res<Page> {
+        let (file,identity)=self.checked_file(file)?;
+        self.read_page(file,identity)
+    }
+
+    fn read_page(&mut self,mut file:File,identity:String)->Res<Page> {
         file.seek(SeekFrom::Start(self.offset)).map_err(|e| e.to_string())?;
         let mut bytes = Vec::new();
         (&mut file).take(BUDGET as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
@@ -217,7 +226,10 @@ impl History {
     }
 
     fn open(&self, path: &Path) -> Res<(File, String)> {
-        let mut file = File::open(path).map_err(|e| format!("history unavailable: {e}"))?;
+        self.checked_file(File::open(path).map_err(|e|format!("history unavailable: {e}"))?)
+    }
+
+    fn checked_file(&self,mut file:File)->Res<(File,String)> {
         if !file.metadata().map_err(|e| e.to_string())?.is_file() { return Err("history not a regular file".into()); }
         let identity = native::file_id(&file)?;
         if sources::external(&self.format){return Ok((file,identity));}

@@ -427,6 +427,7 @@ pub fn sender(install: &Path, every: u64) -> ! {
             std::thread::sleep(Duration::from_secs(every));
             continue;
         }
+        if let Err(e)=crate::hook_spool::drain(&data) {eprintln!("agentq: hook spool: {e}");}
         sampler.tick(&data);
         if crate::control::disabled(&data, "claude") == Ok(false) {
             crate::model::drain(&data, std::time::Instant::now() + Duration::from_secs(10));

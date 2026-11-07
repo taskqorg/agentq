@@ -1,0 +1,25 @@
+# Durable hook metadata delivery
+
+Binding detail of [agentq.md M6.14](../../agentq.md#6-telemetry-to-langfuse). Native hook answers and the existing five-second budget remain unchanged. Old model/telemetry recording stays until its parity and consumer adoption gates close.
+
+## Authority and registration
+
+`agentq hook-spool register <runtime> <project> <absolute-directory>` explicitly registers an existing already-authorized private writable directory for the runtime's current native profile and the exact project code. `unregister` with the same arguments revokes it. These local operator commands take the existing lifecycle lock and journal the owned marker before activating the index. They do not change native profiles, sandbox roots, ACLs, accounts, grants or services. No key or signature provisioning is required.
+
+The private installation-owned index is `data/observe/hook-spools.json`. Each entry binds installation identity, canonical directory and physical identity, runtime, canonical native profile, project, current revision and the exact ownership-journal receipt. The same binding is retained in `.agentq-hook-spool.json` inside the registered directory. The marker never grants authority: both hook and service read the current protected index and journal and verify the installation, revision, receipt and physical directory before writing or draining. No cwd, input, environment or temporary-directory discovery selects a spool. Native profile resolution retains its existing environment rules; it only matches an owned registration.
+
+Revocation takes the exclusive lifecycle lock; external writes and drain hold its shared read lock and recheck current authority. Revoked entries and pending bytes stay bound to their original installation and scope; unregister does not delete them. A revoked directory cannot be adopted or silently registered again. A changed marker, directory, scope, index, journal or unreadable current revision means unknown and refuses effects.
+
+The supported outage is an unavailable or unwritable observations store, or unwritable installation delivery state, while current protected installation authority remains readable. If all protected installation authority is unreadable, the hook keeps its native fallback and exit zero but writes no external spool; service drain also refuses. This does not claim manual sandbox delivery without explicit registration and native platform proof. Without a matching external registration, authorized existing `data/observe` delivery remains the default; no project/temp scan or alternate fallback is added.
+
+## Persistence and delivery
+
+Only the runtime's frozen, CoreQ-validated metadata records enter the spool. Raw hook JSON, transcripts, paths, tool arguments and content never enter event files. Stable event IDs and immutable frozen payloads survive duplicate source reads, replay, partial store commits and restart. A batch filename hashes its event IDs, so a growing source after checkpoint loss can add a new immutable batch without overwriting earlier captured records. Overlapping batches count each ID once and reuse the existing store conflict policy. Complete synced event files precede advancing source checkpoints. A store outage leaves those files; service passes retry them with the existing immutable-ID append helper and delete only after successful local append. There is no network delivery in this drain and no new retention bound, retry limit, timer, cache or configuration switch.
+
+Source reading and checkpoints use the selected authorized directory so a registered sandbox child need not write `data/`. Existing transcript-read limits and deadlines remain. Native call IDs and transcript offsets preserve deduplication. Without a native turn ID or transcript position, each genuinely separate Stop retains its existing unique identity; replaying an already frozen file never allocates a new one.
+
+Partial writes and corrupt, mismatched or unsupported complete records stay retained and make status unknown; they are not silently skipped or counted as delivered. Doctor is read-only and reports pending count and oldest age, or null with a fixed unknown reason. Future or unreadable timestamps cannot become zero or healthy. Service enumerates only the installation-owned index and default installation spool, never worker-supplied destinations. Missing/stopped service does not prevent local spooling; each new service pass resolves the current index, with no cached endpoint.
+
+## Verification boundary
+
+Private invented fixtures cover store/service absence, process reconstruction, registered writable storage with readable protected authority, replay and partial commits, malformed/partial input, revocation, changed identity and unknown doctor state. Focused hook tests preserve native answers, metadata scrubbing and launched/disabled exclusions. Offline fixtures do not qualify Codex workspace-write, installed clients, macOS/Windows native behavior, ACL protection or production service delivery.

@@ -321,27 +321,23 @@ fn call_record(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx
     (key, shared(&v))
 }
 
-fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str, parent_key: &str) -> Res<Event> {
-    let (key, value) = call_record(c, index, session, runtime, ctx, turn_key, parent_key);
-    Event::identified("agent.call", &key, value)
-}
-
 const FROZEN_SCHEMA: &str = "agentq-frozen/1";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FrozenRecord { namespace: String, key: String, observation: Value }
 impl FrozenRecord {
     fn event(&self) -> Res<Event> { Event::identified(&self.namespace, &self.key, self.observation.clone()) }
 }
 
-/// One finished run's `agent.turn` and `agent.call` records, fixed before any store lock or append. It holds immutable IDs
+/// Frozen run or hook metadata, including a standalone hook call, fixed before any store lock or append. Immutable IDs
 /// and CoreQ-validated metadata only, so a retry or restart appends the same records and counts them once.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frozen { records: Vec<FrozenRecord> }
 
 impl Frozen {
     fn new(records: Vec<FrozenRecord>) -> Res<Self> {
-        if records.first().is_none_or(|r| !matches!(r.namespace.as_str(), "agent.turn" | "agent.native" | "agent.app") || r.observation["kind"] != "agent.turn")
+        if records.first().is_none_or(|r| !matches!(r.namespace.as_str(), "agent.turn" | "agent.native" | "agent.app" | "agent.call") || r.observation["kind"] != if r.namespace == "agent.call" { "agent.call" } else { "agent.turn" })
             || records[1..].iter().any(|r| r.namespace != "agent.call" || r.observation["kind"] != "agent.call") {
             return Err("frozen records invalid".into());
         }
@@ -357,7 +353,7 @@ impl Frozen {
     pub fn save(&self) -> Value { json!({"schema": FROZEN_SCHEMA, "records": self.records}) }
     /// The value of `save`. Any other value is refused, never partly read.
     pub fn restore(saved: &Value) -> Res<Self> {
-        if saved["schema"] != FROZEN_SCHEMA { return Err("frozen records invalid".into()); }
+        if saved.as_object().is_none_or(|o|o.len()!=2) || saved["schema"] != FROZEN_SCHEMA { return Err("frozen records invalid".into()); }
         Self::new(serde_json::from_value(saved["records"].clone()).map_err(|_| "frozen records invalid")?)
     }
 }
@@ -414,7 +410,7 @@ pub struct SessionTurn<'a> {
 
 fn call_scope(turn: &SessionTurn) -> String { crate::sha256_hex(format!("hook\0{}\0{}", turn.runtime, turn.scope).as_bytes()) }
 
-fn session_events(turn: &SessionTurn, ctx: &Context, mut r: Report) -> Res<Vec<Event>> {
+fn session_events(turn: &SessionTurn, ctx: &Context, mut r: Report) -> Res<Frozen> {
     (r.outcome, r.error) = (turn.outcome, turn.error);
     r.session = turn.session.map(String::from);
     let model = turn.model.filter(|m| model_code(m)).map(String::from);
@@ -426,14 +422,20 @@ fn session_events(turn: &SessionTurn, ctx: &Context, mut r: Report) -> Res<Vec<E
     record["duration_us"] = Value::Null;
     record["unknown"]["duration_us"] = json!("not-reported");
     record["span"]=json!(crate::sha256_hex(turn.key.as_bytes()));record["unknown"].as_object_mut().map(|u|u.remove("span"));
-    let mut out = vec![Event::identified("agent.turn", turn.key, shared(&record))?];
+    let mut out = vec![FrozenRecord { namespace: "agent.turn".into(), key: turn.key.into(), observation: shared(&record) }];
     let scope = call_scope(turn);
-    for (i, c) in r.calls.iter().enumerate() { out.push(call_event(c, i, r.session.as_deref(), turn.runtime, ctx, &scope, turn.key)?); }
-    Ok(out)
+    for (i, c) in r.calls.iter().enumerate() {
+        let (key, observation) = call_record(c, i, r.session.as_deref(), turn.runtime, ctx, &scope, turn.key);
+        out.push(FrozenRecord { namespace: "agent.call".into(), key, observation });
+    }
+    Frozen::new(out)
 }
 
 /// The records of one turn from its new native transcript bytes in `text`, turn first.
-pub fn session_records(turn: &SessionTurn, ctx: &Context, text: &str) -> Res<Vec<Event>> {
+pub fn session_records(turn: &SessionTurn, ctx: &Context, text: &str) -> Res<Vec<Event>> { session_frozen(turn, ctx, text)?.events() }
+
+/// Freeze hook metadata before delivery or checkpoint advancement.
+pub fn session_frozen(turn: &SessionTurn, ctx: &Context, text: &str) -> Res<Frozen> {
     let client = Client::parse(turn.runtime).ok_or("session records need a known runtime")?;
     let events: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| v["message"]["model"] != "<synthetic>").collect();
     let mut r = Report::read(client, text, &events, None);
@@ -443,7 +445,10 @@ pub fn session_records(turn: &SessionTurn, ctx: &Context, text: &str) -> Res<Vec
 }
 
 /// The records of one turn whose calls the hook already holds, turn first.
-pub fn session_call_records(turn: &SessionTurn, ctx: &Context, mut calls: Vec<Call>) -> Res<Vec<Event>> {
+pub fn session_call_records(turn: &SessionTurn, ctx: &Context, calls: Vec<Call>) -> Res<Vec<Event>> { session_calls_frozen(turn, ctx, calls)?.events() }
+
+/// Freeze a hook turn and its already collected calls.
+pub fn session_calls_frozen(turn: &SessionTurn, ctx: &Context, mut calls: Vec<Call>) -> Res<Frozen> {
     // The store refuses a model that is not a code, which would lose the whole turn.
     for c in &mut calls { c.model = c.model.take().filter(|m| model_code(m)); }
     let mut r = Report::empty();
@@ -454,9 +459,15 @@ pub fn session_call_records(turn: &SessionTurn, ctx: &Context, mut calls: Vec<Ca
 
 /// The `agent.call` record of one model request a hook saw; `turn` names its session and scope.
 pub fn session_call(turn: &SessionTurn, ctx: &Context, call: &Call) -> Res<Event> {
+    session_call_frozen(turn, ctx, call)?.events()?.pop().ok_or("hook call absent".into())
+}
+
+/// Freeze one hook call, retaining its existing immutable identity.
+pub fn session_call_frozen(turn: &SessionTurn, ctx: &Context, call: &Call) -> Res<Frozen> {
     let mut call = call.clone();
     call.model = call.model.filter(|m| model_code(m));
-    call_event(&call, 0, turn.session, turn.runtime, ctx, &call_scope(turn), turn.key)
+    let (key, observation) = call_record(&call, 0, turn.session, turn.runtime, ctx, &call_scope(turn), turn.key);
+    Frozen::new(vec![FrozenRecord { namespace: "agent.call".into(), key, observation }])
 }
 
 #[cfg(test)]

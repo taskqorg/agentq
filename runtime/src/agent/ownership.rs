@@ -422,6 +422,141 @@ fn valid_session(runtime:&str,session:&str)->Res<()> {
     let structured=registry::structured_session(runtime);
     if !session.is_empty() && session!="-" && (structured || !session.starts_with('-') && native::plain_id(session)) {Ok(())} else {Err("session requires a native session ID".into())}
 }
+fn background_controller(row:&Value,current:&NativeProcess)->Res<()> {
+    let old=process(&row["controller"])?.filter(|p|p.pid>0 && !p.started.is_empty()).ok_or("background controller identity unknown")?;
+    if &old!=current && NativeProcess::read(old.pid)?.as_ref()==Some(&old) {return Err("background previous controller still live".into());}
+    Ok(())
+}
+
+// Only ownership metadata varies; source proof and immutable admission stay shared once.
+fn background_state(original:&Value,row:&Value)->Res<Value> {
+    let base=original.as_object().ok_or("background original journal invalid")?;
+    let row=row.as_object().ok_or("background prior journal invalid")?;
+    let bound=row.get("background_transition").is_some_and(|v|!v.is_null());
+    let shared=|key:&str|bound && matches!(key,"background_binding"|"background_transition");
+    let set=row.iter().filter(|(key,value)|!shared(key) && base.get(*key)!=Some(*value)).map(|(key,value)|(key.clone(),value.clone())).collect::<serde_json::Map<_,_>>();
+    let remove=base.keys().filter(|key|!shared(key) && !row.contains_key(*key)).cloned().collect::<Vec<_>>();
+    Ok(json!({"set":set,"remove":remove,"bound":bound}))
+}
+fn background_aliases(original:&Value,aliases:&Value)->Res<Value> {
+    aliases.as_array().ok_or("background aliases invalid")?.iter().map(|alias| {
+        if !alias["row"]["background_binding"].is_null() || !alias["row"]["background_transition"].is_null() {return Err("background alias journal differs".into());}
+        Ok(json!({"name":alias["name"],"state":background_state(original,&alias["row"])?}))
+    }).collect::<Res<Vec<_>>>().map(Value::from)
+}
+fn background_journal(selected:&Value,prior:Option<&Value>,expected:&Value,receipt:&Value,aliases:&Value)->Res<Value> {
+    let mut original=selected;let mut cursor=prior;let mut chain=Vec::new();let mut history=Vec::new();
+    // Read old linked records by reference; never clone their accumulated subtrees.
+    while let Some(row)=cursor {
+        let transition=&row["background_transition"];if transition.is_null() {break;}
+        if row["background_binding"]!=*receipt || transition["expected_owner"]!=*expected {return Err("background historical receipt differs".into());}
+        if transition["schema"]=="agentq-background-history/1" {
+            if transition.as_object().is_none_or(|t|t.len()!=5 || t.keys().any(|k|!matches!(k.as_str(),"schema"|"expected_owner"|"original"|"aliases"|"history"))) {return Err("background history fields unknown".into());}
+            original=&transition["original"];
+            if transition["aliases"]!=background_aliases(original,aliases)? {return Err("background transition alias differs".into());}
+            history=transition["history"].as_array().ok_or("background history invalid")?.clone();
+            for state in &history {
+                let set=state["set"].as_object().ok_or("background history state invalid")?;
+                let remove=state["remove"].as_array().ok_or("background history state invalid")?;
+                if !state["bound"].is_boolean() || state.as_object().is_none_or(|s|s.keys().any(|k|!matches!(k.as_str(),"set"|"remove"|"bound")))
+                    || set.iter().any(|(k,v)|matches!(k.as_str(),"background_binding"|"background_transition") && (state["bound"]==true || !v.is_null()))
+                    || remove.iter().any(|k|k.as_str().is_none_or(|k|state["bound"]==true && matches!(k,"background_binding"|"background_transition"))) {return Err("background history state invalid".into());}
+            }
+            chain.push(row);cursor=None;break;
+        }
+        if !transition["schema"].is_null() || transition.as_object().is_none_or(|t|t.len()!=4 || t.keys().any(|k|!matches!(k.as_str(),"expected_owner"|"prior"|"original"|"aliases"))) || transition["aliases"]!=*aliases || !transition["original"].is_object()
+            || !(transition["prior"].is_null() || transition["prior"].is_object()) {return Err("background historical transition invalid".into());}
+        original=&transition["original"];chain.push(row);cursor=transition.get("prior").filter(|v|!v.is_null());
+    }
+    if !original.is_object() || !original["background_binding"].is_null() || !original["background_transition"].is_null() {return Err("background immutable original invalid".into());}
+    if let Some(row)=cursor {if !row["background_binding"].is_null() {return Err("background historical binding incomplete".into());}if row!=original {history.push(background_state(original,row)?);}}
+    for row in chain.into_iter().rev() {
+        let transition=&row["background_transition"];
+        if transition["schema"].is_null() && transition["original"]!=*original && transition["original"]!=transition["prior"] {return Err("background historical original differs".into());}
+        history.push(background_state(original,row)?);
+    }
+    Ok(json!({"schema":"agentq-background-history/1","expected_owner":expected,"original":original,"aliases":background_aliases(original,aliases)?,"history":history}))
+}
+
+impl SessionStore {
+    pub(super) fn background_stop<J,T>(&self,spec:&Spec,session:&str,native:&NativeProcess,previous:Option<&NativeProcess>,expected:&Value,policy:Lifetime,validate:impl Fn()->Res<(Value,J)>,action:impl FnOnce(J)->Res<T>)->Res<T> {
+        self.background_stop_write(spec,session,native,previous,expected,policy,validate,action,save)
+    }
+    fn background_stop_write<J,T>(&self,spec:&Spec,session:&str,native:&NativeProcess,previous:Option<&NativeProcess>,expected:&Value,policy:Lifetime,validate:impl Fn()->Res<(Value,J)>,action:impl FnOnce(J)->Res<T>,mut write:impl FnMut(&Path,&Value)->Res<()>)->Res<T> {
+        valid_session(spec.client.code(),session)?;
+        let token=expected["token"].as_str().filter(|t|native::plain_id(t) && *t!="-").ok_or("background owner receipt missing")?;
+        let saved_session=expected["session"].as_str().ok_or("background owner receipt missing")?;
+        if saved_session!="-" && saved_session!=session || expected["lifetime"]!=json!(policy) {return Err("background owner receipt differs".into());}
+        let root=self.directory()?;let _admission=lock(&root.join("admission.lock"))?;
+        let target=path(&root,spec.client.code(),session);let alias=root.join(format!("pending-{token}.json"));
+        let _target=lock(&target.with_extension("lock"))?;let _alias=lock(&alias.with_extension("lock"))?;
+        let prior=read(&target)?;let pending=read(&alias)?;
+        let original=pending.as_ref().or(prior.as_ref()).ok_or("background original owner missing")?;
+        let current=NativeProcess::read(std::process::id())?.ok_or("background current controller unknown")?;
+        let check_row=|row:&Value|->Res<()> {
+            scope(row,spec)?;mutation_clear(row)?;background_controller(row,&current)?;
+            if !row["native_reason"].is_null() || !(matches!(row["phase"].as_str(),Some("prepared"|"submitted"|"controlled")) || row["phase"]=="unconfirmed" && !row["background_binding"].is_null() && !row["background_transition"].is_null()) {return Err("background original ownership uncertain".into());}
+            if row["token"]!=token || row["lifetime"]!=json!(policy) || !(process(&row["native"])?.as_ref()==Some(native) || previous.is_some() && process(&row["native"])?.as_ref()==previous)
+                || stopped(&root,row)? || !matches!(row["session"].as_str(),Some("-")) && row["session"]!=session {return Err("background original owner differs".into());}Ok(())
+        };
+        check_row(original)?;
+        if pending.as_ref().is_some_and(|r|r["binding"]!=session) {return Err("background pending destination differs".into());}
+        if let Some(row)=&prior {check_row(row)?;}
+        // Retain exact aliases and prior controller/token history; only the destination is committed.
+        let mut aliases=Vec::new();
+        if let Some(row)=&pending {aliases.push(json!({"name":alias.file_name().and_then(OsStr::to_str).ok_or("background alias name unknown")?,"row":row}));}
+        for entry in std::fs::read_dir(&root).map_err(|e|e.to_string())? {
+            let file=entry.map_err(|e|e.to_string())?.path();if file==alias || file==target || file.extension().is_none_or(|s|s!="json") {continue;}
+            let row=read(&file)?.ok_or("background ownership row disappeared")?;
+            if process(&row["native"])?.as_ref()==Some(native) {return Err("background conflicting native owner".into());}
+        }
+        let recheck=||->Res<()> {
+            if read(&target)?!=prior || read(&alias)?!=pending {return Err("background owner changed".into());}
+            check_row(original)?;if let Some(row)=&prior {check_row(row)?;}
+            if NativeProcess::read(native.pid)?.as_ref()!=Some(native) {return Err("background native identity changed".into());}
+            if let Some(old)=previous {if old.pid==0 || old.started.is_empty() || old==native || NativeProcess::read(old.pid)?.as_ref()==Some(old) {return Err("background previous native still live".into());}}Ok(())
+        };
+        recheck()?;let (receipt,_)=validate()?;
+        for row in [pending.as_ref(),prior.as_ref()].into_iter().flatten() {
+            if !row["background_binding"].is_null() && row["background_binding"]!=receipt {return Err("background control receipt differs".into());}
+            if !row["background_transition"].is_null() && row["background_transition"]["expected_owner"]!=*expected {return Err("background transition receipt differs".into());}
+        }
+        let journal=background_journal(original,prior.as_ref(),expected,&receipt,&json!(aliases))?;
+        if prior.as_ref().is_some_and(|row|row["phase"]=="controlled" && row["controller"]==json!(current) && row["background_binding"]==receipt) {
+            recheck()?;let (fresh,job)=validate()?;
+            if fresh!=receipt {return Err("background source changed before stop".into());}
+            recheck()?;let result=action(job);
+            if result.is_err() {if let Some(row)=&prior {if read(&target)?.as_ref()==Some(row) {let mut fenced=row.clone();fenced["phase"]=json!("unconfirmed");let _=write(&target,&fenced);}}}
+            return result;
+        }
+        recheck()?;if validate()?.0!=receipt {return Err("background source changed before persistence".into());}
+        let mut destination=Value::Object(original.as_object().ok_or("background owner invalid")?.iter().filter(|(key,_)|!matches!(key.as_str(),"background_binding"|"background_transition")).map(|(key,value)|(key.clone(),value.clone())).collect());destination["session"]=json!(session);destination["binding"]=Value::Null;
+        destination["native"]=json!(native);destination["controller"]=json!(current);destination["phase"]=json!("unconfirmed");destination["background_binding"]=receipt.clone();
+        destination["background_transition"]=journal;
+        recheck()?;
+        if let Err(error)=write(&target,&destination) {return Err(error);}
+        let finish=(|| {
+            if read(&target)?.as_ref()!=Some(&destination) || read(&alias)?!=pending {return Err("background staged owner changed".into());}
+            check_row(original)?;if validate()?.0!=receipt {return Err("background source changed after persistence".into());}
+            let mut controlled=destination.clone();controlled["phase"]=json!("controlled");
+            if read(&target)?.as_ref()!=Some(&destination) || read(&alias)?!=pending {return Err("background staged owner changed".into());}
+            check_row(original)?;if NativeProcess::read(native.pid)?.as_ref()!=Some(native) {return Err("background native changed before commit".into());}
+            write(&target,&controlled)?;
+            if read(&target)?.as_ref()!=Some(&controlled) || read(&alias)?!=pending {return Err("background committed owner changed".into());}
+            check_row(original)?;let (fresh,job)=validate()?;
+            if fresh!=receipt {return Err("background source changed before stop".into());}
+            if read(&target)?.as_ref()!=Some(&controlled) || read(&alias)?!=pending {return Err("background owner changed before stop".into());}
+            check_row(original)?;if NativeProcess::read(native.pid)?.as_ref()!=Some(native) {return Err("background native changed before stop".into());}
+            action(job)
+        })();
+        if finish.is_err() {
+            // A failed durable step/request never certifies usable ownership or exit.
+            if read(&target).ok().flatten().is_some_and(|r|r==destination || {let mut controlled=destination.clone();controlled["phase"]=json!("controlled");r==controlled}) {let _=write(&target,&destination);}
+        }
+        finish
+    }
+}
+
 fn binding(spec:&Spec)->Res<Value> {
     let home=spec_home(spec).map(|p|p.canonicalize().map_err(|_|"session-owner-unknown: account home unavailable")).transpose()?;
     Ok(json!({"schema":"agentq-owner/2","runtime":spec.client.code(),"root":spec.root.canonicalize().map_err(|e|e.to_string())?,"home":home,
@@ -444,6 +579,147 @@ fn idle(row:&Value)->Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Structural source regression; execution is deferred with the final coherent batch.
+    #[test]
+    fn background_owned_history_retains_unique_proofs_and_linear_controller_deltas() {
+        let original=json!({"schema":"agentq-owner/2","session":"native","token":"owned","controller":{"pid":99,"started":"original"},"phase":"submitted","admission":"ONE_ORIGINAL_ADMISSION"});
+        let expected=json!({"session":"native","token":"owned","lifetime":"recoverable"});
+        let receipt=json!({"source":"ONE_SOURCE_PROOF","prefix":"p".repeat(16384)});
+        let aliases=json!([]);let mut row=original.clone();let mut states=Vec::new();let mut initial_size=0;
+        for index in 0..16 {
+            let journal=background_journal(&row,Some(&row),&expected,&receipt,&aliases).unwrap();
+            let mut next=original.clone();next["controller"]=json!({"pid":1000+index,"started":format!("controller-{index:02}")});next["phase"]=json!("controlled");
+            next["background_binding"]=receipt.clone();next["background_transition"]=journal;
+            assert_eq!(next["background_transition"]["original"],original);assert_eq!(next["background_binding"],receipt);
+            let history=next["background_transition"]["history"].as_array().unwrap();assert_eq!(history.len(),index);
+            for (delta,wanted) in history.iter().zip(&states) {
+                let mut restored=original.clone();let object=restored.as_object_mut().unwrap();
+                for key in delta["remove"].as_array().unwrap() {object.remove(key.as_str().unwrap());}
+                for (key,value) in delta["set"].as_object().unwrap() {object.insert(key.clone(),value.clone());}
+                assert_eq!(&restored,wanted);assert_eq!(delta["bound"],true);
+                assert!(delta["set"].get("background_binding").is_none());assert!(delta["set"].get("background_transition").is_none());
+            }
+            let encoded=serde_json::to_string(&next).unwrap();
+            assert_eq!(serde_json::to_string(&next["background_transition"]).unwrap().matches("ONE_ORIGINAL_ADMISSION").count(),1);assert_eq!(encoded.matches("ONE_SOURCE_PROOF").count(),1);
+            assert_eq!(encoded.matches("\"expected_owner\":").count(),1);assert_eq!(encoded.matches("\"original\":").count(),1);
+            if index==0 {initial_size=encoded.len();}
+            let changed_bytes=history.iter().map(|entry|serde_json::to_vec(entry).unwrap().len()).sum::<usize>();
+            assert_eq!(encoded.len(),initial_size+changed_bytes+index.saturating_sub(1),"only actual prior-state deltas add bytes");
+            let mut state=next.clone();state.as_object_mut().unwrap().remove("background_binding");state.as_object_mut().unwrap().remove("background_transition");states.push(state);row=next;
+        }
+        // Normalize the exact prior recursive shape without retaining its duplicated subtrees.
+        let mut legacy=original.clone();
+        for index in 0..4 {
+            let mut next=original.clone();next["controller"]=json!({"pid":2000+index,"started":format!("old-{index}")});next["phase"]=json!("controlled");next["background_binding"]=receipt.clone();
+            next["background_transition"]=json!({"expected_owner":expected,"prior":legacy,"original":legacy,"aliases":aliases});legacy=next;
+        }
+        let normalized=background_journal(&legacy,Some(&legacy),&expected,&receipt,&aliases).unwrap();assert_eq!(normalized["original"],original);assert_eq!(normalized["history"].as_array().unwrap().len(),4);
+        assert_eq!(serde_json::to_string(&normalized).unwrap().matches("ONE_ORIGINAL_ADMISSION").count(),1);
+        let mut corrupt=legacy.clone();corrupt["background_transition"]["original"]["token"]=json!("foreign");assert!(background_journal(&corrupt,Some(&corrupt),&expected,&receipt,&aliases).is_err());
+        let mut alias_original=original.clone();alias_original["session"]=json!("-");alias_original["binding"]=json!("native");
+        let aliases=json!([{"name":"pending-owned.json","row":alias_original}]);
+        let alias_journal=background_journal(&alias_original,None,&expected,&receipt,&aliases).unwrap();
+        assert_eq!(alias_journal["aliases"][0]["state"]["set"],json!({}));assert_eq!(alias_journal["original"],alias_original);
+        let mut bound=original.clone();bound["background_binding"]=receipt.clone();bound["background_transition"]=alias_journal;
+        let mut changed=aliases.clone();changed[0]["row"]["background_binding"]=Value::Null;
+        assert!(background_journal(&alias_original,Some(&bound),&expected,&receipt,&changed).is_err(),"exact alias field presence remains evidence");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_owned_receipt_cold_reentry_and_fencing() {
+        use std::cell::Cell;
+        let mut old=Command::new("sleep").arg("60").spawn().unwrap();
+        let old_identity=NativeProcess::read(old.id()).unwrap().unwrap();
+        let root=crate::scratch("background-owned-cold");
+        let spec=Spec {client:Client::Claude,root:root.clone(),session:"native".into(),resume:true,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));
+        let owner=store.acquire(&spec,true,None,Lifetime::Recoverable).unwrap();
+        owner.observe_process(std::process::id()).unwrap();let receipt=owner.checkpoint().unwrap();
+        let target=owner.0.lock().unwrap().path.clone();let mut original=read(&target).unwrap().unwrap();drop(owner);
+        let native=NativeProcess::read(std::process::id()).unwrap().unwrap();let proof=json!({"source":"bound-prefix","pid":native});
+        original["controller"]=json!(old_identity);save(&target,&original).unwrap();
+        let stopped=Cell::new(0);let action=|()| {stopped.set(stopped.get()+1);Ok(())};
+        assert!(store.background_stop(&spec,"native",&native,None,&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),action).unwrap_err().contains("controller still live"));
+        assert_eq!(read(&target).unwrap(),Some(original.clone()));assert_eq!(stopped.get(),0);
+        old.kill().unwrap();old.wait().unwrap();
+        for change in ["controller","token","session","native","receipt","source","uncertain","mutation"] {
+            let mut row=original.clone();let mut expected=receipt.clone();
+            match change {"controller"=>row["controller"]["started"]=json!(""),"token"=>row["token"]=json!("other"),"session"=>row["session"]=json!("foreign"),"native"=>row["native"]["started"]=json!("changed"),"receipt"=>expected["token"]=json!("other"),"uncertain"=>row["phase"]=json!("unconfirmed"),"mutation"=>row["mutation"]=json!({"operation":"unrelated"}),_=>row["background_binding"]=json!({"source":"changed"})}
+            save(&target,&row).unwrap();
+            assert!(store.background_stop(&spec,"native",&native,None,&expected,Lifetime::Recoverable,||Ok((proof.clone(),())),action).is_err(),"{change}");
+            assert_eq!(read(&target).unwrap(),Some(row));assert_eq!(stopped.get(),0);
+        }
+        for fail_at in [1,2] {
+            for after_write in [false,true] {
+                save(&target,&original).unwrap();let writes=Cell::new(0);
+                let result=store.background_stop_write(&spec,"native",&native,None,&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),action,|path,row| {
+                    writes.set(writes.get()+1);if writes.get()==fail_at {if after_write {save(path,row)?;}return Err("fixture persist failure".into());}save(path,row)
+                });
+                assert!(result.is_err());assert_eq!(stopped.get(),0);
+                let row=read(&target).unwrap().unwrap();assert!(row==original || row["phase"]=="unconfirmed");
+                if row!=original {assert_eq!(row["background_transition"]["original"],original);}
+            }
+        }
+        save(&target,&original).unwrap();let validations=Cell::new(0);
+        assert!(store.background_stop(&spec,"native",&native,None,&receipt,Lifetime::Recoverable,|| {validations.set(validations.get()+1);if validations.get()==3 {Err("fixture source changed after durable stage".into())}else{Ok((proof.clone(),()))}},action).is_err());
+        assert_eq!(stopped.get(),0);assert_eq!(read(&target).unwrap().unwrap()["phase"],"unconfirmed");
+        save(&target,&original).unwrap();
+        store.background_stop(&spec,"native",&native,None,&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),action).unwrap();
+        let committed=read(&target).unwrap().unwrap();assert_eq!(committed["phase"],"controlled");assert_eq!(committed["background_transition"]["original"],original);
+        store.background_stop(&spec,"native",&native,None,&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),action).unwrap();
+        assert_eq!(read(&target).unwrap(),Some(committed));assert_eq!(stopped.get(),2,"same-controller reentry is idempotent");
+        let mut last=read(&target).unwrap().unwrap();let first_size=serde_json::to_vec(&last).unwrap().len();let mut delta_bytes=0;
+        for transfer in 1..=8 {
+            last["controller"]=json!(old_identity);save(&target,&last).unwrap();
+            store.background_stop(&spec,"native",&native,None,&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),action).unwrap();
+            last=read(&target).unwrap().unwrap();let history=last["background_transition"]["history"].as_array().unwrap();assert_eq!(history.len(),transfer);
+            delta_bytes+=serde_json::to_vec(history.last().unwrap()).unwrap().len()+1;
+            assert!(serde_json::to_vec(&last).unwrap().len()<=first_size+delta_bytes);
+            assert_eq!(last["background_transition"]["original"],original);assert_eq!(last["background_binding"],proof);
+            assert_eq!(serde_json::to_string(&last).unwrap().matches("bound-prefix").count(),1);
+            store.background_stop(&spec,"native",&native,None,&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),action).unwrap();assert_eq!(read(&target).unwrap(),Some(last.clone()),"idempotent requests do not append history");
+        }
+        last["controller"]=json!(old_identity);save(&target,&last).unwrap();let mut writes=0;
+        assert!(store.background_stop_write(&spec,"native",&native,None,&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),|()|->Res<()>{panic!("partial cold transfer must never stop")},|file,row| {writes+=1;save(file,row)?;if writes==2 {Err("partial cold commit".into())}else{Ok(())}}).is_err());
+        let fenced=read(&target).unwrap().unwrap();assert_eq!(fenced["phase"],"unconfirmed");assert_eq!(fenced["background_binding"],proof);assert_eq!(fenced["background_transition"]["original"],original);
+        assert_eq!(fenced["background_transition"]["history"].as_array().unwrap().len(),9);
+        assert_eq!(serde_json::to_string(&fenced).unwrap().matches("bound-prefix").count(),1);
+        for invalid in [NativeProcess {pid:0,started:old_identity.started.clone()},NativeProcess {pid:old_identity.pid,started:String::new()}] {
+            save(&target,&original).unwrap();assert!(store.background_stop(&spec,"native",&native,Some(&invalid),&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),|()|->Res<()>{panic!("missing old identity must never stop")}).is_err());
+            assert_eq!(read(&target).unwrap(),Some(original.clone()));
+        }
+        let mut replaced=original.clone();replaced["native"]=json!(old_identity);save(&target,&replaced).unwrap();
+        store.background_stop(&spec,"native",&native,Some(&old_identity),&receipt,Lifetime::Recoverable,||Ok((proof.clone(),())),action).unwrap();
+        let transitioned=read(&target).unwrap().unwrap();assert_eq!(transitioned["native"],json!(native));assert_eq!(transitioned["background_transition"]["original"],replaced);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn background_owned_pending_alias_is_exact_and_never_erased() {
+        let root=crate::scratch("background-owned-alias");let spec=Spec {client:Client::Claude,root:root.clone(),session:"native".into(),resume:true,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));let mut fresh=spec.clone();fresh.session="-".into();fresh.resume=false;
+        let owner=store.acquire(&fresh,true,None,Lifetime::Recoverable).unwrap();owner.observe_process(std::process::id()).unwrap();let expected=owner.checkpoint().unwrap();
+        let alias=owner.0.lock().unwrap().path.clone();let mut row=read(&alias).unwrap().unwrap();drop(owner);
+        row["binding"]=json!("native");save(&alias,&row).unwrap();let native=NativeProcess::read(std::process::id()).unwrap().unwrap();let proof=json!({"source":"prefix"});
+        let target=path(&store.path,"claude","native");
+        for change in ["destination","controller","receipt","foreign"] {
+            let mut changed=row.clone();match change {"destination"=>changed["binding"]=json!("other"),"controller"=>changed["controller"]=Value::Null,"receipt"=>changed["background_binding"]=json!({"source":"other"}),_=>{save(&store.path.join("pending-foreign.json"),&row).unwrap();}}
+            save(&alias,&changed).unwrap();
+            assert!(store.background_stop(&spec,"native",&native,None,&expected,Lifetime::Recoverable,||Ok((proof.clone(),())),|()|->Res<()>{panic!("refusal must never stop")}).is_err());
+            assert_eq!(read(&alias).unwrap(),Some(changed));assert!(!target.exists());
+            if change=="foreign" {std::fs::remove_file(store.path.join("pending-foreign.json")).unwrap();}
+        }
+        save(&alias,&row).unwrap();
+        let mut writes=0;assert!(store.background_stop_write(&spec,"native",&native,None,&expected,Lifetime::Recoverable,||Ok((proof.clone(),())),|()|->Res<()>{panic!("persist failure must never stop")},|file,value| {writes+=1;save(file,value)?;if writes==1 {Err("interrupted alias transition".into())}else{Ok(())}}).is_err());
+        assert_eq!(read(&alias).unwrap(),Some(row.clone()));assert_eq!(read(&target).unwrap().unwrap()["phase"],"unconfirmed");
+        store.background_stop(&spec,"native",&native,None,&expected,Lifetime::Recoverable,||Ok((proof.clone(),())),|()|Ok(())).unwrap();
+        assert_eq!(read(&alias).unwrap(),Some(row.clone()));
+        let mut changed=row.clone();changed["native_reason"]=json!("changed");save(&alias,&changed).unwrap();
+        assert!(store.background_stop(&spec,"native",&native,None,&expected,Lifetime::Recoverable,||Ok((proof.clone(),())),|()|->Res<()>{panic!("changed alias must never stop")}).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn adoption_uses_the_locked_pending_row_and_preserves_current_writer_evidence() {

@@ -50,6 +50,7 @@ impl Runtime for Reader {
     fn background_candidates(&self,_:Command,_:&NativeSpec,_:bool,_:Duration)->Res<Vec<agent::BackgroundCandidate>>{unavailable()}
     fn background_input(&self,_:&agent::BackgroundCandidate,_:&str,_:&mut u64)->Res<bool>{unavailable()}
     fn background_failure(&self,_:&agent::BackgroundCandidate)->Res<Option<agent::AssistantFailure>>{unavailable()}
+    fn stop_background_owned(&self,_:&dyn Fn()->Command,_:&Launch,_:&agent::BackgroundExecution<'_>,_:&super::super::sessions::Session,_:Duration)->Res<Output>{unavailable()}
     fn job(&self,_:&Value,_:&NativeSpec,_:&str)->Res<BackgroundJob>{unavailable()}
     fn stop_job(&self,_:Command,_:&NativeSpec,_:&BackgroundJob,_:Duration)->Res<Output>{unavailable()}
     fn launch_refusal(&self,_:&str)->Option<Cause>{Some(CAUSE)}

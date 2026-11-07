@@ -11,6 +11,9 @@ mod preflight;
 pub use preflight::{Readiness, ReadinessMode, LaunchCheck, Repair};
 #[path="ownership.rs"]
 mod ownership;
+#[path="background_control.rs"]
+mod background_control;
+pub use background_control::BackgroundExecution;
 pub use ownership::{SessionStore,SessionOwner,NativeProcess,OwnerObservation,ResumeCommand};
 #[path="activity.rs"]
 mod activity;
@@ -958,6 +961,8 @@ pub trait Runtime: Send + Sync {
     fn log_events(&self, log: &str) -> Vec<Event>;
     /// log_events per source record, with native time, assistant failure, lifecycle label and saved permission mode.
     fn log_records(&self, log: &str) -> Vec<super::events::LogRecord>;
+    /// Content-free native schema diagnostics; unsupported readers do not parse a fallback format.
+    fn record_shape(&self, _record:&str)->Result<super::RecordShape,Cause> {Err(Cause("record-shape-unsupported"))}
     /// Read-only account email/ID or project; unknown and unsupported identities stay absent.
     fn account_identity(&self, home: Option<&Path>) -> Option<String>;
     /// Request the stop; true when the exit is already confirmed.
@@ -980,6 +985,8 @@ pub trait Runtime: Send + Sync {
     fn observe(&self, run: &mut Run) -> Observation;
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause>;
     fn ready(&self, executable: Option<&Path>, home: Option<&Path>) -> Ready;
+    /// Version only, scoped exactly like a launch; unsupported adapters never fall back to ambient context.
+    fn version_for(&self, _launch: &Launch) -> Check {Check {state:"unknown",detail:"context version probe unsupported".into()}}
     /// Account-bound probes use the same home, environment and executable as a launch.
     fn ready_for(&self, _launch: &Launch) -> Ready {let unknown=||Check {state:"unknown",detail:"context probe unsupported".into()};Ready {install:unknown(),version:unknown(),login:unknown()}}
     fn catalogue_for(&self, _launch: &Launch) -> Res<Vec<Model>> {Err("catalogue context unsupported".into())}
@@ -1021,6 +1028,8 @@ pub trait Runtime: Send + Sync {
     fn background_input(&self,candidate:&BackgroundCandidate,input:&str,remaining_bytes:&mut u64)->Res<bool>;
     /// Lazy failure detail from the candidate's exact bound native locator.
     fn background_failure(&self,candidate:&BackgroundCandidate)->Res<Option<AssistantFailure>>;
+    /// Explicit protected-receipt-owned import and stop; acknowledgement is never exit.
+    fn stop_background_owned(&self,base:&dyn Fn()->Command,launch:&Launch,expected:&BackgroundExecution<'_>,source:&history::sessions::Session,budget:Duration)->Res<Output>;
     /// Capability `background`: job `id` validated from one `jobs` row against `spec`.
     fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob>;
     /// Capability `background`: request the stop of `job`; the output acknowledges only the request.
@@ -1520,6 +1529,7 @@ impl Runtime for Adapter {
     }
 
     fn log_records(&self, log: &str) -> Vec<super::events::LogRecord> { super::events::log_records(self.client,log) }
+    fn record_shape(&self, record:&str)->Result<super::RecordShape,Cause> {super::schema::read(record)}
 
     fn account_identity(&self, home: Option<&Path>) -> Option<String> { super::limits::identity(self.client,home) }
 
@@ -1687,6 +1697,7 @@ impl Runtime for Adapter {
         launch.policy.subscription=self.client==Client::Codex;launch.home=home.map(Path::to_path_buf);launch.command=executable.map(|p|vec![p.as_os_str().into()]).unwrap_or_default();
         preflight::ready(self,&launch)
     }
+    fn version_for(&self, launch: &Launch) -> Check {preflight::version(self,launch)}
     fn ready_for(&self, launch: &Launch) -> Ready {preflight::ready(self,launch)}
     fn catalogue_for(&self, launch: &Launch) -> Res<Vec<Model>> {preflight::catalogue(self,launch)}
     fn account_limits_for(&self, launch: &Launch, now:i64) -> Vec<Window> {(self.ops.limits_for)(launch,now)}
@@ -1829,6 +1840,10 @@ impl Runtime for Adapter {
         self.needs("background")?;
         if candidate.runtime()!=self.descriptor.name {return Err("foreign background candidate".into());}
         candidate.failure()
+    }
+
+    fn stop_background_owned(&self,base:&dyn Fn()->Command,launch:&Launch,expected:&BackgroundExecution<'_>,source:&history::sessions::Session,budget:Duration)->Res<Output> {
+        background_control::stop(self,base,launch,expected,source,budget)
     }
 
     fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob> {

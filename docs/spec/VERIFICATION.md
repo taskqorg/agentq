@@ -133,3 +133,11 @@ The defect was exhausted contract headroom. The baseline is `b5ef97c257a97664bcd
 One-time Python assertions compared the complete P/M blocks, including continuation lines, with that baseline: all 59 remain verbatim and in order in the root. All 41 removed detail bullets remain verbatim in [COMPRESSION](COMPRESSION.md#engines-and-pins), [SERVICE](SERVICE.md#installation-and-service-layout) or [RUNTIME](RUNTIME.md#runtime-operation-and-adoption), except rebased relative Markdown link targets. The root names each binding destination; its binding-detail declaration remains unchanged. New context lines keep moved section references attached to the root. Existing linked files and their original detail remain; only their scope descriptions expand.
 
 The same readback checked every local Markdown file/anchor link across the four changed contract pages: 67 resolve. `git diff --check` passed. Changes are restricted to `agentq.md` and `docs/spec`; no runtime, test, fixture, configuration or export changed. This is documentation evidence, not native-platform qualification or deployment; merge-result CI remains the publication gate (TaskQ R12/§ 7).
+
+## Explicit native-version canary
+
+For each supported agent, scenario revision 1 is ONE isolated native turn: `Reply exactly AGENTQ_CANARY_OK`. It requests no tools, files or network task. Preserve authentication and global configuration; request only the exact owner-selected Launch model, Policy, account home and session policy, with no inferred parameters, retries, resume or fallback. Requested settings are not proof of applied settings; missing observations remain unknown and mismatches fail. [Authority and evidence](VERSION-CANARY.md).
+
+Check terminal success and exact answer, canonical events, canonical history, correlated hook evidence and nonmissing usage independently. Missing or null is unknown, never zero or pass. New versions require fresh scenario evidence. Record pass, drift, fail or unknown; preserve only allowlisted typed diagnostic shapes.
+
+Synthetic fixtures prove receipt refusal before execution, independent unknown dimensions, shape privacy and durable finding deduplication. They do not qualify a native client. A real upgraded client on an explicitly opted-in host and a separately approved deduplicated board finding remain acceptance gates.

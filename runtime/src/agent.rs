@@ -24,13 +24,15 @@ pub(crate) use adapter::SelectedSource;
 pub(crate) use adapter::test_receipts;
 pub(crate) mod capture;
 mod events;
+mod schema;
+pub use schema::RecordShape;
 mod limits;
 pub use events::{Answer,Question,AssistantFailure, Choice, Image, Event, LogRecord, Model, RecordTime, RequestKind, TimeFault, ToolKind};
 pub use limits::Window;
-pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
+pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records, session_frozen, session_calls_frozen, session_call_frozen};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
-pub use adapter::{InputStage,LaunchError,BackgroundLocator,LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession,Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Binding,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{InputStage,LaunchError,BackgroundExecution,BackgroundLocator,LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession,Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Binding,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use registry::{BackgroundCandidate,BackgroundKind,BackgroundState,BackgroundActivity,BackgroundPid};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
@@ -983,8 +985,8 @@ fn test_usage(client:Client,events:&[Value])->Usage {let (calls,count,known)=(pr
 /// Standard padded base64 for the archive wire.
 pub(crate) fn encode_base64(bytes: &[u8]) -> String { adapter::b64(bytes) }
 
-/// Private native identity for archive replacement detection; not execution authority.
-pub(crate) fn archive_file_identity(file:&File)->Res<String> {native::file_id(file)}
+/// Physical file/directory identity for archive and hook replacement detection; not execution authority.
+pub fn archive_file_identity(file:&File)->Res<String> {native::file_id(file)}
 
 #[cfg(test)]
 mod start_failure_tests {

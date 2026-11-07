@@ -1,6 +1,6 @@
 //! `agent.turn` and `agent.call` records of manual and PM sessions (agentq.md M6.11, docs/spec/TELEMETRY.md § Session
 //! records). The runtime builds them; this module finds the new native bytes and writes them.
-use agentq_runtime::agent::{APPEND_CHUNK, Call, Context, SessionTurn, append_records, session_call, session_call_records, session_records};
+use agentq_runtime::agent::{Call, Context, SessionTurn, session_call_frozen, session_calls_frozen, session_frozen};
 use serde_json::{Value, json};
 use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,11 @@ fn read_new(mark: &Path, file: &Path, budget: u64, deadline: Instant) -> Result<
     let err = |e: std::io::Error| format!("transcript: {e}");
     let mut f = std::fs::File::open(file).map_err(err)?;
     let len = f.metadata().map_err(err)?.len();
-    let saved = std::fs::read_to_string(mark).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+    let saved = match std::fs::read_to_string(mark) {
+        Ok(s) => s.trim().parse::<u64>().map_err(|_| "observe checkpoint corrupt; retained")?,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound => 0,
+        Err(e) => return Err(err(e)),
+    };
     let start = if saved > len { 0 } else { saved };
     f.seek(SeekFrom::Start(start)).map_err(err)?;
     let mut r = std::io::BufReader::new(f);
@@ -81,7 +85,9 @@ pub fn stop(data: &Path, runtime: &str, input: &Value, launched: bool, deadline:
     let files = files(runtime, input);
     // A Claude `Stop` without a transcript is already a recorded failure of the `agentq.model` path.
     if files.is_empty() && runtime == "claude" { return Ok(()); }
-    let state = data.join("observe");
+    let project = project(input);
+    let delivery = crate::hook_spool::Delivery::open(data,runtime,&project)?;
+    let state = &delivery.state;
     std::fs::create_dir_all(&state).map_err(|e| format!("observe state: {e}"))?;
     let (mut new_text, mut marks, mut position) = (String::new(), vec![], None);
     for file in &files {
@@ -105,15 +111,9 @@ pub fn stop(data: &Path, runtime: &str, input: &Value, launched: bool, deadline:
     let key = crate::model::event_id("turn", &format!("{scope}:{position}"));
     let (outcome, error) = stop_outcome(input);
     let turn = SessionTurn { runtime, session, scope: &scope, key: &key, now_ms: now_ms(), outcome, error, model: text(input, &["modelName"]) };
-    let project = project(input);
-    let events = session_records(&turn, &context(&project), &new_text)?;
-    let store = coreq::telemetry::Store::open(&data.join("observations.sqlite3"))?;
-    for chunk in events.chunks(APPEND_CHUNK) {
-        // The offsets stay, and the next `Stop` keeps the first payload of each stored ID.
-        if Instant::now() >= deadline { return Ok(()); }
-        append_records(&store, chunk)?;
-    }
-    for (mark, end) in marks { coreq::write_atomic(&mark, &json!(end).to_string()).map_err(|e| format!("observe state: {e}"))?; }
+    let frozen = session_frozen(&turn, &context(&project), &new_text)?;
+    delivery.persist(&frozen,deadline)?;
+    for (mark, end) in marks { coreq::write_durable(&mark, json!(end).to_string()).map_err(|e| format!("observe state: {e}"))?; }
     Ok(())
 }
 
@@ -138,8 +138,8 @@ fn hermes_request(v: &Value) -> Call {
 }
 
 /// The calls a Hermes session waits to sum into its turn.
-fn hermes_pending(data: &Path, session: Option<&str>) -> PathBuf {
-    data.join("observe").join("hermes").join(format!("{}.jsonl", crate::model::event_id("hermes", session.unwrap_or("no-session"))))
+fn hermes_pending(state: &Path, session: Option<&str>) -> PathBuf {
+    state.join("hermes").join(format!("{}.jsonl", crate::model::event_id("hermes", session.unwrap_or("no-session"))))
 }
 
 fn hermes_turn<'a>(session: Option<&'a str>, scope: &'a str, key: &'a str, outcome: (&'static str, &'static str)) -> SessionTurn<'a> {
@@ -153,30 +153,33 @@ pub fn hermes_call(data: &Path, input: &Value, launched: bool) -> Result<(), Str
     let project = project(input);
     let call = hermes_request(input);
     let turn = hermes_turn(session, session.unwrap_or("no-session"), "", ("ok", "none"));
-    let event = session_call(&turn, &context(&project), &call)?;
-    let store = coreq::telemetry::Store::open(&data.join("observations.sqlite3"))?;
-    append_records(&store, &[event])?;
-    let pending = hermes_pending(data, session);
+    let delivery = crate::hook_spool::Delivery::open(data,"hermes",&project)?;
+    let event = session_call_frozen(&turn, &context(&project), &call)?;
+    delivery.persist(&event,Instant::now()+STOP_PASS)?;
+    let pending = hermes_pending(&delivery.state, session);
     let dir = pending.parent().ok_or("observe state: no folder")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("observe state: {e}"))?;
-    crate::model::expire(dir);
-    let line = json!({"api_request_id": call.id, "session_id": input["session_id"], "turn_id": input["turn_id"], "model": input["model"], "response_model": input["response_model"], "ended_at": input["ended_at"], "usage": input["usage"]}).to_string() + "\n";
+    let line = json!({"api_request_id": call.id, "session_id": input["session_id"], "model": call.model, "ended_at": call.at_ms.map(|n|n as f64/1000.0), "usage": {
+        "input_tokens":call.input,"cache_read_tokens":call.cache_read,"cache_write_tokens":call.cache_write,"output_tokens":call.output,"reasoning_tokens":call.reasoning
+    }}).to_string() + "\n";
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&pending).map_err(|e| format!("observe state: {e}"))?;
-    f.write_all(line.as_bytes()).map_err(|e| format!("observe state: {e}"))
+    f.write_all(line.as_bytes()).and_then(|_|f.sync_all()).map_err(|e| format!("observe state: {e}"))
 }
 
 /// One Hermes `on_session_end`: one `run_conversation` ended, so write its `agent.turn` over the calls kept for it.
 pub fn hermes_turn_end(data: &Path, input: &Value, launched: bool) -> Result<(), String> {
     if launched { return Ok(()); }
     let session = text(input, &["session_id"]);
-    let pending = hermes_pending(data, session);
+    let project = project(input);
+    let delivery = crate::hook_spool::Delivery::open(data,"hermes",&project)?;
+    let pending = hermes_pending(&delivery.state, session);
     let kept = match std::fs::read_to_string(&pending) {
         Ok(kept) => kept,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("observe state: {e}")),
     };
     let mut seen = std::collections::HashSet::new();
-    let calls: Vec<Call> = kept.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).map(|v| hermes_request(&v)).filter(|c| seen.insert(c.id.clone())).collect();
+    let calls: Vec<Call> = kept.lines().map(serde_json::from_str::<Value>).collect::<Result<Vec<_>,_>>().map_err(|_|"observe pending corrupt; retained")?.iter().map(hermes_request).filter(|c| seen.insert(c.id.clone())).collect();
     let outcome = match (input["completed"].as_bool(), input["interrupted"].as_bool()) {
         (Some(true), _) => ("ok", "none"),
         (_, Some(true)) => ("cancelled", "interrupted"),
@@ -186,10 +189,8 @@ pub fn hermes_turn_end(data: &Path, input: &Value, launched: bool) -> Result<(),
     let scope = session.unwrap_or("no-session");
     let position = calls.first().and_then(|c| c.id.clone()).unwrap_or_else(unique);
     let key = crate::model::event_id("turn", &format!("hermes:{scope}:{position}"));
-    let project = project(input);
-    let events = session_call_records(&hermes_turn(session, scope, &key, outcome), &context(&project), calls)?;
-    let store = coreq::telemetry::Store::open(&data.join("observations.sqlite3"))?;
-    append_records(&store, &events)?;
+    let events = session_calls_frozen(&hermes_turn(session, scope, &key, outcome), &context(&project), calls)?;
+    delivery.persist(&events,Instant::now()+STOP_PASS)?;
     match std::fs::remove_file(&pending) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("observe state: {e}")),
         _ => Ok(()),

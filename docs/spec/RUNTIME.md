@@ -350,6 +350,10 @@ Binding detail of M12.15–M12.17 and PRODUCT R14. `ready` and `quota` remain av
 
 A `Readiness` is part of the run's report, and its states and cause codes join `agent.turn` as metadata. Native detail stays local (M6.2). `ok` is never inferred from a missing check.
 
+`Runtime::version_for(&Launch)` observes only the version through the same command, account-home, environment cleaning and working-directory boundary as Runtime readiness and launch. Unsupported runtimes return unknown without a probe; the existing readiness check reuses this version operation. No login call, repair or fallback is added by this method.
+
+Canary schema diagnostics use `Runtime::record_shape` and typed, content-free `RecordShape` values. Native JSON decoding and fixed schema-name classification stay inside the runtime; callers retain only fixed names, hashed unknown schema names and nullable numeric counts. Unsupported readers refuse rather than interpret a fallback format.
+
 `Launch.readiness` is `Continue` by default or `Strict`. `Launch.store`, when supplied, joins the caller log storage check. The selected command, wrapper arguments, account home and child environment are used for the probes; no version result is cached. A missing explicit home or a conflicting home/environment selection refuses rather than falling back.
 
 `Run::readiness`, its final report and its checkpoint retain local check details. The frozen `agent.turn` carries fixed `counts` keys `preflight.<check>.<state>[.<cause>]`, each with value 1; native errors, paths and next-step text stay local. `Observation.phase` reads `starting` until native evidence, then `started`; the existing poll state remains compatible. `starting_ms` is the run's observed age.
@@ -650,6 +654,8 @@ Unassociated legacy/request observations remain separate raw evidence with `acco
 
 All identified-request and legacy accounting identities include the owning native turn while preserving the raw native request ID as a separate fact; no snapshot retirement occurs without positive same-turn association. Native queue usage without an explicit turn ID inherits only its verified current accepted task boundary. LiveData prefers the registered native context measurement, preserving its unknown fields; an input estimate is used only when native context is absent.
 
+Codex rollout `session_meta` and `turn_context` are known metadata steps, not unknown record shapes.
+
 Every step exposes neutral `presentation` fields: model, effort, cli_version, sidechain
 and meta. Native model/effort/version context carries forward; native per-record flags
 do not. Absent fields remain null with reasons; no installed CLI version is substituted
@@ -769,6 +775,41 @@ approved fail-closed correction to missing-as-false behavior. Source selection u
 Descendant cwd is observation only: candidates cannot become `BackgroundJob` or mint execution/control capabilities. Launch, discovery, adopt and stop retain exact-root guards.
 Worktree execution parity remains an open adoption gate until an existing owned-run/process/session/source binding is separately validated. Subtree membership alone grants no
 authority; caller hand-in, Exit, admission and occupancy policy remain outside the runtime.
+
+
+### Explicit owned background stop
+
+`stop_background_owned` imports only a complete independently authorized protected caller receipt, then requests the existing exact-root stop. A candidate, terminal state or
+descendant cwd is never a control grant. Missing legacy proof refuses; old records are not repaired from fresh observations. Products retain task/attempt/execution, original grant
+and actual-cwd authorization in their protected ownership journal, not worker-writable logs.
+
+The finite public call is `stop_background_owned(base: &dyn Fn() -> Command, launch: &Launch, expected: &BackgroundExecution, source: &Session, budget: Duration) -> Res<Output>`.
+`base` preserves complete command configuration for each exchange. `launch` retains the original exact SessionStore, actual cwd/home and lifetime policy; it is not a fallback launch.
+`expected.owner_receipt` is the opaque original `SessionOwner::checkpoint` saved in the protected caller journal. No owner is acquired by the caller for this operation.
+
+`BackgroundExecution` carries original project, job/native session, saved process creation identity, original protected input reference and the actual pre-submission record count.
+`submitted_session=None` means recorded fresh admission, not a provisional product label; `Some` is a recorded resume. Replacement/copy requires its independent durable transition,
+old incarnation gone, explicit source alias for copy and affirmative input after the saved count within the committed source prefix. Exact original owned processes may be stopped
+before acceptance. A copy also requires a saved previous incarnation; an admission receipt for a different canonical session cannot be substituted. A private binding already committed for another source/process/reference is not rewritten into a new execution.
+
+Acquisition is private inside this one operation: its Launch supplies the exact actual-cwd/home scope and existing SessionStore; BackgroundExecution.owner_receipt is the opaque original canonical owner checkpoint retained in the caller protected journal. There is no public owner restore or reusable admission result. The command factory preserves caller command setup across read-only listing and stop. Binding uses existing admission/session/alias locks and current-record checks, persisting a private binding
+before stop. Reentry requires the same protected receipt plus fresh local caller/native/source checks. The same controller may reenter; a new controller requires the exact old
+controller incarnation affirmatively gone. Live, missing or unreadable controller evidence refuses. Only matching alias/destination rows from one journal transition may be
+reconciled; prior rows, tokens and controller history are retained. Pending aliases remain intact; the destination record is the durable transition commit,
+and interrupted writes retain unconfirmed fencing. Generic acquisition/recovery is not used or changed.
+
+The private journal retains the immutable original owner and source binding once, with ordered prior-state field deltas and compact alias references
+against that original; it never embeds the accumulated ownership record inside another record. Identical source/receipt evidence is shared, not copied
+per controller. Existing recursive private journals are losslessly flattened only when their receipt, alias and original/prior evidence agrees;
+inconsistent evidence refuses without writing.
+
+A failed/interrupted bind stays unknown/fenced and never submits stop, replays input, releases occupancy or claims exit. Owner/native identity are rechecked under the held locks
+before each durable write and immediately before the request. Generic adopt retains its live-writer refusal. No portable token, public raw checkpoint or second ownership registry
+is added; the existing caller stop-pass budget is shared across lookup, validation and request.
+
+Offline original stop may use its protected durable authorization after fresh local current-owner/revocation/conflict and exact execution checks; no new network board read is
+required. It cannot authorize replacement, copy or new cwd. AgentQ receives no board authority. Session alias binding remains explicit read-only observation, delegates existing
+History validation and preserves physical identity/prefix.
 
 
 ## Universal step history

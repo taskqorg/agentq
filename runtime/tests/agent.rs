@@ -102,6 +102,7 @@ pub(crate) fn main() {
         ("lingering_process_is_stopped_after_its_turn_ends", lingering_process_is_stopped_after_its_turn_ends),
         ("deadline_stops_a_turn_that_never_ends", deadline_stops_a_turn_that_never_ends),
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
+        ("background_owned_stop_uses_protected_original_execution",background_owned_stop_uses_protected_original_execution),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
         ("native_queue_reused_response_keeps_distinct_frozen_turns",native_queue_reused_response_keeps_distinct_frozen_turns),
         ("native_queue_identified_usage_freezes_latest_scoped_requests", native_queue_identified_usage_freezes_latest_scoped_requests),
@@ -1284,6 +1285,59 @@ fn soon() -> Option<Instant> { Some(Instant::now() + Duration::from_secs(30)) }
 
 // R47/R48: the native background path maps the abstract launch to start-only flags and keeps the resume argv exact.
 // Risk: workers silently move to print mode or resume with changed saved permissions/rules.
+// Explicit import uses retained launch admission; a native listing cannot create this receipt.
+#[cfg(unix)]
+fn background_owned_stop_uses_protected_original_execution() {
+    struct Kid(std::process::Child);impl Drop for Kid {fn drop(&mut self) {let _=self.0.kill();let _=self.0.wait();}}
+    let runtime=agent::runtime("claude").unwrap();
+    for worktree in [false,true] {
+        let project=scratch("background-owned-public").canonicalize().unwrap();let cwd=if worktree {let path=project.join(".claude/worktrees/authorized");std::fs::create_dir_all(&path).unwrap();path}else{project.clone()};
+        let kid=Kid(Command::new("sleep").arg("60").spawn().unwrap());let process=agent::NativeProcess::read(kid.0.id()).unwrap().unwrap();
+        let home=project.join("account");let rows=json!([{"id":"c37eb75a","kind":"background","cwd":cwd,"sessionId":"native-session","state":"working","pid":process.pid}]).to_string();
+        let mut launch=fake_launch("claude",&cwd,"protected reference",&[("COREQ_FAKE_BACKGROUND","1".as_ref()),("COREQ_FAKE_CONTROL","1".as_ref()),("FAKE_JOB_ROWS",rows.as_ref()),("CLAUDE_CONFIG_DIR",home.as_os_str())]);launch.mode=agent::Mode::Background;
+        let mut run=runtime.launch(&launch).unwrap();runtime.poll(&mut run).unwrap();
+        let history=runtime.transcript(&run).unwrap();let saved=runtime.checkpoint(&run).unwrap();
+        let locator=home.join("jobs/c37eb75a/state.json");std::fs::create_dir_all(locator.parent().unwrap()).unwrap();
+        std::fs::write(&locator,json!({"cwd":cwd,"sessionId":"native-session","state":"working","intent":"protected reference"}).to_string()).unwrap();
+        std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+        append(&history,&[json!({"type":"user","sessionId":"native-session","message":{"content":"unrelated complete message"}})]);
+        let mut source=agent::history::sessions::open("claude","native-session",Some(&home),Some(&history),None).unwrap();source.poll().unwrap();
+        let protected=project.join("protected-proof.json");std::fs::write(&protected,json!({"owner":saved["owner"],"source":source.checkpoint(),"before":0,"admission":"fresh"}).to_string()).unwrap();
+        let proof:Value=serde_json::from_slice(&std::fs::read(&protected).unwrap()).unwrap();drop(run);
+        let expected=agent::BackgroundExecution {owner_receipt:&proof["owner"],project:&project,job:"c37eb75a",submitted_session:None,native_session:"native-session",process:&process,previous_process:None,input:"protected reference",before:0};
+        let command=||Command::new(exe());
+        for change in ["old-missing","pid","source","baseline","foreign-owner","replacement"] {
+            let mut invalid=agent::BackgroundExecution {..expected};let mut bad_process=process.clone();bad_process.started.push_str("changed");
+            let missing=Value::Null;let changed_owner=json!({"token":"foreign","session":"native-session","lifetime":"recoverable"});
+            let mut bad_source=proof["source"].clone();bad_source["prefix"]=json!("changed");
+            match change {"old-missing"=>invalid.owner_receipt=&missing,"pid"=>invalid.process=&bad_process,"baseline"=>invalid.before=99,"foreign-owner"=>invalid.owner_receipt=&changed_owner,"replacement"=>invalid.previous_process=Some(&bad_process),_=>{}}
+            let result=if change=="source" {let source=agent::history::sessions::open("claude","native-session",Some(&home),Some(&history),Some(&bad_source));assert!(source.is_err());continue;} else {runtime.stop_background_owned(&command,&launch,&invalid,&source,Duration::from_secs(20))};
+            assert!(result.is_err(),"{change}");assert_ne!(control(&cwd)["args"][0],"stop","{change}: refusal cannot request native stop");
+        }
+        let locator_bytes=std::fs::read(&locator).unwrap();
+        for invalid in [json!({"cwd":cwd,"sessionId":"foreign","state":"working"}),json!({"cwd":project.join("missing"),"sessionId":"native-session","state":"working"})] {
+            std::fs::write(&locator,invalid.to_string()).unwrap();assert!(runtime.stop_background_owned(&command,&launch,&expected,&source,Duration::from_secs(20)).is_err());assert_ne!(control(&cwd)["args"][0],"stop");
+        }
+        std::fs::write(&locator,&locator_bytes).unwrap();
+        let source_bytes=std::fs::read(&history).unwrap();std::fs::write(&history,[source_bytes.as_slice(),b"{partial"].concat()).unwrap();
+        assert!(runtime.stop_background_owned(&command,&launch,&expected,&source,Duration::from_secs(20)).is_err());assert_ne!(control(&cwd)["args"][0],"stop");std::fs::write(&history,&source_bytes).unwrap();
+        let moved=project.join("foreign-source.jsonl");std::fs::rename(&history,&moved).unwrap();std::os::unix::fs::symlink(&moved,&history).unwrap();
+        assert!(runtime.stop_background_owned(&command,&launch,&expected,&source,Duration::from_secs(20)).is_err());assert_ne!(control(&cwd)["args"][0],"stop");std::fs::remove_file(&history).unwrap();std::fs::rename(&moved,&history).unwrap();
+        let output=runtime.stop_background_owned(&command,&launch,&expected,&source,Duration::from_secs(20)).unwrap();assert!(output.status.success());
+        assert_eq!(control(&cwd)["args"],json!(["stop","c37eb75a"]));assert_eq!(agent::NativeProcess::read(process.pid).unwrap(),Some(process.clone()),"request ack is not exit");
+        runtime.stop_background_owned(&command,&launch,&expected,&source,Duration::from_secs(20)).unwrap();
+        // The alias seam changes only explicit observation identity; a rewritten source still refuses.
+        let alias=source.with_native_session_alias("copied-session","native-session").unwrap();
+        assert_eq!(alias.checkpoint()["offset"],proof["source"]["offset"]);assert_eq!(alias.checkpoint()["prefix"],proof["source"]["prefix"]);
+        assert_eq!(alias.checkpoint()["identity"],proof["source"]["identity"]);
+        assert!(agent::history::sessions::open("claude","copied-session",Some(&home),Some(&history),Some(&alias.checkpoint())).is_ok());
+        std::fs::write(&history,b"changed prefix\n").unwrap();assert!(agent::history::sessions::open("claude","copied-session",Some(&home),Some(&history),Some(&alias.checkpoint())).is_err());
+        drop(kid);std::fs::remove_dir_all(project).unwrap();
+    }
+}
+#[cfg(not(unix))]
+fn background_owned_stop_uses_protected_original_execution() {}
+
 fn background_commands_preserve_native_mode() {
     let root = scratch("background-command");
     let account = root.join("account");

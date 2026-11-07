@@ -424,6 +424,7 @@ fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
         "SubAgentActivity" => StepKind::Subagent,
         name if super::super::registry::codex_image_kind(name).is_some() => StepKind::Image,
         "ContextCompaction"|"context_compacted"|"compaction" => StepKind::Compaction,
+        _ if format=="codex-rollout" && matches!(record["type"].as_str(),Some("session_meta"|"turn_context")) => StepKind::Metadata,
         "token_count"|"usage" => StepKind::Usage,
         "plan"=>StepKind::Plan,"todo"|"todos"=>StepKind::Todo,"model_change"|"model-change"|"model.change"=>StepKind::Model,"background_task"|"subagent"=>StepKind::Subagent,
         _ if record["type"]=="token_usage_record" => StepKind::Usage,

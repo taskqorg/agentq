@@ -80,7 +80,7 @@ fn find(program: &str) -> Option<PathBuf> {
 }
 
 /// The first dotted number in `text`, e.g. `8.4.0` from `curl 8.4.0 (Windows) libcurl/8.4.0`.
-fn version_in(text: &str) -> Option<String> {
+pub(super) fn version_in(text: &str) -> Option<String> {
     text.split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
         .find(|w| w.starts_with(|c: char| c.is_ascii_digit()) && w.contains('.'))
         .map(String::from)

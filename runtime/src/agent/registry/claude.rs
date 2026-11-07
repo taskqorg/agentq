@@ -602,6 +602,24 @@ impl BackgroundCandidate {
         } else {serde_json::from_reader(file).map_err(|e|format!("background locator invalid: {e}"))?};
         Ok(value)
     }
+    pub(crate) fn control_locator(&self)->Res<()> {
+        let locator:BackgroundInput=self.locator(None)?;self.validate_locator(&locator.cwd,&locator.session)
+    }
+    pub(crate) fn control_source(&self,path:&Path)->Res<File> {
+        #[cfg(unix)] {
+            let home=background_directory(&self.home)?;let bound=self.home_identity.as_ref().ok_or("background control account unknown")?;
+            if super::super::super::native::file_id(&home)?!=super::super::super::native::file_id(bound)? {return Err("background control account changed".into());}
+            let relative=path.strip_prefix(&self.home).map_err(|_|"background control source account differs")?;
+            if !relative.starts_with("projects") || path.file_stem().and_then(OsStr::to_str)!=Some(self.session()) {return Err("background control source locator differs".into());}
+            let components=relative.components().collect::<Vec<_>>();let mut file=home;
+            for (index,component) in components.iter().enumerate() {
+                let std::path::Component::Normal(name)=component else {return Err("background control source locator invalid".into());};
+                file=background_open_at(&file,name,index+1<components.len())?;
+            }
+            Ok(file)
+        }
+        #[cfg(not(unix))] {let _=path;Err("background control source provenance unknown: secure path unsupported".into())}
+    }
     fn locator_file(&self,id:&str)->Res<File> {
         #[cfg(any(unix,windows))] {
             let home=background_directory(&self.home)?;
