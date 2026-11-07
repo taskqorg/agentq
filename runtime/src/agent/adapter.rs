@@ -494,10 +494,20 @@ fn discover(n: &Native) -> Res<Option<BackgroundJob>> {
 fn state(r: &Report) -> State { match r.outcome { "ok" => State::Finished, "unknown" => State::Unknown, _ => State::Failed } }
 
 /// The stdio transport of an app-server run: a plain child, or a protected host frontend that verifies authority per write.
+use super::stdio::NativeFrame;
+
+pub(crate) struct SelectedSource {
+    pub path:PathBuf,
+    pub runtime:&'static str,
+    pub format:&'static str,
+    pub session:String,
+    pub representation:&'static str,
+}
+
 pub(crate) enum Transport { Plain(AppServer), Protected(Box<ProtectedAppServer>) }
 
 impl Transport {
-    fn receive(&mut self, until: Instant) -> Res<Option<Value>> { match self { Transport::Plain(s) => s.receive(until), Transport::Protected(s) => s.receive(until) } }
+    fn receive_frame(&mut self, until: Instant) -> Res<Option<NativeFrame>> { match self { Transport::Plain(s) => s.receive_frame(until), Transport::Protected(s) => Ok(s.receive(until)?.map(NativeFrame::parsed)) } }
     fn id(&self) -> u32 { match self { Transport::Plain(s) => s.id(), Transport::Protected(s) => s.id() } }
     fn exit(&mut self) -> Res<Option<i32>> { match self { Transport::Plain(s) => s.poll(), Transport::Protected(s) => s.poll() } }
     fn send_until(&mut self,m:&Value,until:Option<Instant>)->Res<()> {match self {Self::Plain(s)=>s.send_until(m,until),Self::Protected(s)=>s.send(m,until.ok_or("protected-control-unsupported")?)}}
@@ -520,6 +530,7 @@ struct App {
     writer: Option<SessionOwner>,
     cancelling: bool,
     approval: Approval,
+    capture:Option<PathBuf>,
 }
 
 impl Drop for App {
@@ -586,16 +597,24 @@ fn thread_params(l: &Launch, thread: &Value) -> Res<Value> {
 }
 
 impl App {
+    fn captured_source(&self)->Option<SelectedSource> {
+        if !self.owned || self.transport.is_none() || !self.session.ready() {return None;}
+        Some(SelectedSource {path:self.capture.clone()?,runtime:"codex",format:"codex-app-server-selected/1",session:self.session.session()?.into(),representation:"native-jsonl-inbound-selection/1"})
+    }
+
     fn send(&mut self,message:&Value,until:Option<Instant>)->Res<()> {
         if self.owned {self.writer.as_ref().ok_or("control-owner-required")?.control()?;}
         self.transport.as_mut().ok_or("app-server transport ended")?.send_until(message,until)
     }
-    fn observe(&mut self, m: Value, until: Option<Instant>) -> Res<()> {
-        if let Err(error)=self.observe_inner(m,until) {self.closed=Some(error.clone());return Err(error);}Ok(())
+    fn observe(&mut self, frame:NativeFrame, until: Option<Instant>) -> Res<()> {
+        if let Err(error)=self.observe_inner(frame,until) {self.closed=Some(error.clone());return Err(error);}Ok(())
     }
-    fn observe_inner(&mut self, m: Value, until: Option<Instant>) -> Res<()> {
+    fn observe_inner(&mut self, frame:NativeFrame, until: Option<Instant>) -> Res<()> {
+        let m=frame.value.clone();
         if let Some((_,log))=&mut self.control {writeln!(log,"{m}").map_err(|e|format!("control-log-unknown: {e}"))?;}
-        self.session.observe(&m)?;
+        let selected=self.session.observe_frame(frame)?;
+        if let Some(path)=&self.capture {for line in selected {if Some(line.session.as_str())==self.session.session() && line.turn.as_deref()==self.session.turn_id() {crate::archive::stream(path,&line.raw);}}}
+
         if m["method"]=="serverRequest/resolved" && self.control.is_some() {
             let id=&m["params"]["requestId"];
             if m.get("id").is_none() && self.session.session().is_some() && m["params"]["threadId"].as_str()==self.session.session() && m["params"].get("turnId").is_none_or(|t|t.as_str()==self.session.turn_id()) && (id.is_string() || id.is_i64() || id.is_u64()) {
@@ -638,8 +657,8 @@ impl App {
     fn exchange(&mut self, request: Value, until: Instant) -> Res<()> {
         self.send(&request,Some(until))?;
         loop {
-            let m = self.transport.as_mut().ok_or("app-server transport ended")?.receive(until)?.ok_or("app-server reply deadline; session state unknown")?;
-            let reply = m["id"] == request["id"] && m.get("method").is_none();
+            let m = self.transport.as_mut().ok_or("app-server transport ended")?.receive_frame(until)?.ok_or("app-server reply deadline; session state unknown")?;
+            let reply = m.value["id"] == request["id"] && m.value.get("method").is_none();
             self.observe(m, Some(until))?;
             if reply { return Ok(()); }
         }
@@ -659,7 +678,7 @@ impl App {
             #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
             Some((super::control::Requests::new(),options.open(&l.log).map_err(|e|format!("control-log: {e}"))?))
         }else{None};
-        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval };
+        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval,capture:owned.then(||crate::archive::stream_path(l.install.as_deref(),&l.log)) };
         let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
@@ -713,7 +732,7 @@ impl App {
     fn pump(&mut self) -> Res<()> {
         if self.transport.is_none() || self.closed.is_some() { return Ok(()); }
         loop {
-            match self.transport.as_mut().expect("transport").receive(Instant::now()) {
+            match self.transport.as_mut().expect("transport").receive_frame(Instant::now()) {
                 Ok(Some(m)) => {
                     self.observe(m, Some(Instant::now() + Duration::from_secs(5)))?;
                     if self.owned && self.control.is_none() && self.session.report().is_some() {
@@ -749,9 +768,9 @@ impl App {
     fn control_exchange(&mut self,request:Value,until:Option<Instant>)->Res<()> {
         if let Err(error)=self.send(&request,until) {self.closed=Some(error.clone());return Err(error);}
         loop {
-            let message=match self.transport.as_mut() {Some(Transport::Plain(server))=>server.wait(until),_=>Err("control-transport-unsupported".into())};
+            let message=match self.transport.as_mut() {Some(Transport::Plain(server))=>server.wait_frame(until),_=>Err("control-transport-unsupported".into())};
             let message=match message {Ok(message)=>message,Err(error)=>{self.closed=Some(error.clone());return Err(error);}};
-            let replied=message["id"]==request["id"] && message.get("method").is_none();
+            let replied=message.value["id"]==request["id"] && message.value.get("method").is_none();
             self.observe(message,until)?;
             if replied {return Ok(());}
         }
@@ -1154,14 +1173,10 @@ impl Adapter {
                 t.resumed.clone()),
             Body::Native(n)=>(vec![crate::archive::Source {path:n.turn.path().into(),format:self.ops.protocol.native_history.into(),start:n.turn.start(),end:None}],
                 Some(n.turn.session().into())),
+            Body::App(a)=>(a.captured_source().filter(|s|s.runtime==self.descriptor.name && Some(s.session.as_str())==a.session.session() && s.representation=="native-jsonl-inbound-selection/1").map(crate::archive::Source::selected).into_iter().collect(),a.session.session().map(String::from)),
             Body::Claude(a)=>(vec![],Some(a.session.clone())),
-            Body::App(a)=>(match &a.transport {
-                Some(Transport::Plain(server))=>server.archive_sources(),
-                Some(Transport::Protected(server))=>server.archive_sources(),
-                _=>vec![],
-            },a.session.session().map(String::from)),
         };
-        let home=match &body {Body::Turn(t)=>t.home.clone(),Body::Native(n)=>spec_home(&n.spec),Body::App(a)=>a.session.history_home(),Body::Acp(_)|Body::Rpc(_)=>l.home.clone()};
+        let home=match &body {Body::Turn(t)=>t.home.clone(),Body::Native(n)=>spec_home(&n.spec),Body::App(a)=>a.session.history_home(),Body::Acp(_)|Body::Rpc(_)|Body::Claude(_)=>l.home.clone()};
         let archive=crate::archive::Handle::launch(self.descriptor.name,l,sources,session,home);
         Run { stop_id: crate::incident::uuid(), runtime: self.descriptor.name, body, progress, events: super::events::Cursor::new(l.deltas), rollout_progress: None, optimization, live: Some(Live(&self.live)), recorded: false, frozen: None, deadline: l.deadline,
             remote: l.title.is_some(), readiness: Readiness::default(), starting: Instant::now(),owner:None,activity:activity::Activity::new(progress),inactivity:l.inactivity,stop_on_stall:l.stop_on_stall,archive }
@@ -1251,7 +1266,7 @@ impl Adapter {
             }
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
-                let server = AppServer::spawn_recorded((self.ops.app_command)(command, &spec)?, &l.log, &l.process,Some(crate::archive::stream_path(l.install.as_deref(),&l.log)))?;
+                let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
                 let app = App::open(&spec, Transport::Plain(server), initialize, thread, l,&owner)?;
                 Ok(self.checked_run(&readiness, Body::App(Box::new(app)), 0, optimization, l))
             }
@@ -1451,7 +1466,7 @@ impl Runtime for Adapter {
         if s != State::Running && s != State::Unknown { run.live = None; }
         let end=if matches!(s,State::Finished|State::Failed) {match &run.body {
             Body::Turn(t)=>std::fs::metadata(&t.log).ok().map(|m|m.len()),
-            Body::Native(n)=>std::fs::metadata(n.turn.path()).ok().map(|m|m.len()),Body::App(_)=>None,
+            Body::Native(n)=>std::fs::metadata(n.turn.path()).ok().map(|m|m.len()),Body::App(_)|Body::Claude(_)=>None,
             Body::Acp(a)=>std::fs::metadata(&a.path).ok().map(|m|m.len()),Body::Rpc(a)=>std::fs::metadata(&a.path).ok().map(|m|m.len()),
         }}else{None};
         run.archive.observe(self.session_id(run),end);
@@ -1613,7 +1628,7 @@ impl Runtime for Adapter {
             let app = &saved["app"];
             let (spec, optimization) = me.spec(l, app["session"].as_str().ok_or("run recovery session invalid")?.into(), app["session"] != "-")?;
             let session = AppSession::recover(&spec, app)?;
-            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),writer:None,cancelling:false,approval:l.policy.approval };
+            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),writer:None,cancelling:false,approval:l.policy.approval,capture:None };
             let mut run=me.run(Body::App(Box::new(a)),0,optimization,l);run.owner=Some(acquire()?);return run.restored(saved);
         }
         let session = saved["session"].as_str().filter(|s| native::plain_id(s)).ok_or("run recovery session invalid")?;
@@ -1708,7 +1723,7 @@ impl Runtime for Adapter {
 }
 
 /// A protected host frontend opened as a Codex app-server run (`ProtectedAppServer::open`).
-pub(crate) fn open_protected(mut server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
+pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
     if l.lifetime==Lifetime::StopWithOwner {return Err("lifetime-unsupported: protected scope".into());}
     let adapter = registry::app_adapter();
     let Mode::AppServer { initialize, thread } = &l.mode else { return Err("protected open requires mode app-server".into()) };
@@ -1718,7 +1733,6 @@ pub(crate) fn open_protected(mut server: ProtectedAppServer, session: Option<&st
     owner.spawned(server.id())?;
     if !l.input.is_empty() || !l.parts.is_empty() {owner.submit()?;}
     let optimization = server.optimization();
-    server.record_archive(crate::archive::stream_path(l.install.as_deref(),&l.log));
     let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner)?;
     let mut run=adapter.run(Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);Ok(run)
 }
@@ -1788,7 +1802,7 @@ mod tests {
         let mut session=AppSession::new(&spec).unwrap();let initialize=session.initialize(json!({})).unwrap();session.observe(&json!({"id":initialize["id"],"result":{}})).unwrap();
         let open=session.open(json!({})).unwrap();session.observe(&json!({"id":open["id"],"result":{"thread":{"id":"session"}}})).unwrap();
         let before=session.checkpoint();
-        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,writer:None,cancelling:false,approval:Approval::Native};
+        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,writer:None,cancelling:false,approval:Approval::Native,capture:None};
         assert_eq!(app.start(json!([]),Instant::now()).unwrap_err(),"control-state-unknown");assert_eq!(app.session.checkpoint(),before);
         drop((app,readonly));std::fs::remove_dir_all(root).unwrap();
     }
@@ -1846,7 +1860,7 @@ mod tests {
             }
             probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
             let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
-            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native}));
+            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,capture:None}));
             let mut run=adapter.run(body,0,Optimization {intent:Intent::Off,effective:"off",reason:"optimization_retired"},&launch());
             probes.insert("account",!matches!(runtime.account(&mut run),Err(Failure::Refused(Cause("account-unsupported")))));
             probes.insert("respond",matches!(runtime.respond(&mut run,Control::Reply{id:json!("missing"),option:None}),Err(Failure::Refused(Cause("respond-transport-unsupported")))));

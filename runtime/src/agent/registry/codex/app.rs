@@ -1,6 +1,9 @@
 //! App-server protocol state over caller-owned transport. UI, tool execution and approvals stay with the caller.
 use super::*;
 pub(crate) use crate::agent::stdio::Stdio as AppServer;
+use crate::agent::stdio::NativeFrame;
+
+pub(crate) struct SessionLine {pub(crate) session:String,pub(crate) turn:Option<String>,pub(crate) raw:Vec<u8>}
 
 /// Caller-owned server transport: preserve all policy arguments and the account, without CLI `exec` flags.
 pub(crate) fn app_server_command(mut base: Command, spec: &Spec) -> Res<Command> {
@@ -34,7 +37,7 @@ pub(crate) struct AppSession {
     sampler: Option<super::capture::Sampler>,
     /// The sampler's reading frozen at the terminal event, so a repeated report reads the same record.
     process: Option<super::capture::ProcessUse>,
-    early: Vec<Value>,
+    early: Vec<NativeFrame>,
     fault: Option<String>,
     scope: String,
     worked: bool,
@@ -129,16 +132,35 @@ impl AppSession {
         self.request("turn/interrupt", params)
     }
 
-    pub fn observe(&mut self, message: &Value) -> Res<()> {
+    pub fn observe(&mut self, message: &Value) -> Res<()> {self.observe_frame(NativeFrame::parsed(message.clone())).map(|_|())}
+
+    pub(crate) fn observe_frame(&mut self, frame:NativeFrame)->Res<Vec<SessionLine>> {
         if let Some(error)=&self.fault {return Err(error.clone());}
-        let result=self.observe_inner(message);
-        if let Err(error)=&result {self.fault=Some(error.clone());}
-        result
+        let mut selected=vec![];
+        if let Err(error)=self.observe_inner(frame,&mut selected) {self.fault=Some(error.clone());return Err(error);}
+        Ok(selected)
     }
 
-    fn observe_inner(&mut self, message: &Value) -> Res<()> {
+    fn selected(&self,frame:NativeFrame,selected:&mut Vec<SessionLine>) {
+        let p=&frame.value["params"];
+        if p.get("thread").is_some_and(|v|v["id"].as_str()!=self.thread.as_deref())
+            || p.get("turn").is_some_and(|v|v["id"].as_str()!=self.turn.as_deref())
+            || p.get("turnId").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
+        if let (Some(raw),Some(session))=(frame.raw,self.thread.clone()) {selected.push(SessionLine {session,turn:self.turn.clone(),raw});}
+    }
+
+    fn observe_inner(&mut self, frame:NativeFrame,selected:&mut Vec<SessionLine>) -> Res<()> {
+        let message=&frame.value;
         // Server requests belong to the caller, even when their id happens to equal a client request id.
-        if message["method"].is_string() && message.get("id").is_some() { return Ok(()); }
+        if message["method"].is_string() && message.get("id").is_some() {
+            if self.control_scope(message).is_ok() {
+                let p=&message["params"];
+                let known=if message["method"]=="item/tool/call" {p["tool"].as_str().is_some_and(|s|!s.is_empty()) && p["arguments"].is_object() && (message["id"].is_string() || message["id"].is_i64() || message["id"].is_u64())}
+                    else {matches!(self.control_request(message),Ok(Some(_)))};
+                if known {self.selected(frame,selected);}
+            }
+            return Ok(());
+        }
         if limits::update(Client::Codex, message, (unix_ms()/1000).max(0) as u64, &mut self.window_groups) {
             self.latest_windows = self.window_groups.values().flatten().cloned().collect();
             if self.active && self.terminal.is_none() { self.windows = self.latest_windows.clone(); }
@@ -180,7 +202,7 @@ impl AppSession {
                 }
                 self.pending = None;
                 if method == "turn/start" {
-                    for event in std::mem::take(&mut self.early) {self.observe_inner(&event)?;}
+                    for event in std::mem::take(&mut self.early) {self.observe_inner(event,selected)?;}
                 }
                 return Ok(());
             }
@@ -196,12 +218,22 @@ impl AppSession {
         if p["threadId"].as_str() != self.thread.as_deref() { return Ok(()); }
         let id = p["turnId"].as_str().or(p["turn"]["id"].as_str());
         if self.turn.is_none() && self.pending.is_some_and(|(_, m)| m == "turn/start") {
-            if self.early.len()>=256 || self.early.iter().map(|e|e.to_string().len()).sum::<usize>()+message.to_string().len()>8*1024*1024 {
+            if self.early.len()>=256 || self.early.iter().map(|e|e.value.to_string().len()).sum::<usize>()+message.to_string().len()>8*1024*1024 {
                 return Err("app-server early notifications exceed bound; reconcile original submission".into());
             }
-            self.early.push(message.clone());return Ok(());
+            self.early.push(frame);return Ok(());
         }
         if self.turn.is_none() || id != self.turn.as_deref() { return Ok(()); }
+        let capturable=self.terminal.is_none() && match method {
+            "item/started"|"item/completed"=>p["item"].is_object() && super::history::normalize("codex-app-server",message).4=="none",
+            "item/agentMessage/delta"=>p["itemId"].as_str().is_some_and(|s|!s.is_empty()) && p["delta"].is_string(),
+            "thread/tokenUsage/updated"=>p["tokenUsage"].is_object() && ["last","total"].iter().all(|k|p["tokenUsage"].get(*k).is_none_or(Value::is_object)),
+            "turn/started"|"turn/completed"=>p["turn"].is_object(),
+            "turn/plan/updated"=>p["plan"].is_array(),
+            "model/rerouted"=>p["toModel"].as_str().is_some_and(model_code),
+            "error"=>p["error"].is_object(),
+            _=>false,
+        };
         if self.terminal.is_none() && matches!(method,"item/started"|"item/completed")
             && p["item"]["type"].as_str().is_some_and(|s|s!="userMessage") {self.worked=true;}
         if method == "turn/completed" {
@@ -223,6 +255,7 @@ impl AppSession {
                 _ => {}
             }
         }
+        if capturable {self.selected(frame,selected);}
         Ok(())
     }
 
@@ -291,7 +324,7 @@ impl AppSession {
         json!({"schema":"coreq-app-session/1", "root":self.spec.root, "home":self.spec.home, "session":self.spec.session,
             "next":self.next, "pending":self.pending.map(|(id, method)| json!([id,method])), "initialized":self.initialized, "ready":self.ready,
             "thread":self.thread,"turn":self.turn,"active":self.active,"terminal":self.terminal,"model":self.model,"text":self.text,
-            "usage":self.usage,"limits":self.limits,"latest_limits":self.latest_limits,"windows":self.windows,"latest_windows":self.latest_windows,"window_groups":self.window_groups,"started_ms":self.started_ms,"early":self.early,"fault":self.fault,"scope":self.scope,"worked":self.worked,"failure":self.failure})
+            "usage":self.usage,"limits":self.limits,"latest_limits":self.latest_limits,"windows":self.windows,"latest_windows":self.latest_windows,"window_groups":self.window_groups,"started_ms":self.started_ms,"early":self.early.iter().map(|e|&e.value).collect::<Vec<_>>(),"fault":self.fault,"scope":self.scope,"worked":self.worked,"failure":self.failure})
     }
 
     pub fn recover(spec: &Spec, v: &Value) -> Res<Self> {
@@ -316,11 +349,11 @@ impl AppSession {
         if let Some(w) = v.get("latest_windows") { s.latest_windows = serde_json::from_value(w.clone()).map_err(|_| "app-server recovery windows invalid")?; }
         if let Some(groups) = v.get("window_groups") { s.window_groups = serde_json::from_value(groups.clone()).map_err(|_| "app-server recovery window groups invalid")?; }
         s.started_ms = v["started_ms"].as_i64().filter(|n| *n >= 0).ok_or("app-server recovery time invalid")?;
-        s.early=v["early"].as_array().ok_or("app-server recovery early events missing")?.clone();
+        s.early=v["early"].as_array().ok_or("app-server recovery early events missing")?.iter().cloned().map(NativeFrame::parsed).collect();
         s.fault=if v["fault"].is_null() {None} else {Some(v["fault"].as_str().ok_or("app-server recovery fault invalid")?.into())};
         s.worked=v["worked"].as_bool().ok_or("app-server recovery work boundary invalid")?;
         s.failure=if v["failure"].is_null() {None} else {Some(v["failure"].as_object().ok_or("app-server recovery failure invalid")?.clone().into())};
-        if s.early.len()>256 || s.early.iter().map(|e|e.to_string().len()).sum::<usize>()>8*1024*1024
+        if s.early.len()>256 || s.early.iter().map(|e|e.value.to_string().len()).sum::<usize>()>8*1024*1024
             || s.thread.as_deref().is_some_and(|s|!native::plain_id(s)) || s.turn.as_deref().is_some_and(|s|!native::plain_id(s))
             || s.terminal.as_deref().is_some_and(|s|!matches!(s,"completed"|"failed"|"interrupted"))
             || s.ready && s.thread.is_none() || s.terminal.is_some() && s.turn.is_none()
@@ -335,6 +368,39 @@ impl AppSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // S283: exact inbound lines need positive native correlation; Value/checkpoint evidence cannot mint bytes.
+    #[test]
+    fn app_server_frame_selection_keeps_exact_bytes_scope_and_checkpoints() {
+        let spec=Spec {client:Client::Codex,root:std::env::temp_dir(),session:"-".into(),resume:false,args:vec![],env:vec![],home:None};
+        let mut app=AppSession::new(&spec).unwrap();
+        let init=app.initialize(json!({})).unwrap();app.observe(&json!({"id":init["id"],"result":{}})).unwrap();
+        let open=app.open(json!({})).unwrap();app.observe(&json!({"id":open["id"],"result":{"thread":{"id":"thread"}}})).unwrap();
+        let start=app.start_turn(json!({"input":[]})).unwrap();
+        let frame=|raw:&str|NativeFrame {value:serde_json::from_str(raw).unwrap(),raw:Some(raw.as_bytes().to_vec())};
+        let first=concat!(r#" { "params": {"threadId":"thread","turnId":"turn","itemId":"one","delta":"\u4e2d"}, "method":"item/agentMessage/delta" }"#, "\r\n");
+        let second="{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread\",\"turnId\":\"turn\",\"itemId\":\"two\",\"delta\":\"é\"}}\n";
+        assert!(app.observe_frame(frame(first)).unwrap().is_empty());
+        let old=second.replace("\"turn\"","\"old\"");assert!(app.observe_frame(frame(&old)).unwrap().is_empty());
+        assert!(app.observe_frame(frame(second)).unwrap().is_empty());
+        let saved=app.checkpoint();assert!(saved["early"][0].get("raw").is_none());
+        let mut recovered=AppSession::recover(&spec,&saved).unwrap();
+        let receipt=json!({"id":start["id"],"result":{"turn":{"id":"turn"}}});
+        let selected=app.observe_frame(NativeFrame::parsed(receipt.clone())).unwrap();
+        assert_eq!(selected.iter().map(|s|s.raw.as_slice()).collect::<Vec<_>>(),[first.as_bytes(),second.as_bytes()]);
+        assert!(selected.iter().all(|s|s.session=="thread" && s.turn.as_deref()==Some("turn")));
+        assert!(recovered.observe_frame(NativeFrame::parsed(receipt)).unwrap().is_empty());assert_eq!(app.checkpoint(),recovered.checkpoint());
+        let row=json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"x","delta":"owned"}});
+        let mut rejected=vec![row.clone(),row.clone(),row.clone(),row.clone(),row.clone(),row.clone(),row.clone()];
+        rejected[0]["params"]["threadId"]=json!("foreign");rejected[1]["params"]["turnId"]=json!("old");rejected[2]["params"]["turn"]=json!({"id":"foreign"});rejected[3]["params"]["turnId"]=Value::Null;rejected[3]["params"]["turn"]=json!({"id":"turn"});rejected[4]["method"]=json!("future/unknown");rejected[5]["params"]["delta"]=json!([]);rejected[6]["params"].as_object_mut().unwrap().remove("threadId");
+        rejected.extend([json!({"method":"account/rateLimits/updated","params":{"rateLimits":{}}}),json!({"id":9999,"result":{"account":{"email":"private"}}}),json!({"type":"agentq_control","session_id":"thread"})]);
+        for value in rejected {let raw=format!("{value}\n");assert!(app.observe_frame(frame(&raw)).unwrap().is_empty(),"{value}");}
+        let request=json!({"id":99,"method":"item/tool/call","params":{"threadId":"thread","turnId":"turn","tool":"owned","arguments":{}}});
+        let raw=format!("{request}\n");assert_eq!(app.observe_frame(frame(&raw)).unwrap()[0].raw,raw.as_bytes());
+        let terminal=json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}});let raw=format!("{terminal}\n");
+        assert_eq!(app.observe_frame(frame(&raw)).unwrap()[0].raw,raw.as_bytes());assert_eq!(app.report().unwrap().outcome,"ok");
+        assert!(app.observe_frame(frame(second)).unwrap().is_empty(),"late output is private");
+    }
+
     // #246 A4/P2: app-server groups survive updates/recovery; terminal reports stay frozen.
     #[test]
     fn app_server_keeps_independent_quota_groups() {

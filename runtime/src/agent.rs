@@ -19,6 +19,7 @@ use registry::app;
 mod protected;
 pub mod host;
 mod adapter;
+pub(crate) use adapter::SelectedSource;
 #[cfg(test)]
 pub(crate) use adapter::test_receipts;
 pub(crate) mod capture;

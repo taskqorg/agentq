@@ -314,6 +314,10 @@ A controlled session retains its mandatory SessionStore owner while it can write
 
 No new runtime timeout, cap, retry, queue bound or compaction budget is added. Scripted protocols qualify adapter behavior only. Versioned native approval, steer, model and compaction evidence is separate; missing native or platform evidence remains unqualified.
 
+### Selected app-server archive source
+
+The runtime retains complete original inbound line bytes with the native app-server frame. Its existing session/turn observer alone selects capture records, including early notifications only after matching native acceptance. The selected artifact uses `codex-app-server-selected/1` and representation `native-jsonl-inbound-selection/1`; its physical ranges describe that artifact, not full stdout. Foreign, old-turn, global, unbound, malformed and unsupported frames and stderr remain private diagnostics and are never fallback upload sources. Value-only, protected and recovered observations cannot manufacture original bytes. Capture failures degrade only optional archive evidence; protocol, control, ownership, report and Job behavior stay unchanged. The caller-only history format grants no native discovery, resume or reply authority.
+
 ## Worker preflight
 
 Binding detail of M12.15–M12.17 and PRODUCT R14. `ready` and `quota` remain available as individual read-only probes. `ready_for`, `catalogue_for` and `account_limits_for` bind reads to the same `Launch` executable, wrapper, home and environment.

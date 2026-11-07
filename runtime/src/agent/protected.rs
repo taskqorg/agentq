@@ -189,8 +189,6 @@ pub struct ProtectedAppServer {
 }
 
 impl ProtectedAppServer {
-    pub(crate) fn record_archive(&mut self,path:PathBuf) {self.server.record_archive(path);}
-    pub(crate) fn archive_sources(&self)->Vec<crate::archive::Source> {self.server.archive_sources()}
     /// Adapter frontend PID; legacy adapters also supervise. Scope/native identities come from readback.
     pub fn id(&self) -> u32 { self.server.id() }
 

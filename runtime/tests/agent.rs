@@ -514,7 +514,12 @@ fn fake_app_server() {
                     println!("{}",json!({"method":"thread/tokenUsage/updated","params":{"threadId":thread,"turnId":format!("turn-{turn}"),"tokenUsage":usage}}));
                 }
                 println!("{}",json!({"id":999,"method":"item/tool/call","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"tool":"caller-tool","arguments":{"private":"tool input"}}}));
-                println!("{}",json!({"method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"draft","delta":"private draft"}}));
+                if std::env::var_os("AGENTQ_FAKE_SELECTED_BYTES").is_some() {
+                    use std::io::Write;
+                    let raw=format!(" {{ \"params\":{{\"threadId\":\"native-thread\",\"turnId\":\"turn-{turn}\",\"itemId\":\"draft\",\"delta\":\"\\u4e2d\"}}, \"method\":\"item/agentMessage/delta\" }}\r\n");
+                    std::io::stdout().write_all(raw.as_bytes()).unwrap();
+                    println!("{}",json!({"method":"account/rateLimits/updated","params":{"rateLimits":{},"private":"global capture exclusion"}}));
+                }else{println!("{}",json!({"method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"draft","delta":"private draft"}}));}
             },
             None if id==999=>{
                 if std::env::var_os("AGENTQ_FAKE_ONE_TURN").is_some() {assert_eq!(value["error"]["code"],-32601);}
@@ -2471,6 +2476,7 @@ fn archive_capture_and_failure_never_change_work() {
         std::fs::write(data.join("connection/connection.json"),json!({"installation":"fixture","active":{"destination":"https://fixture.invalid","workspace":"fixture","installation":"fixture","generation":1,"credential":"invented","schemas":["agent-history/1"],"capabilities":[]},"pending":null,"revoke":[]}).to_string()).unwrap();
         let app_env=[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref())];
         let mut launch=fake_launch(name,&root,"brief",if app{&app_env}else{&[]});
+        if app {launch.env.push(("AGENTQ_FAKE_SELECTED_BYTES".into(),"1".into()));}
         launch.install=Some(root.join("install"));launch.home=Some(root.join("native-home"));std::fs::create_dir_all(launch.home.as_ref().unwrap()).unwrap();launch.deltas=app;
         let runtime=agent::runtime(name).unwrap();let mut run=runtime.launch(&launch).unwrap();
         assert_eq!(finish(runtime,&mut run),agent::State::Finished);
@@ -2484,13 +2490,21 @@ fn archive_capture_and_failure_never_change_work() {
         }
         let mut sink=Sink::default();agentq_runtime::archive::pass(&data,&mut sink).unwrap();
         assert!(sink.0.iter().any(|b|b["manifest"]["project"]=="fixture/archive" && b["manifest"]["task"]==283 && b["turns"][0]["event_id"]==event));
-        if app {assert!(sink.0.iter().any(|b|b["format"]=="codex-app-server"));}
+        if app {
+            assert!(sink.0.iter().any(|b|b["format"]=="codex-app-server-selected/1"));
+            assert!(sink.0.iter().all(|b|b["format"]=="codex-app-server-selected/1"),"no raw diagnostic fallback");
+            let selected=std::fs::read_dir(data.join("archive/streams")).unwrap().flatten().flat_map(|e|std::fs::read(e.path()).unwrap()).collect::<Vec<_>>();
+            let raw=std::str::from_utf8(&selected).unwrap();assert!(!raw.contains("foreign-thread") && !raw.contains("fixture startup diagnostic") && !raw.contains("global capture exclusion"));
+            for body in &sink.0 {let a=body["start"].as_u64().unwrap() as usize;let end=body["end"].as_u64().unwrap() as usize;assert_eq!(body["bytes"],agent::encode_base64(&selected[a..end]));}
+            assert!(selected.windows(b"\\u4e2d".len()).any(|w|w==b"\\u4e2d"),"original escape bytes retained");assert!(selected.windows(2).any(|w|w==b"\r\n"));
+        }
         assert_eq!(run.archive_status()["state"],"unknown","the run never invents a sink receipt");
-        drop(run);
+        let session=runtime.session_id(&run).unwrap();drop(run);
         let bad=root.join("bad-install");std::fs::create_dir_all(bad.join("data/connection")).unwrap();
         std::fs::copy(data.join("connection/connection.json"),bad.join("data/connection/connection.json")).unwrap();
         std::fs::write(bad.join("data/archive"),b"unwritable archive directory").unwrap();launch.install=Some(bad);
-        let mut run=runtime.launch(&launch).unwrap();assert_eq!(finish(runtime,&mut run),agent::State::Finished);assert_eq!(runtime.report(&run).unwrap().outcome,"ok");
+        // This fake Codex always returns the same native thread; the second run explicitly resumes it.
+        let mut run=if app {runtime.resume(&session,&launch)}else{runtime.launch(&launch)}.unwrap();assert_eq!(finish(runtime,&mut run),agent::State::Finished);assert_eq!(runtime.report(&run).unwrap().outcome,"ok");
         drop(run);
         // shortcut: the asynchronous writer can outlive fixture cleanup; add a drain if strict removal is needed.
         let _=std::fs::remove_dir_all(root);

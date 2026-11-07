@@ -13,6 +13,12 @@ fn channel<T>(bound:Option<usize>)->(Pipe<T>,Receiver<T>) {match bound {
     None=>{let(s,r)=mpsc::channel();(Pipe::Stream(s),r)},
 }}
 
+pub(crate) struct NativeFrame {
+    pub(crate) value:Value,
+    pub(crate) raw:Option<Vec<u8>>,
+}
+impl NativeFrame {pub(crate) fn parsed(value:Value)->Self {Self {value,raw:None}}}
+
 type WriteRequest=(Vec<u8>,mpsc::Sender<Res<()>>);
 
 /// Shared native stdio transport. Dropping the handle does not kill an active session; callers own its lifecycle.
@@ -22,22 +28,16 @@ pub(crate) struct Stdio {
     bounded:bool,
     stopped:bool,
     #[cfg(windows)] job:Option<std::sync::Arc<windows_job::Job>>,
-    events:Receiver<Res<Value>>,
-    archive:Option<PathBuf>,
-    recording:mpsc::Sender<PathBuf>,
-    log:PathBuf,
-    log_start:Option<u64>,
+    events:Receiver<Res<NativeFrame>>,
 }
 
 impl Stdio {
-    pub(crate) fn spawn(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,true,None)}
-    pub(crate) fn spawn_stream(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,false,None)}
-    pub(crate) fn spawn_recorded(command:Command,private_log:&Path,process:&super::Process,archive:Option<PathBuf>)->Res<Self> {Self::spawn_inner(command,private_log,process,true,archive)}
-    fn spawn_inner(mut command:Command,private_log:&Path,process:&super::Process,bounded:bool,archive:Option<PathBuf>)->Res<Self> {
+    pub(crate) fn spawn(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,true)}
+    pub(crate) fn spawn_stream(command:Command,private_log:&Path,process:&super::Process)->Res<Self> {Self::spawn_inner(command,private_log,process,false)}
+    fn spawn_inner(mut command:Command,private_log:&Path,process:&super::Process,bounded:bool)->Res<Self> {
         let mut options=File::options();options.create(true).append(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
         let log=options.open(private_log).map_err(|e|format!("app-server log: {e}"))?;
-        let log_start=log.metadata().ok().map(|m|m.len());
         let mut diagnostics=log.try_clone().map_err(|e|format!("app-server log: {e}"))?;
         crate::telemetry::capture::inherit_context(&mut command);
         command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(log);
@@ -66,8 +66,6 @@ impl Stdio {
             }
         });
         let (output,events)=channel(bounded.then_some(16));
-        let mut recording=archive.clone();
-        let (recording_control,recording_changes)=mpsc::channel();
         std::thread::spawn(move || {
             let mut reader=BufReader::new(stdout);
             loop {
@@ -89,23 +87,15 @@ impl Stdio {
                     },
                     Err(e)=>Err(format!("app-server read failed: {e}")),
                 };
-                while let Ok(path)=recording_changes.try_recv(){recording=Some(path);}
-                if let Some(path)=&recording {if !line.is_empty(){crate::archive::stream(path,&line);}}
                 let failed=event.is_err();
                 if failed {
                     if let Err(e)=diagnostics.write_all(&line).and_then(|_|diagnostics.flush()) {let _=output.send(Err(format!("app-server raw evidence log: {e}")));break;}
                 }
-                if output.send(event).is_err() || failed {break;}
+                if output.send(event.map(|value|NativeFrame {value,raw:Some(line)})).is_err() || failed {break;}
             }
         });
-        Ok(Self {child,input:Some(input),events,bounded,stopped:false,archive,recording:recording_control,log:private_log.into(),log_start,#[cfg(windows)] job})
+        Ok(Self {child,input:Some(input),events,bounded,stopped:false,#[cfg(windows)] job})
     }
-
-    pub(crate) fn archive_sources(&self)->Vec<crate::archive::Source> {
-        let mut sources:Vec<_>=self.archive.as_ref().map(|path|crate::archive::Source {path:path.clone(),format:"codex-app-server".into(),start:0,end:None}).into_iter().collect();
-        if let Some(start)=self.log_start {sources.push(crate::archive::Source {path:self.log.clone(),format:"raw".into(),start,end:None});}sources
-    }
-    pub(crate) fn record_archive(&mut self,path:PathBuf) {self.archive=Some(path.clone());let _=self.recording.send(path);}
 
     pub fn id(&self)->u32 {self.child.id()}
 
@@ -128,16 +118,20 @@ impl Stdio {
     }
 
     /// Timeout means no event yet. EOF/read error is unknown and never a completed turn.
-    pub fn receive(&mut self,until:Instant)->Res<Option<Value>> {
+    pub fn receive(&mut self,until:Instant)->Res<Option<Value>> {Ok(self.receive_frame(until)?.map(|frame|frame.value))}
+
+    pub(crate) fn receive_frame(&mut self,until:Instant)->Res<Option<NativeFrame>> {
         match self.events.recv_timeout(until.saturating_duration_since(Instant::now())) {
             Ok(event)=>event.map(Some),Err(RecvTimeoutError::Timeout)=>Ok(None),
             Err(RecvTimeoutError::Disconnected)=>Err("app-server stream ended; native turn outcome unknown".into()),
         }
     }
 
-    pub(crate) fn wait(&mut self,until:Option<Instant>)->Res<Value> {
+    pub(crate) fn wait(&mut self,until:Option<Instant>)->Res<Value> {Ok(self.wait_frame(until)?.value)}
+
+    pub(crate) fn wait_frame(&mut self,until:Option<Instant>)->Res<NativeFrame> {
         match until {
-            Some(d)=>self.receive(d)?.ok_or_else(||"native reply deadline; outcome unknown".into()),
+            Some(d)=>self.receive_frame(d)?.ok_or_else(||"native reply deadline; outcome unknown".into()),
             None=>self.events.recv().map_err(|_|"native stream ended; outcome unknown")?,
         }
     }
@@ -174,5 +168,30 @@ impl Stdio {
         let until=Instant::now()+Duration::from_secs(2);
         while self.poll()?.is_none() && Instant::now()<until {std::thread::sleep(Duration::from_millis(10));}
         self.kill()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // S283: the pipe owns original bytes; diagnostics and incomplete/invalid frames never become records.
+    #[test]
+    fn native_frames_keep_physical_bytes_and_private_errors() {
+        const RAW:&[u8]=b" { \"z\": \"\\u4e2d\", \"a\":1 }\r\n";
+        if let Ok(mode)=std::env::var("AGENTQ_FRAME_READER_FIXTURE") {
+            eprintln!("private stderr");
+            let mut out=std::io::stdout().lock();out.write_all(b"private startup diagnostic\n").unwrap();
+            out.write_all(match mode.as_str() {"valid"=>RAW,"json"=>b"{broken}\n","shape"=>b"[]\n","utf8"=>b"{\xff}\n",_=>b"{\"partial\":1}"}).unwrap();out.flush().unwrap();std::process::exit(0);
+        }
+        let root=crate::scratch("native-frame-reader");std::fs::create_dir_all(&root).unwrap();
+        for mode in ["valid","json","shape","utf8","partial"] {
+            let mut command=Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact","agent::stdio::tests::native_frames_keep_physical_bytes_and_private_errors","--nocapture"]).env("AGENTQ_FRAME_READER_FIXTURE",mode);
+            let log=root.join(mode);let mut server=Stdio::spawn(command,&log,&super::super::Process::default()).unwrap();
+            let received=server.receive_frame(Instant::now()+Duration::from_secs(30));
+            if mode=="valid" {let frame=received.unwrap().unwrap();assert_eq!(frame.raw.unwrap(),RAW);assert_eq!(frame.value["a"],1);}else{assert!(received.is_err(),"{mode}");}
+            server.kill().unwrap();let private=std::fs::read(&log).unwrap();assert!(private.windows(b"private startup diagnostic".len()).any(|w|w==b"private startup diagnostic"));
+        }
+        let _=std::fs::remove_dir_all(root);
     }
 }
