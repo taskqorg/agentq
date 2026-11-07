@@ -479,7 +479,7 @@ pub(crate) use antigravity::{code_assist,project_identity};
 
 pub(crate) use codex::app;
 pub(in crate::agent) use codex::image_kind as codex_image_kind;
-pub(in crate::agent) use antigravity::input_state as antigravity_input_state;
+pub(in crate::agent) use antigravity::{input_state as antigravity_input_state,retained_source as antigravity_retained_source};
 
 pub(super) use claude::control::Session as ClaudeControl;
 pub use claude::{BackgroundJob,BackgroundCandidate,BackgroundKind,BackgroundState,BackgroundActivity,BackgroundPid};

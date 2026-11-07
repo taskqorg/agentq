@@ -189,17 +189,35 @@ fn block(format: &str, v: Value) -> Value {
     }
 }
 
-pub(super) fn history_session(format: &str, v: &Value, raw: &str) -> Option<String> {
-    if format=="acp" {return v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str()).map(String::from);}
-    session(raw).or_else(|| {
-        (if format == "agy-stream" {
-            v["step_update"]["conversation_id"].as_str()
-        } else {
-            None
-        })
-        .map(String::from)
-    })
+pub(in crate::agent) fn retained_source(v:&Value,raw:&str)->Res<Option<String>> {
+    let (_,kind,_,_,_)=normalize("agy-stream",v);
+    if kind=="unknown" {return Err("history Antigravity stream shape unsupported".into());}
+    let id=history_session("agy-stream",v,raw);
+    if id.as_deref()==Some("") || id.is_none() && v["event"]!="user" {
+        return Err("history Antigravity native identity invalid or missing".into());
+    }
+    Ok(if v["event"]=="user" {None}else{id})
 }
+
+pub(super) fn history_session(format: &str, v: &Value, raw: &str) -> Option<String> {
+    if format=="acp" {if v.get("event").is_some() {return Some(String::new());}return v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str()).map(String::from);}
+    if format=="agy-stream" {
+        if v["type"]=="acp" {return Some(String::new());}
+        let mut id=session(raw);
+        for pointer in ["/conversation_id","/conversationId","/result/conversation_id","/step_update/conversation_id","/response/newConversation/conversationId","/response/sendMessage/recipientId","/session_id"] {
+            if pointer=="/session_id" && !matches!(v["type"].as_str(),Some("conversation.started"|"system"|"result")) {continue;}
+            if let Some(value)=v.pointer(pointer) {
+                let Some(value)=value.as_str().filter(|s|native::plain_id(s) && *s!="-") else{return Some(String::new());};
+                if id.as_deref().is_some_and(|id|id!=value) {return Some(String::new());}
+                id=Some(value.into());
+            }
+        }
+        if id.is_none() && matches!(v["event"].as_str(),Some("init"|"result")) {return Some(String::new());}
+        return id;
+    }
+    session(raw)
+}
+
 pub(super) fn validity(_: &Value) -> Value {
     json!({"status":"unknown","reason":"envelope-validation-unsupported"})
 }

@@ -782,6 +782,8 @@ Nothing writes a native transcript or stores a second canonical history.
 
 `Session::poll` and `poll_before` forward the existing physical cursor through its runtime-resolved source, native format and session binding. `Session::checkpoint` retains that binding for recovery; callers do not decode native first records to select a transport. These methods preserve the same byte boundaries, identity checks and paging as `History`.
 
+Retained Antigravity stream sources resolve their `agy-stream` format and native conversation identity through the registered native interpretation, independent of the caller-selected filename. Caller-authored user intent supplies no native identity; malformed or conflicting native headers and mixed ACP/legacy records refuse. Existing sidecar and ACP source bindings remain distinct.
+
 Antigravity stream `step_update/user_input` projects native ACTIVE as `Step.state=started` and DONE as `completed`; missing or unsupported states remain `unknown`. Physical events expose the same input `state` on bounded forward/backward polling; unrelated records expose `unknown`.
 Only the completed user message observes accepted input.
 Session binding, reported native turn (else explicitly unknown) and exact physical source range remain attached; unrelated Activity/Progress, successful writes and liveness do not prove acceptance.
