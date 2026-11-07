@@ -27,10 +27,20 @@ No diagnostic `978`/`452` source, old raw fallback, compatibility shim, Intent A
 
 Central must provide frozen exact source for these existing producers; this integrator must not duplicate them:
 
-1. Claude history facts: `ctx_4720af2a6ae3`.
+1. Claude history facts: integrated exact `29b48cce03925519a2a603a52835dcbae9a01cb8` against `71a32aa28e82134278347c2e15bb3fb170346332`; author report `/tmp/agentq-claude-source-facts-29b48cc/report.md`.
 2. Launcher: `ctx_42e409e867b3`.
 3. Claude fork: `ctx_a9231c3bac43`.
 4. Lineage: `ctx_a6ab5af09d22`.
+
+Partial Claude fork source `acd030ff8f35d4ac3585468db8f2a262ecbfb4f3` on `68adde6` remains retained on its original ref for a later source join, not imported in this continuation. Author report: `/tmp/agentq-300-claude-native-source-implementation.md`. It does not implement a successful native fork; capability remains undeclared and `fork-unsupported` remains required.
 5. After those functional joins, central supplies exactly one source to the TaskQ cold caller for adoption.
 
-No unresolved source conflict is intentionally left in this initial join. This does not establish GLOBAL functional completion: the four frozen producer deltas and actual TaskQ caller adoption remain pending. Independent review and the single coordinated compile/test batch remain deferred until central GLOBAL functional completion. Native, Windows, service, deployment and external delivery acceptance remain separate and unknown.
+No unresolved source conflict is intentionally left in this initial join. This does not establish GLOBAL functional completion: the remaining launcher, Claude fork completion and lineage producer deltas plus actual TaskQ caller adoption remain pending. Independent review and the single coordinated compile/test batch remain deferred until central GLOBAL functional completion. Native, Windows, service, deployment and external delivery acceptance remain separate and unknown.
+
+## Claude source-facts continuation
+
+The exact 29b48cc delta includes typed record-local `presentation.session_kind`, the explicit caller-witnessed `history_with_native_session_alias` resolver, bounded physical/native copy witness, read/recovery/artifact/resume guards, registered identity conflict refusal, contracts and all five regression scenarios. TaskQ `ctx_4cda7595f7aa` owns consumer migration; no TaskQ files changed here.
+
+The additive join needs one semantic adjustment in owned-stop proof: a witnessed copied handle retains logical `Source.session = destination` and observed `Source.native_session = original`. Control binds the logical destination and requires the supplied original to equal that retained native identity; it does not rewrite either identity. The existing source/prefix/alias/controller/process checks remain. Control also validates the copied witness, and the old mutating alias method refuses an already witnessed handle rather than invalidating its binding. Old non-witnessed alias semantics stay unchanged.
+
+This continuation ran no verification commands. The initial join and its source archive remain preserved; the continuation gets a distinct source commit and archive. Native outcomes and regression outcomes remain unknown.

@@ -289,7 +289,7 @@ impl History {
 }
 
 impl super::sessions::Session {
-    pub fn media(&self)->Res<MediaCatalog> {self.history.media_catalog(&self.path,true)}
+    pub fn media(&self)->Res<MediaCatalog> {if self.copy_witness.is_some(){return Err("copied history native artifact discovery unsupported".into());}self.history.media_catalog(&self.path,true)}
 }
 
 fn file_uri(url:&str)->Res<PathBuf> {

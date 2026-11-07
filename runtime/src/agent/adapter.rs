@@ -930,6 +930,10 @@ pub trait Runtime: Send + Sync {
     fn history(&self, session: &str, home: Option<&Path>, source: Option<&Path>, checkpoint: Option<&Value>) -> Res<super::history::sessions::Session> {
         super::history::sessions::open(self.descriptor().name, session, home, source, checkpoint)
     }
+    /// Resolve a caller-validated copied source; the destination filename is not native proof.
+    fn history_with_native_session_alias(&self, session:&str, original:&str, home:Option<&Path>, source:Option<&Path>, checkpoint:Option<&Value>)->Res<super::history::sessions::Session> {
+        super::history::sessions::open_with_native_session_alias(self.descriptor().name,session,original,home,source,checkpoint)
+    }
     fn adopt(&self,_session:&str,_launch:&Launch,_native:&[NativeProcess])->Res<OwnerObservation> {Err("adoption unsupported".into())}
     fn orphans(&self,_launch:&Launch)->Res<Vec<Orphan>> {Err("orphan inventory unsupported".into())}
     fn stop_orphan(&self,_orphan:&Orphan,_launch:&Launch)->Res<()> {Err("orphan cleanup unsupported".into())}

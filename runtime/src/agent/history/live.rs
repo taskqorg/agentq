@@ -145,6 +145,7 @@ fn call_json(call:&super::super::Call)->Value {
 
 impl super::sessions::Session {
     pub fn live_data(&self,feed:Option<&Path>)->Res<LiveData> {
+        self.validate_copy()?;
         if super::sources::external(&self.history.format){return self.source_live(feed);}
         let (mut file,identity)=self.history.open(&self.path)?;
         file.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;
@@ -188,6 +189,7 @@ impl super::sessions::Session {
             }
         }
         let cost=rows.iter().rev().find(|v|v["type"]=="result").and_then(native_cost);
+        self.validate_copy()?;
         assemble(&self.history,steps,context,windows,calls.iter().map(call_json).collect(),cost)
     }
 }

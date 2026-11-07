@@ -200,8 +200,10 @@ pub(super) fn presentation_facts(record:&Value)->Value {
     let mut facts=json!({"model":record["message"].get("model").or(p.get("model")),
         "effort":p.get("effort").or(p.get("reasoning_effort")).or(record.get("effort")).or(record.get("reasoningEffort")).or(record.get("reasoning_effort")),
         "cli_version":p.get("cli_version").or(record.get("claude_code_version")).or(record.get("version")),
-        "sidechain":record["isSidechain"],"meta":record["isMeta"],"unknown":{}});
-    for name in ["model","effort","cli_version","sidechain","meta"] {if facts[name].is_null(){facts["unknown"][name]=json!("native field not reported");}}
+        "sidechain":record["isSidechain"],"meta":record["isMeta"],
+        "session_kind":record["sessionKind"].as_str().filter(|kind|*kind=="bg"),"unknown":{}});
+    for name in ["model","effort","cli_version","sidechain","meta","session_kind"] {if facts[name].is_null(){facts["unknown"][name]=json!("native field not reported");}}
+    if facts["session_kind"].is_null(){facts["unknown"]["session_kind"]=json!("native session kind missing or unrecognized");}
     facts
 }
 

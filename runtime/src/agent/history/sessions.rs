@@ -6,13 +6,13 @@ use serde::{Serialize,Deserialize};
 #[derive(Clone, Debug, Serialize,Deserialize)]
 pub struct Source { pub id:String, pub native_session:String, pub session: String, pub path: PathBuf, pub format: String, pub parent: Option<String>, pub parent_step: Option<String> }
 
-pub struct Session { resolved:Source,pub(super) history: History, pub(super) path: PathBuf, pub(super) runtime:String, parent: Option<String>, parent_step: Option<String>, children:std::collections::BTreeMap<String,String> }
+pub struct Session { resolved:Source,pub(super) history: History, pub(super) path: PathBuf, pub(super) runtime:String, pub(super) copy_witness:Option<History>, parent: Option<String>, parent_step: Option<String>, children:std::collections::BTreeMap<String,String> }
 impl Session {
     /// Already resolved source; observing it grants no resume or control authority.
     pub fn source(&self)->&Source {&self.resolved}
     /// Explicit copied-source observation; physical identity and committed prefix are unchanged.
     pub fn with_native_session_alias(mut self,native_session:&str,original:&str)->Res<Self> {
-        if self.runtime!="claude" || self.history.native_parent.is_some() || self.history.caller_runtime.is_some()
+        if self.copy_witness.is_some() || self.runtime!="claude" || self.history.native_parent.is_some() || self.history.caller_runtime.is_some()
             || self.history.native_session!=original || !super::super::native::cli_id(native_session) || !super::super::native::cli_id(original) {return Err("history native session alias invalid".into());}
         let alias=History::with_native_session_alias(&self.history.format,&self.history.source,native_session,original)?;
         self.history.session=native_session.into();self.history.native_session=native_session.into();self.history.native_session_alias=alias.native_session_alias;
@@ -22,6 +22,7 @@ impl Session {
     }
 
     pub(crate) fn control_validate(&self,file:&File)->Res<()> {
+        self.validate_copy()?;
         if self.runtime!="claude" || self.history.format!="claude-native" || self.history.identity.is_none() || self.history.native_parent.is_some() || self.history.caller_runtime.is_some() {return Err("background control source proof missing".into());}
         let (mut file,_)=self.history.checked_file(file.try_clone().map_err(|e|e.to_string())?)?;
         let length=file.metadata().map_err(|e|e.to_string())?.len();
@@ -32,7 +33,9 @@ impl Session {
 
     pub(crate) fn control_proof(&self,file:&File,native:&str,submitted:Option<&str>,input:&str,before:usize,required:bool,left:&impl Fn()->Res<Duration>)->Res<Value> {
         self.control_validate(file)?;
-        if self.resolved.native_session!=native || self.history.native_session!=native {return Err("background control source session differs".into());}
+        if self.resolved.session!=native || self.history.native_session!=native
+            || self.copy_witness.is_some() && submitted!=Some(self.resolved.native_session.as_str())
+            || self.copy_witness.is_none() && self.resolved.native_session!=native {return Err("background control source session differs".into());}
         let copied=submitted.is_some_and(|s|s!=native);
         if copied && self.history.native_session_alias.as_deref()!=submitted || !copied && self.history.native_session_alias.is_some() {return Err("background control source alias differs".into());}
         let mut reader=if let Some(alias)=&self.history.native_session_alias {History::with_native_session_alias(&self.history.format,&self.history.source,native,alias)?} else {History::new(&self.history.format,&self.history.source,native)?};
@@ -56,10 +59,10 @@ impl Session {
         Ok(json!({"source":self.resolved,"identity":self.history.identity,"offset":self.history.offset,"prefix":self.history.prefix,"alias":self.history.native_session_alias,"before":before,"input_record":witness}))
     }
     /// Physical records through the already resolved native source and cursor.
-    pub fn poll(&mut self)->Res<Page> {self.history.poll(&self.path)}
-    pub fn poll_before(&mut self)->Res<Page> {self.history.poll_before(&self.path)}
+    pub fn poll(&mut self)->Res<Page> {self.read(|history,path|history.poll(path))}
+    pub fn poll_before(&mut self)->Res<Page> {self.read(|history,path|history.poll_before(path))}
     pub fn steps(&mut self, bytes: u64) -> Res<StepPage> {
-        let mut page=self.history.steps(&self.path,bytes)?;
+        let mut page=self.read(|history,path|history.steps(path,bytes))?;
         for step in &mut page.steps {
             if step.parent.is_none(){step.parent=self.parent_step.clone();step.parent_session=self.parent.clone();}
             if let Some(child)=step.data["session"].as_str() {
@@ -75,12 +78,28 @@ impl Session {
     pub fn checkpoint(&self) -> Value {
         let mut checkpoint=self.history.checkpoint();
         checkpoint["resolved"]=json!({"runtime":self.runtime,"source":self.resolved,"parent":self.parent,"parent_step":self.parent_step,"children":self.children});
+        if let Some(witness)=&self.copy_witness {checkpoint["resolved"]["copy_witness"]=witness.checkpoint();}
         checkpoint
     }
-    pub fn source_bytes(&self,key:&str,start:u64,length:u64)->Res<Vec<u8>> {super::sources::source_bytes(&self.history,&self.path,key,start,length)}
-    pub fn read_bytes(&self, start:u64, length:u64)->Res<Vec<u8>> {self.history.read_bytes(&self.path,start,length)}
+    pub fn source_bytes(&self,key:&str,start:u64,length:u64)->Res<Vec<u8>> {self.validate_copy()?;let bytes=super::sources::source_bytes(&self.history,&self.path,key,start,length)?;self.validate_copy()?;Ok(bytes)}
+    pub fn read_bytes(&self, start:u64, length:u64)->Res<Vec<u8>> {self.validate_copy()?;let bytes=self.history.read_bytes(&self.path,start,length)?;self.validate_copy()?;Ok(bytes)}
+    pub(super) fn validate_copy(&self)->Res<()> {
+        if let Some(witness)=&self.copy_witness {
+            witness.open(&self.path)?;
+            if self.history.identity.as_ref().is_some_and(|id|Some(id)!=witness.identity.as_ref()) {return Err("history copied source identity differs".into());}
+        }
+        Ok(())
+    }
+    fn read<T>(&mut self,read:impl FnOnce(&mut History,&Path)->Res<T>)->Res<T> {
+        self.validate_copy()?;
+        let saved=self.copy_witness.as_ref().map(|_|self.history.clone());
+        let result=read(&mut self.history,&self.path);
+        if let Some(saved)=saved {if let Err(error)=self.validate_copy() {self.history=saved;return Err(error);}}
+        result
+    }
     /// Explicitly adopt and acquire terminal resume authority; source IDs resolve inside the adapter.
     pub fn resume_command(&self, launch:&super::super::Launch, native:&[super::super::NativeProcess])->Res<super::super::ResumeCommand> {
+        if self.copy_witness.is_some(){return Err("copied history terminal resume unsupported".into());}
         if self.history.native_parent.is_some() || self.runtime=="claude" && self.history.session!=self.history.native_session {return Err("native subagent terminal resume unsupported".into());}
         super::super::runtime(&self.runtime).ok_or("history runtime unsupported")?.descriptor().history_resume(&self.history.native_session,launch,native)
     }
@@ -199,6 +218,15 @@ fn link_parents(runtime:&str,sources:&mut [Source])->Res<()> {
 }
 
 pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>, saved:Option<&Value>) -> Res<Session> {
+    open_bound(runtime,session,home,source,saved,None)
+}
+
+pub fn open_with_native_session_alias(runtime:&str,session:&str,original:&str,home:Option<&Path>,source:Option<&Path>,saved:Option<&Value>)->Res<Session> {
+    if !super::super::registry::protocol(client(runtime)?).history_alias || session==original || !super::super::native::cli_id(session) || !super::super::native::cli_id(original) {return Err("history native session alias invalid".into());}
+    open_bound(runtime,session,home,source,saved,Some(original))
+}
+
+fn open_bound(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>, saved:Option<&Value>,alias:Option<&str>) -> Res<Session> {
     if super::sources::get(runtime).is_none(){return Err("history runtime unsupported".into());}
     if let Some(saved)=saved.filter(|s|s["resolved"].is_object()) {
         let requested_source=source;
@@ -210,10 +238,29 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
         }
         if requested_source.is_some_and(|p|p!=source.path) || !source.path.is_absolute() {return Err("history checkpoint source invalid".into());}
         let history=History::recover(saved)?;
-        if history.source!=source.path.to_str().ok_or("history source path invalid UTF-8")? || history.session!=source.session || history.native_session!=source.native_session || history.format!=source.format {return Err("history checkpoint binding differs".into());}
+        let copy_witness=match (alias,resolved.get("copy_witness")) {
+            (None,None)=>None,
+            (Some(original),Some(value))=>{
+                let witness=History::recover(value)?;
+                if source.session!=session || source.native_session!=original || history.native_session!=session || history.native_session_alias.as_deref()!=Some(original) || source.parent.is_some() || history.native_parent.is_some() || history.caller_runtime.is_some()
+                    || source.format!=super::super::registry::protocol(client(runtime)?).native_history || source.path.file_stem().and_then(|s|s.to_str())!=Some(session)
+                    || witness.offset==0 || witness.identity.is_none() {return Err("history copied source binding differs".into());}
+                let current=history.checkpoint();let bound=witness.checkpoint();
+                for key in ["format","source","session","native_session","native_session_alias","native_parent","caller_runtime"] {if current[key]!=bound[key] {return Err("history copied source witness differs".into());}}
+                copy_path(&source.path,session,home)?;
+                Some(witness)
+            },
+            _=>return Err("history copied source requires the same explicit alias and witness".into()),
+        };
+        if history.source!=source.path.to_str().ok_or("history source path invalid UTF-8")? || history.session!=source.session || alias.is_none() && history.native_session!=source.native_session || history.format!=source.format {return Err("history checkpoint binding differs".into());}
         history.open(&source.path)?;
         let children=serde_json::from_value(resolved["children"].clone()).map_err(|_|"history checkpoint children invalid")?;
-        return Ok(Session {path:source.path.clone(),resolved:source,history,runtime:runtime.into(),parent:resolved["parent"].as_str().map(String::from),parent_step:resolved["parent_step"].as_str().map(String::from),children});
+        let session=Session {path:source.path.clone(),resolved:source,history,runtime:runtime.into(),copy_witness,parent:resolved["parent"].as_str().map(String::from),parent_step:resolved["parent_step"].as_str().map(String::from),children};
+        session.validate_copy()?;return Ok(session);
+    }
+    if let Some(original)=alias {
+        if saved.is_some(){return Err("history copied source checkpoint requires resolved witness".into());}
+        return open_copy(runtime,session,original,home,source);
     }
     let sources=if source.is_some(){vec![]}else{discover(runtime,home)?};
     let source=if let Some(path)=source {
@@ -243,7 +290,38 @@ pub fn open(runtime:&str, session:&str, home:Option<&Path>, source:Option<&Path>
         }
     }
     let parent=parent_source(runtime,&source,&sources)?.map(|s|s.id.clone()).or(source.parent.clone());
-    Ok(Session {resolved:source.clone(),history,path:source.path,runtime:runtime.into(),parent,parent_step:source.parent_step,children})
+    Ok(Session {resolved:source.clone(),history,path:source.path,runtime:runtime.into(),copy_witness:None,parent,parent_step:source.parent_step,children})
+}
+
+fn copy_path(path:&Path,destination:&str,home:Option<&Path>)->Res<()> {
+    if !path.is_absolute() || path.file_stem().and_then(|s|s.to_str())!=Some(destination) || path.extension().is_none_or(|s|s!="jsonl") {return Err("history copied destination source differs".into());}
+    if let Some(home)=home {
+        let root=home.join("projects").canonicalize().map_err(|e|format!("history copied home: {e}"))?;
+        if !path.canonicalize().map_err(|e|format!("history copied source: {e}"))?.starts_with(root) {return Err("history copied source differs from selected home".into());}
+    }
+    Ok(())
+}
+
+fn open_copy(runtime:&str,destination:&str,original:&str,home:Option<&Path>,explicit:Option<&Path>)->Res<Session> {
+    let mut paths=if let Some(path)=explicit {vec![path.to_path_buf()]}else{
+        let home=home.map(Path::to_path_buf).or_else(||super::super::base_home(client(runtime).ok()?)).ok_or("history home unknown")?;
+        let mut paths=Vec::new();walk(&home.join("projects"),&mut paths)?;
+        paths.retain(|p|p.file_stem().and_then(|s|s.to_str())==Some(destination));paths
+    };
+    if paths.len()!=1 {return Err(if paths.is_empty(){"history copied source not found"}else{"history copied source ambiguous"}.into());}
+    let path=paths.remove(0);
+    copy_path(&path,destination,home)?;
+    let format=super::super::registry::protocol(client(runtime)?).native_history;
+    let label=path.to_str().ok_or("history source path invalid UTF-8")?;
+    let mut witness=History::with_native_session_alias(format,label,destination,original)?;
+    let page=witness.poll(&path)?;
+    if page.events.iter().any(|e|e["validity"]["status"]!="valid") || !page.events.iter().any(|e|e["kind"]!="unknown" && e["session_binding"]=="alias" && e["native_session"]==original) {return Err("history copied native identity unavailable within bounded page".into());}
+    let mut source=identify(runtime,&path)?.ok_or("history copied native identity unavailable")?;
+    if source.format!=format || source.native_session!=original || source.session!=original || source.parent.is_some() {return Err("history copied native identity differs".into());}
+    witness.open(&path)?;
+    source.session=destination.into();
+    let history=History::with_native_session_alias(format,label,destination,original)?;
+    Ok(Session {resolved:source,history,path,runtime:runtime.into(),copy_witness:Some(witness),parent:None,parent_step:None,children:std::collections::BTreeMap::new()})
 }
 
 pub(crate) fn resume(runtime:&str, session:&str)->Res<Vec<String>> {

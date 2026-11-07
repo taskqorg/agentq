@@ -123,6 +123,10 @@ fn block(format: &str, v: Value) -> Value {
 
 pub(super) fn history_session(_format: &str, v: &Value, raw: &str) -> Option<String> {
     if v["type"]=="agentq_statusline" {return v["payload"]["session_id"].as_str().map(String::from);}
+    if ["sessionId","session_id","agentId"].iter().any(|key|v.get(*key).is_some_and(|id|id.as_str().is_none_or(str::is_empty))) {return Some(String::new());}
+    if let (Some(a),Some(b))=(v.get("sessionId"),v.get("session_id")) {
+        if !a.is_string() || !b.is_string() || a!=b {return Some(String::new());}
+    }
     v["agentId"]
         .as_str()
         .map(String::from)
