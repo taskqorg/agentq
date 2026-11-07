@@ -289,6 +289,27 @@ A consumer service that re-executes itself reattaches its live CLI turn children
 - `spawned(&Child)` runs after spawn and before any input is written, for example to assign a Windows Job Object through the child handle. An error kills and reaps the child and fails the launch with that error.
 - Background, queue, job list and stop launchers are bounded exchanges owned and reaped by `coreq::process`; they get only `quiet` and no caller hooks, because the native background job they start is not their child.
 
+## Live worker control
+
+`Runtime::respond`, `steer`, `compact` and `set_option` are typed native worker operations. `Launch.controls` declares the need for a live control channel; the adapter selects the transport. It is false by default. Each operation requires its descriptor capability and a compatible owned live transport; unsupported runtime, transport, option or state refuses with a named cause before submission. Unknown capabilities grant no authority. An ordinary launch gains no terminal prompt or implicit approval handler.
+
+| Operation | Native boundary |
+|---|---|
+| `respond` | Answer the original pending approval or question with an offered choice, typed question answers or rejection. It cannot submit a new turn or change a grant. |
+| `steer` | Submit ordered input to the known active native turn, preserving its session and expected turn identity. It never interrupts or creates a replacement turn. A native queue is reported as queued; an unavailable steering path refuses. |
+| `compact` | Request native compaction only when the native session permits it. An acknowledgment is not a completed compaction or a restored context. |
+| `set_option` | Request a supported model or native session option. Native validation, the original account and permission policy remain binding. An acknowledgment is not proof that a later model call used the requested model. |
+
+Codex control uses its owned app-server, including `turn/steer` with the exact active turn and `thread/compact/start`. Claude control uses its native stream-JSON control channel and user-message injection only where the native protocol supports the requested operation. ACP reuses its existing request, offered-choice and model/mode methods; unproven steering, compaction and provider-specific operations refuse. Background jobs, desktop queue submissions and one-shot CLI transports have no added reply channel. The runtime never silently changes transport or restarts a live worker to make an operation available.
+
+Approvals and questions use the shared neutral request and choice data in progress and history. A native request ID is observation data, not reply authority: the live controller binds each occurrence to its original run, generation, session and native turn. Reuse of the same native ID cannot make a stale response valid. Foreign, duplicate, cancelled, late and uncertain-delivery responses refuse. A response is validated against the exact pending request and the original launch policy; no absent reply, unknown choice or unreadable request means approval. Native cancellation and turn completion retire pending reply authority. Pending requests remain visible as waiting for their owner or end under the launch policy.
+
+The controller records the request observation before exposing its reply handle and records reply intent before a native write. It distinguishes intent, successful pipe delivery, native acceptance and observed application. An ambiguous journal or transport write fences the original occurrence; neither automatic retry nor recovery resubmits it. Recovery retains observation only and cannot reconstruct a native permission callback. Control data and answers are private session content, never telemetry.
+
+A controlled session retains its mandatory SessionStore owner while it can write native input, including between turns. Every mutation rechecks the original authority. Native settlement, process lifetime, retained scope cleanup and stop identity remain distinct. A protected-host session continues to use its existing host verification and no-replay guards; ordinary control methods cannot send through that host's transport or acquire its authority.
+
+No new runtime timeout, cap, retry, queue bound or compaction budget is added. Scripted protocols qualify adapter behavior only. Versioned native approval, steer, model and compaction evidence is separate; missing native or platform evidence remains unqualified.
+
 ## Worker preflight
 
 Binding detail of M12.15–M12.17 and PRODUCT R14. `ready` and `quota` remain available as individual read-only probes. `ready_for`, `catalogue_for` and `account_limits_for` bind reads to the same `Launch` executable, wrapper, home and environment.
