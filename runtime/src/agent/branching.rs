@@ -3,6 +3,8 @@ use super::*;
 use super::super::history::{History,Step,StepKind};
 use std::io::Seek;
 
+pub(super) enum Phase {BeforeFork,VerifyChild}
+
 fn refuse(cause:&'static str)->Failure {Failure::Refused(Cause(cause))}
 
 fn source<'a>(adapter:&Adapter,run:&'a mut Run,operation:&'static str)->Result<&'a mut App,Failure> {
@@ -19,6 +21,10 @@ fn source<'a>(adapter:&Adapter,run:&'a mut Run,operation:&'static str)->Result<&
 }
 
 impl App {
+    fn branch_settled(&mut self)->Res<()> {
+        self.branch_source_intact()?;self.pump()?;self.writable()?;
+        if !self.session.idle() || !self.requests.is_empty() || self.cancelling || self.control.as_ref().is_some_and(|(r,_)|!r.ids().is_empty()) {return Err("branch-source-not-idle".into());}Ok(())
+    }
     fn branch_source_intact(&mut self)->Res<()> {
         let path=self.journal.as_ref().ok_or("branch-source-unknown")?;
         let (_,log)=self.control.as_mut().ok_or("branch-source-unknown")?;
@@ -29,6 +35,10 @@ impl App {
     fn branch_query(&mut self,method:&'static str,params:Value,intent:Option<&Value>,until:Option<Instant>)->Res<Value> {
         self.branch_source_intact()?;
         let request=self.session.request(method,params)?;
+        self.branch_exchange(request,intent,until)
+    }
+    pub(super) fn branch_exchange(&mut self,request:Value,intent:Option<&Value>,until:Option<Instant>)->Res<Value> {
+        self.branch_source_intact()?;
         let owner=self.writer.as_ref().ok_or("control-owner-required")?;
         if let Some(intent)=intent {owner.branch_authority(intent)?;}else{owner.control()?;}
         let result:Res<Value>=(|| {
@@ -111,7 +121,7 @@ pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&L
     if !readiness.checks.iter().any(|c|c.check=="client" && c.state=="ok" && c.detail=="codex-cli 0.162.0") {return Err(refuse("branch-native-support-unknown"));}
     let mut params=turn_thread(launch)?;
     if !launch.parts.is_empty() {input_items(&me.descriptor,&launch.parts)?;}
-    let parent_log=File::open(app.journal.as_ref().ok_or("branch-source-unknown")?).map_err(|e|e.to_string())?;
+    let mut parent_log=File::open(app.journal.as_ref().ok_or("branch-source-unknown")?).map_err(|e|e.to_string())?;
     match File::open(&launch.log) {
         Ok(log) if native::file_id(&log)?==native::file_id(&parent_log)?=>return Err(refuse("fork-child-log-differs-required")),
         Ok(_)=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string().into()),
@@ -123,18 +133,35 @@ pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&L
     if keep==0 {return Err(refuse("fork-empty-prefix-unsupported"));}
     params["threadId"]=json!(parent);params["lastTurnId"]=turns[keep-1]["id"].clone();
     let intent=json!({"id":crate::incident::uuid(),"operation":"fork","parent":parent,"selected":through,"retained":&turns[..keep],"requested":params});
-    owner.branch_begin(&intent)?;
+    let prefix_len=parent_log.metadata().map_err(|e|e.to_string())?.len();
+    let prefix=native::digest_prefix(&mut parent_log,prefix_len)?;
     let lineage=json!({"operation":"fork","parent_owner":owner.checkpoint()?,"intent":intent,"fork_params":params});
-    let mut verify=|child_app:&mut App|->Res<()> {
+    let mut verify=|child_app:&mut App,phase:Phase|->Res<()> {
+        let child_owner=child_app.writer.as_ref().ok_or("control-owner-required")?.clone();
+        if matches!(phase,Phase::BeforeFork) {
+            child_app.writable()?;
+            if !child_app.requests.is_empty() || child_app.cancelling || child_app.control.as_ref().is_some_and(|(r,_)|!r.ids().is_empty()) {return Err("branch-source-not-idle".into());}
+            owner.control()?;app.branch_source_intact()?;
+            if native::digest_prefix(&mut parent_log,prefix_len)?!=prefix {return Err("branch-source-changed".into());}
+            if app.branch_turns(&parent,None,until)?!=turns {return Err("branch-source-changed".into());}
+            app.branch_goal_absent(&parent,until)?;
+            app.branch_settled()?;
+            if native::digest_prefix(&mut parent_log,prefix_len)?!=prefix {return Err("branch-source-changed".into());}
+            // Setup/hooks have completed; both admissions are fenced before the native write.
+            owner.branch_begin(&intent)?;child_owner.branch_lineage(&lineage)?;
+            owner.branch_authority(&intent)?;app.branch_source_intact()?;
+            return Ok(());
+        }
         let child=child_app.session.session().ok_or("fork-child-identity-unknown")?.to_string();
         let result=child_app.pending.iter().rev().find(|(m,_)|m["result"]["thread"]["id"]==child).ok_or("fork-reply-unknown")?.0["result"].clone();
         owner.branch_observed(&intent,&result)?;
-        if app.branch_turns(&parent,Some(&intent),until)?!=turns || child_app.branch_turns(&child,None,until)?!=turns[..keep] {return Err("fork-prefix-readback-unknown".into());}Ok(())
+        if app.branch_turns(&parent,Some(&intent),until)?!=turns || child_app.branch_turns(&child,Some(&intent),until)?!=turns[..keep] {return Err("fork-prefix-readback-unknown".into());}
+        app.branch_settled()?;child_app.branch_settled()?;
+        if native::digest_prefix(&mut parent_log,prefix_len)?!=prefix {return Err("branch-source-changed".into());}
+        let observed=json!({"child":child,"retained":&turns[..keep]});
+        owner.branch_finish(&intent,&observed)?;child_owner.branch_finish(&intent,&observed)?;Ok(())
     };
-    let child_run=me.start_lineage(launch,None,Some(&lineage),Some(&mut verify))?;
-    let child=me.session_id(&child_run).ok_or("fork-child-identity-unknown")?;
-    owner.branch_finish(&intent,&json!({"child":child,"retained":&turns[..keep]}))?;
-    Ok(child_run)
+    Ok(me.start_lineage(launch,None,Some(&lineage),Some(&mut verify))?)
 }
 
 pub(super) fn rewind(adapter:&Adapter,run:&mut Run,through:Option<&Step>)->Result<(),Failure> {

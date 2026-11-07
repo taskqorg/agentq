@@ -668,7 +668,7 @@ impl App {
 
     /// Initialize, open the thread and, with input, start the first turn.
     /// A failed handshake stops a plain child; a protected frontend stays with its host.
-    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch, owner:&SessionOwner,before_input:Option<&mut dyn FnMut(&mut App)->Res<()>>) -> Res<App> {
+    fn open(spec: &Spec, mut transport: Transport, initialize: &Value, thread: &Value, l: &Launch, owner:&SessionOwner,lineage:Option<&Value>,branch_check:Option<&mut dyn FnMut(&mut App,branching::Phase)->Res<()>>) -> Res<App> {
         let mut session = match AppSession::new(spec) {
             Ok(s) => s,
             Err(e) => { if let Transport::Plain(s) = &mut transport { let _ = s.kill(); } return Err(e); }
@@ -681,30 +681,34 @@ impl App {
             Some((super::control::Requests::new(),options.open(&l.log).map_err(|e|format!("control-log: {e}"))?))
         }else{None};
         let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval,capture:owned.then(||crate::archive::stream_path(l.install.as_deref(),&l.log)) };
-        let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner,before_input);
+        let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner,lineage,branch_check);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
     }
 
-    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch, descriptor: &Descriptor,owner:&SessionOwner,before_input:Option<&mut dyn FnMut(&mut App)->Res<()>>) -> Res<()> {
+    fn handshake(&mut self, initialize: &Value, thread: &Value, l: &Launch, descriptor: &Descriptor,owner:&SessionOwner,lineage:Option<&Value>,mut branch_check:Option<&mut dyn FnMut(&mut App,branching::Phase)->Res<()>>) -> Res<()> {
         let params = if self.owned { turn_thread(l)? } else { thread_params(l, thread)? };
         let until = reply_deadline(l);
         let request = self.session.initialize(initialize.clone())?;
         self.exchange(request, until)?;
         let initialized = self.session.initialized()?;
         self.send(&initialized,Some(until))?;
-        let fork=owner.branch_params()?;
-        let request = if let Some(params)=&fork {self.session.fork(params.clone())?}else{self.session.open(params)?};
-        self.exchange(request, until)?;
+        let fork=lineage.map(|v|v["fork_params"].clone());
+        if let Some(lineage)=lineage {
+            let request=self.session.fork(lineage["fork_params"].clone())?;
+            branch_check.as_mut().ok_or("fork-verification-required")?(self,branching::Phase::BeforeFork)?;
+            let result=self.branch_exchange(request,Some(&lineage["intent"]),Some(until))?;
+            owner.branch_observed(&lineage["intent"],&result)?;
+        }else {let request=self.session.open(params)?;self.exchange(request,until)?;}
         if !self.session.ready() { return Err("app-server thread not ready".into()); }
-        if let Some(params)=&fork {
-            if self.session.session()==params["threadId"].as_str() {return Err("fork-child-identity-unknown".into());}
+        if fork.as_ref().is_some_and(|params|self.session.session()==params["threadId"].as_str()) {return Err("fork-child-identity-unknown".into());}
+        owner.bind(self.session.session().ok_or("session-owner-unknown: app thread missing")?)?;
+        if fork.is_some() {
             let reply=self.pending.iter().rev().find(|(m,_)|m.get("result").is_some_and(|r|r["thread"].is_object())).ok_or("fork-child-resume-unknown")?;
             branching::child_conditions(&reply.0["result"],l)?;
         }
-        owner.bind(self.session.session().ok_or("session-owner-unknown: app thread missing")?)?;
         if self.control.is_some() {owner.hold_controls()?;}
-        if let Some(before_input)=before_input {before_input(self)?;}
+        if let Some(branch_check)=branch_check {branch_check(self,branching::Phase::VerifyChild)?;}
         if !l.parts.is_empty() { self.start(input_items(descriptor, &l.parts).map_err(|e|e.to_string())?, until)?; }
         else if !l.input.is_empty() { self.input(&l.input, until)?; }
         Ok(())
@@ -1201,7 +1205,7 @@ impl Adapter {
 
     fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {self.start_lineage(l,session,None,None)}
 
-    fn start_lineage(&'static self, l: &Launch, session: Option<&str>, lineage: Option<&Value>, mut before_input:Option<&mut dyn FnMut(&mut App)->Res<()>>) -> Res<Run> {
+    fn start_lineage(&'static self, l: &Launch, session: Option<&str>, lineage: Option<&Value>, mut branch_check:Option<&mut dyn FnMut(&mut App,branching::Phase)->Res<()>>) -> Res<Run> {
         let name = self.descriptor.name;
         if l.controls && (l.mode!=Mode::Turn || !self.descriptor.has("respond")) {return Err("controls-unsupported".into());}
         if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability())); }
@@ -1215,7 +1219,6 @@ impl Adapter {
         let mut owner_spec=spec.clone();
         if session.is_none() && matches!(l.mode,Mode::Background) {owner_spec.session="-".into();}
         let owner=l.session_store.acquire(&owner_spec,session.is_none() || lineage.is_some(),None,l.lifetime)?;
-        if let Some(lineage)=lineage {owner.branch_lineage(lineage)?;}
         let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process,matches!(l.mode,Mode::Turn) && self.descriptor.has("process-lifetime"))?;let l=&owned_launch;
         if let Some(config)=acp {
             if l.mode!=Mode::Turn {return Err("mode unsupported by ACP".into());}
@@ -1247,7 +1250,7 @@ impl Adapter {
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
                     let command=(self.ops.app_command)(command,&spec)?;
                     let server=if l.controls {AppServer::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?}else{AppServer::spawn(command,&l.log,&l.process)?};
-                    let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l,&owner,before_input.take())?;
+                    let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l,&owner,lineage,branch_check.take())?;
                     let stop_id=app.control.as_ref().map(|(requests,_)|requests.run.clone());
                     let mut run=self.checked_run(&readiness,Body::App(Box::new(app)),0,optimization,l);if let Some(id)=stop_id {run.stop_id=id;}run.owner=Some(owner);return Ok(run);
                 }
@@ -1283,7 +1286,7 @@ impl Adapter {
             Mode::AppServer { initialize, thread } => {
                 thread_params(l, thread)?;
                 let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
-                let app = App::open(&spec, Transport::Plain(server), initialize, thread, l,&owner,None)?;
+                let app = App::open(&spec, Transport::Plain(server), initialize, thread, l,&owner,None,None)?;
                 Ok(self.checked_run(&readiness, Body::App(Box::new(app)), 0, optimization, l))
             }
         };
@@ -1751,7 +1754,7 @@ pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, 
     owner.spawned(server.id())?;
     if !l.input.is_empty() || !l.parts.is_empty() {owner.submit()?;}
     let optimization = server.optimization();
-    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner,None)?;
+    let app = App::open(&spec, Transport::Protected(Box::new(server)), initialize, thread, l,&owner,None,None)?;
     let mut run=adapter.run(Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);Ok(run)
 }
 

@@ -60,6 +60,7 @@ pub(crate) fn main() {
         ("codex_branch_prefix_keeps_parent_files_and_frozen_report",branching::prefix),
         ("codex_branch_refusals_precede_native_mutation",branching::refusals),
         ("codex_branch_unknown_mutation_stays_durably_fenced",branching::uncertain),
+        ("codex_branch_hooks_and_setup_refusals_preserve_original_admission",branching::admission_boundaries),
         ("account_login_controller_loss_never_reopens_a_live_home_writer",signin::home_processes),
         ("account_login_callback_authority_is_shared_between_processes",signin::callback_processes),
         ("account_login_startup_and_pipe_completion_stay_distinct",signin::startup_and_pipes),

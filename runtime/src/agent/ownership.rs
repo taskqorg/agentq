@@ -122,8 +122,8 @@ impl SessionStore {
         if stopped(&root,&row)? {row["phase"]=json!("stop-unresolved");row["native_reason"]=json!("native-subtree-stop-unverified");}
         if saved.is_none() {if let Some(old)=&old {retain_scope(&root,old)?;}}
         save(&file,&row)?;
-        if alias_guard.is_some() {std::fs::remove_file(&alias).map_err(|e|e.to_string())?;}
-        Ok(SessionOwner(Arc::new(Mutex::new(Owned {root,path:file,row,previous:old,guard,binding:None}))))
+        if alias_guard.is_some() && row["mutation"].is_null() {std::fs::remove_file(&alias).map_err(|e|e.to_string())?;}
+        Ok(SessionOwner(Arc::new(Mutex::new(Owned {root,path:file,row,previous:old,guard,binding:None,branch_alias:None}))))
     }
 }
 
@@ -247,7 +247,7 @@ fn request_stop(root:&Path,row:&Value,native:&NativeProcess)->Res<()> {
     Ok(())
 }
 
-struct Owned {root:PathBuf,path:PathBuf,row:Value,previous:Option<Value>,guard:Option<coreq::file_lock::Lock>,binding:Option<(PathBuf,coreq::file_lock::Lock)>}
+struct Owned {root:PathBuf,path:PathBuf,row:Value,previous:Option<Value>,guard:Option<coreq::file_lock::Lock>,binding:Option<(PathBuf,coreq::file_lock::Lock)>,branch_alias:Option<(PathBuf,Value,coreq::file_lock::Lock)>}
 impl Owned {
     fn authority(&self)->Res<()> {
         self.current()?;
@@ -287,13 +287,16 @@ impl SessionOwner {
     pub(super) fn branch_finish(&self,intent:&Value,evidence:&Value)->Res<()> {self.with(|o| {
         o.authority()?;if o.row["mutation"]!=*intent {return Err("mutation-owner-changed".into());}
         let mut row=o.row.clone();let mut entries=row["lineage"].as_array().cloned().unwrap_or_default();entries.push(json!({"intent":intent,"native":row["mutation_evidence"],"observed":evidence}));row["lineage"]=json!(entries);row["mutation"]=Value::Null;row["mutation_evidence"]=Value::Null;
-        save(&o.path,&row)?;o.row=row;Ok(())
+        if let Some((path,expected,_))=&o.branch_alias {if read(path)?.as_ref()!=Some(expected) {return Err("control-owner-changed".into());}}
+        save(&o.path,&row)?;o.row=row;
+        if let Some((path,_,_))=&o.branch_alias {std::fs::remove_file(path).map_err(|e|e.to_string())?;o.branch_alias=None;}
+        Ok(())
     })}
     pub(super) fn branch_lineage(&self,lineage:&Value)->Res<()> {self.with(|o| {
-        if o.guard.is_none() || o.row["phase"]!="prepared" || !o.row["native"].is_null() {return Err("child-admission-unavailable".into());}
-        let mut row=o.row.clone();row["lineage"]=json!([lineage]);row["branch_admission"]=json!(true);save(&o.path,&row)?;o.row=row;Ok(())
+        o.authority()?;mutation_clear(&o.row)?;
+        if o.row["session"]!="-" || o.row["phase"]!="submitted" || lineage["intent"]["operation"]!="fork" {return Err("child-admission-unavailable".into());}
+        let mut row=o.row.clone();row["lineage"]=json!([lineage]);row["branch_admission"]=json!(true);row["mutation"]=lineage["intent"].clone();row["mutation_evidence"]=Value::Null;save(&o.path,&row)?;o.row=row;Ok(())
     })}
-    pub(super) fn branch_params(&self)->Res<Option<Value>> {self.with(|o|Ok((o.row["branch_admission"]==true).then(||o.row["lineage"][0]["fork_params"].clone())))}
     pub(super) fn branch_scope(&self,store:&SessionStore,spec:&Spec)->Res<()> {self.with(|o| {
         scope(&o.row,spec)?;
         if o.root!=store.directory()? {return Err("branch-session-store-differs".into());}Ok(())
@@ -347,7 +350,9 @@ impl SessionOwner {
         let mut source=o.row.clone();source["binding"]=json!(session);save(&o.path,&source)?;o.row=source;
         let mut row=o.row.clone();row["session"]=json!(session);row["binding"]=Value::Null;
         let (target,_)=o.binding.as_ref().unwrap();save(target,&row)?;
-        match std::fs::remove_file(&o.path) {Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string())}
+        if o.row["branch_admission"]==true && !o.row["mutation"].is_null() {
+            o.branch_alias=Some((o.path.clone(),o.row.clone(),o.guard.take().ok_or("child-admission-unavailable")?));
+        }else {match std::fs::remove_file(&o.path) {Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string())}}
         let (target,guard)=o.binding.take().unwrap();o.path=target;o.row=row;o.guard=Some(guard);Ok(())
     })}
     pub(super) fn hold_controls(&self)->Res<()> {self.with(|o| {

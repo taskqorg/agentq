@@ -80,21 +80,79 @@ pub fn refusals() {
 }
 
 pub fn uncertain() {
-    for operation in ["fork","rewind"] {for mode in ["wrong-prefix","wrong-thread","lost-reply"] {
+    for operation in ["fork","rewind"] {for mode in ["wrong-prefix","wrong-thread","lost-reply","wrong-model","wrong-policy"] {
+        if operation=="rewind" && matches!(mode,"wrong-model"|"wrong-policy") {continue;}
         let (root,launch)=setup(&format!("branch-unknown-{operation}-{mode}"));let runtime=agent::runtime("codex").unwrap();let mut source=runtime.launch(&launch).unwrap();finish(runtime,&mut source);let step=selected(&launch,"A");
-        std::fs::write(root.join("branch-mode"),mode).unwrap();let mut child_launch=launch.clone();child_launch.log=root.join("child.log");
+        std::fs::write(root.join("branch-mode"),mode).unwrap();let mut child_launch=launch.clone();child_launch.log=root.join("child.log");child_launch.model=Some("gpt-6.1-sol".into());
+        if mode=="wrong-policy" {child_launch.policy.approval=agent::Approval::Deny;}
         if operation=="fork" {assert!(runtime.fork(&mut source,Some(&step),&child_launch).is_err());}else{assert!(runtime.rewind(&mut source,Some(&step)).is_err());}
         assert!(!owners(&launch).iter().find(|r|r["session"]=="parent").unwrap()["mutation"].is_null());let before=audit(&root).len();
         assert!(runtime.input(&mut source,&[Part::Text("never replay".into())]).is_err());
         let native=agent::NativeSpec {root:launch.root.clone(),session:"parent".into(),resume:true,args:vec![],home:launch.home.clone(),env:launch.env.clone(),owner:source.owner().cloned()};
         assert!(runtime.turn(Command::new(exe()),&native,&root.join("seam.log"),"never through raw seam",&agent::Process::default()).is_err());assert!(runtime.rewind(&mut source,None).is_err());assert_eq!(audit(&root).len(),before);
+        let rows=owners(&launch);let parent_intent=rows.iter().find(|r|r["session"]=="parent").unwrap()["mutation"].clone();
+        if operation=="fork" {assert!(rows.iter().any(|r|r["session"]=="-" && r["mutation"]==parent_intent),"unverified fork retains the admission alias");assert!(rows.iter().filter(|r|r["branch_admission"]==true).all(|r|r["mutation"]==parent_intent));}
         let saved=runtime.checkpoint(&source).unwrap();drop(source);
+        crate::agent::test_receipts::finish(&[root.canonicalize().unwrap()],false).unwrap();
+        if operation=="fork" {
+            assert!(runtime.adopt("child-1",&child_launch,&[]).unwrap_err().contains("session-mutation-unknown"));
+            assert!(runtime.resume("child-1",&child_launch).is_err());assert!(runtime.session_owner(Some("child-1"),&child_launch).is_err());
+            assert!(!audit(&root).iter().any(|r|r["method"]=="turn/start" && r["params"]["threadId"]=="child-1"));
+        }
         if let Ok(mut recovered)=runtime.recover(&saved,&launch) {assert!(runtime.rewind(&mut recovered,None).is_err());drop(recovered);}
         assert!(!owners(&launch).iter().find(|r|r["session"]=="parent").unwrap()["mutation"].is_null(),"recovery never clears intent");
         assert!(runtime.adopt("parent",&launch,&[]).is_err(),"adoption cannot clear durable unknown mutation");
         assert_eq!(audit(&root).iter().filter(|r|matches!(r["method"].as_str(),Some("thread/fork"|"thread/revert"))).count(),1);
         assert_eq!(std::fs::read_to_string(root.join("file-sentinel")).unwrap(),"original working files");teardown(root);
     }}
+}
+
+
+pub fn admission_boundaries() {
+    for mode in ["configure-owner","spawned-owner","configure-replace","spawned-replace","configure-rewrite","configure-append"] {
+        let (root,launch)=setup(mode);let runtime=agent::runtime("codex").unwrap();let mut source=runtime.launch(&launch).unwrap();finish(runtime,&mut source);let step=selected(&launch,"A");
+        let mut child=launch.clone();child.log=root.join("child.log");let fault_root=root.clone();let fault=move|| {
+            if mode.ends_with("owner") {
+                let path=std::fs::read_dir(fault_root.join(".agentq-sessions")).unwrap().map(|e|e.unwrap().path()).filter(|p|p.extension().is_some_and(|e|e=="json")).find(|p|serde_json::from_slice::<Value>(&std::fs::read(p).unwrap()).unwrap()["session"]=="parent").unwrap();
+                let mut row:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();row["token"]=json!("foreign-after-selection");std::fs::write(path,row.to_string()).unwrap();
+            }else if mode.ends_with("replace") {
+                let path=fault_root.join("worker.log");std::fs::rename(&path,fault_root.join("old-parent.log")).unwrap();std::fs::copy(fault_root.join("old-parent.log"),path).unwrap();
+            }else if mode.ends_with("rewrite") {
+                let path=fault_root.join("worker.log");let mut bytes=std::fs::read(&path).unwrap();bytes[0]=b' ';std::fs::write(path,bytes).unwrap();
+            }else {append(&fault_root.join("worker.log"),&[json!({"foreign":"append"})]);}
+        };
+        if mode.starts_with("configure") {child.process.configure=Some(std::sync::Arc::new(move |_|fault()));}
+        else {child.process.spawned=Some(std::sync::Arc::new(move |_|{fault();Ok(())}));}
+        assert!(runtime.fork(&mut source,Some(&step),&child).is_err(),"{mode}");
+        assert!(!audit(&root).iter().any(|r|r["method"]=="thread/fork"),"{mode} crossed the original parent boundary");
+        assert!(threads(&root).get("child-1").is_none());assert_eq!(std::fs::read_to_string(root.join("file-sentinel")).unwrap(),"original working files");
+        assert!(owners(&launch).iter().all(|r|r["mutation"].is_null()),"pre-write hook refusal created an uncertain branch");
+        drop(source);teardown(root);
+    }
+    for mode in ["lifetime-configure","lifetime-spawned","missing-command","log-directory","configure-error","spawned-error","invalid-model","invalid-parts"] {
+        let (root,launch)=setup(mode);let runtime=agent::runtime("codex").unwrap();let mut source=runtime.launch(&launch).unwrap();finish(runtime,&mut source);let step=selected(&launch,"A");
+        let original=threads(&root)["parent"].clone();let mut child=launch.clone();child.log=root.join("child.log");
+        let configured=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));let observed=configured.clone();
+        match mode {
+            "lifetime-configure"=>{child.lifetime=agent::Lifetime::StopWithOwner;child.process.configure=Some(std::sync::Arc::new(move |_|{observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}));},
+            "lifetime-spawned"=>{child.lifetime=agent::Lifetime::StopWithOwner;child.process.spawned=Some(std::sync::Arc::new(move |_|{observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);Ok(())}));},
+            "missing-command"=>child.command=vec![root.join("absent-executable").into()],
+            "log-directory"=>child.log=root.clone(),
+            "configure-error"=>{let missing=root.join("absent-cwd");child.process.configure=Some(std::sync::Arc::new(move |c|{c.current_dir(&missing);}));},
+            "spawned-error"=>child.process.spawned=Some(std::sync::Arc::new(|_|Err("owned setup refusal".into()))),
+            "invalid-model"=>child.model=Some("not a model code".into()),
+            "invalid-parts"=>child.parts=vec![Part::Image(root.join("absent-image"))],
+            _=>unreachable!(),
+        }
+        assert!(runtime.fork(&mut source,Some(&step),&child).is_err(),"{mode}");
+        if mode.starts_with("lifetime") {assert_eq!(configured.load(std::sync::atomic::Ordering::SeqCst),0);}
+        assert_eq!(threads(&root)["parent"],original);assert!(!audit(&root).iter().any(|r|r["method"]=="thread/fork"));
+        assert!(owners(&launch).iter().all(|r|r["mutation"].is_null()));
+        if mode.starts_with("lifetime") {assert_eq!(owners(&launch).len(),1,"known unsupported setup leaves no child alias");}
+        runtime.input(&mut source,&[Part::Text("separate explicit next input".into())]).unwrap();finish(runtime,&mut source);
+        assert_eq!(threads(&root)["parent"].as_array().unwrap().last().unwrap()["id"],"next-turn");
+        drop(source);teardown(root);
+    }
 }
 
 fn turn(id:&str)->Value {json!({"id":id,"rootTurnId":id,"itemsView":"full","status":"completed","items":[{"type":"agentMessage","id":format!("item-{id}"),"text":format!("answer-{id}")}],"error":null})}
@@ -135,13 +193,15 @@ pub fn server() {
             },
             Some("thread/fork"|"thread/revert")=>{
                 if request["method"]=="thread/fork" {
-                    let admitted=std::fs::read_dir(root.join(".agentq-sessions")).unwrap().map(|e|e.unwrap().path()).filter(|p|p.extension().is_some_and(|e|e=="json")).map(|p|serde_json::from_slice::<Value>(&std::fs::read(p).unwrap()).unwrap()).any(|r|r["session"]=="-" && r["native"]["pid"]==std::process::id() && r["branch_admission"]==true && !r["lineage"].is_null());assert!(admitted,"fresh native admission and durable lineage precede fork");
+                    let admitted=std::fs::read_dir(root.join(".agentq-sessions")).unwrap().map(|e|e.unwrap().path()).filter(|p|p.extension().is_some_and(|e|e=="json")).map(|p|serde_json::from_slice::<Value>(&std::fs::read(p).unwrap()).unwrap()).any(|r|r["session"]=="-" && r["native"]["pid"]==std::process::id() && r["branch_admission"]==true && !r["lineage"].is_null() && r["mutation"]["operation"]=="fork");assert!(admitted,"fresh native admission and original mutation fence precede fork");
                 }
                 if mode=="lost-reply" {return;}
                 let count=state[thread].as_array().unwrap().iter().position(|t|t["id"]==p[if request["method"]=="thread/fork" {"lastTurnId"}else{"beforeTurnId"}]).unwrap();
                 let keep=count+usize::from(request["method"]=="thread/fork");let prefix=if mode=="wrong-prefix" {json!([])}else{json!(&state[thread].as_array().unwrap()[..keep])};
                 let name=if request["method"]=="thread/fork" {"child-1"}else{thread};state[name]=prefix;
-                let result=metadata(if mode=="wrong-thread" {"foreign"}else{name});std::fs::write(root.join("branch-threads"),state.to_string()).unwrap();result
+                let mut result=metadata(if mode=="wrong-thread" {"foreign"}else{name});
+                if mode=="wrong-model" {result["model"]=json!("not-requested");}if mode=="wrong-policy" {result["approvalPolicy"]=json!("on-request");}
+                std::fs::write(root.join("branch-threads"),state.to_string()).unwrap();result
             },
             _=>panic!("unexpected fixture method"),
         };

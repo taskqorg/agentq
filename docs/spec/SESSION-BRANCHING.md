@@ -93,6 +93,11 @@ The owner journal durably records a private mutation intent and selected-boundar
 
 For broader history selection, the minimal proposed history-owner hook is an adapter-private read-only resolver taking the owned physical source binding plus an exact Step, returning its revalidated physical records, native turn/item association and source generation witness, or a named refusal. It must not mint mutation authority or infer a terminal chain boundary. Codex native readback must still prove whole-turn/last-chain selection. No hook or history-owned source is changed in this preparation.
 
+Deterministic child validation, process setup and transport initialization precede the original fork mutation intent. After supported child hooks/admission, revalidate the retained
+parent authority and exact selected physical source immediately before native fork submission; keep post-response checks. Persist the same unresolved original intent on the parent
+and child alias before the write, and carry it into the bound child. Only confirmed child identity, effective conditions and retained-prefix verification can clear it; adoption,
+recovery, re-admission and raw seams cannot bypass an unverified child.
+
 The child obtains fresh alias admission and its own native transport before `thread/fork`; the parent transport performs only selection/readback. The returned child ID is bound and its prefix/effective conditions are checked before the single explicit prompt on that same child transport. Do not fork on the parent server and then open another server on the returned child: official `thread_unsubscribe.rs` at `c1382380` demonstrates that unsubscribe retains the loaded thread until an idle unload, so it is not an immediate ownership transfer. No unload delay, polling or retry is introduced. Native creation replies remain private durable mutation evidence even if later child startup/readback fails.
 
 Claude descendant preparation and its deliberately unsupported startup boundary: [CLAUDE-FORK-PREPARATION.md](CLAUDE-FORK-PREPARATION.md). This does not complete or advertise Claude fork support.
