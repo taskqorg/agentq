@@ -1504,7 +1504,7 @@ mod tests {
                 let spec=NativeSpec {session:session.into(),resume:true,..Default::default()};
                 assert_eq!(runtime.native_arguments(&spec).err().as_deref(),error);
                 assert!(super::super::history::sessions::resume(name,session).is_err(),"terminal argv requires a CLI-safe ID");
-                let mut terminal=Launch::new(std::env::temp_dir(),std::env::temp_dir().join("unused.log"),"","fixtureq");terminal.command=vec!["raw-must-not-spawn".into()];
+                let mut terminal=Launch::new(std::env::temp_dir(),std::env::temp_dir().join("unused.log"),"","fixtureq");terminal.home=Some(std::env::temp_dir().join(crate::incident::uuid()));terminal.command=vec!["raw-must-not-spawn".into()];
                 assert_eq!(runtime.descriptor().history_resume(session,&terminal,&[]).err().as_deref(),Some("history session invalid"),"terminal ID refusal precedes preflight");
                 assert_eq!(runtime.turn(command(),&spec,Path::new("unused.log"),"never",&Process::default()).err().as_deref(),error);
                 if runtime.descriptor().has("background") {
