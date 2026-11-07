@@ -111,6 +111,10 @@ impl App {
 }
 
 pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&Launch)->Result<Run,Failure> {
+    if adapter.client==Client::Claude && adapter.descriptor.has("fork") {
+        let run=adapter.own_mut(run)?;
+        return match &mut run.body {Body::Claude(session)=>session.fork(through,launch),_=>Err(refuse("branch-transport-unsupported"))};
+    }
     let until=run.deadline;
     let archive=run.archive.clone();
     let app=source(adapter,run,"fork")?;

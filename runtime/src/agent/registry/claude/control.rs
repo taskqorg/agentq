@@ -1,6 +1,8 @@
 //! Native Claude stream controls; SDK source 2209f2c134fee914c0f75733b631a5fc238ca846.
 use super::*;
 use crate::agent::{control::Requests,stdio::Stdio as JsonStdio};
+#[path="branching.rs"]
+mod branching;
 
 fn text<'a>(v:&'a Value,key:&str)->Res<&'a str> {v[key].as_str().filter(|s|!s.is_empty()).ok_or_else(||format!("request-{key}-invalid"))}
 
@@ -48,6 +50,9 @@ fn reply(v:&Value,control:&Control)->Res<Value> {
 }
 
 pub(crate) struct Session {
+    spec:Spec,
+    native_turn:Option<native::NativeTurn>,
+    native_generation:Option<Value>,
     server:Option<JsonStdio>,
     native:NativeProcess,
     scope:String,
@@ -77,6 +82,11 @@ impl Drop for Session {fn drop(&mut self) {if let Some(server)=&mut self.server 
 
 impl Session {
     pub fn open(base:Command,spec:&Spec,l:&Launch,owner:&SessionOwner)->Res<Self> {
+        let mut session=Self::boot(base,spec,l,owner)?;
+        let parts=if l.parts.is_empty() {vec![Part::Text(l.input.clone())]}else{l.parts.clone()};session.input(&parts)?;Ok(session)
+    }
+    // Control-only initialization is separate from explicit input, not a native no-autonomy guarantee.
+    fn boot(base:Command,spec:&Spec,l:&Launch,owner:&SessionOwner)->Res<Self> {
         let mut command=command(base,spec);
         if !spec.args.iter().any(|s|s=="--input-format") {command.args(["--input-format","stream-json"]);}
         command.args(["--permission-prompt-tool","stdio"]);
@@ -86,9 +96,9 @@ impl Session {
         let log=options.open(&l.log).map_err(|e|e.to_string())?;let boundary=log.metadata().map_err(|e|e.to_string())?.len();
         let server=JsonStdio::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?;let sampler=Some(capture::Sampler::start(server.id()));let native=NativeProcess::read(server.id())?.ok_or("control-native-identity-unknown")?;
         owner.hold_controls()?;
-        let mut session=Self {server:Some(server),native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified:false,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:false,cancelling:false,closed:None,deadline:l.deadline,started:Instant::now(),started_ms:unix_ms(),sampler,cursor:events::Cursor::new(l.deltas)};
+        let mut session=Self {spec:spec.clone(),native_turn:None,native_generation:None,server:Some(server),native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified:false,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:false,cancelling:false,closed:None,deadline:l.deadline,started:Instant::now(),started_ms:unix_ms(),sampler,cursor:events::Cursor::new(l.deltas)};
         session.exchange(json!({"subtype":"initialize","hooks":null}))?;
-        let parts=if l.parts.is_empty() {vec![Part::Text(l.input.clone())]}else{l.parts.clone()};session.input(&parts)?;Ok(session)
+        Ok(session)
     }
     pub fn id(&self)->u32 {self.native.pid}
     pub fn recovered(&self)->bool {self.server.is_none()}
@@ -103,7 +113,7 @@ impl Session {
         if NativeProcess::read(native.pid)?.is_some_and(|current|current!=native) {return Err("Claude control recovery native identity changed".into());}
         let started_ms=saved["started_ms"].as_i64().filter(|s|*s>=0).ok_or("Claude control recovery time invalid")?;
         let log=File::open(&l.log).map_err(|e|e.to_string())?;if log.metadata().map_err(|e|e.to_string())?.len()<boundary {return Err("Claude control recovery log truncated".into());}
-        Ok(Self {server:None,native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:true,cancelling:false,closed:None,deadline:None,started:Instant::now(),started_ms,sampler:None,cursor:events::Cursor::default()})
+        Ok(Self {spec:spec.clone(),native_turn:None,native_generation:None,server:None,native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:true,cancelling:false,closed:None,deadline:None,started:Instant::now(),started_ms,sampler:None,cursor:events::Cursor::default()})
     }
     pub fn run_id(&self)->&str {&self.requests.run}
     fn writable(&self)->Res<()> {
@@ -116,7 +126,7 @@ impl Session {
         let result=(|| {writeln!(self.log,"{}",json!({"type":"agentq_control_outgoing","native":v})).and_then(|_|self.log.sync_data()).map_err(|e|format!("control-journal-unknown: {e}"))?;self.server.as_mut().ok_or("control-transport-unavailable")?.send_until(v,self.deadline)})();
         if let Err(error)=&result {self.closed=Some(error.clone());}result
     }
-    fn exchange(&mut self,request:Value)->Res<()> {
+    fn exchange(&mut self,request:Value)->Res<Value> {
         self.writable()?;let id=crate::incident::uuid();self.write(&json!({"type":"control_request","request_id":id,"request":request}))?;
         loop {
             let value=match self.server.as_mut().ok_or("control-transport-unavailable")?.wait(self.deadline) {Ok(v)=>v,Err(e)=>{self.closed=Some(e.clone());return Err(e);}};
@@ -124,7 +134,7 @@ impl Session {
             self.observe(value.clone())?;
             if replied {
                 self.log.sync_data().map_err(|e|{self.closed=Some(e.to_string());e.to_string()})?;
-                if value["response"]["subtype"]!="success" {self.closed=Some("native-control-refused-or-unknown".into());return Err("native-control-refused-or-unknown".into());}return Ok(());
+                if value["response"]["subtype"]!="success" {self.closed=Some("native-control-refused-or-unknown".into());return Err("native-control-refused-or-unknown".into());}return Ok(value["response"]["response"].clone());
             }
         }
     }
@@ -135,6 +145,12 @@ impl Session {
         message["uuid"]=json!(crate::incident::uuid());message["session_id"]=json!(self.session);message["parent_tool_use_id"]=Value::Null;
         if self.report.is_some() {self.owner.submit()?;}
         self.boundary=self.log.metadata().map_err(|e|e.to_string())?.len();
+        // NativeTurn binds physical identity and pre-input bytes; absence never creates fork authority.
+        self.native_generation=None;
+        self.native_turn=match parts {
+            [Part::Text(input)]=>claude_transcript(&self.spec,&self.session).ok().and_then(|path|native::NativeTurn::before(&self.spec,&path,input).ok()),
+            _=>None,
+        };
         self.active=true;self.cancelling=false;self.report=None;self.messages.clear();self.cursor=events::Cursor::new(self.cursor.deltas);self.started=Instant::now();self.started_ms=unix_ms();if let Some(sampler)=&mut self.sampler {sampler.mark();}self.write(&message)
     }
     fn observe(&mut self,v:Value)->Res<()> {
@@ -161,6 +177,7 @@ impl Session {
             let text=self.messages.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");let mut report=Report::read(Client::Claude,&text,&self.messages,None);
             if let Some(server)=&mut self.server {server.observe_exit(&mut report)?;}
             report.started_ms=self.started_ms;report.duration_us=if self.recovered() {0}else{self.started.elapsed().as_micros().try_into().unwrap_or(u64::MAX)};report.process=self.sampler.as_ref().map_or_else(||capture::ProcessUse::none("recovered"),capture::Sampler::usage);
+            self.native_generation=self.native_turn.as_mut().and_then(|turn|turn.poll().ok().flatten().map(|_|turn.checkpoint()));
             self.active=false;self.report=Some(report);
         }else{self.messages.push(v.clone());}
         self.pending.extend(self.cursor.read_owned(Client::Claude,vec![v],Some(&self.session),None));Ok(())
@@ -198,7 +215,7 @@ impl Session {
     }
     pub fn set_option(&mut self,control:Control)->Res<()> {
         let Control::Model(model)=control else {return Err("option-unsupported".into());};if !model_code(&model) {return Err("model-invalid".into());}
-        self.exchange(json!({"subtype":"set_model","model":model}))
+        self.exchange(json!({"subtype":"set_model","model":model})).map(|_|())
     }
     pub fn compact(&mut self)->Res<()> {if self.active {return Err("compact-turn-active".into());}self.input(&[Part::Text("/compact".into())])}
     pub fn cancel(&mut self)->Res<bool> {
