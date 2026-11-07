@@ -41,7 +41,7 @@ fn hook_baseline(data:&Path)->Option<std::collections::BTreeSet<String>> {
     }
 }
 fn hook(data:&Path,session:Option<&str>,baseline:&Option<std::collections::BTreeSet<String>>)->Option<bool> {
-    let name=format!("{}.json",crate::model::event_id("session",session?));
+    let name=format!("{}.json",crate::session::event_id("session",session?));
     if baseline.as_ref()?.contains(&name) {return None}
     let row:Value=serde_json::from_slice(&std::fs::read(data.join("sessions").join(name)).ok()?).ok()?;
     (row["launched"]==true).then_some(true)

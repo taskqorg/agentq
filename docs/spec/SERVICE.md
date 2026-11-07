@@ -13,7 +13,7 @@ Section references and P/M rule IDs below refer to [agentq.md](../../agentq.md).
 - A `service run` process is one whose command line runs a binary under `<install>/releases/`; the Windows launcher is not counted. [Windows processes](SERVICE.md#windows-service-processes).
 - Install and update use CoreQ `prepare_install` then `activate_install`; update first checks the sha256 and candidate selftest. The lifecycle lock covers checks, pruning, staging and activation. Durable originals restore a failed or interrupted activation before another install, update or service start ([detail](SERVICE.md#update-and-worker-swap)).
 - Update: hourly; each update keeps only `current` and `previous`; a dashq release notice may trigger an early check. A service run restarts into a new `current` without a proxy drain ([detail](SERVICE.md#update-and-worker-swap)).
-- `status.json` lives at `<install>/status.json`, written every 30 s; `service status` treats it as unknown after 90 s. It adds record hooks, queue, `model_backlog`, newest incident and per-profile `configuration`, without paths or file text ([fields](SERVICE.md#status-file-fields)).
+- `status.json` lives at `<install>/status.json`, written every 30 s; `service status` treats it as unknown after 90 s. It adds record hooks, queue, `model_backlog`, canonical `observation_backlog`/`observation_delivery`, newest incident and per-profile `configuration`, without paths or file text ([fields](SERVICE.md#status-file-fields)).
 
 ## Command registration
 
@@ -73,3 +73,5 @@ agentq runs these external tools on a host ([specq host requirements](https://gi
 - `health`: the running release's existing `releases/<version>/healthy` regular-file marker, consumed by CoreQ launcher rollback. A readable empty marker with a nonfuture modification time yields `state=verified`, `scope=status_written`, `version` and source `at`. Missing, unreadable, nonempty or future markers remain unknown.
 - `lifecycle`: `waiting_for_activation` when selected differs from running (the update drain rule still governs activation); `healthy` only for equal versions with this receipt; otherwise `starting` or `unknown`. Host disable intent yields `pending_disable`; unreadable lifecycle state yields `unknown`.
 - Snapshot and heartbeat reuse the status observation, allowlist fields and codes, and set current health/lifecycle unknown when the status time is missing, future or older than 90 s. Historical versions and receipt time remain explicitly last-known. Older producers report `not_reported`.
+
+Canonical `observation_backlog` reports currently unread native bytes through the registered source continuation descriptors, or explicit unknown. `observation_delivery` reports current grant availability and the timestamped last CoreQ shipper pass; its saved cursor/backlog is not a fresh read of the live store. Legacy `model_backlog` and Langfuse delivery remain separate until #301/D28 parity evidence permits deletion.

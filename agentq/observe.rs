@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+mod continuation;
+pub use continuation::{drain,backlog};
 
 /// Bytes one `Stop` reads over all its files; the next `Stop` continues.
 const PASS_BYTES: u64 = 8 << 20;
@@ -13,9 +15,10 @@ pub const STOP_PASS: Duration = Duration::from_millis(3500);
 
 /// New complete lines of `file` from its saved offset, and the offset range they cover. A line is always read whole;
 /// `budget` and `deadline` end the read between lines. A shorter file reads from the start.
-fn read_new(mark: &Path, file: &Path, budget: u64, deadline: Instant) -> Result<(String, u64, u64), String> {
+fn read_new(mark: &Path, file: &Path, budget: u64, deadline: Instant, identity:Option<&str>) -> Result<(String, u64, u64), String> {
     let err = |e: std::io::Error| format!("transcript: {e}");
     let mut f = std::fs::File::open(file).map_err(err)?;
+    if identity.is_some_and(|id|agentq_runtime::agent::archive_file_identity(&f).ok().as_deref()!=Some(id)) {return Err("continuation source incarnation changed".into());}
     let len = f.metadata().map_err(err)?.len();
     let saved = match std::fs::read_to_string(mark) {
         Ok(s) => s.trim().parse::<u64>().map_err(|_| "observe checkpoint corrupt; retained")?,
@@ -60,7 +63,7 @@ fn now_ms() -> u64 { (crate::telemetry::now_ns() / 1_000_000) as u64 }
 /// The M6.10 code of the session's folder, else `other`.
 fn project(input: &Value) -> String {
     let folder = text(input, &["cwd"]).or(input["workspacePaths"][0].as_str().filter(|p| !p.is_empty())).map(PathBuf::from).or_else(|| std::env::current_dir().ok());
-    folder.and_then(|c| crate::model::project(&c).ok()).unwrap_or_else(|| "other".into())
+    folder.and_then(|c| crate::session::project(&c).ok()).unwrap_or_else(|| "other".into())
 }
 
 fn context(project: &str) -> Context<'_> {
@@ -78,24 +81,36 @@ fn stop_outcome(input: &Value) -> (&'static str, &'static str) {
 /// One `Stop`: write one `agent.turn` and its `agent.call` records. A launched session writes none (M6.9). Bytes not read
 /// or not written by `deadline` wait for the next `Stop`.
 pub fn stop(data: &Path, runtime: &str, input: &Value, launched: bool, deadline: Instant) -> Result<(), String> {
-    if launched { return Ok(()); }
+    if launched || Instant::now()>=deadline { return Ok(()); }
     // More executions of this user turn follow; the last `Stop` reads their bytes too.
     if input["fullyIdle"] == false { return Ok(()); }
-    let session = text(input, &["session_id", "conversationId"]);
     let files = files(runtime, input);
     // A Claude `Stop` without a transcript is already a recorded failure of the `agentq.model` path.
     if files.is_empty() && runtime == "claude" { return Ok(()); }
     let project = project(input);
     let delivery = crate::hook_spool::Delivery::open(data,runtime,&project)?;
+    capture(data,runtime,input,deadline,&project,&delivery,None,true,None)
+}
+
+fn capture(_data:&Path,runtime:&str,input:&Value,deadline:Instant,project:&str,delivery:&crate::hook_spool::Delivery,identity:Option<&str>,retain:bool,outcome:Option<(&'static str,&'static str)>)->Result<(),String> {
+    let outcome=outcome.unwrap_or_else(||stop_outcome(input));
+    let session=text(input,&["session_id","conversationId"]);
+    let files=if retain {files(runtime,input)}else{vec![PathBuf::from(text(input,&["transcript_path"]).ok_or("continuation source missing")?)]};
+    let files=files.into_iter().map(|path|path.canonicalize().map_err(|e|format!("transcript: {e}"))).collect::<Result<Vec<_>,_>>()?;
     let state = &delivery.state;
     std::fs::create_dir_all(&state).map_err(|e| format!("observe state: {e}"))?;
     let (mut new_text, mut marks, mut position) = (String::new(), vec![], None);
+    let mut identities=std::collections::BTreeMap::new();
+    if retain {for file in &files {
+        let canonical=file.canonicalize().map_err(|e|format!("transcript: {e}"))?;
+        identities.insert(file.clone(),continuation::retain(delivery,runtime,project,session,&canonical,outcome,text(input,&["modelName"]))?);
+    }}
     for file in &files {
         let left = PASS_BYTES.saturating_sub(new_text.len() as u64);
         if left == 0 || Instant::now() >= deadline { break; }
-        let name = crate::model::event_id("transcript", &file.to_string_lossy())[..16].to_string();
+        let name = crate::session::event_id("transcript", &file.to_string_lossy())[..16].to_string();
         let mark = state.join(&name);
-        let (new, start, end) = read_new(&mark, file, left, deadline)?;
+        let (new, start, end) = read_new(&mark, file, left, deadline,identity.or_else(||identities.get(file).map(String::as_str)))?;
         if !new.is_empty() {
             new_text.push_str(&new);
             // A retry after a failed append starts at this same place, so it keeps one turn.
@@ -107,9 +122,9 @@ pub fn stop(data: &Path, runtime: &str, input: &Value, launched: bool, deadline:
     if new_text.is_empty() && !files.is_empty() { return Ok(()); }
     if Instant::now() >= deadline { return Ok(()); }
     let position = position.or_else(|| text(input, &["turn_id"]).map(String::from)).unwrap_or_else(unique);
-    let scope = session.map(String::from).or_else(|| files.first().map(|f| crate::model::event_id("transcript", &f.to_string_lossy()))).unwrap_or_else(|| "no-session".into());
-    let key = crate::model::event_id("turn", &format!("{scope}:{position}"));
-    let (outcome, error) = stop_outcome(input);
+    let scope = session.map(String::from).or_else(|| files.first().map(|f| crate::session::event_id("transcript", &f.to_string_lossy()))).unwrap_or_else(|| "no-session".into());
+    let key = crate::session::event_id("turn", &format!("{scope}:{position}"));
+    let (outcome, error) = outcome;
     let turn = SessionTurn { runtime, session, scope: &scope, key: &key, now_ms: now_ms(), outcome, error, model: text(input, &["modelName"]) };
     let frozen = session_frozen(&turn, &context(&project), &new_text)?;
     delivery.persist(&frozen,deadline)?;
@@ -139,7 +154,7 @@ fn hermes_request(v: &Value) -> Call {
 
 /// The calls a Hermes session waits to sum into its turn.
 fn hermes_pending(state: &Path, session: Option<&str>) -> PathBuf {
-    state.join("hermes").join(format!("{}.jsonl", crate::model::event_id("hermes", session.unwrap_or("no-session"))))
+    state.join("hermes").join(format!("{}.jsonl", crate::session::event_id("hermes", session.unwrap_or("no-session"))))
 }
 
 fn hermes_turn<'a>(session: Option<&'a str>, scope: &'a str, key: &'a str, outcome: (&'static str, &'static str)) -> SessionTurn<'a> {
@@ -188,7 +203,7 @@ pub fn hermes_turn_end(data: &Path, input: &Value, launched: bool) -> Result<(),
     };
     let scope = session.unwrap_or("no-session");
     let position = calls.first().and_then(|c| c.id.clone()).unwrap_or_else(unique);
-    let key = crate::model::event_id("turn", &format!("hermes:{scope}:{position}"));
+    let key = crate::session::event_id("turn", &format!("hermes:{scope}:{position}"));
     let events = session_calls_frozen(&hermes_turn(session, scope, &key, outcome), &context(&project), calls)?;
     delivery.persist(&events,Instant::now()+STOP_PASS)?;
     match std::fs::remove_file(&pending) {

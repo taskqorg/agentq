@@ -409,7 +409,7 @@ fn heartbeat(install: &Path, data: &Path, now: u64) -> Value {
     json!({"agentq.legacy_route": crate::profiles::legacy_route(&crate::profiles::clients()), "agentq.retirement": match observed["retirement"]["state"].as_str() { Some("retired" | "conflict") => json!({"state":observed["retirement"]["state"]}), _ => json!({"state":"unknown", "reason":"retirement_unverified"}) },
         "agentq.queue_pending": q["pending"], "agentq.queue_dropped": q["dropped"],
         "agentq.hook_failures": problems(crate::executor::hook_failures(data)), "agentq.hooks": crate::executor::hooks(data),
-        "agentq.release": crate::release::project(&observed["release"], now), "agentq.model_backlog": crate::model::backlog(data),
+        "agentq.release": crate::release::project(&observed["release"], now), "agentq.model_backlog": crate::model::backlog(data), "agentq.observation_backlog":crate::observe::backlog(data),
         "agentq.ids_unknown": "an installation event has no session"})
 }
 
@@ -428,6 +428,7 @@ pub fn sender(install: &Path, every: u64) -> ! {
             continue;
         }
         if let Err(e)=crate::hook_spool::drain(&data) {eprintln!("agentq: hook spool: {e}");}
+        if let Err(e)=crate::observe::drain(&data,std::time::Instant::now()+Duration::from_secs(10)) {eprintln!("agentq: canonical transcript continuation: {e}");}
         sampler.tick(&data);
         if crate::control::disabled(&data, "claude") == Ok(false) {
             crate::model::drain(&data, std::time::Instant::now() + Duration::from_secs(10));

@@ -11,7 +11,7 @@ pub fn default_response(agent: &str, event: &str) -> Value {
 pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Value, String> {
     let empty = || default_response(agent, event);
     // The client passes its own environment and working directory to the hook (M6.9, M6.10).
-    let launched = || crate::model::launched(|k| std::env::var(k).ok());
+    let launched = || crate::session::launched(|k| std::env::var(k).ok());
     let data = || exe.parent().map(|p| p.join("data")).ok_or("hook launcher has no install root");
     let action=registry::entry(agent).filter(|e|e.name==agent).map(|e|(e.hook)(event)).unwrap_or(Hook::None);
     if matches!(action,Hook::None) {return Ok(empty());}
@@ -31,7 +31,7 @@ pub fn response(agent: &str, event: &str, input: &str, exe: &Path) -> Result<Val
             let records=crate::observe::hermes_call(&data()?,&v,launched()); spans.and(records)?;
         }
         Hook::TurnEnd => crate::observe::hermes_turn_end(&data()?,&v,launched())?,
-        Hook::SessionStart => crate::model::session_start(&data()?,&v,launched(),std::env::current_dir().ok().as_deref())?,
+        Hook::SessionStart => crate::session::session_start(&data()?,&v,launched(),std::env::current_dir().ok().as_deref())?,
         Hook::None => {},
     }
     Ok(empty())

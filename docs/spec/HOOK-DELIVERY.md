@@ -23,3 +23,5 @@ Partial writes and corrupt, mismatched or unsupported complete records stay reta
 ## Verification boundary
 
 Private invented fixtures cover store/service absence, process reconstruction, registered writable storage with readable protected authority, replay and partial commits, malformed/partial input, revocation, changed identity and unknown doctor state. Focused hook tests preserve native answers, metadata scrubbing and launched/disabled exclusions. Offline fixtures do not qualify Codex workspace-write, installed clients, macOS/Windows native behavior, ACL protection or production service delivery.
+
+Private canonical transcript-continuation descriptors share the selected spool directory and current registration checks, but are not event batches and never ship. Service source reads additionally require exact selected-profile native inventory/session/path and the captured file incarnation; writable descriptors cannot authorize arbitrary paths. Revoked or disabled registered continuation remains retained/unknown rather than disappearing as an empty backlog.

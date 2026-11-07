@@ -120,6 +120,12 @@ impl Delivery {
         delivery.current()?;
         Ok(delivery)
     }
+    pub(crate) fn scope(&self,runtime:&str,project:&str)->Res<()> {
+        self.current()?;
+        if crate::control::disabled(&self.data,runtime)? {return Err("hook integration disabled".into());}
+        if let Some(entry)=&self.entry {if entry["binding"]["runtime"]!=runtime || entry["binding"]["project"]!=project {return Err("hook continuation scope differs".into());}}
+        Ok(())
+    }
     fn current(&self) -> Res<()> {
         if let Some(e) = &self.entry {
             let idx = index(&self.data)?;
@@ -185,7 +191,7 @@ impl Delivery {
         }
     }
 }
-fn locations(data:&Path)->Res<Vec<Delivery>> {
+pub(crate) fn locations(data:&Path)->Res<Vec<Delivery>> {
     let idx=index(data)?;
     let mut out=vec![Delivery {data:data.into(),state:data.join("observe"),entry:None,_authority:None}];
     for e in idx["entries"].as_array().ok_or("hook authority corrupt")? {
@@ -197,6 +203,13 @@ fn locations(data:&Path)->Res<Vec<Delivery>> {
         out.push(Delivery {data:data.into(),state,entry:Some(e.clone()),_authority:Some(authority)});
     }
     Ok(out)
+}
+pub(crate) fn continuation_locations(data:&Path)->Res<Vec<Delivery>> {
+    for entry in index(data)?["entries"].as_array().ok_or("hook authority corrupt")? {
+        let runtime=entry["binding"]["runtime"].as_str().ok_or("hook runtime unknown")?;
+        if entry["active"]!=true || crate::control::disabled(data,runtime)? {return Err("hook continuation authority inactive; bytes retained".into());}
+    }
+    locations(data)
 }
 /// Called by the existing service pass; no endpoint, network, discovery, timer or process of its own.
 pub fn drain(data:&Path)->Res<()> {
@@ -295,7 +308,7 @@ mod tests {
         let f=Fixture::new("growth");f.transcript();f.outage();f.capture();
         let original_file=f.files().pop().unwrap();let original=fs::read(&original_file).unwrap();
         let source=f.root.join("rollout.jsonl");
-        let name=crate::model::event_id("transcript",&source.to_string_lossy())[..16].to_string();
+        let name=crate::session::event_id("transcript",&source.to_string_lossy())[..16].to_string();
         let checkpoint=f.delivery().state.join(name);
         fs::write(&checkpoint,"corrupt").unwrap();
         assert!(crate::observe::stop(&f.data,"codex",&f.input(),false,Instant::now()+Duration::from_secs(3)).is_err());
@@ -317,7 +330,7 @@ mod tests {
         let input=json!({"session_id":"invented-hermes","api_request_id":"invented-api","model":"invented-model","ended_at":1792398729.0,"cwd":f.root,
             "usage":{"input_tokens":3,"output_tokens":2,"raw":"SECRET-CONTENT"},"prompt":"SECRET-CONTENT"});
         crate::observe::hermes_call(&f.data,&input,false).unwrap();
-        let pending=f.data.join("observe/hermes").join(format!("{}.jsonl",crate::model::event_id("hermes","invented-hermes")));
+        let pending=f.data.join("observe/hermes").join(format!("{}.jsonl",crate::session::event_id("hermes","invented-hermes")));
         let bytes=fs::read(&pending).unwrap();assert!(!String::from_utf8_lossy(&bytes).contains("SECRET"));
         fs::write(&pending,b"{partial").unwrap();
         assert!(crate::observe::hermes_turn_end(&f.data,&input,false).is_err());assert_eq!(fs::read(&pending).unwrap(),b"{partial");

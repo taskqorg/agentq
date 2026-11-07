@@ -13,6 +13,7 @@ mod host;
 mod executor;
 mod local;
 mod model;
+mod session;
 mod observe;
 mod onboard;
 mod profile;
@@ -297,6 +298,8 @@ fn doctor(t: &Tool) -> i32 {
         Ok(n)=>line(true,format!("local telemetry: readable SQLite, {n} retained records")),
         Err(e)=>line(false,format!("local telemetry: unknown ({e})")),
     }
+    let backlog=observe::backlog(&t.install.join("data"));
+    line(backlog["state"]=="none",format!("canonical transcript backlog: {backlog}"));
     let spool=hook_spool::status(&t.install.join("data"));
     line(spool["state"]=="none",format!("hook spool: {spool}"));
     if ok { 0 } else { 1 }
@@ -766,6 +769,8 @@ fn serve(t: &Tool) -> ! {
         s["archive"] = agentq_runtime::archive::status(&t.install.join("data"));
         s["queue"] = telemetry::status(&t.install.join("data"), now());
         s["model_backlog"] = model::backlog(&t.install.join("data"));
+        s["observation_backlog"]=observe::backlog(&t.install.join("data"));
+        s["observation_delivery"]=connect::observation_status(&t.install.join("data"));
         s["configuration"] = profiles::status(&t.install.join("data"), now());
         match write_atomic(&status_path(t), &serde_json::to_string_pretty(&s).unwrap_or_default()) {
             // ponytail: healthy after the first written status; add real checks when the service owns ports (§ 5)

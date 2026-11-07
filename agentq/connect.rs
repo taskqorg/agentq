@@ -68,6 +68,8 @@ pub struct Sender {
     wait_until: u64,
     snapshot_at: u64,
     clients: Option<Vec<profiles::Client>>,
+    observation_backoff: Backoff,
+    observation_wait_until: u64,
 }
 
 /// DashQ serves every machine route under `/machine/` (dashq#110); coreq posts `destination + route`, so the
@@ -77,7 +79,7 @@ struct Machine<'a>(&'a mut dyn Wire, Option<&'a Path>);
 impl Wire for Machine<'_> {
     fn post(&mut self, destination: &str, route: &str, auth: Option<&str>, body: &Value) -> Result<(u16, Value), String> {
         // Host disable (§ 4): only snapshot records (`/ingest`) still travel, so DashQ can name the host disabled.
-        if route != "/ingest" && self.1.is_some_and(|data| crate::control::host_disabled(data) != Ok(false)) { return Err("integration_disabled: export suspended".into()); }
+        if self.1.is_some_and(|data| crate::control::host_disabled(data) != Ok(false)) && (route!="/ingest" || !body["records"].as_array().is_some_and(|rows|rows.iter().all(|row|row["schema"]==SCHEMA))) { return Err("integration_disabled: export suspended".into()); }
         self.0.post(destination, &format!("/machine{route}"), auth, body)
     }
     fn now(&self) -> u64 {
@@ -118,6 +120,39 @@ fn pass_with(data: &Path, now: u64, s: &mut Sender, wire: &mut dyn Wire) {
     if !disabled && now >= s.wait_until {
         operate(data, now, s, wire);
     }
+    if !disabled && now >= s.observation_wait_until {ship_observations(data,now,s,wire);}
+}
+
+/// CoreQ alone owns the metadata envelope, receipts and durable cursor; current grants never expand here.
+fn ship_observations(data:&Path,now:u64,s:&mut Sender,wire:&mut dyn Wire) {
+    let result=(|| {
+        if crate::control::host_disabled(data)!=Ok(false) {return Err(Delivery::Stopped("integration-disabled".into()));}
+        let active=enroll::active(&dir(data)).map_err(Delivery::Stopped)?.ok_or_else(||Delivery::Stopped("disconnected".into()))?;
+        if !active["schemas"].as_array().is_some_and(|a|a.contains(&json!(coreq::telemetry::OBSERVATION_SCHEMA))) {
+            return Err(Delivery::Stopped("observations-not-in-grant".into()));
+        }
+        let path=data.join("observations.sqlite3");
+        if !path.try_exists().map_err(|e|Delivery::Stopped(e.to_string()))? {return Ok(None);}
+        let store=coreq::telemetry::Store::open(&path).map_err(Delivery::Stopped)?;
+        store.ship(&dir(data),&mut s.observation_backoff,wire)?;
+        store.shipper().map(Some).map_err(Delivery::Stopped)
+    })();
+    let error=match result {
+        Ok(shipper)=>{update_state(&queue(data),|state|state["connection"]["observations_last_pass"]=json!({"at":now,"shipper":shipper}));None},
+        Err(Delivery::Retry(seconds))=>{s.observation_wait_until=now.saturating_add(seconds);Some("delivery-uncertain".to_string())},
+        Err(Delivery::Stopped(error))=>Some(error),
+    };
+    update_state(&queue(data),|state|state["connection"]["observations_error"]=json!(error));
+}
+
+pub fn observation_status(data:&Path)->Value {
+    // Status reads retained state only; it must not create/protect an enrollment directory.
+    let file=dir(data).join("connection.json");
+    let saved=read(&file);
+    if saved.is_none() && file.exists() {return json!({"state":"unknown","reason":"observation-authority-unreadable"});}
+    let granted=saved.as_ref().is_some_and(|s|s["active"]["schemas"].as_array().is_some_and(|a|a.contains(&json!(coreq::telemetry::OBSERVATION_SCHEMA))));
+    let state=crate::telemetry::state(&queue(data));
+    json!({"granted":granted,"last_pass":state["connection"]["observations_last_pass"],"error":state["connection"]["observations_error"]})
 }
 
 /// Results of executed operations, kept until DashQ's receipt and after it, so a lost reply, a restart or a duplicate
@@ -290,7 +325,7 @@ pub fn enroll_with(data: &Path, destination: &str, wire: &mut dyn Wire) -> Resul
     let d = seed(data)?;
     let host = crate::host();
     let previous=enroll::active(&d)?.unwrap_or_default();
-    let mut schemas=vec![SCHEMA];
+    let mut schemas=vec![SCHEMA,coreq::telemetry::OBSERVATION_SCHEMA];
     if previous["schemas"].as_array().is_some_and(|a|a.contains(&json!(agentq_runtime::archive::SCHEMA))){schemas.push(agentq_runtime::archive::SCHEMA);}
     let mut capabilities=vec![configure::CAPABILITY];
     if previous["capabilities"].as_array().is_some_and(|a|a.contains(&json!(agentq_runtime::archive::MANUAL))){capabilities.push(agentq_runtime::archive::MANUAL);}
@@ -380,6 +415,7 @@ pub fn status(data: &Path) -> Value {
         "generation": a["generation"],
         "projected": verified.then(|| v["event_id"].clone()),
         "export": {"pending": records, "last_delivery": c["last_delivery"], "error": c["error"]},
+        "observations": observation_status(data),
         "configure": {"granted": a["capabilities"].as_array().is_some_and(|c| c.contains(&json!(configure::CAPABILITY))), "error": c["operations_error"]},
         "revocation_pending": s["revoke"].as_array().map_or(0, Vec::len),
         "next": next,
@@ -434,7 +470,7 @@ mod tests {
                         (format!("cred{}", self.generation), self.generation)
                     }).clone();
                     self.approved = false;
-                    (200, json!({"protocol": 1, "credential": cred, "installation": "inst-1", "generation": g, "product": "agentq", "workspace": "ws", "schemas": [SCHEMA], "capabilities": self.approve}))
+                    (200, json!({"protocol": 1, "credential": cred, "installation": "inst-1", "generation": g, "product": "agentq", "workspace": "ws", "schemas": [SCHEMA,coreq::telemetry::OBSERVATION_SCHEMA], "capabilities": self.approve}))
                 }
                 "/machine/connect/ack" => {
                     if let Some((c, g)) = self.staged.take() {
@@ -549,6 +585,35 @@ mod tests {
         entries(&queue(data)).iter().filter(|e| e.1.to_string_lossy().ends_with(RECORD)).count()
     }
 
+    // #301/D28: existing grants never expand; canonical delivery keeps CoreQ IDs/cursor and disabled fences.
+    #[test]
+    fn canonical_observations_require_current_schema_and_keep_one_cursor() {
+        use agentq_runtime::agent::{session_frozen,SessionTurn,Context};
+        let d=data("canonical-ship");let mut w=Dash {now:1000,..Dash::default()};
+        enroll_with(&d,"https://dash.example",&mut w).unwrap();
+        let connection=dir(&d).join("connection.json");let mut saved=read(&connection).unwrap();
+        saved["active"]["schemas"]=json!([SCHEMA]);write_atomic(&connection,&saved.to_string()).unwrap();
+        let turn=SessionTurn {runtime:"claude",session:Some("fixture-session"),scope:"fixture-session",key:"fixture-turn",now_ms:1000000,outcome:"ok",error:"none",model:None};
+        let ctx=Context {product:"agentq",version:"1",project:"fixture/test",task:None,route:Some("hook"),account:"default"};
+        let text=json!({"type":"assistant","message":{"id":"call-one","model":"fixture-model","usage":{"input_tokens":1,"output_tokens":2}}}).to_string()+"\n";
+        let store=coreq::telemetry::Store::open(&d.join("observations.sqlite3")).unwrap();
+        session_frozen(&turn,&ctx,&text).unwrap().append(&store).unwrap();
+        let mut sender=Sender::default();let before=w.sent.len();
+        ship_observations(&d,1000,&mut sender,&mut Machine(&mut w,Some(&d)));
+        assert_eq!(w.sent.len(),before);assert_eq!(store.shipper().unwrap()["state"],"off");
+        assert_eq!(read(&connection).unwrap()["active"]["schemas"],json!([SCHEMA]));
+        saved["active"]["schemas"]=json!([SCHEMA,coreq::telemetry::OBSERVATION_SCHEMA]);write_atomic(&connection,&saved.to_string()).unwrap();
+        ship_observations(&d,1001,&mut sender,&mut Machine(&mut w,Some(&d)));
+        let records:Vec<_>=w.events.values().filter(|r|r["schema"]==coreq::telemetry::OBSERVATION_SCHEMA).collect();
+        assert_eq!(records.len(),2);assert!(records.iter().all(|r|r["payload"]["id"]==r["event_id"]));
+        assert_eq!(records.iter().filter(|r|r["payload"]["observation"]["kind"]=="agent.call").count(),1);
+        let cursor=store.shipper().unwrap()["cursor"].clone();
+        ship_observations(&d,1002,&mut sender,&mut Machine(&mut w,Some(&d)));assert_eq!(store.shipper().unwrap()["cursor"],cursor);
+        crate::control::save(&d,"integration.json",&json!({"schema":1,"generation":1,"host_disabled":true,"profiles":{}})).unwrap();
+        assert!(Machine(&mut w,Some(&d)).post("https://dash.example","/ingest",None,&json!({"records":[{"schema":coreq::telemetry::OBSERVATION_SCHEMA}]})).is_err());
+        drop(store);std::fs::remove_dir_all(d).unwrap();
+    }
+
     /// A1, A2: one approval keeps `data/installation` and owned edits; a real snapshot is projected, then deleted.
     #[test]
     fn enroll_keeps_identity_and_verifies() {
@@ -558,7 +623,7 @@ mod tests {
         let mut w = Dash { now: 1000, ..Dash::default() };
         let id = enroll_with(&d, "https://dash.example", &mut w).unwrap();
         assert_eq!(w.sent[0].1["installation"], "inst-1", "existing identity");
-        assert_eq!(w.sent[0].1["schemas"], json!([SCHEMA]));
+        assert_eq!(w.sent[0].1["schemas"], json!([SCHEMA,coreq::telemetry::OBSERVATION_SCHEMA]));
         assert!(w.sent.iter().all(|s| s.0.starts_with("https://dash.example/machine/")), "machine routes only");
         let rec = &w.events[&(1, id.clone())];
         assert_eq!((rec["payload"]["schema"].clone(), rec["payload"]["installation"].clone()), (json!(1), json!("inst-1")));

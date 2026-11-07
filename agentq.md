@@ -131,6 +131,8 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M6.12** Native session content uses a separate archive store and shipper with explicit `agent-history/1` approval, off by default. Observation grants never imply capture. Launched workers and managers are captured; manual sessions require a separately approved per-host `agent-history.manual` opt-in.
 - **M6.13** Archive failures never block or fail work. Raw native bytes, with best-effort secret scrubbing and replacement counts, remain authoritative; steps are derived at read time. Sink content retention is 365 days; index and metadata do not expire. [Archive detail](docs/spec/ARCHIVE.md).
 
+Canonical `agent.turn`/`agent.call` metadata delivery uses the existing CoreQ shipper only under the current observation grant; explicit enrollment requests it without widening old grants. Private native-source continuation and backlog preserve bounded-hook leftovers. Legacy model/Langfuse delivery remains until the #301/D28 parity evidence gate. [Detail](docs/spec/TELEMETRY.md#canonical-transcript-continuation).
+
 ## 7. Incidents via coreq
 - **M7.2** Version canaries require durable exact host/runtime/account/settings/scenario authority before any executable. Each dimension is independent; detected versions never qualify native capability. Diagnostics use fixed schema allowlists, never session content. Local findings deduplicate durably; board delivery requires separate explicit approval. [Detail](docs/spec/VERSION-CANARY.md).
 - **M7.1** A report never changes agent work or an exit code.
