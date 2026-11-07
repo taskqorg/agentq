@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::{self, history};
+use crate::agent::{self, history::media::MediaCatalog};
 use coreq::enroll::{self, Request, Wire};
 use std::{
     fs,
@@ -152,11 +152,9 @@ pub(super) fn register(data: &Path, mut capture: Capture) -> Res<()> {
         .and_then(|v| v.as_str().map(String::from))
         .map(Value::String)
         .unwrap_or_else(|| {
-            json!(
-                std::env::var("COMPUTERNAME")
-                    .or_else(|_| std::env::var("HOSTNAME"))
-                    .unwrap_or_else(|_| "unknown".into())
-            )
+            json!(std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "unknown".into()))
         });
     write(&path, &capture)
 }
@@ -302,6 +300,8 @@ struct Queued {
 #[derive(Clone, Serialize, Deserialize)]
 struct Checkpoint {
     source: String,
+    owner: String,
+    paths: Vec<PathBuf>,
     previous: Vec<String>,
     grant: Value,
     identity: String,
@@ -379,6 +379,19 @@ fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> 
     if excluded(&c.root, &c.root)? {
         return Ok(());
     }
+    let mut error = None;
+    for path in files(&root(data).join("sources"))? {
+        let mut st: Checkpoint = read(&path)?;
+        if st.owner == c.id && st.grant == identity(grant) {
+            // Only already-authorized, durably scrubbed bytes survive a vanished native source.
+            if let Err(e) = send(data, grant, c, &mut st, &path, wire) {
+                error = Some(e);
+            }
+            if st.paths.iter().any(|p| p.try_exists().ok() != Some(true)) {
+                error = Some("archive source unavailable".into());
+            }
+        }
+    }
     let rt = agent::runtime(&c.runtime).ok_or("archive runtime unsupported")?;
     if c.manifest["session"].as_str().is_none() {
         let source = c.sources.first().ok_or("archive session unknown")?;
@@ -389,24 +402,17 @@ fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> 
         file.read_to_end(&mut bytes)
             .map_err(|_| "archive source unavailable")?;
         let text = std::str::from_utf8(&bytes).map_err(|_| "archive session unknown")?;
-        c.manifest["session"] = json!(rt.classify(text).session.ok_or("archive session unknown")?);
+        c.manifest["session"] =
+            json!(rt.classify(text).session.ok_or("archive session unknown")?);
     }
     let session = c.manifest["session"]
         .as_str()
         .ok_or("archive session unknown")?
         .to_string();
-    let mut error = None;
     for (index, source) in c.sources.iter().enumerate() {
-        let mut source = source.clone();
-        if source.format == "native" {
-            let reader = rt.history(&session, c.home.as_deref(), Some(&source.path), None)?;
-            source.format = reader.checkpoint()["format"]
-                .as_str()
-                .ok_or("archive format unknown")?
-                .into();
-        }
+        let source = source.clone();
         let mut manifest = c.manifest.clone();
-        if let Err(e) = upload(
+        if let Err(e) = upload_source(
             data,
             grant,
             c,
@@ -460,12 +466,244 @@ fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> 
             start: 0,
             end: None,
         };
-        if let Err(e) = upload(data, grant, c, &src, &mut manifest, None, wire) {
+        if let Err(e) = upload_source(data, grant, c, &src, &mut manifest, None, wire) {
             error = Some(e);
         }
-        // Media is discovered only by the history adapter; no URL or caller-supplied path is fetched here.
     }
     error.map_or(Ok(()), Err)
+}
+
+// The snapshot digest ties native validation and media origins to the bytes actually queued.
+struct NativeBytes {
+    bytes: Vec<u8>,
+    identity: String,
+    media: MediaCatalog,
+}
+fn native_bytes(c: &Capture, src: &Source, session: &str) -> Res<NativeBytes> {
+    let rt = agent::runtime(&c.runtime).ok_or("archive runtime unsupported")?;
+    let mut reader = rt
+        .history(session, c.home.as_deref(), Some(&src.path), None)
+        .map_err(|_| "archive media inspection unavailable for source")?;
+    let media = reader
+        .media()
+        .map_err(|_| "archive native media unavailable")?;
+    let page = reader
+        .steps(u64::MAX)
+        .map_err(|_| "archive native source authority unverified")?;
+    let end = page.checkpoint["offset"]
+        .as_u64()
+        .ok_or("archive source boundary unknown")?;
+    let bytes = reader
+        .read_bytes(0, end)
+        .map_err(|_| "archive native source changed")?;
+    if page.checkpoint["prefix"] != crate::sha256_hex(&bytes) {
+        return Err("archive native source changed".into());
+    }
+    let mut physical = std::collections::BTreeMap::new();
+    for origin in page.steps.iter().flat_map(|step| &step.origins) {
+        let start = origin["start"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or("archive native origin invalid")?;
+        let end = origin["end"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or("archive native origin invalid")?;
+        let row = bytes
+            .get(start..end)
+            .ok_or("archive native source changed")?;
+        if origin["sha256"] != crate::sha256_hex(row) {
+            return Err("archive native source changed".into());
+        }
+        physical.insert(start, end);
+    }
+    let mut consumed = 0;
+    for (start, end) in physical {
+        if start < consumed || !bytes[consumed..start].iter().all(u8::is_ascii_whitespace) {
+            return Err("archive native source authority unverified".into());
+        }
+        consumed = end;
+    }
+    if !bytes[consumed..].iter().all(u8::is_ascii_whitespace) {
+        return Err("archive native source authority unverified".into());
+    }
+    for item in &media.items {
+        let start = item.origin["start"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok());
+        let end = item.origin["end"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok());
+        let origin = start.zip(end).and_then(|(a, b)| bytes.get(a..b));
+        if origin.is_none_or(|bytes| item.origin["sha256"] != crate::sha256_hex(bytes)) {
+            return Err("archive media origin changed".into());
+        }
+        if item.source["kind"] == "inline" {
+            let length = item.size.ok_or("archive inline media unavailable")?;
+            let decoded = media
+                .read(&item.id, 0, length)
+                .map_err(|_| "archive inline media unavailable")?;
+            if super::scrub::bytes(&decoded).1 > 0 {
+                return Err("archive inline media secret representation unsupported".into());
+            }
+        }
+    }
+    Ok(NativeBytes {
+        bytes,
+        identity: page.checkpoint["identity"]
+            .as_str()
+            .ok_or("archive source identity unknown")?
+            .into(),
+        media,
+    })
+}
+
+fn database_bytes(head: &[u8]) -> bool {
+    head.starts_with(b"SQLite format 3\0")
+        || head.starts_with(&[0x37, 0x7f, 0x06, 0x82])
+        || head.starts_with(&[0x37, 0x7f, 0x06, 0x83])
+        || head.starts_with(&[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7])
+}
+fn raw_authority(src: &Source) -> Res<()> {
+    let mut file = fs::File::open(&src.path).map_err(|_| "archive source unavailable")?;
+    let mut head = [0; 16];
+    let n = file
+        .read(&mut head)
+        .map_err(|_| "archive source unavailable")?;
+    if database_bytes(&head[..n])
+        || src.format.contains("sqlite")
+        || src.format.contains("database")
+    {
+        return Err("archive raw database authority unavailable".into());
+    }
+    Ok(())
+}
+
+fn upload_source(
+    data: &Path,
+    grant: &Value,
+    c: &Capture,
+    src: &Source,
+    manifest: &mut Value,
+    turn: Option<&str>,
+    wire: &mut dyn Wire,
+) -> Res<()> {
+    if excluded(&c.root, &src.path)? {
+        return Ok(());
+    }
+    raw_authority(src)?;
+    if src.format == "raw" {
+        return upload(data, grant, c, src, manifest, turn, None, wire);
+    }
+    let native = native_bytes(
+        c,
+        src,
+        manifest["session"]
+            .as_str()
+            .ok_or("archive session unknown")?,
+    )?;
+    let mut source = src.clone();
+    if source.format == "native" {
+        let reader = agent::runtime(&c.runtime)
+            .ok_or("archive runtime unsupported")?
+            .history(
+                manifest["session"].as_str().unwrap(),
+                c.home.as_deref(),
+                Some(&src.path),
+                None,
+            )
+            .map_err(|_| "archive source format unavailable")?;
+        source.format = reader.checkpoint()["format"]
+            .as_str()
+            .ok_or("archive format unknown")?
+            .into();
+    }
+    let mut error = upload(data, grant, c, &source, manifest, turn, Some(&native), wire).err();
+    for item in &native.media.items {
+        if let Err(e) = upload_media(data, grant, c, &source, manifest, &native.media, item, wire) {
+            error = Some(e);
+        }
+    }
+    error.map_or(Ok(()), Err)
+}
+
+fn upload_media(
+    data: &Path,
+    grant: &Value,
+    c: &Capture,
+    src: &Source,
+    manifest: &Value,
+    catalog: &MediaCatalog,
+    item: &agent::history::media::Media,
+    wire: &mut dyn Wire,
+) -> Res<()> {
+    let mut paths = vec![src.path.clone()];
+    if let Some(path) = item.source["path"].as_str() {
+        paths.push(path.into());
+    }
+    for path in paths.clone() {
+        if excluded(&c.root, &path)? {
+            return Ok(());
+        }
+        if let Ok(resolved) = path.canonicalize() {
+            if !paths.contains(&resolved) {
+                paths.push(resolved);
+            }
+        }
+    }
+    let size = item.size.ok_or("archive media bytes unavailable")?;
+    let bytes = catalog
+        .read(&item.id, 0, size)
+        .map_err(|_| "archive media bytes unavailable")?;
+    if database_bytes(&bytes) {
+        return Err("archive raw database authority unavailable".into());
+    }
+    let (bytes, count) = super::scrub::bytes(&bytes);
+    if bytes.is_empty() {
+        return Err("archive empty media representation unsupported".into());
+    }
+    let hash = crate::sha256_hex(&bytes);
+    let dir = root(data).join("sources");
+    private(&dir)?;
+    let key = enroll::digest(&json!([identity(grant), manifest["session"], hash]));
+    let path = dir.join(format!("media-{key}.json"));
+    let mut st = if path.exists() {
+        read::<Checkpoint>(&path)?
+    } else {
+        let mut st = fresh(
+            grant,
+            item.sha256
+                .as_deref()
+                .ok_or("archive media hash unavailable")?,
+            manifest,
+            &c.capture,
+            "media",
+            wire.now(),
+        );
+        st.owner = c.id.clone();
+        st.paths = paths;
+        st.source = hash.clone();
+        let mut original_manifest = manifest.clone();
+        let manifest_scrubbed = super::scrub::manifest(&mut original_manifest);
+        let total = bytes.len() as u64;
+        queue_bytes(
+            &mut st,
+            &bytes,
+            0,
+            count + manifest_scrubbed,
+            Some(total),
+            wire.now(),
+        )?;
+        st.raw = total;
+        st.prefix = hash;
+        write(&path, &st)?;
+        st
+    };
+    send(data, grant, c, &mut st, &path, wire)?;
+    if count > 0 {
+        return Err("archive media reference differs after scrubbing".into());
+    }
+    Ok(())
 }
 
 fn upload(
@@ -475,6 +713,7 @@ fn upload(
     src: &Source,
     manifest: &mut Value,
     turn: Option<&str>,
+    native: Option<&NativeBytes>,
     wire: &mut dyn Wire,
 ) -> Res<()> {
     if excluded(&c.root, &src.path)? {
@@ -510,26 +749,34 @@ fn upload(
         None
     };
     // Capture and delivery are independent: an offline sink must not stop spooling later appends.
-    let mut file = match fs::File::open(&src.path) {
-        Ok(file) => file,
-        Err(_) => {
-            if let Some(st) = &mut saved {
-                send(data, grant, c, st, &path, wire)?;
+    let (identity, raw) = if let Some(native) = native {
+        (native.identity.clone(), native.bytes.clone())
+    } else {
+        let mut file = match fs::File::open(&src.path) {
+            Ok(file) => file,
+            Err(_) => {
+                if let Some(st) = &mut saved {
+                    send(data, grant, c, st, &path, wire)?;
+                }
+                return Err("archive source unavailable".into());
             }
-            return Err("archive source unavailable".into());
+        };
+        if !file
+            .metadata()
+            .map_err(|_| "archive source unavailable")?
+            .is_file()
+        {
+            return Err("archive source is not a regular file".into());
         }
+        let identity = agent::archive_file_identity(&file)?;
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw)
+            .map_err(|_| "archive source unavailable")?;
+        (identity, raw)
     };
-    if !file
-        .metadata()
-        .map_err(|_| "archive source unavailable")?
-        .is_file()
-    {
-        return Err("archive source is not a regular file".into());
+    if database_bytes(&raw) {
+        return Err("archive raw database authority unavailable".into());
     }
-    let identity = agent::archive_file_identity(&file)?;
-    let mut raw = Vec::new();
-    file.read_to_end(&mut raw)
-        .map_err(|_| "archive source unavailable")?;
     let end = src.end.unwrap_or(raw.len() as u64).min(raw.len() as u64) as usize;
     let base = usize::try_from(src.start).map_err(|_| "archive source truncated")?;
     if base > end {
@@ -571,6 +818,8 @@ fn upload(
         st.last_upload = old.last_upload;
         write(&path, &st)?;
     }
+    st.owner = c.id.clone();
+    st.paths = vec![src.path.clone()];
     if let Some(predecessor) = predecessor {
         if !st.previous.contains(&predecessor) {
             st.previous.push(predecessor);
@@ -590,13 +839,59 @@ fn upload(
     // Rescan the native prefix so a PEM block continuing in a later append remains scrubbed.
     let (scrubbed, count) = super::scrub::bytes_from(raw, st.raw as usize);
     let bytes = &scrubbed[st.raw as usize..];
+    let st_raw = st.raw;
+    queue_bytes(
+        &mut st,
+        bytes,
+        st_raw,
+        count + scrubbed_manifest,
+        None,
+        wire.now(),
+    )?;
+    if !bytes.is_empty() {
+        st.raw = raw.len() as u64;
+        st.prefix = crate::sha256_hex(raw);
+        st.observed = wire.now();
+    } else if !st.turns.is_empty()
+        && !st.pending.iter().any(|queued| {
+            st.turns.iter().all(|turn| {
+                queued.body["turns"]
+                    .as_array()
+                    .is_some_and(|turns| turns.contains(turn))
+            })
+        })
+    {
+        // DashQ permits adding an earlier binding on an otherwise exact range replay.
+        if let Some(mut last) = st.last.clone() {
+            last["turns"] = json!(st.turns);
+            st.pending.push(Queued {
+                body: last,
+                replay: true,
+            });
+        }
+    }
+    write(&path, &st)?;
+    send(data, grant, c, &mut st, &path, wire)?;
+    prior_error.map_or(Ok(()), Err)
+}
+fn queue_bytes(
+    st: &mut Checkpoint,
+    bytes: &[u8],
+    raw_start: u64,
+    count: u64,
+    total: Option<u64>,
+    at: u64,
+) -> Res<()> {
     let mut offset = 0;
-    let raw_start = st.raw;
     while offset < bytes.len() {
         let start = raw_start + offset as u64;
         let mut body = json!({"protocol":1,"schema":SCHEMA,"manifest":st.manifest,"manifest_sha256":st.manifest_hash,
             "capture":st.capture,"source":st.source,"format":st.format,"start":start,"end":start,
-            "sha256":"","bytes":"","scrubbed":if offset==0{count+scrubbed_manifest}else{0},"observed_at":wire.now()});
+            "sha256":"","bytes":"","scrubbed":if offset==0{count}else{0},"observed_at":at});
+        if let Some(total) = total {
+            body["media"] = json!(true);
+            body["total"] = json!(total);
+        }
         let available = enroll::MAX_BODY
             .checked_sub(body.to_string().len() + 256)
             .ok_or("archive manifest exceeds sink body limit")?;
@@ -627,32 +922,9 @@ fn upload(
         });
         offset += length;
     }
-    if !bytes.is_empty() {
-        st.raw = raw.len() as u64;
-        st.prefix = crate::sha256_hex(raw);
-        st.observed = wire.now();
-    } else if !st.turns.is_empty()
-        && !st.pending.iter().any(|queued| {
-            st.turns.iter().all(|turn| {
-                queued.body["turns"]
-                    .as_array()
-                    .is_some_and(|turns| turns.contains(turn))
-            })
-        })
-    {
-        // DashQ permits adding an earlier binding on an otherwise exact range replay.
-        if let Some(mut last) = st.last.clone() {
-            last["turns"] = json!(st.turns);
-            st.pending.push(Queued {
-                body: last,
-                replay: true,
-            });
-        }
-    }
-    write(&path, &st)?;
-    send(data, grant, c, &mut st, &path, wire)?;
-    prior_error.map_or(Ok(()), Err)
+    Ok(())
 }
+
 fn identity_of(grant: &Value) -> Value {
     identity(grant)
 }
@@ -668,6 +940,8 @@ fn fresh(
     super::scrub::manifest(&mut manifest);
     Checkpoint {
         source: crate::incident::uuid(),
+        owner: String::new(),
+        paths: vec![],
         previous: vec![],
         grant: identity_of(grant),
         identity: identity.into(),
@@ -709,6 +983,11 @@ fn send(
         if excluded(&c.root, &c.root)? {
             return Err("archive excluded".into());
         }
+        for source in &st.paths {
+            if excluded(&c.root, source)? {
+                return Err("archive excluded".into());
+            }
+        }
         let response = wire.post(
             grant["destination"]
                 .as_str()
@@ -737,7 +1016,12 @@ fn send(
             || ["source", "start", "end", "sha256", "manifest_sha256"]
                 .iter()
                 .any(|k| receipt[*k] != body[*k])
-            || receipt["complete"] != true
+            || receipt["complete"]
+                != if body["media"] == true {
+                    json!(body["end"] == body["total"])
+                } else {
+                    json!(true)
+                }
         {
             return Err("archive receipt mismatch".into());
         }
@@ -840,6 +1124,7 @@ mod tests {
         offline: bool,
         lose: bool,
         mismatch: bool,
+        wrong_complete: bool,
     }
     impl Wire for Sink {
         fn post(
@@ -859,6 +1144,11 @@ mod tests {
                 return Err("lost response".into());
             }
             let mut receipt = json!({"protocol":1,"schema":SCHEMA,"state":"accepted","id":"sink-session","source":body["source"],"start":body["start"],"end":body["end"],"sha256":body["sha256"],"manifest_sha256":body["manifest_sha256"],"complete":true});
+            receipt["complete"] = json!(if self.wrong_complete {
+                false
+            } else {
+                body["media"] != true || body["end"] == body["total"]
+            });
             if self.mismatch {
                 receipt["sha256"] = json!("wrong");
             }
@@ -893,7 +1183,7 @@ mod tests {
             capture: "launched".into(),
             sources: vec![Source {
                 path: log,
-                format: "claude-stream".into(),
+                format: "raw".into(),
                 start: 0,
                 end: None,
             }],
@@ -986,11 +1276,10 @@ mod tests {
         sink.offline = false;
         pass(&data, &mut sink).unwrap();
         assert!(sink.requests.len() > 2);
-        assert!(
-            sink.requests
-                .iter()
-                .all(|r| r.to_string().len() <= enroll::MAX_BODY)
-        );
+        assert!(sink
+            .requests
+            .iter()
+            .all(|r| r.to_string().len() <= enroll::MAX_BODY));
         let old = &sink.requests[0]["source"];
         let mut next = 0;
         for request in sink.requests.iter().filter(|r| &r["source"] == old) {
@@ -1039,6 +1328,215 @@ mod tests {
         pass(&data, &mut sink).unwrap();
         assert_eq!(sink.requests.len(), n);
         assert_eq!(status(&data)["state"], "off");
+        let _ = fs::remove_dir_all(data.parent().unwrap());
+    }
+    fn native_fixture(data: &Path, c: &mut Capture, rows: &[Value]) -> PathBuf {
+        let path = c
+            .home
+            .as_ref()
+            .unwrap()
+            .join("projects/project/session.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            rows.iter().map(|v| format!("{v}\n")).collect::<String>(),
+        )
+        .unwrap();
+        c.sources.clear();
+        register(data, c.clone()).unwrap();
+        path
+    }
+    #[test]
+    fn media_chunks_use_scrubbed_object_hash_and_resume_after_source_loss() {
+        let (data, mut c) = setup("archive-media-resume");
+        let image = c.root.join("image.png");
+        let mut original = b"\x89PNG\r\n\x1a\n".to_vec();
+        original.extend(vec![b'a'; enroll::MAX_BODY * 2]);
+        original.extend_from_slice(b" sk-fixture_media_secret");
+        fs::write(&image, &original).unwrap();
+        let path = native_fixture(
+            &data,
+            &mut c,
+            &[
+                json!({"type":"user","sessionId":"s-1","message":{"content":[{"type":"image","path":image}]}}),
+            ],
+        );
+        let mut sink = Sink {
+            offline: true,
+            ..Sink::default()
+        };
+        pass(&data, &mut sink).unwrap();
+        let media_path = files(&root(&data).join("sources"))
+            .unwrap()
+            .into_iter()
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("media-")
+            })
+            .unwrap();
+        let st: Checkpoint = read(&media_path).unwrap();
+        let (expected, count) = super::super::scrub::bytes(&original);
+        assert_eq!(count, 1);
+        assert_eq!(st.source, crate::sha256_hex(&expected));
+        assert_ne!(st.source, crate::sha256_hex(&original));
+        assert!(st.pending.len() > 1);
+        assert!(st.pending.iter().all(|q| q.body["turns"].is_null()));
+        let pending: Vec<_> = st.pending.iter().map(|q| q.body.clone()).collect();
+        fs::write(
+            c.root.join(".agentq-archive.json"),
+            b"{\"exclude\":[\"image.png\"]}",
+        )
+        .unwrap();
+        sink.offline = false;
+        pass(&data, &mut sink).unwrap();
+        assert!(sink.requests.iter().all(|b| b["media"] != true));
+        fs::remove_file(c.root.join(".agentq-archive.json")).unwrap();
+        fs::remove_file(image).unwrap();
+        fs::remove_file(path).unwrap();
+        pass(&data, &mut sink).unwrap();
+        let sent: Vec<_> = sink
+            .requests
+            .iter()
+            .filter(|b| b["media"] == true)
+            .cloned()
+            .collect();
+        assert_eq!(sent, pending);
+        let mut next = 0;
+        for b in &sent {
+            let a = b["start"].as_u64().unwrap() as usize;
+            let end = b["end"].as_u64().unwrap() as usize;
+            assert_eq!(a, next);
+            assert_eq!(b["bytes"], agent::encode_base64(&expected[a..end]));
+            assert_eq!(b["sha256"], crate::sha256_hex(&expected[a..end]));
+            assert_eq!(b["total"], expected.len());
+            next = end;
+        }
+        assert_eq!(next, expected.len());
+        assert_eq!(status(&data)["pending_bytes"], 0);
+        assert_eq!(status(&data)["reason"], "archive source unavailable");
+        let _ = fs::remove_dir_all(data.parent().unwrap());
+    }
+    #[test]
+    fn native_inline_secrets_and_raw_databases_refuse_before_export() {
+        let (data, mut c) = setup("archive-inline-authority");
+        let encoded = agent::encode_base64(b"\x89PNG\r\n\x1a\nsk-private_inline");
+        native_fixture(
+            &data,
+            &mut c,
+            &[
+                json!({"type":"user","sessionId":"s-1","message":{"content":[{"type":"image","source":{"type":"base64","data":encoded}}]}}),
+            ],
+        );
+        let mut sink = Sink::default();
+        pass(&data, &mut sink).unwrap();
+        assert!(sink.requests.is_empty());
+        assert_eq!(
+            status(&data)["reason"],
+            "archive inline media secret representation unsupported"
+        );
+        fs::remove_dir_all(c.home.as_ref().unwrap().join("projects")).unwrap();
+        let db = c.root.join("sessions.db");
+        fs::write(&db, b"SQLite format 3\0other unopted manual session").unwrap();
+        c.sources = vec![Source {
+            path: db.clone(),
+            format: "raw".into(),
+            start: 0,
+            end: None,
+        }];
+        register(&data, c.clone()).unwrap();
+        pass(&data, &mut sink).unwrap();
+        assert!(sink.requests.is_empty());
+        assert_eq!(
+            status(&data)["reason"],
+            "archive raw database authority unavailable"
+        );
+        native_fixture(
+            &data,
+            &mut c,
+            &[
+                json!({"type":"user","sessionId":"s-1","message":{"content":[{"type":"document","path":db}]}}),
+            ],
+        );
+        pass(&data, &mut sink).unwrap();
+        assert!(sink.requests.iter().all(|b| b["media"] != true));
+        assert_eq!(
+            status(&data)["reason"],
+            "archive raw database authority unavailable"
+        );
+        for magic in [
+            &[0x37, 0x7f, 0x06, 0x82][..],
+            &[0x37, 0x7f, 0x06, 0x83][..],
+            &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7][..],
+        ] {
+            assert!(database_bytes(magic));
+        }
+        let _ = fs::remove_dir_all(data.parent().unwrap());
+    }
+    #[test]
+    fn media_final_receipt_must_verify_object_and_prose_never_authorizes_bytes() {
+        let (data, mut c) = setup("archive-media-receipt");
+        let image = c.root.join("image.png");
+        let bytes = b"\x89PNG\r\n\x1a\nfixture";
+        fs::write(&image, bytes).unwrap();
+        let path = native_fixture(
+            &data,
+            &mut c,
+            &[
+                json!({"type":"assistant","sessionId":"s-1","message":{"content":[{"type":"text","text":json!({"path":image}).to_string()}]}}),
+                json!({"type":"user","sessionId":"s-1","message":{"content":[{"type":"image","path":image}]}}),
+            ],
+        );
+        let reader = agent::runtime("claude")
+            .unwrap()
+            .history("s-1", c.home.as_deref(), Some(&path), None)
+            .unwrap();
+        let catalog = reader.media().unwrap();
+        assert_eq!(catalog.items.len(), 1);
+        let grant = active(&data).unwrap().unwrap();
+        let src = Source {
+            path,
+            format: "claude-native".into(),
+            start: 0,
+            end: None,
+        };
+        let mut sink = Sink {
+            wrong_complete: true,
+            ..Sink::default()
+        };
+        assert_eq!(
+            upload_media(
+                &data,
+                &grant,
+                &c,
+                &src,
+                &c.manifest,
+                &catalog,
+                &catalog.items[0],
+                &mut sink
+            )
+            .unwrap_err(),
+            "archive receipt mismatch"
+        );
+        assert!(status(&data)["state"] != "observed");
+        let first = sink.requests[0].clone();
+        sink.wrong_complete = false;
+        upload_media(
+            &data,
+            &grant,
+            &c,
+            &src,
+            &c.manifest,
+            &catalog,
+            &catalog.items[0],
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(sink.requests[1], first);
+        let st: Checkpoint = read(&files(&root(&data).join("sources")).unwrap()[0]).unwrap();
+        assert_eq!(st.sent, bytes.len() as u64);
+        assert!(st.pending.is_empty());
         let _ = fs::remove_dir_all(data.parent().unwrap());
     }
 }

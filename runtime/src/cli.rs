@@ -40,7 +40,6 @@ pub fn adopt(request:&str)->Res<Value> {
 pub fn preflight(request: &str, repair: bool, journal: Option<&Path>) -> Res<Value> {
     let v:Value=serde_json::from_str(request).map_err(|e|format!("invalid request: {e}"))?;
     let runtime=agent::runtime(text(&v,"client")?).ok_or("unknown client")?;
-    let mut archive=crate::archive::Handle::legacy(&spec,&log,install,&ctx);
     let launch=preflight_launch(&v)?;
     let repair=agent::Repair {workspace:repair,hooks:repair,journal:journal.map(Path::to_path_buf)};
     let mut readiness=runtime.preflight(&launch,&repair);
