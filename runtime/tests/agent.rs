@@ -23,7 +23,6 @@ pub(crate) fn main() {
     if wrapper.first().is_some_and(|s| s == "--wrap") {
         std::process::exit(Command::new(&wrapper[1]).args(&wrapper[2..]).status().unwrap().code().unwrap_or(1));
     }
-    if std::env::var_os("AGENTQ_FAKE_AGENTAPI").is_some() { return fake_agentapi(); }
     if matches!(std::env::args().nth(1).as_deref(), Some("service"|"agent")) { return protected::fake_host(); }
     if std::env::args().nth(1).as_deref()==Some("sandbox") && std::env::var("COREQ_FAKE_AGENT").as_deref()==Ok("codex") {
         if std::env::var_os("FAKE_SANDBOX_REFUSED").is_some() {eprintln!("native sandbox unavailable");std::process::exit(1);}
@@ -33,7 +32,7 @@ pub(crate) fn main() {
         return fake_ready(&file);
     }
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") {
-        if matches!(std::env::args().nth(1).as_deref(),Some("--version"|"auth"|"login")) {return;}
+        if matches!(std::env::args().nth(1).as_deref(),Some("--version"|"auth"|"login")) {if client=="antigravity" && std::env::args().nth(1).as_deref()==Some("--version") {println!("agy 1.5.2");}return;}
         return fake(&client);
     }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
@@ -54,8 +53,6 @@ pub(crate) fn main() {
         ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
         ("project_identity_read_stays_inside_adapter", project_identity_read_stays_inside_adapter),
         ("rollout_progress_survives_fast_resume_and_recovery", rollout_progress_survives_fast_resume_and_recovery),
-        ("antigravity_wrapped_submission_keeps_prompt_and_tail", antigravity_wrapped_submission_keeps_prompt_and_tail),
-        ("antigravity_native_submission_tails_and_resumes", antigravity_native_submission_tails_and_resumes),
         ("claude_starts_and_resumes_one_session", claude_starts_and_resumes_one_session),
         ("codex_resumes_its_thread_in_the_account_home", codex_resumes_its_thread_in_the_account_home),
         ("lingering_process_is_stopped_after_its_turn_ends", lingering_process_is_stopped_after_its_turn_ends),
@@ -254,7 +251,7 @@ fn quota_account_read_guards_credentials() {
 fn project_identity_read_stays_inside_adapter() {
     let root=scratch("project-identity");let bin=root.join(if cfg!(windows) {"curl.exe"} else {"curl"});
     std::fs::copy(std::env::current_exe().unwrap(),&bin).unwrap();
-    let file=root.join("antigravity-oauth-token");
+    let file=root.join("antigravity-cli/antigravity-oauth-token");std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     let credential=json!({"access_token":"invented-token","expiry_date":4102444800000i64}).to_string();
     std::fs::write(&file,&credential).unwrap();
     let keys=["PATH","AGENTQ_FAKE_QUOTA_HTTP","AGENTQ_FAKE_PROJECT_IDENTITY","AGENTQ_FAKE_QUOTA_CHANGE"];
@@ -284,6 +281,8 @@ fn fake(client: &str) {
         std::fs::write("terminal.json",json!({"args":args,"pid":std::process::id()}).to_string()).unwrap();
         while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}return;
     }
+    if client=="antigravity" && args.last().is_some_and(|a|a=="--version") {println!("agy 1.5.2");return;}
+    if args.first().is_some_and(|a|a=="acp") {return fake_acp(&args);}
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
     if client == "antigravity" { input = serde_json::from_str::<Value>(&input).unwrap()["message"]["content"].as_str().unwrap().to_string(); }
@@ -331,7 +330,7 @@ fn fake(client: &str) {
     sessions[&session] = json!(turn);
     std::fs::write(&store, sessions.to_string()).unwrap();
     // The record lets the test read argv, stdin and environment the child got.
-    let home_var = match client { "claude" => "CLAUDE_CONFIG_DIR", "antigravity" => "ANTIGRAVITY_HOME", _ => "CODEX_HOME" };
+    let home_var = match client { "claude" => "CLAUDE_CONFIG_DIR", "antigravity" => "GEMINI_HOME", _ => "CODEX_HOME" };
     let record = json!({"args": args, "input": input, "home": std::env::var(home_var).ok(),
         "inherited": std::env::var("CLAUDE_CODE_SESSION_ID").is_ok() || std::env::var("CODEX_THREAD_ID").is_ok() || std::env::var("ANTIGRAVITY_CONVERSATION_ID").is_ok(),
         "extra": std::env::var("FAKE_EXTRA").ok(),
@@ -384,6 +383,31 @@ fn fake(client: &str) {
         emit(json!({"type": "turn.completed", "usage": {"input_tokens": 50, "cached_input_tokens": 40, "output_tokens": 5}}));
     }
     if std::env::var("COREQ_FAKE_LINGER").is_ok() { std::thread::sleep(Duration::from_secs(60)); }
+}
+
+fn fake_acp(args:&[String]) {
+    use std::io::{BufRead,Write};
+    let session="acp-session";
+    let emit=|v:Value| {println!("{v}");std::io::stdout().flush().unwrap();};
+    for line in std::io::stdin().lock().lines() {
+        let v:Value=serde_json::from_str(&line.unwrap()).unwrap();
+        let result=match v["method"].as_str() {
+            Some("initialize")=>json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true}}),
+            Some("session/new"|"session/load")=>json!({"sessionId":session}),
+            Some("session/prompt")=>{
+                let store=Path::new("fake-sessions.json");
+                let mut sessions:Value=std::fs::read_to_string(store).ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+                let turn=sessions[session].as_u64().unwrap_or(0)+1;sessions[session]=json!(turn);
+                std::fs::write(store,sessions.to_string()).unwrap();
+                std::fs::write(format!("fake-turn-{turn}.json"),json!({"args":args,"input":v["params"]["prompt"][0]["text"],"home":std::env::var("GEMINI_HOME").ok(),
+                    "launcher":std::env::var("AGENTQ_LAUNCHER").ok(),"trace_context":std::env::var("COREQ_TRACE_CONTEXT").ok()}).to_string()).unwrap();
+                emit(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("turn {turn}")}}}}));
+                json!({"stopReason":"end_turn","usage":{"inputTokens":12,"outputTokens":8}})
+            },
+            _=>panic!("unexpected ACP fixture request: {v}"),
+        };
+        emit(json!({"jsonrpc":"2.0","id":v["id"],"result":result}));
+    }
 }
 
 fn fake_app_server() {
@@ -1129,7 +1153,9 @@ fn host_args_reach_codex_turns_only() {
     policy.policy.write = agent::Scope::Project;
     assert_eq!(refused(&policy, "codex").as_deref(), Some("host-args require the native policy on codex; next: select a supported policy"));
     assert_eq!(refused(&l, "claude").as_deref(), Some("host-args unsupported by claude; next: select a supported policy"));
-    assert_eq!(refused(&l, "antigravity").as_deref(), Some("host-args unsupported by antigravity; next: select a supported policy"));
+    let mut acp = fake_launch("antigravity", &root, "x", &[]);
+    acp.host_args = l.host_args.clone();
+    assert_eq!(refused(&acp, "antigravity").as_deref(), Some("host-args unsupported by antigravity; next: select a supported policy"));
     let mut queue = l.clone();
     queue.mode = agent::Mode::Queue { transcript: root.join("t.jsonl") };
     assert_eq!(codex.resume(&thread, &queue).err().as_deref(), Some("host-args unsupported by codex; next: select a supported policy"));
@@ -1192,7 +1218,9 @@ fn settings_env_reaches_the_session() {
     let mut queue = c.clone();
     queue.mode = agent::Mode::Queue { transcript: codex_root.join("t.jsonl") };
     assert_eq!(codex.resume(&codex.session_id(&run).unwrap(), &queue).err().as_deref(), Some("settings-env unsupported by codex; next: select a supported policy"));
-    assert_eq!(agent::runtime("antigravity").unwrap().launch(&c).err().as_deref(), Some("settings-env unsupported by antigravity; next: select a supported policy"));
+    let mut acp = fake_launch("antigravity", &codex_root, "x", &[]);
+    acp.settings_env = c.settings_env.clone();
+    assert_eq!(agent::runtime("antigravity").unwrap().launch(&acp).err().as_deref(), Some("settings-env unsupported by antigravity; next: select a supported policy"));
     teardown(root);
     teardown(codex_root);
     if let Some(task) = task { unsafe { std::env::set_var("TASKQ_TASK", task); } }
@@ -1576,7 +1604,8 @@ fn wait_for(path: &Path) {
 fn cli_turn_recovers_its_running_child() {
     use agent::State::{Finished, Running};
     unsafe { std::env::remove_var("TASKQ_TASK"); std::env::remove_var("AGENTQ_LAUNCHER"); std::env::remove_var("AGENTQ_OPTIMIZATION"); }
-    for r in agent::runtimes() {
+    // Stateful ACP sessions explicitly refuse process checkpoints; their next turn is session/load.
+    for r in agent::runtimes().into_iter().filter(|r|!r.descriptor().has("acp")) {
         let name = r.descriptor().name;
         let root = scratch(&format!("turn-recover-{name}"));
         let store = coreq::telemetry::Store::open(&root.join("telemetry.db")).unwrap();
@@ -2074,102 +2103,6 @@ fn off_reaches_codex_queue_and_app_server() {
     teardown(root);
 }
 
-// M12.1/M12.6: a caller-owned executable wrapper must preserve agentapi prompt/tailing and reject server off.
-fn antigravity_wrapped_submission_keeps_prompt_and_tail() {
-    let root = scratch("wrapped-agentapi");
-    let bin = root.join(if cfg!(windows) {"agentapi.exe"} else {"agentapi"});
-    std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
-    let ag = agent::runtime("antigravity").unwrap();
-    let home = root.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let mut l = agent::Launch::new(&root, root.join("turn.log"), "first", "fixtureq");
-    l.command = vec![exe(), "--wrap".into(), bin.clone().into()];
-    l.env = vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("AGENTQ_OPTIMIZATION".into(),"inherit".into()),("ANTIGRAVITY_HOME".into(),home.clone().into())];
-    let mut run = ag.launch(&l).unwrap();
-    let history = home.join("brain/native-conv/.system_generated/logs/transcript.jsonl");
-    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
-    append(&history, &[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"wrapper answer"})]);
-    finish(ag, &mut run);
-    let r = ag.report(&run).unwrap();
-    assert_eq!((r.outcome,r.text.as_deref()),("ok",Some("wrapper answer")));
-    l.env.push(("AGENTQ_OPTIMIZATION".into(),"off".into()));l.log=root.join("wrapped-resume.log");
-    let mut run = ag.resume("native-conv",&l).unwrap();
-    assert_eq!(run.optimization().reason, "optimization_retired");
-    wait_agentapi_receipt(ag,&mut run,&l.log,"first");
-    ag.cancel(&mut run).unwrap();finish(ag,&mut run);
-    teardown(root);
-}
-
-// M12.1/M12.3: agentapi acknowledges submission before terminal transcript evidence; resume consumes only new steps.
-// Risk: exit 0 is mistaken for completed work, stale history counts twice, or the caller's prompt/args are lost.
-fn antigravity_native_submission_tails_and_resumes() {
-    let root = scratch("native-agentapi");
-    let bin = root.join(if cfg!(windows) { "agentapi.exe" } else { "agentapi" });
-    std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
-    let ag = agent::runtime("antigravity").unwrap();
-    let home = root.join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let mut l = agent::Launch::new(&root, root.join("turns.log"), "first", "fixtureq");
-    l.command = vec![bin.clone().into()];
-    l.env = vec![("AGENTQ_FAKE_AGENTAPI".into(),"1".into()),("ANTIGRAVITY_HOME".into(),home.clone().into())];
-    let mut run = ag.launch(&l).unwrap();
-    // The double exits after receipt. Supply the terminal later, as a separately owned server would.
-    wait_agentapi_receipt(ag, &mut run, &l.log, "first");
-    assert_eq!(ag.poll(&mut run).unwrap(), agent::State::Running, "submission is not completion");
-    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none(),"submitter exit is not a stopped sidecar turn");
-    let history = home.join("brain/native-conv/.system_generated/logs/transcript.jsonl");
-    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
-    append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":1,"status":"DONE","content":"first done","input_tokens":3,"cache_read_tokens":2,"cache_write_tokens":0,"output_tokens":1,"tool_calls":[]})]);
-    finish(ag, &mut run); let report=ag.report(&run).unwrap();
-    assert_eq!((report.outcome,report.text.as_deref(),report.session.as_deref()),("ok",Some("first done"),Some("native-conv")));
-    assert_eq!(agentq_runtime::cli::report_json(&report)["termination"],json!({"state":"unknown","reason":"sidecar-process-not-observed"}));
-    let session=report.session.unwrap();
-    l.input="second".into();
-    let mut run=ag.resume(&session,&l).unwrap();
-    wait_agentapi_receipt(ag, &mut run, &l.log, "second");
-    assert_eq!(ag.poll(&mut run).unwrap(), agent::State::Running);
-    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none());
-    append(&history,&[json!({"type":"PLANNER_RESPONSE","step_index":2,"status":"DONE","content":"second done","input_tokens":7,"cache_read_tokens":4,"cache_write_tokens":0,"output_tokens":2})]);
-    finish(ag, &mut run);let report=ag.report(&run).unwrap();
-    assert_eq!((report.outcome,report.usage.input,report.usage.calls,report.text.as_deref()),("ok",Some(7),Some(1),Some("second done")));
-    l.log=root.join("cancel.log");
-    let mut run=ag.resume(&session,&l).unwrap();wait_agentapi_receipt(ag,&mut run,&l.log,"second");
-    append(&history,&[json!({"type":"TOOL_RESPONSE","step_index":3,"status":"DONE","content":"last activity"})]);
-    assert!(ag.stop_event(&mut run,u64::MAX).unwrap().is_none());ag.cancel(&mut run).unwrap();finish(ag,&mut run);
-    let stop=ag.stop_event(&mut run,u64::MAX).unwrap().unwrap();
-    assert!(stop.last_activity.is_some(),"receipt separators retain subsequent activity: {:?}",stop.activity_unknown);
-    assert_eq!(stop.last_activity.unwrap().source["format"],"agy-stream");
-    drop(run);ag.adopt(&session,&l,&[]).unwrap();
-    l.input="timeout".into(); l.deadline=Some(Instant::now()+Duration::from_millis(100));
-    let mut run=ag.resume(&session,&l).unwrap();
-    finish(ag, &mut run);
-    let report=ag.report(&run).unwrap();
-    assert_eq!((report.outcome,report.error),("cancelled","timeout"));
-    teardown(root);
-}
-
-fn wait_agentapi_receipt(ag: &dyn agent::Runtime, run: &mut agent::Run, log: &Path, prompt: &str) {
-    let until = Instant::now()+Duration::from_secs(5);
-    loop {
-        assert_eq!(ag.poll(run).unwrap(), agent::State::Running, "receipt alone is not a terminal");
-        if std::fs::read_to_string(log).unwrap_or_default().contains(&format!("\"prompt\":\"{prompt}\"")) {break;}
-        assert!(Instant::now()<until); std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn fake_agentapi() {
-    let args:Vec<String>=std::env::args().skip(1).collect();
-    assert!(matches!(args.first().map(String::as_str),Some("new-conversation" | "send-message")));
-    assert!(matches!(args.last().map(String::as_str),Some("first" | "second" | "timeout")),"native prompt is argv, not '-' or stdin");
-    if args[0]=="send-message" {assert_eq!(args[1],"native-conv");}
-    use std::io::Write;
-    let receipt = serde_json::to_string_pretty(&json!({"response":{"newConversation":{"conversationId":"native-conv"}},"prompt":args.last()})).unwrap();
-    let half=receipt.len()/2;
-    print!("{}",&receipt[..half]); std::io::stdout().flush().unwrap();
-    std::thread::sleep(Duration::from_millis(40));
-    print!("{}",&receipt[half..]); std::io::stdout().flush().unwrap();
-}
-
 // taskq#2271: a caller that builds its own native session reaches every native seam through the trait, and an optional
 // one refuses by capability. Risk: a consumer reimplements a native parser or command because the trait lacks it.
 fn runtime_trait_exposes_native_seams() {
@@ -2386,7 +2319,8 @@ fn preflight_checks_order_and_journals_exact_trust() {
 // M12.19: missing native terminals and signalled/recovered processes must never disappear or imply success.
 fn stopped_runs_have_typed_activity() {
     use agent::history::{StepKind,stop::StopCause};
-    for name in ["claude","codex","antigravity"] {
+    // Stateful ACP stop observations are exercised by the ACP transport regression.
+    for name in ["claude","codex"] {
         for mode in ["exit","kill"] {
             let root=scratch(&format!("stop-{name}-{mode}"));
             let r=agent::runtime(name).unwrap();

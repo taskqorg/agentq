@@ -5,6 +5,12 @@ use std::collections::HashSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum ToolKind { Shell, Mcp, Web, Other }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum RequestKind { Approval, Question }
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Choice {pub id:String,pub label:String,pub kind:String}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum Event {
     Text { item: Option<String>, delta: String },
@@ -21,6 +27,10 @@ pub enum Event {
     Unsupported { reason: &'static str },
     Quota(Vec<Window>),
     Context { used: Option<u64>, window: Option<u64> },
+    /// A native request. The original ID and choices stay opaque; no approval is inferred.
+    Request { id: Value, kind: RequestKind, prompt: Option<String>, choices: Vec<Choice> },
+    /// Native session metadata, capabilities or an update without a neutral mapping.
+    Metadata { kind: String, data: Value },
     Activity,
     Stalled { idle_ms:u64 },
 }
@@ -133,6 +143,8 @@ pub(crate) struct Cursor {
     pub(crate) seen: HashSet<String>,
     #[serde(default)]
     pub(crate) start_limit: StartLimit,
+    #[serde(default)]
+    pub(crate) acp: super::acp::ReadState,
 }
 
 pub(crate) fn string(v: &Value) -> Option<String> { v.as_str().map(String::from) }
@@ -187,6 +199,7 @@ impl Cursor {
     pub fn read_owned(&mut self, client: Client, values: Vec<Value>, thread: Option<&str>, turn: Option<&str>) -> Vec<Event> {
         let mut out = vec![];
         for v in values {
+            if v["type"]=="acp" {out.extend(self.acp.record_events(&v));continue;}
             if matches!(self.start_limit,StartLimit::Pending) {
                 if let Some(start)=(protocol(client).start_limit)(&v) {self.start_limit=start;}
             }
@@ -587,7 +600,7 @@ mod tests {
                         Event::Unsupported{reason}=>self.error=Some(reason),
                         Event::Message{..}|Event::Progress=>self.done(at),
                         Event::TurnEnd{..}=>{self.tools.clear();self.error=None;self.done(at);}
-                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Activity|Event::Stalled{..}=>{}
+                        Event::Text{..}|Event::Quota(_)|Event::Context{..}|Event::Request{..}|Event::Metadata{..}|Event::Stalled{..}|Event::Activity=>{}
                     }
                 }
             }

@@ -32,3 +32,8 @@ harness = false
 [[example]]
 name = "qualify_events"
 test = true
+
+[[test]]
+name = "acp"
+path = "tests/acp.rs"
+harness = false

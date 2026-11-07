@@ -43,8 +43,8 @@ impl Descriptor {
         let adapter=Client::parse(self.name).map(registry::builtin).ok_or("history resume unsupported")?;
         if launch.mode!=Mode::Turn || !launch.input.is_empty() || !launch.parts.is_empty() || launch.deltas || launch.mcp.is_some() || launch.instructions.is_some() {return Err("terminal resume requires empty input without relay options".into());}
         if launch.deadline.is_some() || launch.inactivity.is_some() || launch.stop_on_stall {return Err("terminal resume cannot apply worker observation windows".into());}
-        adapter.preflight(launch,&Repair::default()).permit(launch.readiness)?;
         let args=super::history::sessions::resume(self.name,session)?;
+        adapter.preflight(launch,&Repair::default()).permit(launch.readiness)?;
         adapter.adopt(session,launch,native)?;
         let owner=adapter.session_owner(Some(session),launch)?;
         let (spec,_)=adapter.spec(launch,session.into(),true)?;
@@ -243,6 +243,14 @@ impl From<&str> for Failure { fn from(e: &str) -> Self { Failure::Failed(e.into(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part { Text(String), Image(PathBuf) }
 
+/// Native IDs are opaque data selected from session metadata and pending requests.
+#[derive(Clone, Debug)]
+pub enum Control {
+    Model(String),
+    Mode(String),
+    Reply { id: Value, option: Option<String> },
+}
+
 /// How a session's native account is signed in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Login { Subscription, ApiKey, None }
@@ -283,7 +291,7 @@ impl State {
 pub struct Check { pub state: &'static str, pub detail: String }
 
 /// Numeric parts of the first dotted version token of `s`: `codex-cli 0.162.0` and `2.1.5 (Claude Code)` read alike.
-fn version_parts(s: &str) -> Option<Vec<u64>> {
+pub(super) fn version_parts(s: &str) -> Option<Vec<u64>> {
     s.split(|c: char| c.is_whitespace() || c == '(').find_map(|t| {
         let v: Option<Vec<u64>> = t.trim_start_matches('v').split('.').map(|p| p.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).collect();
         v.filter(|v| v.len() >= 2)
@@ -353,7 +361,7 @@ pub struct Run {
     stop_on_stall:bool,
 }
 
-enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>) }
+enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>), Acp(Box<super::acp::Session>) }
 
 /// A background or queue run: an observation cursor over the native transcript, never a process owner.
 struct Native {
@@ -377,6 +385,7 @@ impl Run {
     pub(crate) fn stop_facts(&mut self) -> Res<super::history::stop::Facts> {
         use super::history::stop::Facts;
         Ok(match &mut self.body {
+            Body::Acp(s) => s.stop_facts(self.stop_id.clone())?,
             Body::Turn(t) => Facts {run:self.stop_id.clone(),format:protocol(t.client).stream_history,path:t.log.clone(),start:t.start,exited:Some(t.has_exited()),native_end:t.ended,exit:if t.exit_unknown {None}else{t.exit},lost_owner:t.exit_unknown && !(t.ended && t.stopping)},
             Body::Native(n) => Facts {run:self.stop_id.clone(),format:protocol(n.spec.client).native_history,path:n.turn.path().into(),start:0,exited:None,native_end:n.report.is_some(),exit:None,lost_owner:false},
             Body::App(a) => {
@@ -410,13 +419,14 @@ impl Run {
     pub fn optimization(&self) -> &Optimization { &self.optimization }
     /// The direct child process ID of a CLI turn, or the verified background job's native process.
     pub fn id(&self) -> Option<u32> {
-        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id) }
+        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id), Body::Acp(a)=>Some(a.id()) }
     }
     /// The finished run's immutable records for a deferred append, without a store, lock or native call; a repeated call
     /// returns the same value with the first caller context. A run without a terminal observation reads `running`.
     pub fn snapshot(&mut self, ctx: &Context) -> Res<super::Frozen> {
         if let Some(frozen) = &self.frozen { return Ok(frozen.clone()); }
         let frozen = match &self.body {
+            Body::Acp(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
             Body::Turn(t) => t.snapshot(ctx)?,
             Body::Native(n) => n.turn.snapshot(n.report.as_ref().ok_or("running")?, ctx)?,
             // Each app-server turn records once under its native thread and turn identity.
@@ -432,6 +442,7 @@ impl Run {
     pub fn record(&mut self, ctx: &Context, store: &crate::telemetry::Store) -> Res<Report> {
         if self.recorded { return Err("run already recorded".into()); }
         let mut r = match &self.body {
+            Body::Acp(a)=>a.report().ok(),
             Body::Turn(t) => t.terminal_report(),
             Body::Native(n) => n.report.clone(),
             Body::App(a) => a.session.report(),
@@ -741,6 +752,8 @@ pub trait Runtime: Send + Sync {
     fn report(&self, run: &Run) -> Res<Report>;
     /// Ordered neutral events, each returned at most once.
     fn progress(&self, run: &mut Run) -> Res<Vec<Event>>;
+    /// Session controls; unsupported runtimes refuse before a native write.
+    fn control(&self, _run: &mut Run, _control: Control) -> Result<(), Failure> { Err(Failure::Refused(Cause("control-unsupported"))) }
     /// Capability `background`: the raw launcher exchange of this run, handed over once.
     fn launcher_output(&self, run: &mut Run) -> Result<Result<Output, crate::process::Failure>, Cause>;
     fn session_id(&self, run: &Run) -> Option<String>;
@@ -815,9 +828,17 @@ pub struct NativeSpec {
     pub owner:Option<SessionOwner>,
 }
 
+impl NativeSpec {
+    fn validate_session(&self)->Res<()> {
+        if self.session=="-" && !self.resume || native::cli_id(&self.session) {Ok(())}
+        else {Err("native CLI session invalid".into())}
+    }
+}
+
 struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize, ops: NativeOps }
 
 struct NativeOps {
+    acp: Option<&'static super::acp::Config>,
     catalogue:fn(Option<&Path>,Option<&Path>)->Res<Vec<Model>>,
     background_launch:fn(Command,&Spec,&str,Duration)->Res<Result<Output,crate::process::Failure>>,
     background_jobs:fn(Command,&Spec,bool,Duration)->Res<Vec<Value>>,
@@ -898,6 +919,7 @@ impl Adapter {
     fn read_progress(&self, run: &mut Run) -> Res<Vec<Event>> {
         let run = self.own_mut(run)?;
         let path = match &mut run.body {
+            Body::Acp(a)=>return a.progress(),
             Body::Turn(t) => { t.sync_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
@@ -920,6 +942,7 @@ impl Adapter {
     fn refresh_activity(&self,run:&mut Run)->Res<()> {
         let run=self.own_mut(run)?;
         let events=match &mut run.body {
+            Body::Acp(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].to_vec();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
             Body::Turn(t)=>{t.sync_transcript()?;let (rows,next)=activity_lines(&t.log,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Native(n) if n.attached=>{let (rows,next)=activity_lines(n.turn.path(),run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
@@ -929,6 +952,7 @@ impl Adapter {
     }
 
     fn seam_readiness(&self, command: &Command, spec: &NativeSpec, log: Option<&Path>, input: &str) -> Res<Readiness> {
+        spec.validate_session()?;
         (self.ops.validate)(&spec.args,&[],&Policy::default())?;
         let mut launch=Launch::new(&spec.root,log.map(Path::to_path_buf).unwrap_or_else(||spec.root.join(".agentq-preflight-log")),input,"agentq");
         launch.home=spec.home.clone();
@@ -974,7 +998,7 @@ impl Adapter {
             return Err(format!("settings-env unsupported by {name}"));
         }
         // App-server policy travels as thread parameters; only the Codex extras stay flags.
-        let mut args = if !app { mapped(self.client, name, l)? } else if self.descriptor.has("app-server") { (self.ops.extras)(&l.policy) } else { vec![] };
+        let mut args = if let Some(acp)=self.ops.acp {super::acp::validate_launch(acp,l)?;vec![]} else if !app { mapped(self.client, name, l)? } else if self.descriptor.has("app-server") { (self.ops.extras)(&l.policy) } else { vec![] };
         args.extend(l.host_args.iter().cloned());
         let env = l.env.clone();
         let mut spec = Spec { client: self.client, root: l.root.clone(), session, resume, args, home: l.home.clone(), env };
@@ -1003,12 +1027,20 @@ impl Adapter {
         if l.lifetime==Lifetime::StopWithOwner && (!matches!(l.mode,Mode::Turn) || !self.descriptor.has("process-lifetime")) {return Err("lifetime-unsupported: native submission scope".into());}
         let readiness = self.preflight(l, &Repair::default());
         readiness.permit(l.readiness)?;
-        if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
+        let acp=self.ops.acp;
+        if session.is_some_and(|s| s.is_empty() || s == "-" || acp.is_none() && !native::plain_id(s)) { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let mut owner_spec=spec.clone();
         if session.is_none() && matches!(l.mode,Mode::Background) {owner_spec.session="-".into();}
         let owner=l.session_store.acquire(&owner_spec,session.is_none(),None,l.lifetime)?;
         let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process,matches!(l.mode,Mode::Turn) && self.descriptor.has("process-lifetime"))?;let l=&owned_launch;
+        if let Some(config)=acp {
+            if l.mode!=Mode::Turn {return Err("mode unsupported by ACP".into());}
+            let command=preflight::command(self,l)?;
+            let session=super::acp::Session::open(command,config,l,session,&owner)?;
+            let boundary=session.boundary;
+            let mut run=self.checked_run(&readiness,Body::Acp(Box::new(session)),boundary,optimization,l);run.owner=Some(owner);return Ok(run);
+        }
         let command = preflight::launch_base(self,l)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
             job_id, job: None, attached, fault, report: None, launcher }));
@@ -1093,6 +1125,13 @@ impl Runtime for Adapter {
         }
     }
 
+    fn control(&self,run:&mut Run,control:Control)->Result<(),Failure> {
+        match &mut self.own_mut(run)?.body {
+            Body::Acp(a)=>a.control(control).map_err(Failure::Failed),
+            _=>Err(Failure::Refused(Cause("control-unsupported"))),
+        }
+    }
+
     fn account(&self, run: &mut Run) -> Result<Account, Failure> {
         let run = self.own_mut(run)?;
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
@@ -1125,6 +1164,7 @@ impl Runtime for Adapter {
     fn cancel(&self, run: &mut Run) -> Res<bool> {
         let owner=self.own(run)?.owner.clone().ok_or("session-owner-required")?;
         match &mut self.own_mut(run)?.body {
+            Body::Acp(a)=>a.cancel(),
             Body::Turn(t) => {
                 if !t.timed_out { t.cancelled = true; }
                 t.kill()?;
@@ -1154,6 +1194,7 @@ impl Runtime for Adapter {
     fn poll(&self, run: &mut Run) -> Res<State> {
         let run = self.own_mut(run)?;
         let s = match &mut run.body {
+            Body::Acp(a)=>a.poll()?,
             Body::Turn(t) => {
                 // An agentapi submitter exits after its receipt while the turn continues, so the deadline applies after exit too.
                 if run.deadline.is_some_and(|d| Instant::now() >= d) && !t.timed_out {
@@ -1186,6 +1227,7 @@ impl Runtime for Adapter {
 
     fn report(&self, run: &Run) -> Res<Report> {
         let mut report = match &self.own(run)?.body {
+            Body::Acp(a)=>a.report(),
             Body::Turn(t) if t.exit.is_some() => Ok(t.report()),
             Body::Native(n) if n.report.is_some() => Ok(n.report.clone().expect("report")),
             Body::App(a) => a.session.report().ok_or_else(|| String::from("running")),
@@ -1213,6 +1255,7 @@ impl Runtime for Adapter {
 
     fn session_id(&self, run: &Run) -> Option<String> {
         match &self.own(run).ok()?.body {
+            Body::Acp(a)=>Some(a.session.clone()),
             Body::Turn(t) => session_of(self.client, &read_from(&t.log, t.start).unwrap_or_default())
                 .or_else(|| t.extension.session().map(String::from)).or_else(|| t.resumed.clone()),
             Body::Native(n) => n.attached.then(|| n.turn.session().to_string()),
@@ -1239,7 +1282,7 @@ impl Runtime for Adapter {
                 let text=read_from(&t.log,t.start).unwrap_or_default();
                 session_of(self.client,&text).is_some() || self.log_records(&text).iter().any(|r|r.lifecycle.is_some() || r.events.iter().any(|e|!matches!(e,Event::Activity|Event::Unsupported{..})))
             },
-            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(),
+            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(), Body::Acp(a)=>!a.session.is_empty(),
         };
         Observation { state, phase: if state != State::Running { state.code() } else if proven { "started" } else { "starting" },
             starting_ms: run.starting.elapsed().as_millis().min(u64::MAX as u128) as u64, owner:run.owner.as_ref().map(SessionOwner::observation).unwrap_or_default(),activity,error, session, url, cause, detail }
@@ -1247,6 +1290,7 @@ impl Runtime for Adapter {
 
     fn transcript(&self, run: &Run) -> Result<PathBuf, Cause> {
         match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
+            Body::Acp(a)=>Ok(a.path.clone()),
             Body::Turn(t) => Ok(t.log.clone()),
             Body::Native(n) if n.attached => Ok(n.turn.path().to_path_buf()),
             Body::Native(_) => Err(Cause("transcript-unknown")),
@@ -1277,11 +1321,12 @@ impl Runtime for Adapter {
     }
 
     fn home_env(&self, tool: &str, label: &str) -> Vec<(OsString, OsString)> {
-        account_home(self.client, tool, label).map(|h| vec![(OsString::from(self.client.home_var()), h.into_os_string())]).unwrap_or_default()
+        account_home(self.client, tool, label).map(|h| vec![(OsString::from(self.ops.acp.map_or(self.client.home_var(),|c|c.home_var)), h.into_os_string())]).unwrap_or_default()
     }
 
     fn checkpoint(&self, run: &Run) -> Result<Value, Cause> {
         let mut saved = match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
+            Body::Acp(_)=>Err(Cause("no-checkpoint")),
             Body::Turn(t) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "turn", "turn": t.checkpoint()?})),
             Body::App(a) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "app", "app": a.session.checkpoint(), "model": a.model})),
             Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
@@ -1343,7 +1388,7 @@ impl Runtime for Adapter {
         match path { Some(p) => executable_in(self.client, p), None => executable(self.client) }
     }
 
-    fn home(&self) -> Option<PathBuf> { base_home(self.client) }
+    fn home(&self) -> Option<PathBuf> { self.ops.acp.map_or_else(||base_home(self.client),|c|(c.home)()) }
 
     fn session_transcript(&self, session: &str, home: Option<&Path>) -> Option<PathBuf> {
         (self.ops.transcript)(session, home)
@@ -1360,7 +1405,7 @@ impl Runtime for Adapter {
         optimization
     }
 
-    fn native_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>> {(self.ops.validate)(&spec.args,&[],&Policy::default())?; Ok(args(&self.native(spec))) }
+    fn native_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>> {spec.validate_session()?;(self.ops.validate)(&spec.args,&[],&Policy::default())?; Ok(args(&self.native(spec))) }
 
     fn turn(&self, base: Command, spec: &NativeSpec, log: &Path, input: &str, process: &Process) -> Res<Turn> {
         let readiness=self.seam_readiness(&base,spec,Some(log),input)?;
@@ -1378,11 +1423,13 @@ impl Runtime for Adapter {
 
     fn jobs(&self, base: Command, spec: &NativeSpec, filtered: bool, budget: Duration) -> Res<Vec<Value>> {
         self.needs("background")?;
+        spec.validate_session()?;
         (self.ops.background_jobs)(base, &self.native(spec), filtered, budget)
     }
 
     fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob> {
         self.needs("background")?;
+        spec.validate_session()?;
         let job=(self.ops.background_job)(row, &self.native(spec), id)?;
         if let Some(owner)=&spec.owner {owner.bind(&job.session)?;if let Some(pid)=job.pid {owner.observe_process(pid)?;}}
         Ok(job)
@@ -1390,6 +1437,7 @@ impl Runtime for Adapter {
 
     fn stop_job(&self, base: Command, spec: &NativeSpec, job: &BackgroundJob, budget: Duration) -> Res<Output> {
         self.needs("background")?;
+        spec.validate_session()?;
         (self.ops.background_stop)(base, &self.native(spec), job, budget)
     }
 
@@ -1406,6 +1454,7 @@ impl Runtime for Adapter {
 
     fn app_server_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>> {
         self.needs("app-server")?;
+        spec.validate_session()?;
         Ok((self.ops.app_command)(Command::new("native-argument-inspection"), &self.native(spec))?.get_args().map(OsStr::to_os_string).collect())
     }
 }
@@ -1446,6 +1495,33 @@ use registry::project_dir;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test] fn raw_native_session_validation_precedes_commands() {
+        let command=||Command::new("raw-must-not-spawn");let error=Some("native CLI session invalid");let budget=Duration::ZERO;
+        for name in ["claude","codex","antigravity"] {
+            let runtime=runtime(name).unwrap();
+            for session in ["--foreign-flag","-x","opaque:/file","one two","one\nline","","-"] {
+                let spec=NativeSpec {session:session.into(),resume:true,..Default::default()};
+                assert_eq!(runtime.native_arguments(&spec).err().as_deref(),error);
+                assert!(super::super::history::sessions::resume(name,session).is_err(),"terminal argv requires a CLI-safe ID");
+                let mut terminal=Launch::new(std::env::temp_dir(),std::env::temp_dir().join("unused.log"),"","fixtureq");terminal.home=Some(std::env::temp_dir().join(crate::incident::uuid()));terminal.command=vec!["raw-must-not-spawn".into()];
+                assert_eq!(runtime.descriptor().history_resume(session,&terminal,&[]).err().as_deref(),Some("history session invalid"),"terminal ID refusal precedes preflight");
+                assert_eq!(runtime.turn(command(),&spec,Path::new("unused.log"),"never",&Process::default()).err().as_deref(),error);
+                if runtime.descriptor().has("background") {
+                    assert_eq!(runtime.background_launch(command(),&spec,"never",budget).err().as_deref(),error);
+                    assert_eq!(runtime.jobs(command(),&spec,false,budget).err().as_deref(),error);
+                    assert_eq!(runtime.job(&Value::Null,&spec,"job").err().as_deref(),error);
+                    let job=BackgroundJob {id:"job".into(),session:"safe".into(),pid:None,root:PathBuf::new(),scope:String::new()};
+                    assert_eq!(runtime.stop_job(command(),&spec,&job,budget).err().as_deref(),error);
+                }
+                if runtime.descriptor().has("app-queue") {assert_eq!(runtime.app_queue(command(),&spec,"never",budget).err().as_deref(),error);}
+                if runtime.descriptor().has("app-server") {assert_eq!(runtime.app_server_arguments(&spec).err().as_deref(),error);}
+            }
+            for (session,resume) in [("session-1",true),("session-1",false),("-",false)] {
+                assert!(runtime.native_arguments(&NativeSpec {session:session.into(),resume,..Default::default()}).is_ok());
+            }
+        }
+    }
 
     fn args(name: &str, l: &Launch) -> Res<Vec<String>> {
         mapped(Client::parse(name).unwrap(), name, l).map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect())
@@ -1496,6 +1572,7 @@ mod tests {
             probes.insert("caller-session-id",args.windows(2).any(|p|p==["--session-id","session-1"]));
             probes.insert("session-url",!matches!(runtime.session_link(&native,None),Err((Cause("no-session-url"),_))));
             probes.insert("catalogue",supported(runtime.catalogue_with_executable(Some(&root),Some(&absent)).map(|_|())));
+            probes.insert("acp",adapter.ops.acp.is_some());
             probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
             let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
             let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None}));
@@ -1656,7 +1733,7 @@ mod tests {
         assert_eq!(input_items(codex, &[Part::Text("a".into()), Part::Image(abs.clone())]).unwrap(), json!([{"type": "text", "text": "a"}, {"type": "localImage", "path": abs}]));
         assert_eq!(input_items(codex, &[]), refused("input-empty"));
         assert_eq!(input_items(codex, &[Part::Image("rel.png".into())]), refused("image-invalid"));
-        for name in ["claude", "antigravity"] {
+        for name in ["claude"] {
             assert_eq!(input_items(runtime(name).unwrap().descriptor(), &[Part::Image(abs.clone())]), refused("image-unsupported"), "{name}");
         }
         let read = |v: Value| account_of(&v);
@@ -1680,7 +1757,7 @@ mod tests {
         assert_eq!(runtime("agy").unwrap().descriptor().name, "antigravity");
         assert!(runtime("other").is_none());
         assert!(runtime("claude").unwrap().descriptor().has("compact-hook") && !runtime("codex").unwrap().descriptor().has("compact-hook"));
-        assert!(runtime("claude").unwrap().descriptor().has("turn-parts") && runtime("codex").unwrap().descriptor().has("turn-parts") && !runtime("antigravity").unwrap().descriptor().has("turn-parts"));
+        assert!(runtime("claude").unwrap().descriptor().has("turn-parts") && runtime("codex").unwrap().descriptor().has("turn-parts") && runtime("antigravity").unwrap().descriptor().has("turn-parts"));
         assert_eq!(runtime("claude").unwrap().descriptor().models, ["opus", "sonnet", "haiku"]);
         assert!(runtimes().iter().all(|r| r.descriptor().minimum.is_empty() || version_parts(r.descriptor().minimum).is_some()));
         for r in runtimes() {
