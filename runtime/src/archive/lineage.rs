@@ -99,3 +99,21 @@ mod tests {
         let mut other=frame.clone();other.source="generation-two".into();assert_ne!(frame.anchor(&step,"incarnation-one",&accepted),other.anchor(&step,"incarnation-one",&accepted));
     }
 }
+
+#[cfg(test)]
+mod claude_native_projection_tests {
+    use super::*;
+    use crate::agent::history::lineage::native_prefix;
+    // #300: native capture maps the actual native record, never its stream-log lookalike.
+    #[test]
+    fn claude_terminal_attachment_uses_same_physical_native_generation() {
+        let raw=include_bytes!("../../tests/fixtures/history/claude-fork-tool-chain.jsonl");let session="00000000-0000-4000-8000-000000000099";
+        let steps=native_prefix("claude","claude-native","private-native",session,Some(session),raw).unwrap();
+        let step=steps.iter().find(|s|s.source["raw"].as_str().is_some_and(|r|r.contains("\"type\":\"attachment\""))).unwrap();
+        let frame=Frame::capture("native-generation","native-incarnation",Path::new("private-native"),0,"claude-native",raw).unwrap();
+        let anchor=frame.anchor(step,"native-incarnation",raw).unwrap();assert!(frame.projection(step,"native-incarnation",raw,"claude",session,&anchor).is_some());
+        assert!(frame.anchor(step,"different-incarnation",raw).is_none());
+        let mut stream=step.clone();stream.source["source"]=json!("private-stream");stream.source["format"]=json!("claude-stream");assert!(frame.anchor(&stream,"native-incarnation",raw).is_none());
+        let mut foreign=step.clone();foreign.origins[0]["source"]=json!("private-stream");assert!(frame.projection(&foreign,"native-incarnation",raw,"claude",session,&anchor).is_none());
+    }
+}

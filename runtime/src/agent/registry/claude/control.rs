@@ -104,6 +104,11 @@ impl Session {
         session.initialization=session.exchange(json!({"subtype":"initialize","hooks":null}))?;
         Ok(session)
     }
+    pub fn archive_home(&self)->Option<PathBuf> {spec_home(&self.spec)}
+    pub fn archive_source(&self)->Option<crate::archive::Source> {
+        let turn=self.native_turn.as_ref()?;
+        Some(crate::archive::Source {path:turn.path().into(),format:"claude-native".into(),start:turn.start(),end:None})
+    }
     pub fn id(&self)->u32 {self.native.pid}
     pub fn recovered(&self)->bool {self.server.is_none()}
     pub fn checkpoint(&self)->Value {

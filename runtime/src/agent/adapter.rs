@@ -1361,9 +1361,9 @@ impl Adapter {
             Body::Native(n)=>(vec![crate::archive::Source {path:n.turn.path().into(),format:self.ops.protocol.native_history.into(),start:n.turn.start(),end:None}],
                 Some(n.turn.session().into())),
             Body::App(a)=>(a.captured_source().filter(|s|s.runtime==self.descriptor.name && Some(s.session.as_str())==a.session.session() && s.representation=="native-jsonl-inbound-selection/1").map(crate::archive::Source::selected).into_iter().collect(),a.session.session().map(String::from)),
-            Body::Claude(a)=>(vec![],Some(a.session.clone())),
+            Body::Claude(a)=>(a.archive_source().into_iter().collect(),Some(a.session.clone())),
         };
-        let home=match &body {Body::Turn(t)=>t.home.clone(),Body::Native(n)=>spec_home(&n.spec),Body::App(a)=>a.session.history_home(),Body::Acp(_)|Body::Rpc(_)|Body::Claude(_)=>l.home.clone()};
+        let home=match &body {Body::Turn(t)=>t.home.clone(),Body::Native(n)=>spec_home(&n.spec),Body::App(a)=>a.session.history_home(),Body::Claude(a)=>a.archive_home(),Body::Acp(_)|Body::Rpc(_)=>l.home.clone()};
         let mut archive=crate::archive::Handle::launch(self.descriptor.name,l,sources,session,home);
         let stop_id=crate::incident::uuid();
         if matches!(body,Body::Native(_)) {archive.bind_native(&stop_id);}else{archive.save();}

@@ -34,12 +34,23 @@ fn source_unaliased(path:&Path)->Res<()> {
         if metadata.nlink()!=1 {return Err("fork-source-alias-unsupported".into());}
         Ok(())
     }
-    #[cfg(not(unix))] {Err("fork-source-alias-check-unavailable".into())}
+    #[cfg(windows)] {
+        use std::os::windows::{fs::MetadataExt,io::AsRawHandle};
+        if metadata.file_attributes()&0x400!=0 {return Err("fork-source-alias-unsupported".into());}
+        #[repr(C)] struct Standard {allocation:i64,end:i64,links:u32,pending:u8,directory:u8}
+        #[link(name="kernel32")] unsafe extern "system" {fn GetFileInformationByHandleEx(handle:*mut std::ffi::c_void,kind:i32,data:*mut std::ffi::c_void,size:u32)->i32;}
+        let file=File::open(path).map_err(|e|e.to_string())?;
+        let mut info=Standard {allocation:0,end:0,links:0,pending:0,directory:0};
+        // SAFETY: FILE_STANDARD_INFO writes the live repr(C) buffer for this owned file handle.
+        if unsafe {GetFileInformationByHandleEx(file.as_raw_handle(),1,(&mut info as *mut Standard).cast(),std::mem::size_of::<Standard>() as u32)}==0 {return Err("fork-source-alias-check-unavailable".into());}
+        if info.links!=1 || info.pending!=0 || info.directory!=0 {return Err("fork-source-alias-unsupported".into());}Ok(())
+    }
+    #[cfg(not(any(unix,windows)))] {Err("fork-source-alias-check-unavailable".into())}
 }
 
 fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Boundary> {
     let path=turn.path().to_path_buf();source_unaliased(&path)?;let label=path.to_str().ok_or("fork-source-unknown")?;
-    if step.source["format"]!="claude-native" || step.source["source"]!=label || step.turn.session!=turn.session() || step.kind!=StepKind::Message || step.author!="assistant" {return Err("fork-selection-unsupported".into());}
+    if step.source["format"]!="claude-native" || step.source["source"]!=label || step.turn.session!=turn.session() {return Err("fork-selection-unsupported".into());}
     // Reuse the native decoder's accepted-input/end marker and immutable pre-input physical guard.
     if turn.checkpoint()!=*generation || std::fs::metadata(&path).map_err(|e|e.to_string())?.len()!=generation["protected_until"].as_u64().ok_or("fork-source-generation-unknown")? {return Err("fork-source-generation-changed".into());}
     if turn.poll()?.is_none() || turn.aborted {return Err("fork-native-turn-unsettled".into());}
@@ -53,16 +64,26 @@ fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Bound
     let rows=text.lines().map(|line|serde_json::from_str::<Value>(line).map_err(|_|"fork-source-invalid".to_string())).collect::<Res<Vec<_>>>()?;
     let selected:Value=serde_json::from_str(step.source["raw"].as_str().ok_or("fork-selection-source-unknown")?).map_err(|_|"fork-selection-source-unknown")?;
     let target=uuid(&selected["uuid"])?;
+    let content=selected["message"]["content"].as_array();
+    let selected_tail=match selected["type"].as_str() {
+        Some("assistant")=>step.kind==StepKind::Message && content.is_some_and(|c|step.part+1==c.len() && c[step.part]["type"]=="text"),
+        Some("user")=>content.is_some_and(|c|!c.is_empty() && step.part+1==c.len() && c.iter().all(|b|b["type"]=="tool_result")),
+        Some("attachment")=>matches!(selected["attachment"]["type"].as_str(),Some("structured_output"|"inlined_image_paths"|"mcp_resource")),
+        _=>false,
+    };
+    if !selected_tail {return Err("fork-selection-not-terminal-entry".into());}
     let mut chain=vec![];let mut ids=std::collections::BTreeSet::new();let mut previous:Option<String>=None;
+    let mut tools=std::collections::BTreeSet::new();let mut seen_tools=std::collections::BTreeSet::new();
     let mut prompt=None::<String>;let mut group=None::<String>;let mut closed=true;let mut selected_prompt=None;let mut selected_chain=None;let mut retained_end=0u64;let mut offset=0u64;
     for (row,line) in rows.iter().zip(text.split_inclusive('\n')) {
         offset+=line.len() as u64;
+        if row["subtype"]=="compact_boundary" || row["isCompactSummary"]==true {return Err("fork-compaction-cursor-unmapped".into());}
+        if row["isSidechain"]==true {return Err("fork-sidechain-source-unmapped".into());}
         if row["type"]=="system" && row["subtype"]=="turn_duration" && row.get("uuid").is_none() {
-            if row.get("sessionId").is_some_and(|s|s!=turn.session()) || closed || previous.is_none() {return Err("fork-turn-marker-unknown".into());}
+            if row.get("sessionId").is_some_and(|s|s!=turn.session()) || closed || previous.is_none() || !tools.is_empty() {return Err("fork-turn-marker-unknown".into());}
             closed=true;continue;
         }
-        // Attachments, compaction, tool carriers and side chains need their own proven whole-turn map.
-        if !matches!(row["type"].as_str(),Some("user"|"assistant")) || row["isSidechain"]!=false || row["sessionId"]!=turn.session() || row.get("parentSessionId").is_some_and(|v|!v.is_null()) {return Err("fork-chain-entry-unsupported".into());}
+        if !matches!(row["type"].as_str(),Some("user"|"assistant"|"attachment")) || row["isSidechain"]!=false || row["sessionId"]!=turn.session() || row.get("parentSessionId").is_some_and(|v|!v.is_null()) {return Err("fork-chain-entry-unsupported".into());}
         let id=uuid(&row["uuid"])?;
         if !ids.insert(id.to_string()) {return Err("fork-native-uuid-duplicate".into());}
         match (previous.as_deref(),row.get("parentUuid")) {
@@ -70,18 +91,44 @@ fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Bound
             (Some(parent),Some(value)) if uuid(value)?==parent=>{},
             _=>return Err("fork-native-chain-unknown".into()),
         }
-        if row["type"]=="user" {
-            if !closed || row["isMeta"]==true || !row["message"]["content"].is_string() {return Err("fork-prompt-boundary-unknown".into());}
-            prompt=Some(id.to_string());group=Some(uuid(&row["promptId"] )?.to_string());closed=false;
+        let blocks=row["message"]["content"].as_array();
+        if row["type"]=="user" && row["message"]["role"]!="user" {return Err("fork-user-role-unknown".into());}
+        let carrier=row["type"]=="user" && blocks.is_some_and(|c|!c.is_empty() && c.iter().all(|b|b["type"]=="tool_result"));
+        if row["type"]=="user" && !carrier {
+            if !closed || row["isMeta"]==true || row["stackedExpansion"]==true || !(row["message"]["content"].is_string() || blocks.is_some_and(|c|!c.is_empty() && c.iter().all(|b|matches!(b["type"].as_str(),Some("text"|"image"|"document"))))) {return Err("fork-prompt-boundary-unknown".into());}
+            prompt=Some(id.to_string());group=Some(uuid(&row["promptId"] )?.to_string());closed=false;seen_tools.clear();
         }else{
-            if closed || group.as_deref()!=Some(uuid(&row["promptId"])? ) || row["message"]["role"]!="assistant" || row["isApiErrorMessage"]==true || !row["message"]["content"].as_array().is_some_and(|blocks|!blocks.is_empty() && blocks.iter().all(|b|b["type"]=="text" && b["text"].is_string())) {return Err("fork-whole-turn-unknown".into());}
-            if row["message"]["stop_reason"]!="end_turn" {return Err("fork-whole-turn-unknown".into());}
+            if prompt.is_none() || row.get("promptId").is_some_and(|p|Some(p.as_str().unwrap_or_default())!=group.as_deref()) {return Err("fork-prompt-association-unknown".into());}
+            if carrier {
+                if closed {return Err("fork-tool-carrier-outside-turn".into());}
+                for block in blocks.ok_or("fork-tool-carrier-invalid")? {
+                    let tool=block["tool_use_id"].as_str().filter(|s|!s.is_empty()).ok_or("fork-tool-carrier-invalid")?;
+                    if !tools.remove(tool) {return Err("fork-tool-carrier-unassociated".into());}
+                }
+            }else if row["type"]=="assistant" {
+                if closed || row["message"]["role"]!="assistant" || row["isApiErrorMessage"]==true {return Err("fork-whole-turn-unknown".into());}
+                for block in blocks.filter(|b|!b.is_empty()).ok_or("fork-assistant-content-unknown")? {
+                    match block["type"].as_str() {
+                        Some("text") if block["text"].is_string()=>{},
+                        Some("thinking") if block["thinking"].is_string()=>{},
+                        Some("redacted_thinking") if block["data"].is_string()=>{},
+                        Some("tool_use") if block["name"].as_str().is_some_and(|s|!s.is_empty()) && block["input"].is_object()=>{
+                            let tool=block["id"].as_str().filter(|s|!s.is_empty()).ok_or("fork-tool-id-unknown")?;
+                            if !seen_tools.insert(tool.to_string()) || !tools.insert(tool.to_string()) {return Err("fork-tool-id-duplicate".into());}
+                        },
+                        _=>return Err("fork-native-block-unmapped".into()),
+                    }
+                }
+            }else if row["type"]=="attachment" {
+                if !matches!(row["attachment"]["type"].as_str(),Some("structured_output"|"inlined_image_paths"|"mcp_resource")) {return Err("fork-attachment-turn-unmapped".into());}
+                if !tools.is_empty() {return Err("fork-attachment-tool-tail-unknown".into());}
+            }
         }
         chain.push(json!({"uuid":id,"parent_uuid":row["parentUuid"]}));previous=Some(id.to_string());
         if id==target {selected_prompt=prompt.clone();selected_chain=Some(chain.clone());retained_end=offset;}
         else if selected_chain.is_some() && prompt==selected_prompt {return Err("fork-selected-not-last-chain-entry".into());}
     }
-    if !closed {return Err("fork-whole-turn-unknown".into());}
+    if !closed || !tools.is_empty() {return Err("fork-whole-turn-unknown".into());}
     let chain=selected_chain.ok_or("fork-selected-native-entry-unknown")?;
     let prefix=history.read_bytes(&path,0,retained_end)?;
     let boundary=Boundary {path,generation:page.checkpoint.clone(),descriptor:json!({"parent_session":turn.session(),"prompt_uuid":selected_prompt,"last_chain_uuid":target,"chain":chain,"retained_end":retained_end,"retained_sha256":crate::sha256_hex(&prefix),"generation":page.checkpoint,"selected":{"id":step.id,"revision":step.revision,"part":step.part,"start":step.source["start"],"end":step.source["end"],"sha256":step.source["sha256"]},"whole_turn":true})};
@@ -116,9 +163,9 @@ impl Boundary {
             for line in std::str::from_utf8(bytes).map_err(|_|"fork-prefix-invalid")?.lines() {
                 let row:Value=serde_json::from_str(line).map_err(|_|"fork-prefix-invalid")?;
                 if row["type"]=="system" && row["subtype"]=="turn_duration" {continue;}
-                if !matches!(row["type"].as_str(),Some("user"|"assistant")) || row["sessionId"]!=session || row["isSidechain"]!=false {return Err("fork-prefix-entry-unsupported".into());}
+                if !matches!(row["type"].as_str(),Some("user"|"assistant"|"attachment")) || row["sessionId"]!=session || row["isSidechain"]!=false {return Err("fork-prefix-entry-unsupported".into());}
                 uuid(&row["uuid"])?;
-                out.push(json!({"uuid":row["uuid"],"parentUuid":row["parentUuid"],"promptId":row["promptId"],"type":row["type"],"message":row["message"],"isMeta":row["isMeta"],"isCompactSummary":row["isCompactSummary"]}));
+                out.push(json!({"uuid":row["uuid"],"parentUuid":row["parentUuid"],"promptId":row["promptId"],"type":row["type"],"message":row["message"],"isMeta":row["isMeta"],"isCompactSummary":row["isCompactSummary"],"attachment":row["attachment"]}));
             }Ok(out)
         };
         if values(&bytes,&spec.session)?!=values(&original,self.descriptor["parent_session"].as_str().ok_or("fork-parent-unknown")?)? {return Err("fork-child-prefix-differs".into());}
@@ -267,6 +314,38 @@ mod tests {
         std::fs::write(&path,&before).unwrap();let mut bad=step.clone();bad.source["source"]=json!(root.join("copy.jsonl"));assert!(resolve(&bad,&mut turn,&generation).is_err());
         let alias=root.join("alias.jsonl");std::fs::hard_link(&path,&alias).unwrap();assert!(proof.revalidate().is_err());std::fs::remove_file(alias).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(),before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retained_tool_tail_tests {
+    use super::*;
+    #[cfg(any(unix,windows))]
+    #[test]
+    fn whole_turn_uses_actual_structured_attachment_after_thinking_and_tool_carrier() {
+        let root=crate::scratch("claude-tool-tail");let path=root.join("native.jsonl");let session="00000000-0000-4000-8000-000000000099";
+        let spec=Spec {client:Client::Claude,root:root.clone(),session:session.into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+        let fixture=include_str!("../../../../tests/fixtures/history/claude-fork-tool-chain.jsonl");
+        let mut turn=native::NativeTurn::before(&spec,&path,"first").unwrap();std::fs::write(&path,fixture).unwrap();assert!(turn.poll().unwrap().is_some());let generation=turn.checkpoint();
+        let mut history=History::new("claude-native",path.to_str().unwrap(),session).unwrap();let page=history.steps(&path,fixture.len() as u64).unwrap();
+        let selected=page.steps.iter().find(|s|s.source["raw"].as_str().is_some_and(|raw|raw.contains("\"type\":\"attachment\""))).unwrap();
+        let proof=resolve(selected,&mut turn,&generation).unwrap();
+        assert_eq!(proof.descriptor["last_chain_uuid"],"00000000-0000-4000-8000-000000000004");assert_eq!(proof.descriptor["chain"].as_array().unwrap().len(),4);
+        for mid in page.steps.iter().filter(|s|s.kind==StepKind::Thinking || s.source["raw"].as_str().is_some_and(|raw|raw.contains("\"type\":\"tool_result\""))) {assert!(resolve(mid,&mut turn,&generation).is_err());}
+        let launch=Launch::new(&root,root.join("child.log"),"next","fixtureq");let child=child_spec(&launch,session,&proof.descriptor).unwrap();let child_path=claude_transcript(&child,&child.session).unwrap();std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        let prefix=&fixture[..proof.descriptor["retained_end"].as_u64().unwrap() as usize];std::fs::write(&child_path,prefix.replace(session,&child.session)).unwrap();assert_eq!(proof.child_prefix(&child).unwrap()["session_id"],child.session);
+        let carrier_fixture=fixture.lines().filter(|line|!line.contains("\"type\":\"attachment\"")).collect::<Vec<_>>().join("\n")+"\n";
+        let carrier_path=root.join("carrier.jsonl");let mut carrier_turn=native::NativeTurn::before(&spec,&carrier_path,"first").unwrap();std::fs::write(&carrier_path,&carrier_fixture).unwrap();assert!(carrier_turn.poll().unwrap().is_some());let carrier_generation=carrier_turn.checkpoint();
+        let mut carrier_history=History::new("claude-native",carrier_path.to_str().unwrap(),session).unwrap();let carrier_page=carrier_history.steps(&carrier_path,carrier_fixture.len() as u64).unwrap();
+        let carrier=carrier_page.steps.iter().find(|s|s.source["raw"].as_str().is_some_and(|r|r.contains("\"type\":\"tool_result\""))).unwrap();assert_eq!(resolve(carrier,&mut carrier_turn,&carrier_generation).unwrap().descriptor["last_chain_uuid"],"00000000-0000-4000-8000-000000000003");
+        drop(history);drop(carrier_history);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_link_count_is_measured_and_aliases_refuse() {
+        let root=crate::scratch("claude-windows-alias");let path=root.join("native.jsonl");std::fs::write(&path,b"native\n").unwrap();source_unaliased(&path).unwrap();
+        let alias=root.join("alias.jsonl");std::fs::hard_link(&path,&alias).unwrap();assert!(source_unaliased(&path).is_err());std::fs::remove_file(alias).unwrap();source_unaliased(&path).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 }
