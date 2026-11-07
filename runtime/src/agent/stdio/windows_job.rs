@@ -35,7 +35,28 @@ fn created(handle:*mut c_void)->Res<u64> {
     let(mut start,mut exit,mut kernel,mut user)=(Time::default(),Time::default(),Time::default(),Time::default());
     if unsafe {GetProcessTimes(handle,&mut start,&mut exit,&mut kernel,&mut user)}==0 {return Err(error("creation identity"));}Ok((u64::from(start.high)<<32)|u64::from(start.low))
 }
+const DESCENDANT_ACCESS:u32=0x00100000|0x0400|0x0800|0x0100|0x0001;
 struct Frozen {handle:OwnedHandle,pid:u32,created:u64,resume:bool}
+fn check_parent(pid:u32,created:u64,parent:&Frozen,basic:&ProcessBasic,returned:u32,status:i32,parent_wait:u32)->Res<()> {
+    let size_ok=returned as usize==std::mem::size_of::<ProcessBasic>();
+    let pid_ok=basic.pid==pid as usize;let parent_ok=basic.parent==parent.pid as usize;
+    let creation_ok=created>=parent.created;let parent_live=parent_wait==258;
+    if status<0 || !size_ok || !pid_ok || !parent_ok || !creation_ok || !parent_live {
+        let operation=if status<0 {"parent identity"}else{"descendant identity changed or unknown"};
+        let query_valid=status>=0 && size_ok;
+        let observed_pid=if query_valid {basic.pid.to_string()}else{"null".into()};
+        let observed_parent=if query_valid {basic.parent.to_string()}else{"null".into()};
+        let pid_ok=if query_valid {pid_ok.to_string()}else{"null".into()};
+        let parent_ok=if query_valid {parent_ok.to_string()}else{"null".into()};
+        return Err(format!("native job {operation}; phase=attach requested_rights={DESCENDANT_ACCESS} candidate_pid={pid} candidate_creation={created} expected_parent_pid={} expected_parent_creation={} observed_pid={observed_pid} observed_parent_pid={observed_parent} query_valid={query_valid} query_status={status} query_returned={returned} query_expected={} parent_wait={parent_wait} size_ok={size_ok} pid_ok={pid_ok} parent_ok={parent_ok} creation_ok={creation_ok} parent_live={parent_live}",parent.pid,parent.created,std::mem::size_of::<ProcessBasic>()));
+    }
+    Ok(())
+}
+fn open_error(code:Option<i32>,pid:u32,parent:&Frozen)->String {
+    let code=code.map_or_else(||"null".into(),|v|v.to_string());
+    let parent_wait=unsafe {WaitForSingleObject(parent.handle.as_raw_handle(),0)};
+    format!("native job open process; phase=attach os_code={code} requested_rights={DESCENDANT_ACCESS} candidate_pid={pid} expected_parent_pid={} expected_parent_creation={} parent_wait={parent_wait}",parent.pid,parent.created)
+}
 impl Drop for Frozen {fn drop(&mut self) {unsafe {if self.resume {NtResumeProcess(self.handle.as_raw_handle());}else{TerminateProcess(self.handle.as_raw_handle(),1);}}}}
 impl Frozen {
     fn root(child:&Child)->Res<Self> {
@@ -44,8 +65,12 @@ impl Frozen {
         Self::freeze(unsafe {OwnedHandle::from_raw_handle(raw)},None)
     }
     fn open(pid:u32,parent:&Self)->Res<Option<Self>> {
-        let raw=unsafe {OpenProcess(0x00100000|0x0400|0x0800|0x0100|0x0001,0,pid)};
-        if raw.is_null() {if std::io::Error::last_os_error().raw_os_error()==Some(87) {return Ok(None);}return Err(error("open process"));}
+        let raw=unsafe {OpenProcess(DESCENDANT_ACCESS,0,pid)};
+        if raw.is_null() {
+            let failure=std::io::Error::last_os_error();
+            if failure.raw_os_error()==Some(87) {return Ok(None);}
+            return Err(open_error(failure.raw_os_error(),pid,parent));
+        }
         Self::freeze(unsafe {OwnedHandle::from_raw_handle(raw)},Some(parent)).map(Some)
     }
     fn freeze(handle:OwnedHandle,parent:Option<&Self>)->Res<Self> {
@@ -54,12 +79,9 @@ impl Frozen {
         if let Some(parent)=parent {
             let mut basic:ProcessBasic=unsafe {std::mem::zeroed()};let mut returned=0;
             let status=unsafe {NtQueryInformationProcess(raw,0,(&mut basic as *mut ProcessBasic).cast(),std::mem::size_of::<ProcessBasic>() as u32,&mut returned)};
-            if status<0 {return Err(format!("native job parent identity: NTSTATUS {status:#x}"));}
             // The snapshot is discovery only. Neither an unknown nor a replaced PID grants process authority.
-            if returned as usize!=std::mem::size_of::<ProcessBasic>() || basic.pid!=pid as usize || basic.parent!=parent.pid as usize || created<parent.created
-                || unsafe {WaitForSingleObject(parent.handle.as_raw_handle(),0)}!=258 {
-                return Err("native job descendant identity changed or unknown".into());
-            }
+            let parent_wait=unsafe {WaitForSingleObject(parent.handle.as_raw_handle(),0)};
+            check_parent(pid,created,parent,&basic,returned,status,parent_wait)?;
         }
         let status=unsafe {NtSuspendProcess(raw)};
         if status<0 {return Err(format!("native job suspend: NTSTATUS {status:#x}"));}
@@ -109,6 +131,33 @@ impl Job {
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn parent_identity_errors_name_each_failed_predicate() {
+        let mut child=Command::new("cmd.exe").args(["/D","/C","set /p wait="]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let parent=Frozen::root(&child).unwrap();
+        let mut basic:ProcessBasic=unsafe {std::mem::zeroed()};basic.pid=parent.pid as usize;basic.parent=parent.pid as usize;
+        let size=std::mem::size_of::<ProcessBasic>() as u32;
+        assert!(check_parent(parent.pid,parent.created,&parent,&basic,size,0,258).is_ok());
+        let failures=[
+            (parent.pid,parent.created,size,-1,258,"query_status=-1"),
+            (parent.pid,parent.created,0,0,258,"size_ok=false"),
+            (0,parent.created,size,0,258,"pid_ok=false"),
+            (parent.pid,0,size,0,258,"creation_ok=false"),
+            (parent.pid,parent.created,size,0,0,"parent_live=false"),
+            (parent.pid,parent.created,size,0,u32::MAX,"parent_live=false"),
+        ];
+        let errors:Vec<_>=failures.iter().map(|&(pid,created,size,status,wait,_)|check_parent(pid,created,&parent,&basic,size,status,wait).unwrap_err()).collect();
+        basic.pid=0;basic.parent=0;
+        let invalid_buffers:Vec<_>=[(-1,size),(0,0)].iter().map(|&(status,returned)|check_parent(parent.pid,parent.created,&parent,&basic,returned,status,258).unwrap_err()).collect();
+        basic.pid=parent.pid as usize;basic.parent=0;
+        let wrong_parent=check_parent(parent.pid,parent.created,&parent,&basic,size,0,258).unwrap_err();
+        let denied=open_error(Some(5),parent.pid,&parent);let unknown=open_error(None,parent.pid,&parent);
+        drop(parent);child.wait().unwrap();
+        assert!(wrong_parent.contains("parent_ok=false"));
+        for field in ["phase=attach","os_code=5","requested_rights=1051905","candidate_pid=","expected_parent_creation=","parent_wait=258"] {assert!(denied.contains(field),"{denied}");}
+        assert!(unknown.contains("os_code=null"));
+        for error in errors[..2].iter().chain(&invalid_buffers) {assert!(error.contains("query_valid=false") && error.contains("observed_pid=null observed_parent_pid=null") && error.contains("pid_ok=null parent_ok=null"),"{error}");}
+        for (error,case) in errors.iter().zip(failures) {assert!(error.contains(case.5),"{error}");}
+    }
     // A stale snapshot names an owned parent, but its PID now resolves to our unrelated child.
     #[test] fn stale_snapshot_refuses_unrelated_process_before_touching_it() {
         let spawn=||Command::new("cmd.exe").args(["/D","/C","set /p first= & echo unrelated-live & set /p second="])
@@ -116,7 +165,7 @@ impl Job {
         let mut parent=spawn();let root=Frozen::root(&parent).unwrap();
         let mut unrelated=spawn();
         let attempt=Frozen::open(unrelated.id(),&root);
-        let refused=attempt.is_err();drop(attempt);
+        let refusal=attempt.as_ref().err().cloned();let refused=refusal.is_some();drop(attempt);
         if refused {
             unrelated.stdin.as_mut().unwrap().write_all(b"continue\r\n").unwrap();
             let mut line=String::new();BufReader::new(unrelated.stdout.take().unwrap()).read_line(&mut line).unwrap();
@@ -124,5 +173,9 @@ impl Job {
         }
         let _=unrelated.kill();let _=unrelated.wait();drop(root);let _=parent.wait();
         assert!(refused,"snapshot PID reuse must refuse before suspension, assignment or termination");
+        let refusal=refusal.unwrap();
+        for field in ["phase=attach","candidate_pid=","expected_parent_pid=","observed_parent_pid=","parent_ok=false","query_status=0","parent_live=true"] {
+            assert!(refusal.contains(field),"missing {field}: {refusal}");
+        }
     }
 }
