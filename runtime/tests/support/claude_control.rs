@@ -85,12 +85,16 @@ pub fn controls() {
 }
 
 pub fn boundaries() {
-    for mode in ["resolved","foreign-session","unknown-result","deny-policy"] {
+    for mode in ["resolved","foreign-session","unknown-result","deny-policy","foreign-receipt"] {
         let root=scratch("claude-control-boundaries");let runtime=agent::runtime("claude").unwrap();let mut l=fake_launch("claude",&root,"first",&[]);l.controls=true;
         l.env.extend([("AGENTQ_CLAUDE_CONTROL_FIXTURE".into(),"1".into()),("AGENTQ_CLAUDE_CONTROL_EXTRA".into(),mode.into())]);if mode=="deny-policy" {l.policy.approval=agent::Approval::Deny;}
         let mut run=runtime.launch(&l).unwrap();let Event::Request{id:first,choices,..}=request(runtime,&mut run) else {unreachable!()};
         let before=std::fs::read(root.join("claude-input.jsonl")).unwrap();
-        if mode=="deny-policy" {
+        if mode=="foreign-receipt" {
+            assert!(runtime.set_option(&mut run,Control::Model("sonnet".into())).is_err(),"a matching request ID does not override a foreign session claim");
+            let after=std::fs::read(root.join("claude-input.jsonl")).unwrap();assert!(after.len()>before.len(),"only the original authorized model request was sent");
+            assert!(runtime.respond(&mut run,Control::Reply{id:first,option:Some("allow".into())}).is_err());assert_eq!(std::fs::read(root.join("claude-input.jsonl")).unwrap(),after);
+        }else if mode=="deny-policy" {
             assert_eq!(choices.iter().map(|c|c.id.as_str()).collect::<Vec<_>>(),["deny"]);assert!(runtime.respond(&mut run,Control::Reply{id:first.clone(),option:Some("allow".into())}).is_err());
             assert_eq!(std::fs::read(root.join("claude-input.jsonl")).unwrap(),before);runtime.respond(&mut run,Control::Reply{id:first,option:None}).unwrap();finish(runtime,&mut run);
         }else{
@@ -124,14 +128,16 @@ pub fn server() {
             Some("control_request")=>{
                 let subtype=value["request"]["subtype"].as_str().unwrap();assert!(matches!(subtype,"initialize"|"set_model"|"interrupt"));
                 if subtype=="set_model" {assert_eq!(value["request"]["model"],"sonnet");}
-                emit(json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{}}}));if subtype=="interrupt" {emit(result(true));}
+                let mut receipt=json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{}}});
+                if subtype=="set_model" && std::env::var("AGENTQ_CLAUDE_CONTROL_EXTRA").as_deref()==Ok("foreign-receipt") {receipt["session_id"]=json!("foreign");}
+                emit(receipt);if subtype=="interrupt" {emit(result(true));}
             },
             Some("user")=>{
                 assert_eq!(value["session_id"],session);question=false;emit(json!({"type":"system","subtype":"init","session_id":session}));
                 if value["message"]["content"][0]["text"]=="/compact" {emit(json!({"type":"system","subtype":"compact_boundary","session_id":session}));emit(result(false));}
                 else{
                     emit(json!({"type":"control_request","request_id":"native-reused","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool","input":{"command":"owned fixture"}}}));
-                    if let Ok(mode)=std::env::var("AGENTQ_CLAUDE_CONTROL_EXTRA") {if mode!="deny-policy" {
+                    if let Ok(mode)=std::env::var("AGENTQ_CLAUDE_CONTROL_EXTRA") {if mode!="deny-policy" && mode!="foreign-receipt" {
                         let root=std::env::current_dir().unwrap();let session=session.clone();
                         std::thread::spawn(move|| {wait_for(&root.join("inject"));
                             if mode=="resolved" {

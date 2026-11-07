@@ -120,11 +120,12 @@ impl Session {
         self.writable()?;let id=crate::incident::uuid();self.write(&json!({"type":"control_request","request_id":id,"request":request}))?;
         loop {
             let value=match self.server.as_mut().ok_or("control-transport-unavailable")?.wait(self.deadline) {Ok(v)=>v,Err(e)=>{self.closed=Some(e.clone());return Err(e);}};
-            if value["type"]=="control_response" && value["response"]["request_id"]==id {
-                writeln!(self.log,"{value}").and_then(|_|self.log.sync_data()).map_err(|e|{self.closed=Some(e.to_string());e.to_string()})?;
+            let replied=value["type"]=="control_response" && value["response"]["request_id"]==id;
+            self.observe(value.clone())?;
+            if replied {
+                self.log.sync_data().map_err(|e|{self.closed=Some(e.to_string());e.to_string()})?;
                 if value["response"]["subtype"]!="success" {self.closed=Some("native-control-refused-or-unknown".into());return Err("native-control-refused-or-unknown".into());}return Ok(());
             }
-            self.observe(value)?;
         }
     }
     pub fn input(&mut self,parts:&[Part])->Res<()> {
