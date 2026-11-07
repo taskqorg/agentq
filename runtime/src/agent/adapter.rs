@@ -43,8 +43,8 @@ impl Descriptor {
         let adapter=Client::parse(self.name).map(registry::builtin).ok_or("history resume unsupported")?;
         if launch.mode!=Mode::Turn || !launch.input.is_empty() || !launch.parts.is_empty() || launch.deltas || launch.mcp.is_some() || launch.instructions.is_some() {return Err("terminal resume requires empty input without relay options".into());}
         if launch.deadline.is_some() || launch.inactivity.is_some() || launch.stop_on_stall {return Err("terminal resume cannot apply worker observation windows".into());}
-        adapter.preflight(launch,&Repair::default()).permit(launch.readiness)?;
         let args=super::history::sessions::resume(self.name,session)?;
+        adapter.preflight(launch,&Repair::default()).permit(launch.readiness)?;
         adapter.adopt(session,launch,native)?;
         let owner=adapter.session_owner(Some(session),launch)?;
         let (spec,_)=adapter.spec(launch,session.into(),true)?;
@@ -830,7 +830,7 @@ pub struct NativeSpec {
 
 impl NativeSpec {
     fn validate_session(&self)->Res<()> {
-        if self.session=="-" && !self.resume || !self.session.starts_with('-') && native::plain_id(&self.session) {Ok(())}
+        if self.session=="-" && !self.resume || native::cli_id(&self.session) {Ok(())}
         else {Err("native CLI session invalid".into())}
     }
 }
@@ -1503,6 +1503,9 @@ mod tests {
             for session in ["--foreign-flag","-x","opaque:/file","one two","one\nline","","-"] {
                 let spec=NativeSpec {session:session.into(),resume:true,..Default::default()};
                 assert_eq!(runtime.native_arguments(&spec).err().as_deref(),error);
+                assert!(super::super::history::sessions::resume(name,session).is_err(),"terminal argv requires a CLI-safe ID");
+                let mut terminal=Launch::new(std::env::temp_dir(),std::env::temp_dir().join("unused.log"),"","fixtureq");terminal.command=vec!["raw-must-not-spawn".into()];
+                assert_eq!(runtime.descriptor().history_resume(session,&terminal,&[]).err().as_deref(),Some("history session invalid"),"terminal ID refusal precedes preflight");
                 assert_eq!(runtime.turn(command(),&spec,Path::new("unused.log"),"never",&Process::default()).err().as_deref(),error);
                 if runtime.descriptor().has("background") {
                     assert_eq!(runtime.background_launch(command(),&spec,"never",budget).err().as_deref(),error);
