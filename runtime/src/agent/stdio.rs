@@ -24,7 +24,8 @@ type WriteRequest=(Vec<u8>,mpsc::Sender<Res<()>>);
 
 /// Shared native stdio transport. Dropping the handle does not kill an active session; callers own its lifecycle.
 pub(crate) struct Stdio {
-    child:Child,
+    child:Option<Child>,
+    reap:mpsc::Sender<Child>,
     input:Option<Pipe<WriteRequest>>,
     bounded:bool,
     stopped:bool,
@@ -67,6 +68,7 @@ impl Stdio {
             }
         });
         let (output,events)=channel(bounded.then_some(16));
+        let (reap,reaping)=mpsc::channel::<Child>();
         std::thread::spawn(move || {
             let mut reader=BufReader::new(stdout);
             loop {
@@ -94,11 +96,17 @@ impl Stdio {
                 }
                 if output.send(event.map(|value|NativeFrame {value,raw:Some(line),journal:None})).is_err() || failed {break;}
             }
+            drop(output);
+            drop(reader);
+            // Keep the exact owned handle until wait reaps it; never signal a protected scope.
+            if let Ok(mut child)=reaping.recv() {
+                if let Err(error)=child.wait() {eprintln!("app-server frontend reap unknown: {error}");}
+            }
         });
-        Ok(Self {child,input:Some(input),events,bounded,stopped:false,#[cfg(windows)] job})
+        Ok(Self {child:Some(child),reap,input:Some(input),events,bounded,stopped:false,#[cfg(windows)] job})
     }
 
-    pub fn id(&self)->u32 {self.child.id()}
+    pub fn id(&self)->u32 {self.child.as_ref().expect("owned frontend").id()}
 
     /// A timeout may follow partial native delivery. Retain the original request and reconcile; never resend it.
     pub fn send(&mut self,message:&Value,until:Instant)->Res<()> {
@@ -139,7 +147,7 @@ impl Stdio {
 
     /// A real child wait proves direct termination; its native numeric code remains independently optional.
     pub(crate) fn observe_exit(&mut self,report:&mut Report)->Res<()> {
-        let status=self.child.try_wait().map_err(|e|format!("app-server wait: {e}"))?;
+        let status=self.child.as_mut().expect("owned frontend").try_wait().map_err(|e|format!("app-server wait: {e}"))?;
         report.exit=status.filter(|_|!self.stopped).and_then(|s|s.code());
         report.termination=if status.is_some() {ProcessTermination::Observed} else {ProcessTermination::Unknown {reason:"session-process-running"}};
         if status.is_none() {report.process.exit_unknown="session-process-running";}
@@ -148,15 +156,15 @@ impl Stdio {
         Ok(())
     }
 
-    pub fn poll(&mut self)->Res<Option<i32>> {self.child.try_wait().map(|s|s.map(|s|s.code().unwrap_or(-1))).map_err(|e|format!("app-server wait: {e}"))}
+    pub fn poll(&mut self)->Res<Option<i32>> {self.child.as_mut().expect("owned frontend").try_wait().map(|s|s.map(|s|s.code().unwrap_or(-1))).map_err(|e|format!("app-server wait: {e}"))}
 
     /// Stop the owned server (and its Windows job); caller authority outside that scope stays unchanged.
     pub fn kill(&mut self)->Res<()> {
         let running=self.poll()?.is_none();
         #[cfg(windows)] if let Some(job)=&self.job {job.kill()?;self.stopped|=running;}
         if !running || self.poll()?.is_some() {return Ok(());}
-        self.child.kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))?;self.stopped=true;
-        self.child.wait().map_err(|e|format!("app-server reap unconfirmed: {e}"))?;
+        self.child.as_mut().expect("owned frontend").kill().map_err(|e|format!("app-server stop unconfirmed: {e}"))?;self.stopped=true;
+        self.child.as_mut().expect("owned frontend").wait().map_err(|e|format!("app-server reap unconfirmed: {e}"))?;
         Ok(())
     }
 
@@ -172,9 +180,53 @@ impl Stdio {
     }
 }
 
+impl Drop for Stdio {
+    fn drop(&mut self) {
+        self.input.take();
+        if let Some(child)=self.child.take() {
+            // The reader cannot exit before receiving this handle, even after a stream error.
+            if self.reap.send(child).is_err() {eprintln!("app-server frontend reap unknown: reader unavailable");}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Protected frontends must be reaped through their original Child after graceful EOF.
+    #[test]
+    fn stdio_drop_reaps_original_frontend_after_eof() {
+        if let Some(marker)=std::env::var_os("AGENTQ_STDIO_REAP_FIXTURE") {
+            std::io::stdout().write_all(b"\n{}\n").unwrap();
+            std::io::stdout().flush().unwrap();
+            let mut input=vec![];
+            std::io::stdin().read_to_end(&mut input).unwrap();
+            std::fs::write(marker,b"original input EOF").unwrap();
+            std::process::exit(0);
+        }
+        let root=crate::scratch("stdio-frontend-reap");std::fs::create_dir_all(&root).unwrap();
+        let marker=root.join("eof");
+        let mut command=Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact","agent::stdio::tests::stdio_drop_reaps_original_frontend_after_eof","--nocapture"])
+            .env("AGENTQ_STDIO_REAP_FIXTURE",&marker);
+        let mut server=Stdio::spawn(command,&root.join("private.log"),&super::super::Process::default()).unwrap();
+        let original=coreq::process::identity(server.id()).unwrap().unwrap();
+        server.receive_frame(Instant::now()+Duration::from_secs(10)).unwrap().unwrap();
+        drop(server);
+        let until=Instant::now()+Duration::from_secs(10);
+        loop {
+            match coreq::process::identity(original.pid) {
+                Ok(None)=>break,
+                Ok(Some(current))=>assert_eq!(current,original,"original PID reused; no reap proof"),
+                Err(_)=>{}, // Unreadable creation identity stays pending, never absent.
+            }
+            assert!(Instant::now()<until,"original frontend was not reaped after drop");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(std::fs::read(&marker).unwrap(),b"original input EOF");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     // S283: the pipe owns original bytes; diagnostics and incomplete/invalid frames never become records.
     #[test]
     fn native_frames_keep_physical_bytes_and_private_errors() {

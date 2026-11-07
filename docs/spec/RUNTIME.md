@@ -628,6 +628,8 @@ Fake clients verify these boundaries on Linux, macOS and Windows. Native consume
 
 ## Protected app-server
 
+Dropping a transport closes input without signalling the protected native scope. Its existing reader retains the original owned frontend Child and waits for that child after stream completion, so EOF/exit cannot leave an unreaped frontend. Drop does not block on that wait. An unresolved child remains owned by that reader; no PID-based wait or absence inference replaces the original handle, and reap failure stays unknown. This local transport cleanup grants no native/descendant completion or permit release.
+
 M12.8 owns an independent protected host. `ProtectedHost::signed` checks the operator-pinned executable digest and Ed25519 signature before every dispatch, on macOS and Windows. The signature message is UTF-8 `agentq.protected-adapter/1\0` followed by the lowercase hexadecimal SHA-256. Public keys (32 bytes) and signatures (64 bytes) are lowercase hex. Keys from task text, environment or receipts are not trust anchors. This signature does not provide macOS signature checks or TCC grants.
 
 Protected host dispatch runs in the exact checked executable, including the stable launcher; it never redirects through `current`.
