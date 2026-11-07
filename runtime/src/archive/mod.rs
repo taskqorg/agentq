@@ -56,7 +56,7 @@ pub(crate) struct Handle {
 }
 
 enum Job {
-    Capture(PathBuf, Capture),
+    Capture(PathBuf, Capture, Option<PathBuf>),
     Bytes(PathBuf, Vec<u8>),
 }
 fn queue(job: Job) {
@@ -68,7 +68,9 @@ fn queue(job: Job) {
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
                     let result = match job {
-                        Job::Capture(data, capture) => store::register(&data, capture),
+                        Job::Capture(data, capture, candidate) => {
+                            store::register_candidate(&data, capture, candidate)
+                        }
                         Job::Bytes(path, bytes) => store::append_stream(&path, &bytes),
                     };
                     if result.is_err() {
@@ -154,7 +156,7 @@ impl Handle {
     }
     fn save(&self) {
         if self.data.is_absolute() {
-            queue(Job::Capture(self.data.clone(), self.capture.clone()));
+            queue(Job::Capture(self.data.clone(), self.capture.clone(), None));
         }
     }
     pub(crate) fn observe(&mut self, session: Option<String>, end: Option<u64>) {
@@ -221,9 +223,9 @@ fn attribution(manifest: &mut Value, ctx: &Context) {
     manifest["account_label"] = json!(ctx.account);
 }
 
-/// A hook or another adapter can register an already identified source. No network or storage wait.
+/// Register caller-only observation sources. No native discovery, network or storage wait.
 pub fn capture(data: &Path, capture: Capture) {
-    queue(Job::Capture(data.into(), capture));
+    queue(Job::Capture(data.into(), capture, None));
 }
 
 /// Raw app-server wire recording, on the archive writer rather than the pipe reader.
@@ -271,6 +273,7 @@ pub fn hook(data: &Path, runtime: &str, input: &Value, launched: bool, project: 
             "cli_version":null,"model":null,"effort":null,"policy":null,"account_label":null,"host":null,"session":session,"parent_session":null,"instructions_hash":null}),
         capture: if launched { "launched" } else { "manual" }.into(),
         sources: path
+            .clone()
             .map(|path| Source {
                 path,
                 format: "native".into(),
@@ -282,5 +285,5 @@ pub fn hook(data: &Path, runtime: &str, input: &Value, launched: bool, project: 
         turn: None,
         grant: Value::Null,
     };
-    self::capture(data, capture);
+    queue(Job::Capture(data.into(), capture, path));
 }

@@ -110,7 +110,28 @@ fn allowed(grant: &Value, capture: &str) -> bool {
                     .is_some_and(|a| a.contains(&json!(MANUAL))))
 }
 
-pub(super) fn register(data: &Path, mut capture: Capture) -> Res<()> {
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct NativeWitness {
+    path: PathBuf,
+    checkpoint: Value,
+}
+#[derive(Serialize, Deserialize)]
+struct Registration {
+    #[serde(flatten)]
+    capture: Capture,
+    #[serde(default)]
+    native: Option<NativeWitness>,
+}
+
+#[cfg(test)]
+pub(super) fn register(data: &Path, capture: Capture) -> Res<()> {
+    register_candidate(data, capture, None)
+}
+pub(super) fn register_candidate(
+    data: &Path,
+    mut capture: Capture,
+    candidate: Option<PathBuf>,
+) -> Res<()> {
     let Some(grant) = active(data)? else {
         return Ok(());
     };
@@ -156,7 +177,24 @@ pub(super) fn register(data: &Path, mut capture: Capture) -> Res<()> {
                 .or_else(|_| std::env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "unknown".into()))
         });
-    write(&path, &capture)
+    let native = candidate.and_then(|path| {
+        capture.sources.iter().find(|source| {
+            source.path == path
+                && source.format == "native"
+                && source.start == 0
+                && source.end.is_none()
+        })?;
+        if excluded(&capture.root, &path).ok()? {
+            return None;
+        }
+        let (_, page, _) =
+            native_reader(&capture, &path, capture.manifest["session"].as_str()?, None).ok()?;
+        Some(NativeWitness {
+            path,
+            checkpoint: page.checkpoint,
+        })
+    });
+    write(&path, &Registration { capture, native })
 }
 
 pub(super) fn append_stream(path: &Path, bytes: &[u8]) -> Res<()> {
@@ -293,12 +331,72 @@ struct Summary {
     error: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
+struct Authority {
+    owner: String,
+    capture: String,
+    root: PathBuf,
+    canonical_root: PathBuf,
+    runtime: String,
+    home: Option<PathBuf>,
+    grant: Value,
+    paths: Vec<PathBuf>,
+    evidence: Value,
+}
+impl Authority {
+    fn same_context(&self, c: &Capture) -> bool {
+        self.owner == c.id
+            && self.capture == c.capture
+            && self.root == c.root
+            && self.runtime == c.runtime
+            && self.home == c.home
+            && self.grant == c.grant
+            && match c.root.canonicalize() {
+                Ok(root) => root == self.canonical_root,
+                Err(_) => c.root.try_exists().ok() == Some(false),
+            }
+    }
+}
+fn authority(c: &Capture, mut paths: Vec<PathBuf>, evidence: Value) -> Res<Authority> {
+    let canonical_root = c
+        .root
+        .canonicalize()
+        .map_err(|_| "archive project authority unavailable")?;
+    for path in paths.clone() {
+        let target = path
+            .canonicalize()
+            .map_err(|_| "archive source authority unavailable")?;
+        if !paths.contains(&target) {
+            paths.push(target);
+        }
+    }
+    for path in &paths {
+        if excluded(&c.root, path)? || excluded(&canonical_root, path)? {
+            return Err("archive excluded".into());
+        }
+    }
+    Ok(Authority {
+        owner: c.id.clone(),
+        capture: c.capture.clone(),
+        root: c.root.clone(),
+        canonical_root,
+        runtime: c.runtime.clone(),
+        home: c.home.clone(),
+        grant: c.grant.clone(),
+        paths,
+        evidence,
+    })
+}
+#[derive(Clone, Serialize, Deserialize)]
 struct Queued {
     body: Value,
     replay: bool,
+    #[serde(default)]
+    authority: Option<Authority>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Checkpoint {
+    #[serde(default)]
+    authority: Option<Authority>,
     source: String,
     owner: String,
     paths: Vec<PathBuf>,
@@ -314,6 +412,8 @@ struct Checkpoint {
     format: String,
     pending: Vec<Queued>,
     last: Option<Value>,
+    #[serde(default)]
+    last_authority: Option<Authority>,
     turns: Vec<Value>,
     bound: Vec<String>,
     observed: u64,
@@ -360,22 +460,36 @@ pub fn pass(data: &Path, wire: &mut dyn Wire) -> Res<()> {
     summary.error = None;
     let mut captures = Vec::new();
     for path in files(&dir.join("captures"))? {
-        match read::<Capture>(&path) {
-            Ok(c) if c.grant == identity(&grant) && allowed(&grant, &c.capture) => captures.push(c),
+        match read::<Registration>(&path) {
+            Ok(r) if r.capture.grant == identity(&grant) && allowed(&grant, &r.capture.capture) => {
+                captures.push(r)
+            }
             Ok(_) => {}
             Err(e) => summary.error = Some(e),
         }
     }
     // A source can fail without hiding any other registered session.
-    for mut capture in captures {
-        if let Err(e) = session(data, &grant, &mut capture, wire) {
+    for mut registration in captures {
+        if let Err(e) = session(
+            data,
+            &grant,
+            &mut registration.capture,
+            registration.native.as_ref(),
+            wire,
+        ) {
             summary.error = Some(e);
         }
     }
     write(&summary_path, &summary)
 }
 
-fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> Res<()> {
+fn session(
+    data: &Path,
+    grant: &Value,
+    c: &mut Capture,
+    witness: Option<&NativeWitness>,
+    wire: &mut dyn Wire,
+) -> Res<()> {
     if excluded(&c.root, &c.root)? {
         return Ok(());
     }
@@ -394,21 +508,32 @@ fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> 
     }
     let rt = agent::runtime(&c.runtime).ok_or("archive runtime unsupported")?;
     if c.manifest["session"].as_str().is_none() {
-        let source = c.sources.first().ok_or("archive session unknown")?;
-        let mut file = fs::File::open(&source.path).map_err(|_| "archive source unavailable")?;
-        file.seek(SeekFrom::Start(source.start))
-            .map_err(|_| "archive source unavailable")?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|_| "archive source unavailable")?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| "archive session unknown")?;
-        c.manifest["session"] =
-            json!(rt.classify(text).session.ok_or("archive session unknown")?);
+        c.manifest["session"] = json!("unknown");
     }
-    let session = c.manifest["session"]
-        .as_str()
-        .ok_or("archive session unknown")?
-        .to_string();
+    let native_scope = witness
+        .map(|w| {
+            if excluded(&c.root, &w.path)? {
+                return Err("archive excluded".into());
+            }
+            native_reader(
+                c,
+                &w.path,
+                c.manifest["session"]
+                    .as_str()
+                    .ok_or("archive native session unknown")?,
+                Some(&w.checkpoint),
+            )
+            .map(|_| ())
+        })
+        .transpose();
+    let native_scope = match native_scope {
+        Ok(Some(())) => true,
+        Ok(None) => false,
+        Err(e) => {
+            error = Some(e);
+            false
+        }
+    };
     for (index, source) in c.sources.iter().enumerate() {
         let source = source.clone();
         let mut manifest = c.manifest.clone();
@@ -418,17 +543,29 @@ fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> 
             c,
             &source,
             &mut manifest,
-            source.format != "native",
+            !(native_scope && witness.is_some_and(|w| w.path == source.path)),
+            witness
+                .filter(|w| native_scope && w.path == source.path)
+                .map(|w| &w.checkpoint),
             if index == 0 { c.turn.as_deref() } else { None },
             wire,
         ) {
             error = Some(e);
         }
     }
+    if !native_scope {
+        return error.map_or(Ok(()), Err);
+    }
+    let session = &witness
+        .ok_or("archive native authority unavailable")?
+        .checkpoint["resolved"]["source"]["session"];
+    let session = session
+        .as_str()
+        .ok_or("archive native authority unavailable")?;
     let sources = rt
         .history_sessions(c.home.as_deref())
         .map_err(|_| "archive source discovery unavailable")?;
-    let mut family = vec![session.clone()];
+    let mut family = vec![session.to_string()];
     loop {
         let old = family.len();
         for source in &sources {
@@ -469,7 +606,8 @@ fn session(data: &Path, grant: &Value, c: &mut Capture, wire: &mut dyn Wire) -> 
             start: 0,
             end: None,
         };
-        if let Err(e) = upload_source(data, grant, c, &src, &mut manifest, false, None, wire) {
+        if let Err(e) = upload_source(data, grant, c, &src, &mut manifest, false, None, None, wire)
+        {
             error = Some(e);
         }
     }
@@ -532,23 +670,93 @@ struct NativeBytes {
     media: MediaCatalog,
     format: String,
     base: u64,
+    checkpoint: Value,
 }
+fn native_reader(
+    c: &Capture,
+    path: &Path,
+    session: &str,
+    saved: Option<&Value>,
+) -> Res<(
+    agent::history::sessions::Session,
+    agent::history::StepPage,
+    Vec<u8>,
+)> {
+    let rt = agent::runtime(&c.runtime).ok_or("archive runtime unsupported")?;
+    if let Some(saved) = saved {
+        rt.history(session, c.home.as_deref(), Some(path), Some(saved))
+            .map_err(|_| "archive native witness changed")?;
+    }
+    // A recovered cursor contains only new steps; raw-origin validation needs the whole snapshot.
+    let mut reader = rt
+        .history(session, c.home.as_deref(), Some(path), None)
+        .map_err(|_| "archive native witness unavailable")?;
+    let page = reader
+        .steps(u64::MAX)
+        .map_err(|_| "archive native source authority unverified")?;
+    let checkpoint = &page.checkpoint;
+    let end = checkpoint["offset"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .ok_or("archive native witness unobserved")?;
+    let bytes = reader
+        .read_bytes(0, end)
+        .map_err(|_| "archive native source changed")?;
+    if let Some(saved) = saved {
+        let prefix = saved["offset"]
+            .as_u64()
+            .and_then(|end| usize::try_from(end).ok())
+            .and_then(|end| bytes.get(..end));
+        if checkpoint["identity"] != saved["identity"]
+            || prefix.is_none_or(|bytes| saved["prefix"] != crate::sha256_hex(bytes))
+        {
+            return Err("archive native witness changed".into());
+        }
+    }
+    if checkpoint["identity"].as_str().is_none_or(str::is_empty)
+        || checkpoint["prefix"] != crate::sha256_hex(&bytes)
+        || checkpoint["resolved"]["runtime"] != c.runtime
+        || checkpoint["resolved"]["source"]["path"] != json!(path)
+        || checkpoint["native_session"] != checkpoint["resolved"]["source"]["native_session"]
+        || checkpoint["native_session"]
+            .as_str()
+            .is_none_or(str::is_empty)
+        || checkpoint["format"]
+            .as_str()
+            .is_none_or(|f| f.starts_with("history-") || f == "codex-app-server-selected/1")
+    {
+        return Err("archive native witness unverified".into());
+    }
+    Ok((reader, page, bytes))
+}
+
 fn native_bytes(
     data: &Path,
     c: &Capture,
     src: &Source,
     session: &str,
     caller: bool,
+    saved: Option<&Value>,
 ) -> Res<NativeBytes> {
     let (media, page, bytes, identity, base) = if caller {
         let (snapshot, identity) = caller_snapshot(data, src)?;
+        let inferred = if session == "unknown" {
+            let bytes = fs::read(&snapshot.0).map_err(|_| "archive source snapshot unavailable")?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| "archive session unknown")?;
+            agent::runtime(&c.runtime)
+                .ok_or("archive runtime unsupported")?
+                .classify(text)
+                .session
+        } else {
+            Some(session.to_string())
+        };
         let source_label = enroll::digest(&json!([c.id, src.path, src.start]));
         let mut reader = agent::history::History::caller(
             &c.runtime,
             &src.format,
             &source_label,
             &c.id,
-            Some(session),
+            inferred.as_deref(),
         )
         .map_err(|_| "archive caller format unavailable")?;
         let page = reader
@@ -565,28 +773,10 @@ fn native_bytes(
             .map_err(|_| "archive caller source changed")?;
         (media, page, bytes, Some(identity), src.start)
     } else {
-        let rt = agent::runtime(&c.runtime).ok_or("archive runtime unsupported")?;
-        let mut reader = rt
-            .history(session, c.home.as_deref(), Some(&src.path), None)
-            .map_err(|_| "archive media inspection unavailable for source")?;
-        if reader.checkpoint()["format"]
-            .as_str()
-            .is_some_and(|f| f.starts_with("history-"))
-        {
-            return Err("archive multipart source representation unsupported".into());
-        }
-        let page = reader
-            .steps(u64::MAX)
-            .map_err(|_| "archive native source authority unverified")?;
+        let (reader, page, bytes) = native_reader(c, &src.path, session, saved)?;
         let media = reader
             .media()
             .map_err(|_| "archive native media unavailable")?;
-        let end = page.checkpoint["offset"]
-            .as_u64()
-            .ok_or("archive source boundary unknown")?;
-        let bytes = reader
-            .read_bytes(0, end)
-            .map_err(|_| "archive native source changed")?;
         (media, page, bytes, None, 0)
     };
     if page.checkpoint["prefix"] != crate::sha256_hex(&bytes) {
@@ -651,6 +841,7 @@ fn native_bytes(
             .or_else(|| page.checkpoint["identity"].as_str().map(String::from))
             .ok_or("archive source identity unknown")?,
         base,
+        checkpoint: page.checkpoint,
         media,
     })
 }
@@ -683,6 +874,7 @@ fn upload_source(
     src: &Source,
     manifest: &mut Value,
     caller: bool,
+    saved: Option<&Value>,
     turn: Option<&str>,
     wire: &mut dyn Wire,
 ) -> Res<()> {
@@ -701,14 +893,30 @@ fn upload_source(
             .as_str()
             .ok_or("archive session unknown")?,
         caller,
+        saved,
     )?;
+    if manifest["session"] == "unknown" {
+        if let Some(session) = native.checkpoint["native_session"].as_str() {
+            manifest["session"] = json!(session);
+        }
+    }
     let mut source = src.clone();
     if source.format == "native" {
         source.format = native.format.clone();
     }
     let mut error = upload(data, grant, c, &source, manifest, turn, Some(&native), wire).err();
     for item in &native.media.items {
-        if let Err(e) = upload_media(data, grant, c, &source, manifest, &native.media, item, wire) {
+        if let Err(e) = upload_media(
+            data,
+            grant,
+            c,
+            &source,
+            manifest,
+            &native.media,
+            item,
+            &native.checkpoint,
+            wire,
+        ) {
             error = Some(e);
         }
     }
@@ -723,6 +931,7 @@ fn upload_media(
     manifest: &Value,
     catalog: &MediaCatalog,
     item: &agent::history::media::Media,
+    checkpoint: &Value,
     wire: &mut dyn Wire,
 ) -> Res<()> {
     let mut paths = vec![src.path.clone()];
@@ -769,7 +978,12 @@ fn upload_media(
             wire.now(),
         );
         st.owner = c.id.clone();
-        st.paths = paths;
+        st.authority = Some(authority(
+            c,
+            paths.clone(),
+            json!({"reader":checkpoint,"item":item}),
+        )?);
+        st.paths = st.authority.as_ref().unwrap().paths.clone();
         st.source = hash.clone();
         let mut original_manifest = manifest.clone();
         let manifest_scrubbed = super::scrub::manifest(&mut original_manifest);
@@ -787,6 +1001,9 @@ fn upload_media(
         write(&path, &st)?;
         st
     };
+    if st.authority.as_ref().is_none_or(|a| !a.same_context(c)) {
+        return Err("archive capture authority changed".into());
+    }
     send(data, grant, c, &mut st, &path, wire)?;
     if count > 0 {
         return Err("archive media reference differs after scrubbing".into());
@@ -836,6 +1053,12 @@ fn upload(
     } else {
         None
     };
+    if saved
+        .as_ref()
+        .is_some_and(|st| st.authority.as_ref().is_none_or(|a| !a.same_context(c)))
+    {
+        return Err("archive capture authority changed".into());
+    }
     // Capture and delivery are independent: an offline sink must not stop spooling later appends.
     let (identity, raw) = if let Some(native) = native {
         (native.identity.clone(), native.bytes.clone())
@@ -912,6 +1135,9 @@ fn upload(
             &src.format,
             wire.now(),
         );
+        st.authority = old.authority;
+        st.owner = old.owner;
+        st.paths = old.paths;
         st.previous = old.previous;
         st.previous.push(old.source);
         st.pending = old.pending;
@@ -922,7 +1148,22 @@ fn upload(
         write(&path, &st)?;
     }
     st.owner = c.id.clone();
-    st.paths = vec![src.path.clone()];
+    let target = src
+        .path
+        .canonicalize()
+        .map_err(|_| "archive source authority unavailable")?;
+    let file = fs::File::open(&target).map_err(|_| "archive source authority unavailable")?;
+    if agent::archive_file_identity(&file)? != identity {
+        return Err("archive source changed".into());
+    }
+    st.authority = Some(authority(
+        c,
+        vec![src.path.clone(), target],
+        json!({"path":src.path,"start":src.start,"end":src.end,
+        "format":src.format,"identity":identity,"prefix":crate::sha256_hex(raw),
+        "reader":native.map(|n| &n.checkpoint)}),
+    )?);
+    st.paths = st.authority.as_ref().unwrap().paths.clone();
     if let Some(predecessor) = predecessor {
         if !st.previous.contains(&predecessor) {
             st.previous.push(predecessor);
@@ -970,6 +1211,7 @@ fn upload(
             st.pending.push(Queued {
                 body: last,
                 replay: true,
+                authority: st.last_authority.clone(),
             });
         }
     }
@@ -1022,6 +1264,7 @@ fn queue_bytes(
         st.pending.push(Queued {
             body,
             replay: false,
+            authority: st.authority.clone(),
         });
         offset += length;
     }
@@ -1042,6 +1285,7 @@ fn fresh(
     let mut manifest = manifest.clone();
     super::scrub::manifest(&mut manifest);
     Checkpoint {
+        authority: None,
         source: crate::incident::uuid(),
         owner: String::new(),
         paths: vec![],
@@ -1057,6 +1301,7 @@ fn fresh(
         format: format.into(),
         pending: vec![],
         last: None,
+        last_authority: None,
         turns: vec![],
         bound: vec![],
         observed: at,
@@ -1075,19 +1320,34 @@ fn send(
     wire: &mut dyn Wire,
 ) -> Res<()> {
     while let Some(queued) = st.pending.first().cloned() {
+        let proof = queued
+            .authority
+            .as_ref()
+            .ok_or("archive queued authority unknown")?;
+        if !proof.same_context(c)
+            || proof.grant != st.grant
+            || proof.evidence.is_null()
+            || proof.paths.is_empty()
+            || queued.body["capture"] != proof.capture
+        {
+            return Err("archive queued authority changed".into());
+        }
         let body = queued.body;
         let current = active(data)?.ok_or("archive disconnected")?;
         if identity(&current) != identity(grant)
-            || !allowed(&current, &c.capture)
+            || identity(&current) != proof.grant
+            || !allowed(&current, &proof.capture)
             || !enabled(data)?
         {
             return Err("archive grant changed".into());
         }
-        if excluded(&c.root, &c.root)? {
+        if excluded(&proof.root, &proof.root)?
+            || excluded(&proof.canonical_root, &proof.canonical_root)?
+        {
             return Err("archive excluded".into());
         }
-        for source in &st.paths {
-            if excluded(&c.root, source)? {
+        for source in &proof.paths {
+            if excluded(&proof.root, source)? || excluded(&proof.canonical_root, source)? {
                 return Err("archive excluded".into());
             }
         }
@@ -1149,6 +1409,7 @@ fn send(
                 .sent
                 .max(body["end"].as_u64().ok_or("archive receipt invalid")?);
             st.last = Some(body);
+            st.last_authority = queued.authority;
         }
         st.pending.remove(0);
         write(path, st)?;
@@ -1297,6 +1558,8 @@ mod tests {
         };
         (data, capture)
     }
+    include!("authority_tests.rs");
+
     // A4/A6: lost response and process restart replay precisely the persisted scrubbed request.
     // A changed/truncated native file gets a different source; accepted bytes remain immutable.
     #[test]
@@ -1447,8 +1710,14 @@ mod tests {
             rows.iter().map(|v| format!("{v}\n")).collect::<String>(),
         )
         .unwrap();
-        c.sources.clear();
-        register(data, c.clone()).unwrap();
+        c.sources = vec![Source {
+            path: path.clone(),
+            format: "native".into(),
+            start: 0,
+            end: None,
+        }];
+        c.grant = identity(&active(data).unwrap().unwrap());
+        register_candidate(data, c.clone(), Some(path.clone())).unwrap();
         path
     }
     #[test]
@@ -1636,6 +1905,7 @@ mod tests {
                 &c.manifest,
                 &catalog,
                 &catalog.items[0],
+                &reader.checkpoint(),
                 &mut sink
             )
             .unwrap_err(),
@@ -1652,6 +1922,7 @@ mod tests {
             &c.manifest,
             &catalog,
             &catalog.items[0],
+            &reader.checkpoint(),
             &mut sink,
         )
         .unwrap();
@@ -1749,7 +2020,13 @@ mod tests {
             .unwrap()
             .contains("unopted secret"));
         assert!(PathBuf::from(format!("{}-wal", path.display())).exists());
-        register(&data, c.clone()).unwrap();
+        c.sources = vec![Source {
+            path: path.clone(),
+            format: "native".into(),
+            start: 0,
+            end: None,
+        }];
+        register_candidate(&data, c.clone(), Some(path.clone())).unwrap();
         let mut sink = Sink::default();
         pass(&data, &mut sink).unwrap();
         assert!(sink.requests.is_empty());
