@@ -98,6 +98,7 @@ fn main() {
     assert!(!logged.iter().any(|e|matches!(e,Event::Text{delta,..} if delta=="old replay")));
     let named=root.join(if cfg!(windows){"agentapi.exe"}else{"agentapi"});std::fs::copy(std::env::current_exe().unwrap(),&named).unwrap();
     let mut named_launch=l.clone();named_launch.command=vec![named.into_os_string()];named_launch.deadline=Some(Instant::now()+Duration::from_secs(20));
+    eprintln!("JOBDIAG {}",json!({"stage":"fixture-named-start"}));
     let mut named_run=r.launch(&named_launch).unwrap();r.cancel(&mut named_run).unwrap();
     while r.poll(&mut named_run).unwrap()==State::Running {std::thread::yield_now();}
     assert_eq!(r.report(&named_run).unwrap().outcome,"cancelled");
