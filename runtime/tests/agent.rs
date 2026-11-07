@@ -19,6 +19,10 @@ mod control;
 mod claude_control;
 
 pub(crate) fn main() {
+    if let Some(path)=std::env::var_os("AGENTQ_HARNESS_PROBE_TRACE") {
+        use std::io::Write;
+        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap(),"{}",std::process::id()).unwrap();
+    }
     if std::env::args().nth(1).as_deref()==Some("--login-home-controller") {return signin::home_controller();}
     if std::env::args().nth(1).as_deref()==Some("--login-controller") {return signin::controller();}
     if std::env::var_os("AGENTQ_FAKE_LOGIN").is_some() {return signin::fake();}
@@ -49,15 +53,19 @@ pub(crate) fn main() {
         if std::env::var_os("FAKE_SANDBOX_REFUSED").is_some() {eprintln!("native sandbox unavailable");std::process::exit(1);}
         println!("seatbelt");return;
     }
-    if let Some(file) = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].iter().find_map(|k| std::env::var_os(k)).map(|h| PathBuf::from(h).join("fake-ready.json")).filter(|f| f.is_file()) {
-        return fake_ready(&file);
-    }
+    let probe_args:Vec<_>=std::env::args().skip(1).collect();
+    if let Some(file)=ready_fixture(&probe_args) {return fake_ready(&file);}
     if let Ok(client) = std::env::var("COREQ_FAKE_AGENT") {
+        if !matches!(client.as_str(),"claude"|"codex"|"antigravity") {eprintln!("invalid fake client context");std::process::exit(2);}
+        if probe_args.first().is_some_and(|a|a=="auth") && client!="claude" || probe_args.first().is_some_and(|a|a=="login") && client!="codex" {
+            eprintln!("native probe does not match fake client");std::process::exit(2);
+        }
         if matches!(std::env::args().nth(1).as_deref(),Some("--version"|"auth"|"login")) {if client=="antigravity" && std::env::args().nth(1).as_deref()==Some("--version") {println!("agy 1.5.2");}return;}
         return fake(&client);
     }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
+        ("harness_probe_dispatch_is_fail_closed",harness_probe_dispatch_is_fail_closed),
         ("resumed_background_locator_keeps_token_source_and_original_process",resumed_background_locator_keeps_token_source_and_original_process),
         ("background_launcher_text_never_mints_native_stage_or_verified_job",background_launcher_text_never_mints_native_stage_or_verified_job),
         ("owned_plain_cli_refusal_requires_exact_source_exit_and_native_grammar",owned_plain_cli_refusal_requires_exact_source_exit_and_native_grammar),
@@ -150,7 +158,11 @@ pub(crate) fn main() {
         ("snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart", snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart),
     ];
     let filters:Vec<_>=std::env::args().skip(1).collect();
-    let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
+    // Native argv must never be interpreted as a substring selecting recursive login tests.
+    if filters.iter().any(|f|!tests.iter().any(|(name,_)|name==f)) {
+        eprintln!("unrecognized fixture argv; explicit matching fake context required");std::process::exit(2);
+    }
+    let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name==f)).collect();
     for (name, test) in &selected {
         {let _cleanup=FixtureCleanup;test();}
         println!("test {name} ... ok");
@@ -2570,6 +2582,44 @@ fn runtime_trait_exposes_native_seams() {
     assert_eq!(claude.app_queue(Command::new(exe()),&thread,"x",Duration::from_secs(1)).unwrap_err(),"app-queue unsupported by claude");
     assert_eq!(claude.app_server_arguments(&thread).unwrap_err(),"app-server unsupported by claude");
     teardown(root);
+}
+
+// A status probe selects only its client's fixture; --version requires an unambiguous home.
+fn ready_fixture(args:&[String])->Option<PathBuf> {
+    let client=std::env::var("COREQ_FAKE_AGENT").ok();
+    let mut candidates=Vec::new();
+    for (name,key) in [("claude","CLAUDE_CONFIG_DIR"),("codex","CODEX_HOME")] {
+        if client.as_deref().is_some_and(|c|c!=name) {continue;}
+        let Some(home)=std::env::var_os(key) else {continue;};
+        let file=PathBuf::from(home).join("fake-ready.json");
+        let Some(value)=std::fs::read(&file).ok().and_then(|b|serde_json::from_slice::<Value>(&b).ok()) else {continue;};
+        let expected=if name=="claude" {args==["auth","status","--json"]}else{args.iter().any(|a|a=="login") && args.last().is_some_and(|a|a=="status")};
+        if args==["--version"] || expected && value["expect"]==json!(args) {candidates.push(file);}
+    }
+    if candidates.len()==1 {candidates.pop()}else{None}
+}
+
+fn harness_probe_dispatch_is_fail_closed() {
+    let root=scratch("harness-dispatch");let claude=root.join("claude");let codex=root.join("codex");
+    std::fs::create_dir_all(&claude).unwrap();std::fs::create_dir_all(&codex).unwrap();
+    std::fs::write(codex.join("fake-ready.json"),json!({"version":"codex-cli fixture","expect":["login","status"],"status":"fixture-codex"}).to_string()).unwrap();
+    let trace=root.join("probe-processes");
+    let check=|args:&[&str],ready:bool,success:bool| {
+        let mut command=Command::new(std::env::current_exe().unwrap());command.env_clear().env("AGENTQ_HARNESS_PROBE_TRACE",&trace).args(args);
+        if ready {command.env("CLAUDE_CONFIG_DIR",&claude).env("CODEX_HOME",&codex);}
+        command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let mut child=command.spawn().unwrap();let until=Instant::now()+Duration::from_secs(2);
+        loop {if child.try_wait().unwrap().is_some(){break;}if Instant::now()>=until {child.kill().unwrap();let _=child.wait();panic!("probe did not exit promptly: {args:?}");}std::thread::sleep(Duration::from_millis(10));}
+        let out=child.wait_with_output().unwrap();assert_eq!(out.status.success(),success,"{args:?}: {}",String::from_utf8_lossy(&out.stderr));
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("test "),"native probe entered test selection");
+        if success {assert_eq!(out.stdout,b"fixture-codex");}
+    };
+    for args in [&["auth","status","--json"][..],&["login","status"][..],&["--version"][..],&["login"][..]] {check(args,false,false);}
+    check(&["login","status"],true,true);
+    check(&["auth","status","--json"],true,false);
+    assert_eq!(std::fs::read_to_string(trace).unwrap().lines().count(),6,"six direct probes, no recursive descendants");
+    assert_eq!(std::fs::read_dir(&claude).unwrap().count(),0,"wrong-client home untouched");
+    teardown(&root);
 }
 
 // Readiness fake: `fake-ready.json` in the login home maps `--version` and the status command to their output.
