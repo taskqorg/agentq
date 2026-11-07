@@ -828,6 +828,13 @@ pub struct NativeSpec {
     pub owner:Option<SessionOwner>,
 }
 
+impl NativeSpec {
+    fn validate_session(&self)->Res<()> {
+        if self.session=="-" && !self.resume || !self.session.starts_with('-') && native::plain_id(&self.session) {Ok(())}
+        else {Err("native CLI session invalid".into())}
+    }
+}
+
 struct Adapter { client: Client, descriptor: Descriptor, live: AtomicUsize, ops: NativeOps }
 
 struct NativeOps {
@@ -945,6 +952,7 @@ impl Adapter {
     }
 
     fn seam_readiness(&self, command: &Command, spec: &NativeSpec, log: Option<&Path>, input: &str) -> Res<Readiness> {
+        spec.validate_session()?;
         (self.ops.validate)(&spec.args,&[],&Policy::default())?;
         let mut launch=Launch::new(&spec.root,log.map(Path::to_path_buf).unwrap_or_else(||spec.root.join(".agentq-preflight-log")),input,"agentq");
         launch.home=spec.home.clone();
@@ -1397,7 +1405,7 @@ impl Runtime for Adapter {
         optimization
     }
 
-    fn native_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>> {(self.ops.validate)(&spec.args,&[],&Policy::default())?; Ok(args(&self.native(spec))) }
+    fn native_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>> {spec.validate_session()?;(self.ops.validate)(&spec.args,&[],&Policy::default())?; Ok(args(&self.native(spec))) }
 
     fn turn(&self, base: Command, spec: &NativeSpec, log: &Path, input: &str, process: &Process) -> Res<Turn> {
         let readiness=self.seam_readiness(&base,spec,Some(log),input)?;
@@ -1415,11 +1423,13 @@ impl Runtime for Adapter {
 
     fn jobs(&self, base: Command, spec: &NativeSpec, filtered: bool, budget: Duration) -> Res<Vec<Value>> {
         self.needs("background")?;
+        spec.validate_session()?;
         (self.ops.background_jobs)(base, &self.native(spec), filtered, budget)
     }
 
     fn job(&self, row: &Value, spec: &NativeSpec, id: &str) -> Res<BackgroundJob> {
         self.needs("background")?;
+        spec.validate_session()?;
         let job=(self.ops.background_job)(row, &self.native(spec), id)?;
         if let Some(owner)=&spec.owner {owner.bind(&job.session)?;if let Some(pid)=job.pid {owner.observe_process(pid)?;}}
         Ok(job)
@@ -1427,6 +1437,7 @@ impl Runtime for Adapter {
 
     fn stop_job(&self, base: Command, spec: &NativeSpec, job: &BackgroundJob, budget: Duration) -> Res<Output> {
         self.needs("background")?;
+        spec.validate_session()?;
         (self.ops.background_stop)(base, &self.native(spec), job, budget)
     }
 
@@ -1443,6 +1454,7 @@ impl Runtime for Adapter {
 
     fn app_server_arguments(&self, spec: &NativeSpec) -> Res<Vec<OsString>> {
         self.needs("app-server")?;
+        spec.validate_session()?;
         Ok((self.ops.app_command)(Command::new("native-argument-inspection"), &self.native(spec))?.get_args().map(OsStr::to_os_string).collect())
     }
 }
@@ -1483,6 +1495,30 @@ use registry::project_dir;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test] fn raw_native_session_validation_precedes_commands() {
+        let command=||Command::new("raw-must-not-spawn");let error=Some("native CLI session invalid");let budget=Duration::ZERO;
+        for name in ["claude","codex","antigravity"] {
+            let runtime=runtime(name).unwrap();
+            for session in ["--foreign-flag","-x","opaque:/file","one two","one\nline","","-"] {
+                let spec=NativeSpec {session:session.into(),resume:true,..Default::default()};
+                assert_eq!(runtime.native_arguments(&spec).err().as_deref(),error);
+                assert_eq!(runtime.turn(command(),&spec,Path::new("unused.log"),"never",&Process::default()).err().as_deref(),error);
+                if runtime.descriptor().has("background") {
+                    assert_eq!(runtime.background_launch(command(),&spec,"never",budget).err().as_deref(),error);
+                    assert_eq!(runtime.jobs(command(),&spec,false,budget).err().as_deref(),error);
+                    assert_eq!(runtime.job(&Value::Null,&spec,"job").err().as_deref(),error);
+                    let job=BackgroundJob {id:"job".into(),session:"safe".into(),pid:None,root:PathBuf::new(),scope:String::new()};
+                    assert_eq!(runtime.stop_job(command(),&spec,&job,budget).err().as_deref(),error);
+                }
+                if runtime.descriptor().has("app-queue") {assert_eq!(runtime.app_queue(command(),&spec,"never",budget).err().as_deref(),error);}
+                if runtime.descriptor().has("app-server") {assert_eq!(runtime.app_server_arguments(&spec).err().as_deref(),error);}
+            }
+            for (session,resume) in [("session-1",true),("session-1",false),("-",false)] {
+                assert!(runtime.native_arguments(&NativeSpec {session:session.into(),resume,..Default::default()}).is_ok());
+            }
+        }
+    }
 
     fn args(name: &str, l: &Launch) -> Res<Vec<String>> {
         mapped(Client::parse(name).unwrap(), name, l).map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect())

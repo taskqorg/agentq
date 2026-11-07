@@ -11,12 +11,19 @@ fn main() {
         assert_eq!(r.home_env("fixtureq","other"),vec![("GEMINI_HOME".into(),home.join("fixtureq-accounts").join("other").into_os_string())]);
         assert_eq!(r.protected_paths(None),vec![home.clone(),home.join("config")]);return;
     }
+    if let Some(marker)=std::env::var_os("AGENTQ_FAKE_RAW") {
+        let args=std::env::args().skip(1).collect::<Vec<_>>();std::fs::write(marker,serde_json::to_vec(&args).unwrap()).unwrap();
+        if args.iter().any(|a|a=="--version") {println!("agy 1.5.2");return;}
+        let _=std::io::stdin().lock().lines().next();
+        println!("{}",json!({"event":"init","session_id":"raw-session-1"}));return;
+    }
     if std::env::var_os("AGENTQ_FAKE_ACP").is_some() {return server();}
     let root=std::env::temp_dir().join(format!("agentq-acp-{}",std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let expected=root.join("gemini-root");
     assert!(std::process::Command::new(std::env::current_exe().unwrap()).env("AGENTQ_CHECK_ACP_HOME",&expected).env("GEMINI_HOME",&expected).env("ANTIGRAVITY_HOME",root.join("old-data")).status().unwrap().success());
     let r=agent::runtime("antigravity").unwrap();
+    raw_session_boundary(&root);
     let mut l=Launch::new(&root,root.join("acp.jsonl"),"first","fixtureq");
     l.command=vec![std::env::current_exe().unwrap().into_os_string()];
     l.home=Some(root.join("account"));std::fs::create_dir_all(l.home.as_ref().unwrap()).unwrap();
@@ -185,6 +192,31 @@ fn main() {
     println!("ACP trait: launch, choices, model/mode, tools, resume replay, cancel, unknown updates, version refusal and EOF passed");
 }
 
+fn raw_session_boundary(root:&std::path::Path) {
+    let r=agent::runtime("antigravity").unwrap();let marker=root.join("raw-spawn.json");
+    let mut l=Launch::new(root,root.join("raw.jsonl"),"fixture","fixtureq");l.home=Some(root.into());
+    l.env=vec![("AGENTQ_FAKE_RAW".into(),marker.clone().into_os_string())];
+    for (session,resume) in [("--foreign-flag",true),("-x",false),("opaque:/file",true),("one two",true),("one\nline",true),("",false),("-",true)] {
+        let owned=if session.is_empty() || session=="-" {"raw-owned-session"}else{session};
+        r.adopt(owned,&l,&[]).unwrap();let owner=r.session_owner(Some(owned),&l).unwrap();
+        let spec=agent::NativeSpec {root:root.into(),session:session.into(),resume,home:l.home.clone(),env:l.env.clone(),owner:Some(owner),..Default::default()};
+        let result=r.turn(std::process::Command::new(std::env::current_exe().unwrap()),&spec,&l.log,&l.input,&agent::Process::default());
+        let accepted=result.is_ok();if let Ok(mut turn)=result {turn.wait(Some(Instant::now()+Duration::from_secs(20))).unwrap();}
+        assert!(!accepted && !marker.exists(),"opaque ownership must not authorize raw CLI spawn: {session:?}");
+        assert!(r.native_arguments(&spec).is_err(),"raw argument inspection must reject {session:?}");
+        assert_eq!(r.turn(std::process::Command::new(root.join("agentapi")),&spec,&l.log,&l.input,&agent::Process::default()).err().as_deref(),Some("native CLI session invalid"),"agentapi comparison seam rejects before preflight");
+    }
+    let owner=r.session_owner(None,&l).unwrap();
+    let fresh=agent::NativeSpec {root:root.into(),session:"-".into(),owner:Some(owner),..Default::default()};
+    assert!(r.native_arguments(&fresh).is_ok(),"new-start sentinel remains valid");drop(fresh);
+    r.adopt("raw-session-1",&l,&[]).unwrap();
+    let spec=agent::NativeSpec {root:root.into(),session:"raw-session-1".into(),resume:true,home:l.home.clone(),env:l.env.clone(),owner:Some(r.session_owner(Some("raw-session-1"),&l).unwrap()),..Default::default()};
+    let mut turn=r.turn(std::process::Command::new(std::env::current_exe().unwrap()),&spec,&l.log,&l.input,&agent::Process::default()).unwrap();
+    turn.wait(Some(Instant::now()+Duration::from_secs(20))).unwrap();
+    let args:Vec<String>=serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert!(args.windows(2).any(|a|a==["--conversation","raw-session-1"]));std::fs::remove_file(marker).unwrap();
+}
+
 fn server() {
     if std::env::args().any(|s|s=="--version") {println!("agy {}",std::env::var("AGENTQ_FAKE_ACP_PROBE_VERSION").unwrap_or("1.5.2".into()));return;}
     #[cfg(windows)] if std::env::var_os("AGENTQ_FAKE_ACP_DESCENDANT").is_some() {
@@ -192,7 +224,7 @@ fn server() {
         let child=std::process::Command::new(std::env::current_exe().unwrap()).env("AGENTQ_FAKE_DESCENDANT","1").spawn().unwrap();
         std::fs::write("descendant.pid",child.id().to_string()).unwrap();
     }
-    let mut session=std::env::var("AGENTQ_FAKE_ACP_SESSION").unwrap_or_else(|_|format!("session:opaque_/{}",std::process::id()));
+    let mut session=std::env::var("AGENTQ_FAKE_ACP_SESSION").unwrap_or_else(|_|format!("--session:opaque_/{}",std::process::id()));
     let mut asked=false;let mut cancelled=false;let mut linger=false;
     let mut prompt=Value::Null;
     let emit=|v:Value| {println!("{v}");std::io::stdout().flush().unwrap();};
