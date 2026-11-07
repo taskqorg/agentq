@@ -385,6 +385,15 @@ mod background_control_tests {
         let alias=open("claude","native-session",Some(&root),Some(&path),Some(&source.checkpoint())).unwrap().with_native_session_alias("copied-session","native-session").unwrap();
         assert!(alias.control_proof(&file,"copied-session",Some("native-session"),"protected reference",1,true,&left).is_ok());
         assert!(alias.control_proof(&file,"copied-session",None,"protected reference",1,true,&left).is_err(),"copy requires explicit original session");
+        // Joined witnessed-copy resolver retains native original while control binds the logical destination.
+        let copied_path=root.join("projects/copy/copied-session.jsonl");std::fs::create_dir_all(copied_path.parent().unwrap()).unwrap();
+        std::fs::write(&copied_path,first.clone()+&second).unwrap();
+        let mut copied=open_with_native_session_alias("claude","copied-session","native-session",Some(&root),None,None).unwrap();copied.poll().unwrap();
+        let copied_file=File::open(&copied_path).unwrap();
+        assert_eq!(copied.source().session,"copied-session");assert_eq!(copied.source().native_session,"native-session");
+        assert!(copied.control_proof(&copied_file,"copied-session",Some("native-session"),"protected reference",1,true,&left).is_ok());
+        assert!(copied.control_proof(&copied_file,"copied-session",Some("foreign-session"),"protected reference",1,true,&left).is_err());
+        assert!(copied.with_native_session_alias("rewritten-session","copied-session").is_err(),"cannot rewrite a witnessed copy");
         assert!(source.control_proof(&file,"native-session",None," protected reference",1,true,&left).is_err(),"only native text is trimmed");
         assert!(source.control_proof(&file,"native-session",None,"protected",1,true,&left).is_err(),"no substring matching");
         assert!(source.control_proof(&file,"native-session",None,"protected reference",2,true,&left).is_err(),"before is a complete-record count");
