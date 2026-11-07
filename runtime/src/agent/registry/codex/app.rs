@@ -154,6 +154,8 @@ impl AppSession {
             || p.get("turn_id").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
         // History also recognizes turn headers in an optional top-level payload.
         if ["turn_id","turnId"].iter().any(|key|frame.value["payload"].get(*key).is_some_and(|v|v.as_str()!=self.turn.as_deref())) {return;}
+        if matches!(frame.value["type"].as_str(),Some("user"|"assistant"))
+            && frame.value.get("promptId").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
         selected.push(SessionLine {session:session.into(),turn:self.turn.clone(),raw});
     }
 
@@ -412,13 +414,28 @@ mod tests {
             let mut value=row.clone();value["params"]["turn_id"]=identity.clone();rejected.push(value);
             for key in ["turn_id","turnId"] {let mut value=row.clone();value["payload"]=json!({key:identity});rejected.push(value);}
         }
-        for value in rejected {let raw=format!("{value}\n");assert!(app.observe_frame(frame(&raw)).unwrap().is_empty(),"{value}");}
+        for ty in ["user","assistant"] {
+            for identity in [json!("old"),json!(""),Value::Null,json!([]),json!({}),json!(7),json!(true)] {
+                rejected.push(json!({"type":ty,"promptId":identity,"method":"turn/started","params":{"threadId":"thread","turn":{"id":"turn"}}}));
+                let mut masked=row.clone();masked["type"]=json!(ty);masked["promptId"]=identity;rejected.push(masked);
+            }
+        }
+        let valid=format!("{row}\n");let mut kept=vec![];
+        for value in rejected {
+            let raw=format!("{value}\n");assert!(app.observe_frame(frame(&raw)).unwrap().is_empty(),"{value}");
+            let admitted=app.observe_frame(frame(&valid)).unwrap();assert_eq!(admitted[0].raw,valid.as_bytes());kept.extend_from_slice(&admitted[0].raw);
+        }
         let mut matching=row.clone();matching["type"]=json!("thread.started");matching["thread_id"]=json!("thread");matching["params"]["turn_id"]=json!("turn");matching["payload"]=json!({"turn_id":"turn","turnId":"turn"});
-        let raw=format!("{matching}\n");assert_eq!(app.observe_frame(frame(&raw)).unwrap()[0].raw,raw.as_bytes());
-        let valid=format!("{row}\n");let admitted=app.observe_frame(frame(&valid)).unwrap();assert_eq!(admitted[0].raw,valid.as_bytes());
-        let root=crate::scratch("selected-header-binding");std::fs::create_dir_all(&root).unwrap();let path=root.join("selected.jsonl");std::fs::write(&path,&admitted[0].raw).unwrap();
+        let mut positives=vec![matching];
+        for ty in ["user","assistant"] {
+            positives.push(json!({"type":ty,"promptId":"turn","method":"turn/started","params":{"threadId":"thread","turn":{"id":"turn"}}}));
+            let mut missing=row.clone();missing["type"]=json!(ty);positives.push(missing);
+        }
+        let mut unrelated=row.clone();unrelated["type"]=json!("future");unrelated["promptId"]=json!("foreign");positives.push(unrelated);
+        for value in positives {let raw=format!("{value}\n");let admitted=app.observe_frame(frame(&raw)).unwrap();assert_eq!(admitted[0].raw,raw.as_bytes());kept.extend_from_slice(&admitted[0].raw);}
+        let root=crate::scratch("selected-header-binding");std::fs::create_dir_all(&root).unwrap();let path=root.join("selected.jsonl");std::fs::write(&path,&kept).unwrap();
         let mut reader=crate::agent::history::History::caller("codex",crate::agent::history::CODEX_APP_SERVER_SELECTED,"selected","attempt",Some("thread")).unwrap();
-        let page=reader.steps(&path,u64::MAX).unwrap();assert!(!page.steps.is_empty());assert_eq!(reader.read_bytes(&path,0,valid.len() as u64).unwrap(),valid.as_bytes());let _=std::fs::remove_dir_all(root);
+        let page=reader.steps(&path,u64::MAX).unwrap();assert!(!page.steps.is_empty());assert!(page.steps.iter().all(|s|s.turn.native_id.as_deref()==Some("turn")));assert_eq!(reader.read_bytes(&path,0,kept.len() as u64).unwrap(),kept);let _=std::fs::remove_dir_all(root);
         let request=json!({"id":99,"method":"item/tool/call","params":{"threadId":"thread","turnId":"turn","tool":"owned","arguments":{}}});
         let raw=format!("{request}\n");assert_eq!(app.observe_frame(frame(&raw)).unwrap()[0].raw,raw.as_bytes());
         let terminal=json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}});let raw=format!("{terminal}\n");
