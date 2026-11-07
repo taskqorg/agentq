@@ -11,6 +11,7 @@ unsafe extern "system" {
     fn TerminateProcess(process:*mut c_void,code:u32)->i32;
     fn OpenProcess(access:u32,inherit:i32,pid:u32)->*mut c_void;
     fn GetProcessId(process:*mut c_void)->u32;
+    fn GetExitCodeProcess(process:*mut c_void,code:*mut u32)->i32;
     fn GetCurrentProcess()->*mut c_void;
     fn DuplicateHandle(source_process:*mut c_void,source:*mut c_void,target_process:*mut c_void,target:*mut *mut c_void,access:u32,inherit:i32,options:u32)->i32;
     fn WaitForSingleObject(handle:*mut c_void,millis:u32)->u32;
@@ -41,27 +42,53 @@ impl Frozen {
     fn root(child:&Child)->Res<Self> {
         let current=unsafe {GetCurrentProcess()};let mut raw=std::ptr::null_mut();
         if unsafe {DuplicateHandle(current,child.as_raw_handle(),current,&mut raw,0,0,2)}==0 {return Err(error("duplicate root identity"));}
+        eprintln!("JOBDIAG {}",serde_json::json!({"stage":"root-child","pid":child.id(),"child_handle":child.as_raw_handle() as usize,"held_handle":raw as usize}));
         Self::freeze(unsafe {OwnedHandle::from_raw_handle(raw)},None)
     }
     fn open(pid:u32,parent:&Self)->Res<Option<Self>> {
+        eprintln!("JOBDIAG {}",serde_json::json!({"stage":"open","pid":pid,"parent_pid":parent.pid,"parent_created":parent.created,"parent_handle":parent.handle.as_raw_handle() as usize,"parent_wait":unsafe {WaitForSingleObject(parent.handle.as_raw_handle(),0)},"rights":0x100d01}));
         let raw=unsafe {OpenProcess(0x00100000|0x0400|0x0800|0x0100|0x0001,0,pid)};
-        if raw.is_null() {if std::io::Error::last_os_error().raw_os_error()==Some(87) {return Ok(None);}return Err(error("open process"));}
+        if raw.is_null() {
+            let failure=std::io::Error::last_os_error();
+            eprintln!("JOBDIAG {}",serde_json::json!({"stage":"open-denied","pid":pid,"rights":0x100d01,"win32":failure.raw_os_error()}));
+            // Diagnostic only: this read-only handle never supplies suspension/enrollment/termination authority.
+            let query=unsafe {OpenProcess(0x1000,0,pid)};
+            if query.is_null() {
+                let query_failure=std::io::Error::last_os_error();
+                eprintln!("JOBDIAG {}",serde_json::json!({"stage":"query-unavailable","pid":pid,"rights":0x1000,"win32":query_failure.raw_os_error()}));
+            } else {
+                let query=unsafe {OwnedHandle::from_raw_handle(query)};let handle=query.as_raw_handle();
+                let creation=created(handle).ok();let native_pid=unsafe {GetProcessId(handle)};
+                let mut basic:ProcessBasic=unsafe {std::mem::zeroed()};let mut returned=0;
+                let status=unsafe {NtQueryInformationProcess(handle,0,(&mut basic as *mut ProcessBasic).cast(),std::mem::size_of::<ProcessBasic>() as u32,&mut returned)};
+                let mut exit=0;let exit_known=unsafe {GetExitCodeProcess(handle,&mut exit)}!=0;
+                eprintln!("JOBDIAG {}",serde_json::json!({"stage":"query-identity","pid":pid,"native_pid":native_pid,"created":creation,"native_parent":basic.parent,"native_basic_pid":basic.pid,"query_status":status,"query_bytes":returned,"exit_known":exit_known,"exit_code":exit_known.then_some(exit)}));
+            }
+            if failure.raw_os_error()==Some(87) {return Ok(None);}return Err(format!("native job open process: {failure}"));
+        }
         Self::freeze(unsafe {OwnedHandle::from_raw_handle(raw)},Some(parent)).map(Some)
     }
     fn freeze(handle:OwnedHandle,parent:Option<&Self>)->Res<Self> {
-        let raw=handle.as_raw_handle();let created=created(raw)?;let pid=unsafe {GetProcessId(raw)};
-        if pid==0 {return Err(error("process identity"));}
+        let raw=handle.as_raw_handle();let created=created(raw)?;let pid=unsafe {GetProcessId(raw)};let pid_error=(pid==0).then(std::io::Error::last_os_error);
+        eprintln!("JOBDIAG {}",serde_json::json!({"stage":"held-identity","pid":pid,"created":created,"held_handle":raw as usize,"wait":unsafe {WaitForSingleObject(raw,0)},"parent_pid":parent.map(|p|p.pid)}));
+        if let Some(failure)=pid_error {return Err(format!("native job process identity: {failure}"));}
         if let Some(parent)=parent {
             let mut basic:ProcessBasic=unsafe {std::mem::zeroed()};let mut returned=0;
             let status=unsafe {NtQueryInformationProcess(raw,0,(&mut basic as *mut ProcessBasic).cast(),std::mem::size_of::<ProcessBasic>() as u32,&mut returned)};
-            if status<0 {return Err(format!("native job parent identity: NTSTATUS {status:#x}"));}
+            if status<0 {
+                eprintln!("JOBDIAG {}",serde_json::json!({"stage":"relation-query-refused","pid":pid,"parent_pid":parent.pid,"query_status":status,"query_bytes":returned}));
+                return Err(format!("native job parent identity: NTSTATUS {status:#x}"));
+            }
+            let parent_wait=unsafe {WaitForSingleObject(parent.handle.as_raw_handle(),0)};
+            eprintln!("JOBDIAG {}",serde_json::json!({"stage":"relation","pid":pid,"created":created,"held_handle":raw as usize,"native_pid":basic.pid,"native_parent":basic.parent,"query_bytes":returned,"parent_pid":parent.pid,"parent_created":parent.created,"parent_handle":parent.handle.as_raw_handle() as usize,"parent_wait":parent_wait,"size_ok":returned as usize==std::mem::size_of::<ProcessBasic>(),"pid_ok":basic.pid==pid as usize,"parent_ok":basic.parent==parent.pid as usize,"creation_ok":created>=parent.created,"parent_live":parent_wait==258}));
             // The snapshot is discovery only. Neither an unknown nor a replaced PID grants process authority.
             if returned as usize!=std::mem::size_of::<ProcessBasic>() || basic.pid!=pid as usize || basic.parent!=parent.pid as usize || created<parent.created
-                || unsafe {WaitForSingleObject(parent.handle.as_raw_handle(),0)}!=258 {
+                || parent_wait!=258 {
                 return Err("native job descendant identity changed or unknown".into());
             }
         }
         let status=unsafe {NtSuspendProcess(raw)};
+        eprintln!("JOBDIAG {}",serde_json::json!({"stage":"suspend-result","pid":pid,"held_handle":raw as usize,"status":status}));
         if status<0 {return Err(format!("native job suspend: NTSTATUS {status:#x}"));}
         Ok(Self {handle,pid,created,resume:false})
     }
@@ -95,6 +122,7 @@ impl Job {
             for (pid,parent) in rows {
                 if frozen.iter().any(|p|p.pid==pid) {continue;}
                 if let Some(parent)=frozen.iter().find(|p|p.pid==parent) {
+                    eprintln!("JOBDIAG {}",serde_json::json!({"stage":"snapshot-candidate","pid":pid,"snapshot_parent":parent.pid,"root_pid":frozen[0].pid,"root_created":frozen[0].created,"root_handle":frozen[0].handle.as_raw_handle() as usize,"root_wait":unsafe {WaitForSingleObject(frozen[0].handle.as_raw_handle(),0)}}));
                     if let Some(member)=Frozen::open(pid,parent)? {added.push(member);}
                 }
             }

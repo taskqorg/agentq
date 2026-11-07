@@ -1,47 +1,72 @@
-name: Test
+# Diagnostic-only branch; never merge. Reproduce one original Windows Test order, never retry.
+name: ACP full-order diagnostics
 on:
-  # Branch work runs through pull_request and merge_group; main pushes keep the main status.
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
-  merge_group:
 permissions:
   contents: read
-# A new push to a pull request replaces its older run.
-concurrency:
-  group: test-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  contract:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
-        with:
-          repository: taskqorg/specq
-          ref: 7e9adf57287553176d8b3be61c2b22565543dc51
-          path: .specq
-      - run: python3 .specq/engineering/scripts/contract_lint.py agentq.md
-  rust:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    # GitHub-hosted runners are free for this public repository and run in parallel; the host Mac also runs the agents.
-    runs-on: ${{ matrix.os }}
+  windows-full-order:
+    runs-on: windows-latest
     timeout-minutes: 15
     env:
       AGENTQ_SELFTEST_OFFLINE: '1'
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - run: rustup default stable
-      # Only main pushes save the cache.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Same pinned cache action/order as the failing Test; this isolated branch never saves.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: python tests/hermes_adapter.py
-      - run: python tests/pin_update.py
-      - run: cargo test --locked
-      - run: cargo run --locked -- selftest
+      - name: Original Windows Test command order with metadata-only capture
+        shell: python
+        run: |
+          import json, pathlib, re, subprocess, sys
+          records = []
+          def emit(record):
+              assert record.get('stage') in stages
+              assert all(value is None or type(value) in (int, bool) for key, value in record.items() if key not in ('stage', 'target', 'suite'))
+              assert record.get('target', target) == target
+              assert record.get('suite', suite) in set(suites.values()) | {'not-started', 'unrecognized'}
+              record['target'] = target
+              records.append(record)
+              print('JOBDIAG ' + json.dumps(record), flush=True)
+          stages = {'root-child', 'open', 'open-denied', 'query-unavailable', 'query-identity', 'held-identity', 'relation-query-refused', 'relation', 'suspend-result', 'snapshot-candidate', 'fixture-named-start', 'command-start', 'command-exit', 'suite-start', 'suite-result', 'identity-control-result', 'acp-fixture-result', 'failure-boundary', 'parent-cleanup-refusal'}
+          suites = {'unittests agentq/main.rs': 'agentq-unit', 'tests/control.rs': 'control', 'tests/hook.rs': 'hook', 'tests/release.rs': 'release', 'unittests src/lib.rs': 'runtime-unit', 'tests/acp.rs': 'acp', 'tests/agent.rs': 'runtime-agent', 'tests/history.rs': 'history', 'tests/history_accounting.rs': 'history-accounting', 'tests/history_live.rs': 'history-live', 'tests/history_steps.rs': 'history-steps', 'tests/history_usage_scope.rs': 'history-usage-scope', 'tests/runtime_2448.rs': 'runtime-2448', 'Doc-tests agentq_runtime': 'runtime-doc'}
+          commands = [('hermes-adapter', ['python', 'tests/hermes_adapter.py']), ('pin-update', ['python', 'tests/pin_update.py']), ('full-cargo-test', ['cargo', 'test', '--locked']), ('offline-selftest', ['cargo', 'run', '--locked', '--', 'selftest'])]
+          suite = 'not-started'
+          for target, command in commands:
+              emit({'stage': 'command-start'})
+              result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
+              for line in result.stdout.splitlines():
+                  normalized = line.replace('\\', '/').strip()
+                  if normalized.startswith('Running ') or normalized.startswith('Doc-tests '):
+                      suite = next((label for marker, label in suites.items() if marker in normalized), 'unrecognized')
+                      emit({'stage': 'suite-start', 'suite': suite})
+                  if 'JOBDIAG ' in line:
+                      record = json.loads(line.split('JOBDIAG ', 1)[1])
+                      record['suite'] = suite
+                      emit(record)
+                  summary = re.search(r'test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', line)
+                  if summary:
+                      emit({'stage': 'suite-result', 'suite': suite, 'passed': int(summary[2]), 'failed': int(summary[3]), 'ignored': int(summary[4]), 'measured': int(summary[5]), 'filtered': int(summary[6]), 'ok': summary[1] == 'ok'})
+                  if 'test agent::stdio::windows_job::tests::stale_snapshot_refuses_unrelated_process_before_touching_it ... ' in line:
+                      emit({'stage': 'identity-control-result', 'suite': suite, 'passed': line.rstrip().endswith(' ... ok')})
+                  if line.startswith('ACP trait: ') and line.endswith(' passed'):
+                      emit({'stage': 'acp-fixture-result', 'suite': suite, 'passed': True})
+                  boundary = re.search(r'panicked at runtime[/\\]tests[/\\](?:agent|acp)\.rs:(\d+):(\d+)', line)
+                  if boundary:
+                      emit({'stage': 'failure-boundary', 'suite': suite, 'line': int(boundary[1]), 'column': int(boundary[2])})
+                  if suite == 'runtime-agent' and ('os error 145' in line or 'code: 145,' in line):
+                      emit({'stage': 'parent-cleanup-refusal', 'suite': suite, 'win32': 145})
+              emit({'stage': 'command-exit', 'exit': result.returncode})
+              pathlib.Path('startup-metadata.jsonl').write_text('\n'.join(map(json.dumps, records)) + '\n')
+              if result.returncode:
+                  sys.exit(result.returncode)
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: startup-metadata
+          path: startup-metadata.jsonl
+          if-no-files-found: error
