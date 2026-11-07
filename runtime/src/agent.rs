@@ -23,7 +23,7 @@ pub(crate) use adapter::test_receipts;
 mod capture;
 mod events;
 mod limits;
-pub use events::{AssistantFailure, Choice, Event, LogRecord, Model, RecordTime, RequestKind, TimeFault, ToolKind};
+pub use events::{Answer,Question,AssistantFailure, Choice, Event, LogRecord, Model, RecordTime, RequestKind, TimeFault, ToolKind};
 pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
