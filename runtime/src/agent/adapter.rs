@@ -177,6 +177,8 @@ pub struct Launch {
     pub parts: Vec<Part>,
     /// Partial text records in `progress` (capability `turn-deltas`; app-server runs always stream them).
     pub deltas: bool,
+    /// Keep a live native control channel; ordinary one-shot transports refuse it.
+    pub controls: bool,
     /// Operator-configured native arguments of a turn (capability `host-args`); needs the default `Policy`.
     pub host_args: Vec<OsString>,
     /// Session environment (capability `settings-env`). A Claude launch puts it in argv: never secrets; use `env` for those.
@@ -217,7 +219,7 @@ impl Launch {
         let log=log.into();let session_store=SessionStore::new(log.parent().unwrap_or(Path::new(".")).join(".agentq-sessions"));
         Launch { root: root.into(), log, input: input.into(), policy: Policy::default(), model: None, effort: None, compact_hook: None,
             env: vec![], command: vec![], optimization: Intent::Inherit, product: product.into(), install: None, accounts: None,
-            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![], readiness: ReadinessMode::default(), store: None, session_store, inactivity:None,stop_on_stall:false,lifetime:Lifetime::default() }
+            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, controls:false,host_args: vec![], settings_env: vec![], readiness: ReadinessMode::default(), store: None, session_store, inactivity:None,stop_on_stall:false,lifetime:Lifetime::default() }
     }
 }
 
@@ -395,7 +397,7 @@ impl Run {
             Body::Native(n) => Facts {run:self.stop_id.clone(),format:protocol(n.spec.client).native_history,path:n.turn.path().into(),start:0,exited:None,native_end:n.report.is_some(),exit:None,lost_owner:false},
             Body::App(a) => {
                 let exit=if a.owned {a.transport.as_mut().map(Transport::exit).transpose()?.flatten()}else{None};
-                Facts {run:self.stop_id.clone(),format:"codex-app-server",path:PathBuf::new(),start:0,exited:if a.owned {Some(exit.is_some())}else{None},native_end:a.session.report().is_some(),exit,lost_owner:a.closed.is_some() && exit.is_none()}
+                Facts {run:self.stop_id.clone(),format:"codex-app-server",path:a.journal.clone().unwrap_or_default(),start:0,exited:if a.owned {Some(exit.is_some())}else{None},native_end:a.session.report().is_some(),exit,lost_owner:a.closed.is_some() && exit.is_none()}
             },
         })
     }
@@ -491,6 +493,7 @@ impl Transport {
     fn receive(&mut self, until: Instant) -> Res<Option<Value>> { match self { Transport::Plain(s) => s.receive(until), Transport::Protected(s) => s.receive(until) } }
     fn id(&self) -> u32 { match self { Transport::Plain(s) => s.id(), Transport::Protected(s) => s.id() } }
     fn exit(&mut self) -> Res<Option<i32>> { match self { Transport::Plain(s) => s.poll(), Transport::Protected(s) => s.poll() } }
+    fn send_until(&mut self,m:&Value,until:Option<Instant>)->Res<()> {match self {Self::Plain(s)=>s.send_until(m,until),Self::Protected(s)=>s.send(m,until.ok_or("protected-control-unsupported")?)}}
 }
 
 /// An app-server session: the caller drives turns with `input`, answers server requests with `send`, reads `progress`.
@@ -498,22 +501,27 @@ struct App {
     transport: Option<Transport>,
     session: AppSession,
     /// Native messages received but not yet returned by `progress`.
-    pending: Vec<Value>,
+    pending: Vec<(Value,Option<Event>)>,
     model: Option<String>,
     /// Why the transport ended; the turn outcome stays native evidence only.
     closed: Option<String>,
     owned: bool,
     requests: Vec<Value>,
     effort: Option<String>,
+    control: Option<(super::control::Requests,File)>,
+    journal: Option<PathBuf>,
+    cancelling: bool,
+    approval: Approval,
 }
 
 impl Drop for App {
     fn drop(&mut self) {
+        if let Some((requests,log))=&mut self.control {let _=requests.retire(log,self.session.session().unwrap_or(""),"unknown");}
         if self.owned { if let Some(Transport::Plain(s)) = &mut self.transport { let _ = s.close(); } }
     }
 }
 
-fn automatic(l: &Launch) -> bool { l.mode == Mode::Turn && (l.mcp.is_some() || l.instructions.is_some() || !l.parts.is_empty() || l.deltas) }
+fn automatic(l: &Launch) -> bool { l.mode == Mode::Turn && (l.mcp.is_some() || l.instructions.is_some() || !l.parts.is_empty() || l.deltas || l.controls) }
 
 /// Ordinary turns accept only declared needs; native protocol parameters remain protected-host data.
 fn turn_thread(l: &Launch) -> Res<Value> {
@@ -568,14 +576,37 @@ fn thread_params(l: &Launch, thread: &Value) -> Res<Value> {
 }
 
 impl App {
-    fn observe(&mut self, m: Value, until: Instant) -> Res<()> {
+    fn observe(&mut self, m: Value, until: Option<Instant>) -> Res<()> {
+        if let Err(error)=self.observe_inner(m,until) {self.closed=Some(error.clone());return Err(error);}Ok(())
+    }
+    fn observe_inner(&mut self, m: Value, until: Option<Instant>) -> Res<()> {
+        if let Some((_,log))=&mut self.control {writeln!(log,"{m}").map_err(|e|format!("control-log-unknown: {e}"))?;}
         self.session.observe(&m)?;
         if m.get("id").is_some() && m["method"].is_string() {
-            if self.owned {
+            if self.control.is_some() && self.cancelling {
+                self.transport.as_mut().ok_or("app-server transport ended")?.send_until(&json!({"id":m["id"],"error":{"code":-32800,"message":"Turn cancellation requested"}}),until)?;
+                self.pending.push((m,None));
+            }else if self.control.is_some() {self.requests.push(m);}
+            else if self.owned {
                 let reply = json!({"id":m["id"],"error":{"code":-32601,"message":"No approval or native tool handler for this turn"}});
-                self.transport.as_mut().ok_or("app-server transport ended")?.send(&reply, until)?;
+                self.transport.as_mut().ok_or("app-server transport ended")?.send_until(&reply, until)?;
             } else { self.requests.push(m); }
-        } else { self.pending.push(m); }
+        } else { self.pending.push((m,None)); }
+        if self.session.report().is_some() {
+            if let Some((requests,log))=&mut self.control {requests.retire(log,self.session.session().ok_or("control-session-unknown")?,"cancelled")?;self.requests.clear();}
+        } else if self.control.is_some() && self.session.turn_id().is_some() {
+            for request in std::mem::take(&mut self.requests) {
+                if let Some(mut event)=self.session.control_request(&request)? {
+                    if !matches!(self.approval,Approval::Native|Approval::Bypass) {if let Event::Request{kind:RequestKind::Approval,choices,..}=&mut event {choices.retain(|c|c.kind=="deny");}}
+                    let (requests,log)=self.control.as_mut().expect("controlled session");
+                    let event=requests.register(log,self.session.session().ok_or("control-session-unknown")?,event,request.clone(),self.session.turn_id().map(String::from))?;
+                    self.pending.push((request,Some(event)));
+                }else{
+                    self.transport.as_mut().ok_or("app-server transport ended")?.send_until(&json!({"id":request["id"],"error":{"code":-32601,"message":"Native request unsupported"}}),until)?;
+                    self.pending.push((request,None));
+                }
+            }
+        }
         Ok(())
     }
     /// Exchange one client request and read until its reply; every message read stays pending for `progress`.
@@ -584,7 +615,7 @@ impl App {
         loop {
             let m = self.transport.as_mut().ok_or("app-server transport ended")?.receive(until)?.ok_or("app-server reply deadline; session state unknown")?;
             let reply = m["id"] == request["id"] && m.get("method").is_none();
-            self.observe(m, until)?;
+            self.observe(m, Some(until))?;
             if reply { return Ok(()); }
         }
     }
@@ -598,7 +629,12 @@ impl App {
         };
         if let Transport::Plain(server) = &transport { session.sample(server.id()); }
         let owned = matches!(transport, Transport::Plain(_));
-        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone() };
+        let control=if l.controls && owned {
+            let mut options=File::options();options.create(true).append(true);
+            #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
+            Some((super::control::Requests::new(),options.open(&l.log).map_err(|e|format!("control-log: {e}"))?))
+        }else{None};
+        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),cancelling:false,approval:l.policy.approval };
         let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
@@ -615,16 +651,23 @@ impl App {
         self.exchange(request, until)?;
         if !self.session.ready() { return Err("app-server thread not ready".into()); }
         owner.bind(self.session.session().ok_or("session-owner-unknown: app thread missing")?)?;
+        if self.control.is_some() {owner.hold_controls()?;}
         if !l.parts.is_empty() { self.start(input_items(descriptor, &l.parts).map_err(|e|e.to_string())?, until)?; }
         else if !l.input.is_empty() { self.input(&l.input, until)?; }
         Ok(())
+    }
+
+    fn writable(&self)->Res<()> {
+        if self.closed.is_some() || self.control.as_ref().is_some_and(|(requests,_)|requests.uncertain()) {return Err("control-state-unknown".into());}Ok(())
     }
 
     fn input(&mut self, text: &str, until: Instant) -> Res<()> { self.start(json!([{"type": "text", "text": text}]), until) }
 
     /// Start the next turn with exactly `items`; a failed write stays uncertain and is never resent.
     fn start(&mut self, items: Value, until: Instant) -> Res<()> {
+        self.writable()?;
         if self.session.report().is_some() { self.session.finish_turn()?; }
+        self.cancelling=false;
         let mut params = json!({"input": items});
         if let Some(m) = &self.model { params["model"] = json!(m); }
         if let Some(e) = &self.effort { params["effort"] = json!(e); }
@@ -637,18 +680,18 @@ impl App {
         let request = self.session.request("account/read", json!({"refreshToken": false}))?;
         let id = request["id"].clone();
         self.exchange(request, until)?;
-        let at = self.pending.iter().rposition(|m| m["id"] == id && m.get("method").is_none()).ok_or("account/read reply missing")?;
-        account_of(&self.pending.remove(at))
+        let at = self.pending.iter().rposition(|(m,_)| m["id"] == id && m.get("method").is_none()).ok_or("account/read reply missing")?;
+        account_of(&self.pending.remove(at).0)
     }
 
     /// Read every message available now.
     fn pump(&mut self) -> Res<()> {
-        if self.transport.is_none() { return Ok(()); }
+        if self.transport.is_none() || self.closed.is_some() { return Ok(()); }
         loop {
             match self.transport.as_mut().expect("transport").receive(Instant::now()) {
                 Ok(Some(m)) => {
-                    self.observe(m, Instant::now() + Duration::from_secs(5))?;
-                    if self.owned && self.session.report().is_some() {
+                    self.observe(m, Some(Instant::now() + Duration::from_secs(5)))?;
+                    if self.owned && self.control.is_none() && self.session.report().is_some() {
                         if let Some(Transport::Plain(s)) = &mut self.transport { s.close()?; }
                         return Ok(());
                     }
@@ -661,10 +704,34 @@ impl App {
 
     fn poll(&mut self) -> Res<State> {
         self.pump()?;
+        if self.control.as_ref().is_some_and(|(requests,_)|requests.uncertain()) || self.closed.is_some() && self.session.control_pending() {return Ok(State::Unknown);}
         if let Some(r) = self.session.report() { return Ok(state(&r)); }
         // Reap an exited server; an exit without a native report never proves a turn.
         if let Some(code) = self.transport.as_mut().map(Transport::exit).transpose()?.flatten() { self.closed.get_or_insert(format!("app-server exited {code}")); }
         Ok(if self.closed.is_some() || self.transport.is_none() { State::Unknown } else { State::Running })
+    }
+
+    fn respond(&mut self,control:Control,until:Option<Instant>)->Res<()> {
+        if self.closed.is_some() || self.session.report().is_some() {return Err("control-turn-unavailable".into());}
+        let Some(Transport::Plain(server))=&mut self.transport else {return Err("respond-transport-unsupported".into());};
+        let (requests,log)=self.control.as_mut().ok_or("respond-transport-unsupported")?;
+        let session=self.session.session().ok_or("control-session-unknown")?;
+        let reply=self.session.control_reply(requests.native(&control)?,&control)?;
+        let request=requests.begin(log,session,&control,&reply)?;
+        if let Err(error)=server.send_until(&reply,until) {requests.fail(log,session,&request);return Err(error);}
+        requests.sent(log,session,&request,&reply)
+    }
+
+    fn control_exchange(&mut self,request:Value,until:Option<Instant>)->Res<()> {
+        let Some(Transport::Plain(server))=&mut self.transport else {return Err("control-transport-unsupported".into());};
+        if let Err(error)=server.send_until(&request,until) {self.closed=Some(error.clone());return Err(error);}
+        loop {
+            let message=match self.transport.as_mut() {Some(Transport::Plain(server))=>server.wait(until),_=>Err("control-transport-unsupported".into())};
+            let message=match message {Ok(message)=>message,Err(error)=>{self.closed=Some(error.clone());return Err(error);}};
+            let replied=message["id"]==request["id"] && message.get("method").is_none();
+            self.observe(message,until)?;
+            if replied {return Ok(());}
+        }
     }
 }
 
@@ -766,6 +833,10 @@ pub trait Runtime: Send + Sync {
     fn progress(&self, run: &mut Run) -> Res<Vec<Event>>;
     /// Session controls; unsupported runtimes refuse before a native write.
     fn control(&self, _run: &mut Run, _control: Control) -> Result<(), Failure> { Err(Failure::Refused(Cause("control-unsupported"))) }
+    fn respond(&self,_run:&mut Run,_response:Control)->Result<(),Failure> {Err(Failure::Refused(Cause("respond-unsupported")))}
+    fn steer(&self,_run:&mut Run,_parts:&[Part])->Result<(),Failure> {Err(Failure::Refused(Cause("steer-unsupported")))}
+    fn compact(&self,_run:&mut Run)->Result<(),Failure> {Err(Failure::Refused(Cause("compact-unsupported")))}
+    fn set_option(&self,_run:&mut Run,_option:Control)->Result<(),Failure> {Err(Failure::Refused(Cause("set-option-unsupported")))}
     /// Capability `background`: the raw launcher exchange of this run, handed over once.
     fn launcher_output(&self, run: &mut Run) -> Result<Result<Output, crate::process::Failure>, Cause>;
     fn session_id(&self, run: &Run) -> Option<String>;
@@ -956,7 +1027,11 @@ impl Adapter {
             Body::Turn(t) => { t.sync_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
-            Body::App(a) => { a.pump()?;run.activity.pending_seen=0; return Ok(run.events.read_owned(self.client, std::mem::take(&mut a.pending), a.session.session(), a.session.turn_id())); }
+            Body::App(a) => {
+                a.pump()?;run.activity.pending_seen=0;let mut events=vec![];
+                for (raw,event) in std::mem::take(&mut a.pending) {if let Some(event)=event {events.push(event);}else{events.extend(run.events.read_owned(self.client,vec![raw],a.session.session(),a.session.turn_id()));}}
+                return Ok(events);
+            }
         };
         let (mut values, next) = lines_from(&path, run.progress)?;
         if let Body::Turn(t) = &run.body {
@@ -977,7 +1052,7 @@ impl Adapter {
         let events=match &mut run.body {
             Body::Acp(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Rpc(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
-            Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].to_vec();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
+            Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].iter().map(|(raw,_)|raw.clone()).collect();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
             Body::Turn(t)=>{t.sync_transcript()?;let (rows,next)=activity_lines(&t.log,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Native(n) if n.attached=>{let (rows,next)=activity_lines(n.turn.path(),run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             _=>vec![],
@@ -1056,6 +1131,7 @@ impl Adapter {
 
     fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {
         let name = self.descriptor.name;
+        if l.controls && (l.mode!=Mode::Turn || !self.descriptor.has("respond")) {return Err("controls-unsupported".into());}
         if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability())); }
         if matches!(l.mode, Mode::AppServer { .. }) { return Err("app-server requires explicit protected host; state needs in Launch".into()); }
         if l.lifetime==Lifetime::StopWithOwner && (!matches!(l.mode,Mode::Turn) || !self.descriptor.has("process-lifetime")) {return Err("lifetime-unsupported: native submission scope".into());}
@@ -1092,9 +1168,11 @@ impl Adapter {
                 if self.descriptor.has("app-server") && automatic(l) {
                     turn_thread(l)?;
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
-                    let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
+                    let command=(self.ops.app_command)(command,&spec)?;
+                    let server=if l.controls {AppServer::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?}else{AppServer::spawn(command,&l.log,&l.process)?};
                     let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l,&owner)?;
-                    let mut run=self.checked_run(&readiness,Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);return Ok(run);
+                    let stop_id=app.control.as_ref().map(|(requests,_)|requests.run.clone());
+                    let mut run=self.checked_run(&readiness,Body::App(Box::new(app)),0,optimization,l);if let Some(id)=stop_id {run.stop_id=id;}run.owner=Some(owner);return Ok(run);
                 }
                 let input = if l.parts.is_empty() { l.input.clone() } else { stream_message(&l.parts)? };
                 let baseline = if spec.resume {
@@ -1162,17 +1240,60 @@ impl Runtime for Adapter {
         let items = input_items(&self.descriptor, parts)?;
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
-            Body::App(a) if !a.owned => { a.pump()?;run.owner.as_ref().ok_or("session-owner-unknown")?.submit()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
+            Body::App(a) if !a.owned || a.control.is_some() => { a.pump()?;let owner=run.owner.as_ref().ok_or("session-owner-unknown")?;if a.control.is_some() {a.writable()?;owner.control()?;}owner.submit()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
             // A CLI run reads one input; the next turn is a resume.
             _ => Err(Failure::Refused(Cause("input-unsupported"))),
         }
     }
 
     fn control(&self,run:&mut Run,control:Control)->Result<(),Failure> {
+        if matches!(&self.own(run)?.body,Body::App(_)) {
+            return match control {Control::Reply{..}|Control::Answers{..}=>self.respond(run,control),_=>self.set_option(run,control)};
+        }
         match &mut self.own_mut(run)?.body {
             Body::Acp(_) if matches!(control,Control::Answers{..})=>Err(Failure::Refused(Cause("question-answers-unsupported"))),
             Body::Acp(a)=>{a.pump()?;a.control(control).map_err(Failure::Failed)},
             _=>Err(Failure::Refused(Cause("control-unsupported"))),
+        }
+    }
+
+    fn respond(&self,run:&mut Run,response:Control)->Result<(),Failure> {
+        if !self.descriptor.has("respond") {return Err(Failure::Refused(Cause("respond-unsupported")));}
+        if !matches!(response,Control::Reply{..}|Control::Answers{..}) {return Err(Failure::Refused(Cause("response-invalid")));}
+        let run=self.own_mut(run)?;
+        match &mut run.body {
+            Body::App(app) if app.owned && app.control.is_some()=>{
+                app.pump()?;run.owner.as_ref().ok_or("control-owner-required")?.control()?;
+                app.respond(response,run.deadline).map_err(Failure::Failed)
+            },
+            _=>Err(Failure::Refused(Cause("respond-transport-unsupported"))),
+        }
+    }
+
+    fn steer(&self,run:&mut Run,parts:&[Part])->Result<(),Failure> {
+        if !self.descriptor.has("steer") {return Err(Failure::Refused(Cause("steer-unsupported")));}
+        if parts.is_empty() {return Err(Failure::Refused(Cause("input-empty")));}
+        let items=input_items(&self.descriptor,parts)?;let run=self.own_mut(run)?;
+        match &mut run.body {
+            Body::App(app) if app.owned && app.control.is_some()=>{
+                app.pump()?;run.owner.as_ref().ok_or("control-owner-required")?.control()?;
+                app.writable()?;
+                let request=app.session.steer(items)?;app.control_exchange(request,run.deadline).map_err(Failure::Failed)
+            },
+            _=>Err(Failure::Refused(Cause("steer-transport-unsupported"))),
+        }
+    }
+
+    fn compact(&self,run:&mut Run)->Result<(),Failure> {
+        if !self.descriptor.has("compact") {return Err(Failure::Refused(Cause("compact-unsupported")));}
+        let run=self.own_mut(run)?;
+        match &mut run.body {
+            Body::App(app) if app.owned && app.control.is_some()=>{
+                app.pump()?;run.owner.as_ref().ok_or("control-owner-required")?.control()?;
+                app.writable()?;
+                let request=app.session.compact()?;app.control_exchange(request,run.deadline).map_err(Failure::Failed)
+            },
+            _=>Err(Failure::Refused(Cause("compact-transport-unsupported"))),
         }
     }
 
@@ -1218,6 +1339,7 @@ impl Runtime for Adapter {
             Body::Native(n) if n.queue => Err("cancel-unsupported: desktop cancellation is a caller UI operation".into()),
             Body::App(a) => {
                 let until = Instant::now() + Duration::from_secs(5);
+                if let Some((requests,log))=&mut a.control {owner.control()?;a.cancelling=true;requests.retire(log,a.session.session().ok_or("control-session-unknown")?,"cancelled")?;a.requests.clear();}
                 if let Ok(request) = a.session.interrupt() {
                     a.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)?;
                     return Ok(false);
@@ -1343,7 +1465,8 @@ impl Runtime for Adapter {
             Body::Turn(t) => Ok(t.log.clone()),
             Body::Native(n) if n.attached => Ok(n.turn.path().to_path_buf()),
             Body::Native(_) => Err(Cause("transcript-unknown")),
-            // The private log holds stderr only; `progress` is the session stream.
+            Body::App(a) if a.journal.is_some()=>Ok(a.journal.clone().unwrap()),
+            // An ordinary app log holds stderr only; `progress` is the session stream.
             Body::App(_) => Err(Cause("no-transcript")),
         }
     }
@@ -1414,7 +1537,7 @@ impl Runtime for Adapter {
             let app = &saved["app"];
             let (spec, optimization) = me.spec(l, app["session"].as_str().ok_or("run recovery session invalid")?.into(), app["session"] != "-")?;
             let session = AppSession::recover(&spec, app)?;
-            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone() };
+            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),cancelling:false,approval:l.policy.approval };
             let mut run=me.run(Body::App(Box::new(a)),0,optimization,l);run.owner=Some(acquire()?);return run.restored(saved);
         }
         let session = saved["session"].as_str().filter(|s| native::plain_id(s)).ok_or("run recovery session invalid")?;
@@ -1576,6 +1699,23 @@ mod tests {
         mapped(Client::parse(name).unwrap(), name, l).map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect())
     }
 
+    // M12.24: a failed durable reply intent cannot become permission to start another turn.
+    #[test]
+    fn uncertain_reply_intent_refuses_new_input_without_changing_native_state() {
+        let root=crate::scratch("control-uncertain-input");std::fs::create_dir_all(&root).unwrap();let path=root.join("journal");
+        let mut log=File::options().create(true).append(true).open(&path).unwrap();let mut requests=super::super::control::Requests::new();
+        let event=Event::Request{id:json!("native"),kind:RequestKind::Approval,prompt:None,choices:vec![],questions:vec![]};
+        let Event::Request{id,..}=requests.register(&mut log,"session",event,Value::Null,None).unwrap() else {panic!()};
+        let mut readonly=File::open(&path).unwrap();assert!(requests.begin(&mut readonly,"session",&Control::Reply{id,option:None},&Value::Null).is_err());
+        let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
+        let mut session=AppSession::new(&spec).unwrap();let initialize=session.initialize(json!({})).unwrap();session.observe(&json!({"id":initialize["id"],"result":{}})).unwrap();
+        let open=session.open(json!({})).unwrap();session.observe(&json!({"id":open["id"],"result":{"thread":{"id":"session"}}})).unwrap();
+        let before=session.checkpoint();
+        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,cancelling:false,approval:Approval::Native};
+        assert_eq!(app.start(json!([]),Instant::now()).unwrap_err(),"control-state-unknown");assert_eq!(app.session.checkpoint(),before);
+        drop((app,readonly));std::fs::remove_dir_all(root).unwrap();
+    }
+
     // Registry declarations must agree with actual operations in both directions, not a second name whitelist.
     #[test]
     fn declared_and_undeclared_capabilities_match_operations() {
@@ -1629,9 +1769,13 @@ mod tests {
             }
             probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
             let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
-            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None}));
+            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,cancelling:false,approval:Approval::Native}));
             let mut run=adapter.run(body,0,Optimization {intent:Intent::Off,effective:"off",reason:"optimization_retired"},&launch());
             probes.insert("account",!matches!(runtime.account(&mut run),Err(Failure::Refused(Cause("account-unsupported")))));
+            probes.insert("respond",matches!(runtime.respond(&mut run,Control::Reply{id:json!("missing"),option:None}),Err(Failure::Refused(Cause("respond-transport-unsupported")))));
+            probes.insert("steer",matches!(runtime.steer(&mut run,&[Part::Text("probe".into())]),Err(Failure::Refused(Cause("steer-transport-unsupported")))));
+            probes.insert("compact",matches!(runtime.compact(&mut run),Err(Failure::Refused(Cause("compact-transport-unsupported")))));
+            probes.insert("set-option",!matches!(runtime.set_option(&mut run,Control::Model("probe".into())),Err(Failure::Refused(Cause("set-option-unsupported")))));
             let quotas=concat!(r#"{"type":"rate_limit_event","rate_limit_info":{"rateLimitType":"five_hour","utilization":0.5,"resetsAt":9999999999}}"#,"\n",
                 r#"{"type":"event_msg","payload":{"rate_limits":{"primary":{"used_percent":50,"window_minutes":300,"resets_at":9999999999}}}}"#);
             probes.insert("quota-snapshot",runtime.log_limits(quotas,None,Some(&root)).iter().any(|w|w.used.is_some()));

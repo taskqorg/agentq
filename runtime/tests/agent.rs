@@ -11,11 +11,17 @@ mod protected;
 #[path="support/signin.rs"]
 mod signin;
 
+#[path="support/control.rs"]
+mod control;
+
 pub(crate) fn main() {
     if std::env::args().nth(1).as_deref()==Some("--login-home-controller") {return signin::home_controller();}
     if std::env::args().nth(1).as_deref()==Some("--login-controller") {return signin::controller();}
     if std::env::var_os("AGENTQ_FAKE_LOGIN").is_some() {return signin::fake();}
     if std::env::var_os("AGENTQ_NATIVE_LOGIN_PROOF").is_some() {return signin::native_proof();}
+    if std::env::var_os("AGENTQ_CONTROL_FIXTURE").is_some() {return control::server();}
+    #[cfg(unix)]
+    if std::env::args().nth(1).as_deref()==Some("--control-owner") {return control::owner(Path::new(&std::env::args_os().nth(2).unwrap()));}
     #[cfg(windows)]
     if std::env::args().nth(1).as_deref()==Some("--receipt-unwind") {return receipt_unwind_fixture(Path::new(&std::env::args_os().nth(2).unwrap()));}
     if std::env::args().nth(1).as_deref()==Some("--lifetime-reexec") {let root=PathBuf::from(std::env::args_os().nth(2).unwrap());std::fs::write(root.join("owner-reexec"),"").unwrap();return wait_for(&root.join("owner-release"));}
@@ -49,6 +55,10 @@ pub(crate) fn main() {
         ("account_login_pipes_remain_private_and_owned",signin::pipes),
         ("account_login_cancel_fences_changed_or_unknown_credentials",signin::cancel_guards),
         ("account_login_retains_home_until_native_transport_cleanup",signin::transport_cleanup),
+        ("live_codex_controls_keep_occurrence_and_owner_scope",control::codex),
+        ("live_codex_controls_preserve_original_denial_policy",control::policy),
+        #[cfg(unix)]
+        ("controlled_writer_survives_controller_loss_and_recovered_completion",control::controller_loss),
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("session_ownership_and_stall_signal", session_ownership_and_stall_signal),
         ("process_lifetime_and_orphan_cleanup",process_lifetime_and_orphan_cleanup),

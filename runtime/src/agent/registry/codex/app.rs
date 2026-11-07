@@ -83,6 +83,21 @@ impl AppSession {
     pub fn ready(&self) -> bool { self.ready && self.fault.is_none() }
     pub fn session(&self) -> Option<&str> { self.thread.as_deref() }
     pub(crate) fn turn_id(&self) -> Option<&str> { self.turn.as_deref() }
+    pub(crate) fn control_pending(&self)->bool {self.pending.is_some_and(|(_,method)|matches!(method,"turn/steer"|"thread/compact/start"))}
+
+    pub(crate) fn control_request(&self,value:&Value)->Res<Option<Event>> {
+        if !self.active || self.terminal.is_some() || self.fault.is_some() {return Err("control-turn-unavailable".into());}
+        super::control::request(value,self.thread.as_deref().ok_or("control-session-unknown")?,self.turn.as_deref().ok_or("control-turn-unknown")?)
+    }
+    pub(crate) fn control_reply(&self,native:&Value,control:&Control)->Res<Value> {super::control::reply(native,control)}
+    pub(crate) fn steer(&mut self,input:Value)->Res<Value> {
+        if !self.active || self.terminal.is_some() {return Err("steer-turn-unavailable".into());}
+        self.request("turn/steer",json!({"threadId":self.thread.as_deref().ok_or("steer-session-unknown")?,"expectedTurnId":self.turn.as_deref().ok_or("steer-turn-unknown")?,"input":input}))
+    }
+    pub(crate) fn compact(&mut self)->Res<Value> {
+        if !self.ready() || self.active && self.terminal.is_none() {return Err("compact-turn-active".into());}
+        self.request("thread/compact/start",json!({"threadId":self.thread.as_deref().ok_or("compact-session-unknown")?}))
+    }
 
     /// Save the returned state before writing this request to the transport. A lost reply remains pending.
     pub fn start_turn(&mut self, mut params: Value) -> Res<Value> {
@@ -149,6 +164,8 @@ impl AppSession {
                         if self.turn.as_deref().is_some_and(|old| old != turn) { return Err("app-server turn identity differs".into()); }
                         self.turn = Some(turn.into());
                     }
+                    "turn/steer"=>{if result["turnId"].as_str()!=self.turn.as_deref() {return Err("app-server steer turn differs".into());}},
+                    "thread/compact/start"=>{if !result.is_object() {return Err("app-server compact reply invalid".into());}},
                     "account/rateLimits/read" => {
                         let limits=if result["rateLimitsByLimitId"].is_object() {&result["rateLimitsByLimitId"]["codex"]} else {&result["rateLimits"]};
                         self.latest_limits=limits.is_object().then(||limits.clone());
@@ -279,7 +296,7 @@ impl AppSession {
         let mut s = Self::new(spec)?;
         s.next = v["next"].as_u64().filter(|n| *n > 0).ok_or("app-server recovery request invalid")?;
         if !v["pending"].is_null() {
-            let method = match v["pending"][1].as_str() { Some("initialize") => "initialize", Some("thread/start") => "thread/start", Some("thread/resume") => "thread/resume", Some("turn/start") => "turn/start", Some("turn/interrupt") => "turn/interrupt", _ => return Err("app-server recovery method invalid".into()) };
+            let method = match v["pending"][1].as_str() { Some("initialize") => "initialize", Some("thread/start") => "thread/start", Some("thread/resume") => "thread/resume", Some("turn/start") => "turn/start", Some("turn/interrupt") => "turn/interrupt", Some("turn/steer")=>"turn/steer",Some("thread/compact/start")=>"thread/compact/start",_ => return Err("app-server recovery method invalid".into()) };
             s.pending = Some((v["pending"][0].as_u64().ok_or("app-server recovery id invalid")?,method));
         }
         s.initialized = v["initialized"].as_bool().ok_or("app-server recovery state invalid")?;

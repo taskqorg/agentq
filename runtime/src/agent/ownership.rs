@@ -108,6 +108,7 @@ impl SessionStore {
         row["process_scope"]=if saved.is_some() {old.as_ref().unwrap()["process_scope"].clone()} else {Value::Null};
         row["token"]=json!(token);
         row["phase"]=saved.map(|_|old.as_ref().unwrap()["phase"].clone()).unwrap_or(json!("prepared"));
+        row["control_writer"]=saved.map(|_|old.as_ref().unwrap()["control_writer"].clone()).unwrap_or(Value::Null);
         row["native"]=saved.map(|_|old.as_ref().unwrap()["native"].clone()).unwrap_or(Value::Null);
         row["native_reason"]=old.as_ref().map(|r|r["native_reason"].clone()).unwrap_or(Value::Null);
         row["binding"]=old.as_ref().map(|r|r["binding"].clone()).unwrap_or(Value::Null);
@@ -252,9 +253,9 @@ impl SessionOwner {
     pub fn observation(&self)->OwnerObservation {self.with(|o| {if stopped(&o.root,&o.row)? {return Ok(OwnerObservation {state:"unknown".into(),reason:Some("native-subtree-stop-unverified".into())});}Ok(OwnerObservation {state:if o.row["phase"]=="idle" {"idle"} else if o.row["native"].is_null() || o.row["phase"]=="unconfirmed" {"unknown"} else {"owned"}.into(),reason:o.row["native_reason"].as_str().map(String::from).or_else(||o.row["native"].is_null().then(||"native-writer-unidentified".into()))})}).unwrap_or_default()}
     pub fn checkpoint(&self)->Res<Value> {self.with(|o|Ok(json!({"session":o.row["session"],"token":o.row["token"],"lifetime":o.row["lifetime"]})))}
     pub(crate) fn control(&self)->Res<()> {self.with(|o| {
-        if o.guard.is_none() || o.binding.is_some() || stopped(&o.root,&o.row)? || matches!(o.row["phase"].as_str(),Some("idle"|"unconfirmed"|"stop-unresolved")) {return Err("control-owner-unavailable".into());}
+        if o.guard.is_none() || o.binding.is_some() || stopped(&o.root,&o.row)? || matches!(o.row["phase"].as_str(),Some("unconfirmed"|"stop-unresolved")) {return Err("control-owner-unavailable".into());}
         let row=read(&o.path)?.ok_or("control-owner-unavailable")?;
-        if row["token"]!=o.row["token"] || row["session"]!=o.row["session"] || row["native"]!=o.row["native"] {return Err("control-owner-changed".into());}
+        if row!=o.row {return Err("control-owner-changed".into());}
         let native=process(&o.row["native"])?.ok_or("control-native-identity-unknown")?;
         if NativeProcess::read(native.pid)?.as_ref()!=Some(&native) {return Err("control-native-identity-changed".into());}
         Ok(())
@@ -286,7 +287,7 @@ impl SessionOwner {
             if row["token"]!=o.row["token"] {return Err("session-busy: ownership transferred".into());}
             idle(&row)?;o.guard=Some(guard);
         }
-        if o.row["phase"]!="prepared" && o.row["phase"]!="idle" {return Err("session-input-in-flight".into());}
+        if o.row["phase"]!="prepared" && o.row["phase"]!="idle" && o.row["phase"]!="controlled" {return Err("session-input-in-flight".into());}
         o.row["phase"]=json!("submitted");save(&o.path,&o.row)
     })}
     pub(crate) fn bind(&self,session:&str)->Res<()> {self.with(|o| {
@@ -308,15 +309,20 @@ impl SessionOwner {
         match std::fs::remove_file(&o.path) {Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string())}
         let (target,guard)=o.binding.take().unwrap();o.path=target;o.row=row;o.guard=Some(guard);Ok(())
     })}
-    /// Release after this session's known terminal native report; never use a launcher exit as proof.
+    pub(super) fn hold_controls(&self)->Res<()> {self.with(|o| {
+        if o.guard.is_none() {return Err("control-owner-unavailable".into());}
+        let mut row=o.row.clone();row["control_writer"]=json!(true);save(&o.path,&row)?;o.row=row;Ok(())
+    })}
+    /// Known native turn completion does not release a controlled native writer.
     pub fn finish(&self,report:&Report)->Res<()> {self.with(|o| {
+        let retain=o.row["control_writer"]==true;
         if report.session.as_deref().zip(o.row["session"].as_str()).is_some_and(|(seen,owned)|seen!=owned) {return Err("session-owner-unknown: native session differs".into());}
         if o.guard.is_none() {return Ok(());}
         if stopped(&o.root,&o.row)? {o.row["phase"]=json!("stop-unresolved");o.row["native_reason"]=json!("native-subtree-stop-unverified");return save(&o.path,&o.row);}
         if report.session.is_none() || report.outcome=="unknown" || report.background_job || matches!(report.error,"interrupted"|"timeout"|"exit"|"no-end") {
             o.row["phase"]=json!("unconfirmed");o.row["native_reason"]=json!("native-completion-unverified");return save(&o.path,&o.row);
         }
-        o.row["phase"]=json!("idle");save(&o.path,&o.row)?;o.guard=None;Ok(())
+        o.row["phase"]=json!(if retain {"controlled"}else{"idle"});save(&o.path,&o.row)?;if !retain {o.guard=None;}Ok(())
     })}
     pub(super) fn unscoped_submission(&self)->Res<()> {self.with(|o| {if o.row["lifetime"]==json!(Lifetime::StopWithOwner) {Err("lifetime-unsupported: external native submission".into())} else {Ok(())}})}
     pub(super) fn stop_uncertain(&self)->Res<()> {self.with(|o| {

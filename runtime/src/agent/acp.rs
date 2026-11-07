@@ -124,7 +124,7 @@ pub(super) struct Session {
     cancelling: bool,
 }
 
-impl Drop for Session {fn drop(&mut self) {let _=self.server.kill();}}
+impl Drop for Session {fn drop(&mut self) {let _=self.requests.retire(&mut self.log,&self.session,"unknown");let _=self.server.kill();}}
 
 impl Session {
     pub fn open(mut command: Command, config: &Config, l: &Launch, resume: Option<&str>,owner:&SessionOwner) -> Res<Self> {
@@ -326,10 +326,12 @@ impl Session {
             Control::Mode(mode)=>{self.exchange("session/set_mode",json!({"sessionId":self.session,"modeId":mode}),false)?;},
             Control::Answers{..}=>return Err("question-answers-unsupported".into()),
             Control::Reply{id,option}=>{
-                let request=self.requests.begin(&mut self.log,&self.session,&Control::Reply{id,option:option.clone()})?;
+                let control=Control::Reply{id,option:option.clone()};
                 let outcome=option.map_or_else(||json!({"outcome":"cancelled"}),|id|json!({"outcome":"selected","optionId":id}));
-                if let Err(error)=self.write(&json!({"jsonrpc":"2.0","id":request.native_id,"result":{"outcome":outcome}})) {self.requests.fail(&mut self.log,&self.session,&request);return Err(error);}
-                self.requests.sent(&mut self.log,&self.session,&request)?;
+                let response=json!({"jsonrpc":"2.0","id":self.requests.native(&control)?["id"],"result":{"outcome":outcome}});
+                let request=self.requests.begin(&mut self.log,&self.session,&control,&response)?;
+                if let Err(error)=self.write(&response) {self.requests.fail(&mut self.log,&self.session,&request);return Err(error);}
+                self.requests.sent(&mut self.log,&self.session,&request,&response)?;
             }
         }Ok(())
     }
