@@ -576,3 +576,6 @@ pub(super) use codex::{codex_read_command,exchange,credential_snapshot};
 pub fn hook_status(agent:&str,home:&Path,journal:Option<&Path>)->Option<LaunchCheck> {Some((entry(agent)?.builtin?.ops.hook_status?)(home,journal))}
 
 pub(crate) use claude::start_failure as claude_start_failure;
+
+pub(crate) use claude::launch_exchange as claude_launch_exchange;
+pub(crate) use codex::parsing::cli_refusal as codex_cli_refusal;

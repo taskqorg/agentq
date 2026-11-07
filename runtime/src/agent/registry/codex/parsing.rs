@@ -126,6 +126,7 @@ pub(super) fn classify_report(
     rollout: Option<&Path>,
     end_index: Option<usize>,
 ) -> Report {
+    let cli=cli_refusal(text,None);
     let writer = text.lines().find_map(|line| {
         let detail=match serde_json::from_str::<Value>(line) {
             Ok(v) if matches!(v["type"].as_str(),Some("error"|"turn.failed"))=>v["message"].as_str().or(v["error"]["message"].as_str()).map(String::from),
@@ -159,8 +160,29 @@ pub(super) fn classify_report(
         status.2 = Some(detail.into());
     }
     let mut result=report(Client::Codex, text, events, rollout, status, vec![]);
+    if let Some(failure)=cli {result.session=failure.session;result.reason=Some("native-cli-resume-refusal".into());result.detail=Some(failure.detail);}
     if result.error=="auth-rejected" {result.reason=auth_reason.map(String::from);}
     if let Some(cost)=end_index.and_then(|i|crate::agent::history::live::native_cost(&events[i])) {result.usage.cost_usd=Some(cost);}
     result
 
+}
+
+/// The retained plain CLI diagnostic grammar; classification alone never proves an owned input stage.
+pub(crate) fn cli_refusal(text:&str,requested:Option<&str>)->Option<LaunchError> {
+    if !text.ends_with('\n') {return None;}
+    let last=text.lines().filter(|line|!line.is_empty()).next_back()?;
+    let session=last.strip_prefix("Error: thread/resume: thread/resume failed: thread ")?
+        .strip_suffix(" already has an active writer (code -32600)")?;
+    if !native::plain_id(session) || session=="-" || requested.is_some_and(|id|id!=session) {return None;}
+    let conflict=format!("thread {session} already has an active writer");
+    let create=format!("Failed to create session: thread-store conflict: {conflict}");
+    let persistence=format!("failed to initialize thread persistence: thread-store conflict: {conflict}");
+    let mut created=false;let mut refused=false;
+    for line in text.lines().filter(|line|!line.is_empty()) {
+        if refused || serde_json::from_str::<Value>(line).is_ok() {return None;}
+        if line==last {refused=true;}
+        else if line.split_once(" ERROR codex_core::session: ").is_some_and(|(_,message)|message==create) {created=true;}
+        else if !line.split_once(" ERROR codex_core::session::session: ").is_some_and(|(_,message)|message==persistence) {return None;}
+    }
+    (created && refused).then(||LaunchError {stage:InputStage::Unknown,cause:Some(Cause("session-busy")),session:Some(session.into()),detail:text.into(),native:None})
 }

@@ -57,6 +57,8 @@ pub(crate) fn main() {
     }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
+        ("background_launcher_text_never_mints_native_stage_or_verified_job",background_launcher_text_never_mints_native_stage_or_verified_job),
+        ("owned_plain_cli_refusal_requires_exact_source_exit_and_native_grammar",owned_plain_cli_refusal_requires_exact_source_exit_and_native_grammar),
         ("native_start_refusal_proof_preserves_stage_cause_and_session",native_start_refusal_proof_preserves_stage_cause_and_session),
         ("codex_branch_prefix_keeps_parent_files_and_frozen_report",branching::prefix),
         ("codex_branch_refusals_precede_native_mutation",branching::refusals),
@@ -331,6 +333,25 @@ fn fake(client: &str) {
         std::fs::write("terminal.json",json!({"args":args,"pid":std::process::id()}).to_string()).unwrap();
         while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}return;
     }
+    if let Ok(mode)=std::env::var("AGENTQ_FAKE_CLI_START_REFUSAL") {
+        let mut input=String::new();std::io::stdin().read_to_string(&mut input).unwrap();
+        let thread=if mode=="foreign" {"foreign-thread"} else {"original-thread"};
+        let create=format!("2026-11-02T00:00:00Z ERROR codex_core::session: Failed to create session: thread-store conflict: thread {thread} already has an active writer\n");
+        let refusal=format!("Error: thread/resume: thread/resume failed: thread {thread} already has an active writer (code -32600)\n");
+        let text=format!("{create}{refusal}");
+        match mode.as_str() {
+            "generic"=>eprintln!("native launch failed"),
+            "missing-create"=>eprint!("{refusal}"),
+            "quoted"=>println!("{}",json!({"type":"assistant","message":{"content":text}})),
+            "incomplete"=>eprint!("{}",text.trim_end()),
+            "work"=>{println!("{}",json!({"type":"item.completed","item":{"type":"agent_message","text":"work"}}));eprint!("{text}");},
+            _=>eprint!("{text}"),
+        }
+        if mode=="trailing" {eprintln!("other output");}
+        if mode=="copy" {let bytes=std::fs::read("worker.log").unwrap();std::fs::write("replacement.log",bytes).unwrap();std::fs::rename("replacement.log","worker.log").unwrap();}
+        if matches!(mode.as_str(),"live"|"cancel") {std::fs::write("cli-refusal-ready","").unwrap();wait_for(Path::new("cli-refusal-release"));}
+        std::process::exit(if mode=="success" {0} else {1});
+    }
     if let Ok(mode)=std::env::var("AGENTQ_FAKE_START_REFUSAL") {
         let mut input=String::new();std::io::stdin().read_to_string(&mut input).unwrap();
         let session=args.windows(2).find(|a|a[0]=="--resume").map(|a|a[1].as_str()).unwrap();
@@ -351,6 +372,18 @@ fn fake(client: &str) {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
     if client == "antigravity" { input = serde_json::from_str::<Value>(&input).unwrap()["message"]["content"].as_str().unwrap().to_string(); }
+    if let Ok(mode)=std::env::var("AGENTQ_FAKE_BACKGROUND_EXCHANGE") {
+        assert_eq!(args.first().map(String::as_str),Some("--bg"));
+        match mode.as_str() {
+            "untrusted"=>eprintln!("Error: Workspace not trusted. Run claude here first."),
+            "refused"=>eprintln!("Error: Background sessions are disabled.\nAsk your administrator."),
+            "exit-id"=>{println!("backgrounded · c37eb75a");eprintln!("remote control unavailable");},
+            "quoted"=>println!("{}",json!({"type":"assistant","text":"backgrounded · c37eb75a"})),
+            "contradictory"=>println!("backgrounded · c37eb75a\nbackgrounded · different-job"),
+            _=>eprintln!("native launch failed"),
+        }
+        std::process::exit(1);
+    }
     if std::env::var("COREQ_FAKE_CONTROL").is_ok() && args.first().is_some_and(|a| matches!(a.as_str(), "agents" | "stop" | "queue")) {
         let record=json!({"args":args,"home":std::env::var(if client=="claude" {"CLAUDE_CONFIG_DIR"} else {"CODEX_HOME"}).ok(),"trace_context":std::env::var("COREQ_TRACE_CONTEXT").ok()});
         std::fs::write("native-control.json",record.to_string()).unwrap();
@@ -2939,4 +2972,43 @@ fn native_start_refusal_proof_preserves_stage_cause_and_session() {
     assert_eq!(codex.launch_refusal(&json!({"type":"item.completed","item":{"text":"thread not found"}}).to_string()),None);
     let root=scratch("native-start-unknown");let l=fake_launch("codex",&root,"never replay",&[]);
     let e=codex.resume("untracked",&l).err().unwrap();assert_eq!((e.stage,e.session.as_deref()),(InputStage::Unknown,Some("untracked")));
+}
+
+// Source-only fixtures; execution is pending the owner's global functional freeze.
+fn owned_plain_cli_refusal_requires_exact_source_exit_and_native_grammar() {
+    let rt=agent::runtime("codex").unwrap();
+    for mode in ["refused","generic","missing-create","quoted","incomplete","work","foreign","trailing","success","copy","live","cancel"] {
+        let root=scratch("plain-cli-refusal");
+        let l=fake_launch("codex",&root,"original input",&[("AGENTQ_FAKE_CLI_START_REFUSAL",mode.as_ref())]);
+        rt.adopt("original-thread",&l,&[]).unwrap();
+        std::fs::write(&l.log,"old native boundary\n").unwrap();
+        let mut run=rt.resume("original-thread",&l).unwrap();
+        if matches!(mode,"live"|"cancel") {
+            wait_for(&root.join("cli-refusal-ready"));assert_eq!(rt.report(&run).unwrap_err(),"running");
+            assert!(agent::NativeProcess::read(run.id().unwrap()).unwrap().is_some());
+            if mode=="cancel" {rt.cancel(&mut run).unwrap();} else {std::fs::write(root.join("cli-refusal-release"),"").unwrap();}
+        }
+        finish(rt,&mut run);let report=rt.report(&run).unwrap();
+        assert_eq!(report.start_failure.is_some(),matches!(mode,"refused"|"live"),"{mode}: {report:?}");
+        if let Some(failure)=report.start_failure {
+            assert_eq!((failure.stage,failure.cause,failure.session.as_deref()),(agent::InputStage::BeforeInput,Some(agent::Cause("session-busy")),Some("original-thread")));
+        }
+    }
+}
+
+// Source-only: historical text and even an owned launcher exit cannot prove native child acceptance/refusal.
+fn background_launcher_text_never_mints_native_stage_or_verified_job() {
+    let rt=agent::runtime("claude").unwrap();
+    for mode in ["untrusted","refused","generic","exit-id","quoted","contradictory"] {
+        let root=scratch("background-exchange");
+        let mut l=fake_launch("claude",&root,"bound input reference",&[("AGENTQ_FAKE_BACKGROUND_EXCHANGE",mode.as_ref())]);
+        l.mode=agent::Mode::Background;
+        let mut run=rt.launch(&l).unwrap();
+        assert_eq!(rt.background_job(&run).unwrap_err(),agent::Cause("background-job-unverified"));
+        assert_eq!(rt.report(&run).unwrap_err(),"running");assert!(rt.session_id(&run).is_none());assert!(run.id().is_none());
+        let output=match rt.launcher_output(&mut run).unwrap() {Ok(output)|Err(coreq::process::Failure::Exit(output))=>output,Err(error)=>panic!("fixture exchange: {error}")};
+        let observed=rt.background_launch_exchange(&String::from_utf8_lossy(&output.stdout),&String::from_utf8_lossy(&output.stderr));
+        assert_eq!(observed.unverified_job.as_deref(),(mode=="exit-id").then_some("c37eb75a"));assert!(observed.unknown.is_some());
+        assert_eq!(rt.background_job(&run).unwrap_err(),agent::Cause("background-job-unverified"));
+    }
 }

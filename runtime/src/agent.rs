@@ -32,7 +32,7 @@ pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records, session_frozen, session_calls_frozen, session_call_frozen};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
-pub use adapter::{InputStage,LaunchError,BackgroundExecution,BackgroundLocator,LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession,Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Binding,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{BackgroundLaunchExchange,InputStage,LaunchError,BackgroundExecution,BackgroundLocator,LoginFlow,LoginOptions,LoginPrompt,LoginPhase,LoginStatus,LoginSession,Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Binding,Account, Approval, Builtin, Cause, Check, Control, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use registry::{BackgroundCandidate,BackgroundKind,BackgroundState,BackgroundActivity,BackgroundPid};
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
@@ -317,7 +317,7 @@ impl Turn {
         let out = File::options().create(true).append(true).open(log).map_err(|e| format!("agent log: {e}"))?;
         let err = out.try_clone().map_err(|e| format!("agent log: {e}"))?;
         let start = out.metadata().map_err(|e| format!("agent log: {e}"))?.len();
-        let source=if spec.client==Client::Claude && spec.resume {Some(native::file_id(&out)?)} else {None};
+        let source=if matches!(spec.client,Client::Claude|Client::Codex) && spec.resume {Some(native::file_id(&out)?)} else {None};
         let home = spec_home(spec);
         let (mut base,extension)=(protocol(spec.client).prepare_command)(base,spec,text)?;
         let native_agentapi=extension.is_submission();
@@ -522,8 +522,11 @@ impl Turn {
         if r.outcome=="unknown" {
             if let Some(cause)=adapter::runtime(self.client.code()).and_then(|a|a.launch_refusal(text)) {(r.outcome,r.error)=("refused",cause.0);}
         }
-        if self.client==Client::Claude && self.reaped && !self.exit_unknown && self.exit.is_some_and(|c|c!=0) && !self.cancelled && !self.timed_out {
-            if let Some(failure)=registry::claude_start_failure(text,&events,self.resumed.as_deref(),r.session.as_deref()) {
+        if self.reaped && !self.exit_unknown && self.exit.is_some_and(|c|c!=0) && !self.cancelled && !self.timed_out {
+            let failure=if self.client==Client::Claude {registry::claude_start_failure(text,&events,self.resumed.as_deref(),r.session.as_deref())}
+                else if self.client==Client::Codex && self.exit.is_some_and(|c|c>0) && self.resumed.is_some() {registry::codex_cli_refusal(text,self.resumed.as_deref())}
+                else {None};
+            if let Some(mut failure)=failure {
                 // A rejection is proof only for this owned source, never recovered/copied logs.
                 let source_ok=self.source.as_ref().is_some_and(|id| {
                     File::open(&self.log).ok().is_some_and(|mut file| {
@@ -533,7 +536,7 @@ impl Turn {
                             && File::open(&self.log).ok().and_then(|f|native::file_id(&f).ok()).as_ref()==Some(id)
                     })
                 });
-                if source_ok {r.start_failure=Some(failure);}
+                if source_ok {failure.stage=InputStage::BeforeInput;r.start_failure=Some(failure);}
             }
         }
 

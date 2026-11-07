@@ -253,6 +253,16 @@ impl From<String> for LaunchError {
 }
 impl From<&str> for LaunchError {fn from(detail:&str)->Self {String::from(detail).into()}}
 
+/// Caller-held launcher text only; every returned token remains unverified, never execution authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundLaunchExchange {
+    pub source: &'static str,
+    pub unverified_job: Option<String>,
+    pub cause: Option<Cause>,
+    pub detail: Option<String>,
+    pub unknown: Option<&'static str>,
+}
+
 /// A typed operation error: `Refused` before any native write, `Failed` after a native or transport error (never retried).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Failure { Refused(Cause), Failed(String) }
@@ -1039,6 +1049,10 @@ pub trait Runtime: Send + Sync {
     /// Capability `background`: request the stop of `job`; the output acknowledges only the request.
     fn stop_job(&self, base: Command, spec: &NativeSpec, job: &BackgroundJob, budget: Duration) -> Res<Output>;
     /// The named cause of a launcher refusal in `stderr`, if known.
+    /// Read-only historical native text; never stage, accepted input, ownership or process proof.
+    fn background_launch_exchange(&self, _stdout:&str, _stderr:&str)->BackgroundLaunchExchange {
+        BackgroundLaunchExchange {source:"unsupported",unverified_job:None,cause:None,detail:None,unknown:Some("background-unsupported")}
+    }
     fn launch_refusal(&self, text: &str) -> Option<Cause>;
     /// Already verified cached native background evidence only; never queries the native client.
     fn background_job(&self, run: &Run) -> Result<BackgroundLocator,Cause>;
@@ -1375,10 +1389,15 @@ impl Adapter {
                 let turn = NativeTurn::before(&spec, &(self.ops.background_transcript)(&spec, &spec.session)?, &l.input)?;
                 owner.submit()?;
                 let exchange = (self.ops.background_launch)(command, &spec, &l.input, Duration::from_secs(30))?;
-                let (job_id, fault) = match &exchange {
-                    Ok(o) if o.status.success() => ((self.ops.background_id)(&String::from_utf8_lossy(&o.stdout)), None),
-                    Ok(o) => (None, uncertain("background launcher", &format!("exit {:?}", o.status.code()))),
-                    Err(e) => (None, uncertain("background launcher", &e.class())),
+                // A returned token only selects an unconfirmed discovery candidate, including failed launcher replies.
+                let job_id=match &exchange {
+                    Ok(o)|Err(crate::process::Failure::Exit(o))=>self.background_launch_exchange(&String::from_utf8_lossy(&o.stdout),&String::from_utf8_lossy(&o.stderr)).unverified_job,
+                    _=>None,
+                };
+                let fault=match &exchange {
+                    Ok(o) if o.status.success()=>None,
+                    Ok(o)=>uncertain("background launcher",&format!("exit {:?}",o.status.code())),
+                    Err(e)=>uncertain("background launcher",&e.class()),
                 };
                 let start = turn.start();
                 Ok(self.checked_run(&readiness, native(turn, false, job_id, spec.resume, fault, Some(exchange)), start, l))
@@ -1872,6 +1891,10 @@ impl Runtime for Adapter {
         Ok(BackgroundLocator {runtime:run.runtime,source:"native-background-jobs",id:job.id.clone(),session:job.session.clone(),cwd:job.root.clone(),home:job.home.clone(),pid:job.pid})
     }
 
+    fn background_launch_exchange(&self, stdout:&str, stderr:&str)->BackgroundLaunchExchange {
+        if self.client==Client::Claude {registry::claude_launch_exchange(stdout,stderr)}
+        else {BackgroundLaunchExchange {source:"unsupported",unverified_job:None,cause:None,detail:None,unknown:Some("background-unsupported")}}
+    }
     fn launch_refusal(&self, text: &str) -> Option<Cause> {
         (self.ops.refusal)(text)
     }

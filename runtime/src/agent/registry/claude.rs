@@ -525,8 +525,24 @@ pub(crate) fn background_launch(base: Command, spec: &Spec, reference: &str, bud
 
 /// The job ID from the launcher's first line `backgrounded · <job>[ · <name>]`; the command hints after it are not IDs.
 pub(crate) fn background_job_id(stdout: &str) -> Option<String> {
-    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
-    line.split('·').nth(1).map(str::trim).filter(|t| plain_id(t)).map(String::from)
+    let line=stdout.lines().find(|l|!l.trim().is_empty())?;
+    line.strip_prefix("backgrounded · ")?.split('·').next().map(str::trim).filter(|t|plain_id(t) && *t!="-").map(String::from)
+}
+
+pub(crate) fn launch_exchange(stdout:&str,stderr:&str)->BackgroundLaunchExchange {
+    let mut result=BackgroundLaunchExchange {source:"claude-background-launcher",unverified_job:background_job_id(stdout),cause:None,detail:(!stderr.trim().is_empty()).then(||stderr.to_string()),unknown:Some("launcher-acceptance-unobserved")};
+    let mut tokens=stdout.lines().filter_map(background_job_id);
+    if let Some(first)=tokens.next() {
+        if tokens.any(|next|next!=first) {result.unverified_job=None;result.unknown=Some("contradictory-launcher-receipts");return result;}
+    }
+    if !stdout.trim().is_empty() {return result;}
+    result.cause=match stderr.trim() {
+        "Workspace not trusted"|"Error: Workspace not trusted. Run claude here first."=>Some(Cause("workspace-untrusted")),
+        "Error: Background sessions are disabled.\nAsk your administrator."=>Some(Cause("background-disabled")),
+        "Not logged in · Please run /login"=>Some(Cause("login-required")),
+        _=>None,
+    };
+    result
 }
 
 /// `filtered` adds `--cwd <root>`; Claude's filter misses roots under `.claude/worktrees` (#222), so callers retry
