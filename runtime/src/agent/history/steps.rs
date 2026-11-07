@@ -335,7 +335,7 @@ fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
         };
         return vec![base_step(event,record,&item,kind,data,0)];
     }
-    let payload = if format == "codex-rollout" {&record["payload"]} else if format == "codex-app-server" {&record["params"]} else {record};
+    let payload = if format == "codex-rollout" {&record["payload"]} else if super::interpretation(format) == "codex-app-server" {&record["params"]} else {record};
     let item = payload.get("item").unwrap_or(payload);
     if record["method"] == "item/commandExecution/outputDelta" {
         let item = json!({"id":payload["itemId"],"status":"delta"});

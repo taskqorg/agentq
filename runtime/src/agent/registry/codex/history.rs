@@ -3,6 +3,7 @@ pub(super) fn normalize(
     format: &str,
     v: &Value,
 ) -> (&'static str, &'static str, Value, Vec<Value>, &'static str) {
+    let format=crate::agent::history::interpretation(format);
     let mut author = "unknown";
     let mut kind = "unknown";
     let mut blocks = vec![];
@@ -140,6 +141,7 @@ fn block(format: &str, v: Value) -> Value {
 }
 
 pub(super) fn history_session(format: &str, v: &Value, raw: &str) -> Option<String> {
+    let format=crate::agent::history::interpretation(format);
     session(raw).or_else(|| {
         (match format {
             "codex-rollout" if v["type"] == "session_meta" => v["payload"]["id"].as_str(),

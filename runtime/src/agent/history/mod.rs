@@ -12,17 +12,25 @@ use serde_json::{Value, json};
 use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
 
 const BUDGET: usize = 16 * 1024 * 1024;
-const FORMATS: &[&str] = &["codex-exec", "codex-rollout", "codex-app-server", "claude-stream", "claude-native", "agy-stream", "antigravity-sidecar", "acp", "jsonl-rpc"];
+pub const CODEX_APP_SERVER_SELECTED:&str="codex-app-server-selected/1";
+const FORMATS: &[&str] = &["codex-exec", "codex-rollout", "codex-app-server", CODEX_APP_SERVER_SELECTED, "claude-stream", "claude-native", "agy-stream", "antigravity-sidecar", "acp", "jsonl-rpc"];
+
+// Share interpretation without erasing the selected artifact's stored representation.
+pub(crate) fn interpretation(format:&str)->&str {if format==CODEX_APP_SERVER_SELECTED {"codex-app-server"}else{format}}
 
 /// Adapter support is distinct from native qualification. Version and OS are caller readback.
 pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res<Value> {
     if !FORMATS.contains(&format) && !sources::external(format) { return Err("history transport unsupported".into()); }
     if let Some(spec)=sources::SPECS.iter().find(|s|s.format==format && sources::external(format)){return sources::capability(spec.name);}
     let sidecar = format == "antigravity-sidecar";
-    let app = format == "codex-app-server";
+    let selected=format==CODEX_APP_SERVER_SELECTED;
+    let app = interpretation(format) == "codex-app-server";
     let mut features = serde_json::Map::new();
     for feature in ["launch", "resume", "session", "input", "files_images", "ask_reply", "tools_outputs", "heartbeat", "cancel_recovery", "model_effort_accounts_permissions", "usage_errors", "history"] {
         let (status, reason) = match feature {
+            "history" if selected=>("supported","caller-only selected inbound records; format is not selection proof"),
+            "files_images"|"tools_outputs" if selected=>("limited","retained typed references/output only; no native artifact discovery"),
+            _ if selected=>("unsupported","caller-only observation; no execution, native Session or reply authority"),
             "history" if format == "agy-stream" => ("limited", "completed steps may omit text; deltas/result only; unknown shapes retained raw"),
             "history" if sidecar => ("limited", "truncated fields, GENERIC author unknown and raw-only attachments; caller selects full source"),
             "history" => ("supported", "bounded source adapter; unknown fields retained raw"),
@@ -39,7 +47,7 @@ pub fn capabilities(format: &str, native_version: Option<&str>, os: &str) -> Res
     Ok(json!({"schema":1,"format":format,"native_version":native_version,"os":os,"features":features,
         "native":{"status":"untested","reason":"history API not qualified on a native version/OS tuple"},
         "evidence":["runtime/tests/history.rs","runtime/tests/agent.rs"],
-        "live_output":{"status":if app {"supported"}else{"unsupported"},"reason":if app {"item/commandExecution/outputDelta"}else{"no native live console delta proof"}},
+        "live_output":{"status":if selected {"limited"}else if app {"supported"}else{"unsupported"},"reason":if selected {"retained selected deltas only; no live transport authority"}else if app {"item/commandExecution/outputDelta"}else{"no native live console delta proof"}},
         "limits":{"page_bytes":BUDGET,"record_bytes":BUDGET,"page_events":128}}))
 }
 
@@ -72,6 +80,7 @@ pub struct Page {
 
 impl History {
     pub fn new(format: &str, source: &str, session: &str) -> Res<Self> {
+        if format==CODEX_APP_SERVER_SELECTED {return Err("selected history requires explicit caller binding".into());}
         if super::registry::history_protocol(format).is_none() && !sources::external(format) { return Err("history transport unsupported".into()); }
         if source.is_empty() || session.is_empty() { return Err("history source/session required".into()); }
         Ok(Self {format:format.into(), source:source.into(), session:session.into(), native_session:session.into(), native_session_alias:None, native_parent:None, caller_runtime:None, offset:0,
@@ -80,10 +89,11 @@ impl History {
 
     /// Explicit caller observation; absent native identity is never inferred from the binding.
     pub fn caller(runtime:&str,format:&str,source:&str,binding:&str,native_session:Option<&str>)->Res<Self> {
-        sessions::source_format(runtime,format)?;
+        sessions::source_format(runtime,interpretation(format))?;
         if sources::external(format){return Err("caller history requires a native stream format".into());}
         if native_session.is_some_and(str::is_empty){return Err("history native session invalid".into());}
-        let mut history=Self::new(format,source,binding)?;
+        let mut history=Self::new(interpretation(format),source,binding)?;
+        history.format=format.into();
         history.caller_runtime=Some(runtime.into());
         history.native_session=native_session.unwrap_or_default().into();
         Ok(history)

@@ -1030,6 +1030,29 @@ Source-fixture provenance, adapter conclusions and remaining native gaps:
 
 ACP and JSONL RPC candidates use the same unlimited stream transport and canonical history steps. Explicit-source history is available through the runtime trait; native source discovery for unqualified candidates reads unsupported rather than guessing a directory layout.
 
+## Selected inbound app-server history
+
+`codex-app-server-selected/1` identifies the read-only representation
+`native-jsonl-inbound-selection/1`: original complete inbound lines selected by the
+owned runtime's accepted session/turn correlation. It is not full stdout, native
+home history, a runtime-authored control journal or a selection proof by itself.
+Only the runtime-owned descriptor can substantiate selection; archive never parses
+native fields or falls back to private stdout/stderr diagnostics.
+
+`History::caller` validates Codex registration and expected native identity for this
+format. Checkpoints, events, IDs and archive source/wire metadata retain the exact
+selected format. Parser interpretation shares the existing Codex app-server decoder;
+original bytes, hashes and offsets refer only to the selected physical artifact.
+Changed format creates a distinct archive source generation. An absent native ID
+stays unknown; it is not inserted into original lines from descriptor metadata.
+
+Direct `History::new`, native Session creation/recovery/discovery, native-session
+aliases, resume/adopt/reply/launch and generated-directory authority do not admit
+this caller-only representation. Capabilities expose read-only history and retained
+tool/media/delta facts, never execution or reply support. The source format grants
+no additional path or content-export authority. Native server requests in selected
+records retain observation-only unknown reply scope and physical occurrence IDs.
+
 ## History media
 
 Caller-owned physical logs use `History::caller(runtime, format, source, binding,
