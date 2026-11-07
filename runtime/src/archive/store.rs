@@ -1119,12 +1119,9 @@ fn send(
             || ["source", "start", "end", "sha256", "manifest_sha256"]
                 .iter()
                 .any(|k| receipt[*k] != body[*k])
-            || receipt["complete"]
-                != if body["media"] == true {
-                    json!(body["end"] == body["total"])
-                } else {
-                    json!(true)
-                }
+            || receipt["complete"].as_bool().is_none()
+            || ((body["media"] != true || body["end"] == body["total"])
+                && receipt["complete"] != true)
         {
             return Err("archive receipt mismatch".into());
         }
@@ -1228,6 +1225,8 @@ mod tests {
         lose: bool,
         mismatch: bool,
         wrong_complete: bool,
+        complete_media: bool,
+        invalid_complete: bool,
     }
     impl Wire for Sink {
         fn post(
@@ -1250,8 +1249,11 @@ mod tests {
             receipt["complete"] = json!(if self.wrong_complete {
                 false
             } else {
-                body["media"] != true || body["end"] == body["total"]
+                self.complete_media || body["media"] != true || body["end"] == body["total"]
             });
+            if self.invalid_complete {
+                receipt["complete"] = Value::Null;
+            }
             if self.mismatch {
                 receipt["sha256"] = json!("wrong");
             }
@@ -1505,7 +1507,10 @@ mod tests {
             .filter(|b| b["media"] == true)
             .cloned()
             .collect();
-        assert_eq!(sent, pending);
+        assert!(
+            sent == pending,
+            "media replay changed persisted request bytes"
+        );
         let mut next = 0;
         for b in &sent {
             let a = b["start"].as_u64().unwrap() as usize;
@@ -1519,6 +1524,20 @@ mod tests {
         assert_eq!(next, expected.len());
         assert_eq!(status(&data)["pending_bytes"], 0);
         assert_eq!(status(&data)["reason"], "archive source unavailable");
+        // A restored sender checkpoint replays earlier chunks after the sink verified the whole object.
+        write(&media_path, &st).unwrap();
+        sink.invalid_complete = true;
+        pass(&data, &mut sink).unwrap();
+        assert!(status(&data)["pending_bytes"].as_u64().unwrap() > 0);
+        sink.invalid_complete = false;
+        sink.complete_media = true;
+        let n = sink.requests.len();
+        pass(&data, &mut sink).unwrap();
+        assert!(
+            &sink.requests[n..] == pending.as_slice(),
+            "completed-object replay changed persisted requests"
+        );
+        assert_eq!(status(&data)["pending_bytes"], 0);
         let _ = fs::remove_dir_all(data.parent().unwrap());
     }
     #[test]
