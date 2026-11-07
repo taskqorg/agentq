@@ -1619,6 +1619,11 @@ mod tests {
             probes.insert("session-url",!matches!(runtime.session_link(&native,None),Err((Cause("no-session-url"),_))));
             probes.insert("catalogue",supported(runtime.catalogue_with_executable(Some(&root),Some(&absent)).map(|_|())));
             probes.insert("acp",adapter.ops.acp.is_some());
+            // Exercise login admission without a native process or credential read; pipe fixtures cover the supported exchanges.
+            for (capability,flow) in [("login-browser",LoginFlow::Browser),("login-device",LoginFlow::Device)] {
+                let mut options=LoginOptions::new(Some(root.join("unprepared-login")),flow);options.executable=Some(absent.clone());
+                probes.insert(capability,matches!(runtime.login_start(&options),Err(Failure::Failed(reason)) if reason=="login-home-missing"));
+            }
             probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
             let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
             let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None}));

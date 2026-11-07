@@ -1,7 +1,7 @@
 //! #286: no real account sign-in. Scripted native protocols use only fixture homes.
 use super::*;
 use std::io::{BufRead,Write};
-use agent::{LoginFlow,LoginOptions,LoginPhase,LoginSession,LoginStatus,Runtime};
+use agent::{Cause,Failure,LoginFlow,LoginOptions,LoginPhase,LoginSession,LoginStatus,Runtime};
 const LINK:&str="https://claude.ai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fconsole.anthropic.com%2Foauth%2Fcode&state=private";
 fn options(root:&Path,client:&str,mode:&str,flow:LoginFlow)->LoginOptions {
     let home=root.join(client);std::fs::create_dir_all(&home).unwrap();provision_home(&home);
@@ -37,8 +37,6 @@ pub fn pipes() {
     assert_eq!(std::fs::read_to_string(root.join("received")).unwrap(),"private-code#state\n");
     assert!(!std::fs::read_to_string(root.join("argv")).unwrap().contains("private-code"));
     assert!(claude.login_cancel(&session).is_err());
-    let mut unsupported=opts.clone();unsupported.flow=LoginFlow::Device;assert!(claude.login_start(&unsupported).is_err());
-    assert!(agent::runtime("antigravity").unwrap().login_start(&opts).is_err());
     let mut missing=opts.clone();missing.home=Some(root.join("missing"));assert!(claude.login_start(&missing).is_err());
     let mut provider=opts.clone();provider.env.push(("OPENAI_API_KEY".into(),"do-not-use".into()));assert!(claude.login_start(&provider).is_err());
     #[cfg(windows)] {
@@ -46,12 +44,20 @@ pub fn pipes() {
         let session=codex.login_start(&lower).unwrap();until(codex,&session,|s|s.phase==LoginPhase::Waiting);cancel_and_wait(codex,&session);drop(session);
         lower.env.push(("oPeNaI_aPi_KeY".into(),"never-used".into()));assert!(codex.login_start(&lower).is_err());
     }
-    for flow in [LoginFlow::Browser,LoginFlow::Device] {
-        let opts=options(&root,"codex","hold",flow);let session=codex.login_start(&opts).unwrap();
-        let status=until(codex,&session,|s|s.phase==LoginPhase::Waiting);let prompt=status.prompt.unwrap();
-        assert!(!prompt.needs_code);assert_eq!(prompt.user_code.is_some(),flow==LoginFlow::Device);
-        assert!(codex.login_code(&session,"must-not-send").is_err());cancel_and_wait(codex,&session);drop(session);
-    }
+    // Descriptor agreement must reach the real isolated protocol, including every unsupported mode.
+    for runtime in agent::runtimes() {for (flow,capability) in [(LoginFlow::Browser,"login-browser"),(LoginFlow::Device,"login-device")] {
+        let name=runtime.descriptor().name;let opts=options(&root,name,"hold",flow);
+        match runtime.login_start(&opts) {
+            Ok(session)=>{
+                assert!(runtime.descriptor().has(capability),"{name}: undeclared {capability} accepted");
+                let status=until(runtime,&session,|s|s.phase==LoginPhase::Waiting || terminal(s));assert_eq!(status.phase,LoginPhase::Waiting,"{name}: {capability} did not reach its native protocol");
+                let prompt=status.prompt.unwrap();assert_eq!(prompt.user_code.is_some(),flow==LoginFlow::Device);
+                if !prompt.needs_code {assert!(runtime.login_code(&session,"must-not-send").is_err());}cancel_and_wait(runtime,&session);drop(session);
+            },
+            Err(Failure::Refused(Cause("login-flow-unsupported")))=>assert!(!runtime.descriptor().has(capability),"{name}: declared {capability} refused"),
+            Err(error)=>panic!("{name}: {capability}: {error:?}"),
+        }
+    }}
     teardown(root);
 }
 pub fn cancel_guards() {
