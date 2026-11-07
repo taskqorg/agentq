@@ -289,7 +289,7 @@ pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
             _ if message["method"]=="session/request_permission"=>{item["id"]=message["id"].clone();(StepKind::Approval,message["params"].clone())},
             _=>(StepKind::Unknown,message.clone()),
         };
-        return vec![step(event,record,&item,kind,data,0)];
+        return vec![base_step(event,record,&item,kind,data,0)];
     }
     let payload = if format == "codex-rollout" {&record["payload"]} else if format == "codex-app-server" {&record["params"]} else {record};
     let item = payload.get("item").unwrap_or(payload);
