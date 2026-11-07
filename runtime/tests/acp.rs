@@ -91,7 +91,7 @@ fn main() {
     assert!(steps.iter().any(|s|s.kind==agent::history::StepKind::Unknown));
     l.input="second".into();
     let mut resumed=r.resume(&session,&l).unwrap();
-    r.cancel(&mut resumed).unwrap();
+    assert!(!r.cancel(&mut resumed).unwrap(),"active protocol cancellation is not confirmed process exit");
     while r.poll(&mut resumed).unwrap()==State::Running {std::thread::yield_now();}
     let events=r.progress(&mut resumed).unwrap();
     assert!(!events.iter().any(|e|matches!(e,Event::Text{delta,..} if delta=="old replay")));
@@ -126,7 +126,16 @@ fn main() {
     assert_eq!(stop.cause,agent::history::stop::StopCause::TurnEndProcessLive);
     assert!(stop.last_activity.is_some());
     assert_eq!(r.stop_event(&mut lingering,u64::MAX).unwrap().unwrap().id,stop.id);
-    assert_eq!(r.report(&lingering).unwrap().outcome,"ok");drop(lingering);
+    let pid=lingering.id().unwrap();let identity=agent::NativeProcess::read(pid).unwrap().expect("the owned lingering fixture is still live");
+    assert!(matches!(r.report(&lingering).unwrap().termination,agent::ProcessTermination::Unknown{..}));
+    assert_eq!(r.poll(&mut lingering).unwrap(),State::Finished);
+    assert!(matches!(r.report(&lingering).unwrap().termination,agent::ProcessTermination::Unknown{..}),"a repeated terminal poll cannot fabricate exit while the original PID is live");
+    assert!(r.cancel(&mut lingering).unwrap(),"settled cancellation confirms only its actual owned stop/reap");
+    assert_ne!(agent::NativeProcess::read(pid).unwrap().as_ref(),Some(&identity),"cancel=true must not leave the same owned process live");
+    let stopped=r.report(&lingering).unwrap();assert_eq!(stopped.termination,agent::ProcessTermination::Observed);
+    assert_eq!((stopped.outcome,stopped.exit),("ok",None),"cleanup never rewrites the native turn result or invents a numeric exit");
+    assert_eq!(r.poll(&mut lingering).unwrap(),State::Finished);assert!(r.cancel(&mut lingering).unwrap());
+    assert_eq!(r.report(&lingering).unwrap().termination,agent::ProcessTermination::Observed);drop(lingering);
     #[cfg(windows)] {
         let shim=root.join("native.cmd");std::fs::write(&shim,format!("@echo off\r\n\"{}\" %*\r\n",std::env::current_exe().unwrap().display())).unwrap();
         let mut wrapped=l.clone();wrapped.command=vec![shim.into_os_string()];wrapped.deadline=Some(Instant::now()+Duration::from_secs(20));

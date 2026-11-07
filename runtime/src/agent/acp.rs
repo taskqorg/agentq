@@ -276,7 +276,10 @@ impl Session {
     }
 
     pub fn pump(&mut self)->Res<()> {
-        if self.closed.is_some() {return Ok(());}
+        if self.closed.is_some() {
+            if let Some(report)=&mut self.report {self.server.observe_exit(report)?;}
+            return Ok(());
+        }
         loop {
             match self.server.receive(Instant::now()) {
                 Ok(Some(v))=>if let Err(error)=self.observe(v,false) {self.closed=Some(error.clone());let _=self.requests.retire(&mut self.log,&self.session,"unknown");return Err(error);},Ok(None)=>break,
@@ -307,7 +310,10 @@ impl Session {
     pub fn id(&self)->u32 {self.server.id()}
     pub fn run_id(&self)->&str {&self.requests.run}
     pub fn cancel(&mut self)->Res<bool> {
-        if self.report.is_some() {return Ok(true);}
+        if let Some(report)=&mut self.report {
+            self.server.kill()?;self.server.observe_exit(report)?;
+            return Ok(matches!(report.termination,ProcessTermination::Observed));
+        }
         self.cancelling=true;
         self.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":self.session}}))?;
         self.cancel_requests()?;Ok(false)
