@@ -367,7 +367,7 @@ pub struct Run {
     stop_on_stall:bool,
 }
 
-enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>), Acp(Box<super::acp::Session>), Rpc(Box<super::jsonl_rpc::Session>) }
+enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>), Acp(Box<super::acp::Session>), Rpc(Box<super::jsonl_rpc::Session>), Claude(Box<registry::ClaudeControl>) }
 
 /// A background or queue run: an observation cursor over the native transcript, never a process owner.
 struct Native {
@@ -393,6 +393,7 @@ impl Run {
         Ok(match &mut self.body {
             Body::Acp(s) => s.stop_facts(self.stop_id.clone())?,
             Body::Rpc(s) => s.stop_facts(self.stop_id.clone())?,
+            Body::Claude(s) => s.stop_facts(self.stop_id.clone())?,
             Body::Turn(t) => Facts {run:self.stop_id.clone(),format:protocol(t.client).stream_history,path:t.log.clone(),start:t.start,exited:Some(t.has_exited()),native_end:t.ended,exit:if t.exit_unknown {None}else{t.exit},lost_owner:t.exit_unknown && !(t.ended && t.stopping)},
             Body::Native(n) => Facts {run:self.stop_id.clone(),format:protocol(n.spec.client).native_history,path:n.turn.path().into(),start:0,exited:None,native_end:n.report.is_some(),exit:None,lost_owner:false},
             Body::App(a) => {
@@ -426,7 +427,7 @@ impl Run {
     pub fn optimization(&self) -> &Optimization { &self.optimization }
     /// The direct child process ID of a CLI turn, or the verified background job's native process.
     pub fn id(&self) -> Option<u32> {
-        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id), Body::Acp(a)=>Some(a.id()),Body::Rpc(a)=>Some(a.id()) }
+        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id), Body::Acp(a)=>Some(a.id()),Body::Rpc(a)=>Some(a.id()),Body::Claude(a)=>Some(a.id()) }
     }
     /// The finished run's immutable records for a deferred append, without a store, lock or native call; a repeated call
     /// returns the same value with the first caller context. A run without a terminal observation reads `running`.
@@ -435,6 +436,7 @@ impl Run {
         let frozen = match &self.body {
             Body::Acp(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
             Body::Rpc(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
+            Body::Claude(a)=>a.snapshot(ctx)?,
             Body::Turn(t) => t.snapshot(ctx)?,
             Body::Native(n) => n.turn.snapshot(n.report.as_ref().ok_or("running")?, ctx)?,
             // Each app-server turn records once under its native thread and turn identity.
@@ -452,6 +454,7 @@ impl Run {
         let mut r = match &self.body {
             Body::Acp(a)=>a.report().ok(),
             Body::Rpc(a)=>a.report().ok(),
+            Body::Claude(a)=>a.report().ok(),
             Body::Turn(t) => t.terminal_report(),
             Body::Native(n) => n.report.clone(),
             Body::App(a) => a.session.report(),
@@ -1039,6 +1042,8 @@ impl Adapter {
         let path = match &mut run.body {
             Body::Acp(a)=>return a.progress(),
             Body::Rpc(a)=>return a.progress(),
+            Body::Claude(a) if !a.recovered()=>{let events=a.progress()?;run.progress=std::fs::metadata(&a.path).map_err(|e|e.to_string())?.len();return Ok(events);},
+            Body::Claude(a)=>a.path.clone(),
             Body::Turn(t) => { t.sync_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
@@ -1067,6 +1072,7 @@ impl Adapter {
         let events=match &mut run.body {
             Body::Acp(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Rpc(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
+            Body::Claude(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].iter().map(|(raw,_)|raw.clone()).collect();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
             Body::Turn(t)=>{t.sync_transcript()?;let (rows,next)=activity_lines(&t.log,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Native(n) if n.attached=>{let (rows,next)=activity_lines(n.turn.path(),run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
@@ -1180,6 +1186,10 @@ impl Adapter {
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
         let result=match &l.mode {
             Mode::Turn => {
+                if self.client==Client::Claude && l.controls {
+                    let session=registry::ClaudeControl::open(command,&spec,l,&owner)?;let boundary=session.boundary;let stop_id=session.run_id().to_string();
+                    let mut run=self.checked_run(&readiness,Body::Claude(Box::new(session)),boundary,optimization,l);run.stop_id=stop_id;run.owner=Some(owner);return Ok(run);
+                }
                 if self.descriptor.has("app-server") && automatic(l) {
                     turn_thread(l)?;
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
@@ -1256,13 +1266,14 @@ impl Runtime for Adapter {
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
             Body::App(a) if !a.owned || a.control.is_some() => { a.pump()?;let owner=run.owner.as_ref().ok_or("session-owner-unknown")?;if a.control.is_some() {a.writable()?;owner.control()?;}owner.submit()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
+            Body::Claude(a)=>{a.pump()?;a.input(parts)?;run.recorded=false;run.frozen=None;if run.live.is_none() {table(self.client).live.fetch_add(1,Ordering::SeqCst);run.live=Some(Live(&table(self.client).live));}Ok(())},
             // A CLI run reads one input; the next turn is a resume.
             _ => Err(Failure::Refused(Cause("input-unsupported"))),
         }
     }
 
     fn control(&self,run:&mut Run,control:Control)->Result<(),Failure> {
-        if matches!(&self.own(run)?.body,Body::App(_)) {
+        if matches!(&self.own(run)?.body,Body::App(_)|Body::Claude(_)) {
             return match control {Control::Reply{..}|Control::Answers{..}=>self.respond(run,control),_=>self.set_option(run,control)};
         }
         match &mut self.own_mut(run)?.body {
@@ -1281,6 +1292,7 @@ impl Runtime for Adapter {
                 app.pump()?;run.owner.as_ref().ok_or("control-owner-required")?.control()?;
                 app.respond(response,run.deadline).map_err(Failure::Failed)
             },
+            Body::Claude(a)=>{a.pump()?;a.respond(response).map_err(Failure::Failed)},
             _=>Err(Failure::Refused(Cause("respond-transport-unsupported"))),
         }
     }
@@ -1308,7 +1320,16 @@ impl Runtime for Adapter {
                 app.writable()?;
                 let request=app.session.compact()?;app.control_exchange(request,run.deadline).map_err(Failure::Failed)
             },
+            Body::Claude(a)=>{a.pump()?;a.compact()?;run.recorded=false;run.frozen=None;if run.live.is_none() {table(self.client).live.fetch_add(1,Ordering::SeqCst);run.live=Some(Live(&table(self.client).live));}Ok(())},
             _=>Err(Failure::Refused(Cause("compact-transport-unsupported"))),
+        }
+    }
+
+    fn set_option(&self,run:&mut Run,option:Control)->Result<(),Failure> {
+        if !self.descriptor.has("set-option") {return Err(Failure::Refused(Cause("set-option-unsupported")));}
+        match &mut self.own_mut(run)?.body {
+            Body::Claude(a)=>{a.pump()?;a.set_option(option).map_err(Failure::Failed)},
+            _=>Err(Failure::Refused(Cause("set-option-transport-unsupported"))),
         }
     }
 
@@ -1346,6 +1367,7 @@ impl Runtime for Adapter {
         match &mut self.own_mut(run)?.body {
             Body::Acp(a)=>a.cancel(),
             Body::Rpc(a)=>a.cancel(),
+            Body::Claude(a)=>{a.pump()?;a.cancel()},
             Body::Turn(t) => {
                 if !t.timed_out { t.cancelled = true; }
                 t.kill()?;
@@ -1378,6 +1400,7 @@ impl Runtime for Adapter {
         let s = match &mut run.body {
             Body::Acp(a)=>a.poll()?,
             Body::Rpc(a)=>a.poll()?,
+            Body::Claude(a)=>a.poll()?,
             Body::Turn(t) => {
                 // An agentapi submitter exits after its receipt while the turn continues, so the deadline applies after exit too.
                 if run.deadline.is_some_and(|d| Instant::now() >= d) && !t.timed_out {
@@ -1412,6 +1435,7 @@ impl Runtime for Adapter {
         let mut report = match &self.own(run)?.body {
             Body::Acp(a)=>a.report(),
             Body::Rpc(a)=>a.report(),
+            Body::Claude(a)=>a.report(),
             Body::Turn(t) if t.exit.is_some() => Ok(t.report()),
             Body::Native(n) if n.report.is_some() => Ok(n.report.clone().expect("report")),
             Body::App(a) => a.session.report().ok_or_else(|| String::from("running")),
@@ -1441,6 +1465,7 @@ impl Runtime for Adapter {
         match &self.own(run).ok()?.body {
             Body::Acp(a)=>Some(a.session.clone()),
             Body::Rpc(a)=>Some(a.session.clone()),
+            Body::Claude(a)=>Some(a.session.clone()),
             Body::Turn(t) => session_of(self.client, &read_from(&t.log, t.start).unwrap_or_default())
                 .or_else(|| t.extension.session().map(String::from)).or_else(|| t.resumed.clone()),
             Body::Native(n) => n.attached.then(|| n.turn.session().to_string()),
@@ -1467,7 +1492,7 @@ impl Runtime for Adapter {
                 let text=read_from(&t.log,t.start).unwrap_or_default();
                 session_of(self.client,&text).is_some() || self.log_records(&text).iter().any(|r|r.lifecycle.is_some() || r.events.iter().any(|e|!matches!(e,Event::Activity|Event::Unsupported{..})))
             },
-            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(), Body::Acp(a)=>!a.session.is_empty(), Body::Rpc(a)=>!a.session.is_empty(),
+            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(), Body::Acp(a)=>!a.session.is_empty(), Body::Rpc(a)=>!a.session.is_empty(), Body::Claude(a)=>a.identified,
         };
         Observation { state, phase: if state != State::Running { state.code() } else if proven { "started" } else { "starting" },
             starting_ms: run.starting.elapsed().as_millis().min(u64::MAX as u128) as u64, owner:run.owner.as_ref().map(SessionOwner::observation).unwrap_or_default(),activity,error, session, url, cause, detail }
@@ -1477,6 +1502,7 @@ impl Runtime for Adapter {
         match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
             Body::Acp(a)=>Ok(a.path.clone()),
             Body::Rpc(a)=>Ok(a.path.clone()),
+            Body::Claude(a)=>Ok(a.path.clone()),
             Body::Turn(t) => Ok(t.log.clone()),
             Body::Native(n) if n.attached => Ok(n.turn.path().to_path_buf()),
             Body::Native(_) => Err(Cause("transcript-unknown")),
@@ -1514,6 +1540,7 @@ impl Runtime for Adapter {
     fn checkpoint(&self, run: &Run) -> Result<Value, Cause> {
         let mut saved = match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
             Body::Acp(_) | Body::Rpc(_)=>Err(Cause("no-checkpoint")),
+            Body::Claude(a)=>Ok(json!({"schema":"agentq-run/1","runtime":self.descriptor.name,"kind":"claude-control","claude":a.checkpoint()})),
             Body::Turn(t) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "turn", "turn": t.checkpoint()?})),
             Body::App(a) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "app", "app": a.session.checkpoint(), "model": a.model})),
             Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
@@ -1534,9 +1561,16 @@ impl Runtime for Adapter {
         let mut owner_spec=preflight::spec(self,l);owner_spec.session=saved["owner"]["session"].as_str().ok_or("session-owner-unknown: checkpoint has no owner")?.into();
         let acquire=||l.session_store.acquire(&owner_spec,false,Some(&saved["owner"]),l.lifetime);
         let queue = matches!(l.mode, Mode::Queue { .. });
-        let kind = match l.mode { Mode::Turn if self.descriptor.has("app-server") && automatic(l) => "app", Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
+        let kind = match l.mode { Mode::Turn if self.client==Client::Claude && l.controls=>"claude-control", Mode::Turn if self.descriptor.has("app-server") && automatic(l) => "app", Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
         if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["kind"] != kind {
             return Err("run recovery scope differs".into());
+        }
+        if kind=="claude-control" {
+            let saved_session=saved["claude"]["session"].as_str().filter(|s|native::cli_id(s)).ok_or("Claude control recovery session invalid")?;
+            let resumed=saved["claude"]["resume"].as_bool().ok_or("Claude control recovery resume invalid")?;
+            let (spec,optimization)=me.spec(l,saved_session.into(),resumed)?;let owner=acquire()?;
+            let session=registry::ClaudeControl::recover(&spec,l,&saved["claude"],&owner)?;let boundary=session.boundary;
+            let mut run=me.run(Body::Claude(Box::new(session)),boundary,optimization,l);run.owner=Some(owner);return run.restored(saved);
         }
         if kind == "turn" {
             // Observation only: the saved child keeps running; a resumed turn's session is the saved one.

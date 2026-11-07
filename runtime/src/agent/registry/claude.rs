@@ -1,5 +1,7 @@
 #[path="claude/signin.rs"]
 mod signin;
+#[path="claude/control.rs"]
+pub(super) mod control;
 #[path="claude/history.rs"]
 mod history;
 #[path="claude/parsing.rs"]
@@ -14,7 +16,7 @@ use std::collections::BTreeSet;
 
 static ADAPTER: Adapter = Adapter {client: Client::Claude, live: AtomicUsize::new(0), descriptor: Descriptor { name: "claude", label: "Claude Code", brand: "Anthropic", family: "claude",
         models: &["opus", "sonnet", "haiku"], minimum: "2.1.0",
-        capabilities: &["login-browser", "process-lifetime", "history", "turn", "resume", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
+        capabilities: &["login-browser", "process-lifetime", "history", "turn", "resume", "respond", "compact", "set-option", "caller-session-id", "compact-hook", "session-url", "quota-snapshot", "account-limits", "background", "title", "mcp-config",
             "instructions-file", "turn-parts", "turn-deltas", "settings-env"] } , ops: NativeOps {rpc:None,acp:None,catalogue:|_,_|Err("catalogue unsupported".into()),background_launch:background_launch,background_jobs:background_jobs,background_job:BackgroundJob::read,background_stop:background_stop,background_id:background_job_id,app_queue:|_,_,_,_|Err("app-queue unsupported".into()),app_command:|_,_|Err("app-server unsupported".into()), protocol:&PROTOCOL, home_var:"CLAUDE_CONFIG_DIR",alternate_home_var:None,session_vars:&["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SSE_PORT", "CLAUDE_JOB_DIR", "CLAUDE_PID"],auth_vars:&["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN"],home:native_home,executable:native_executable,new_session,args:native_args,mapped, extras, environment:env, settings, login, sign_in:Some(&signin::PROTOCOL), preparation, restore_preparation:Some(restore_preparation), sandbox:None,hook_status:None, limits_for, validate, protected, refusal, transcript, background_transcript, link, session_link } };
 
 pub(super) const ENTRY: Entry = Entry { name:"claude", aliases:&[], order:1, profile_order:1, worker_order:0, onboard:true,
@@ -114,7 +116,7 @@ fn link(run: &Run) -> Result<String, native::Absence> {
             Body::Turn(t) => (t.home.clone(), None, text.lines()
                 .filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| bridge(&v)).next_back()),
             Body::Native(n) => (spec_home(&n.spec), n.job.as_ref().map(|j| j.id.clone()).or_else(|| n.job_id.clone()), n.turn.remote_url().map(String::from)),
-            Body::App(_) | Body::Acp(_) | Body::Rpc(_) => return none("no-session-url"),
+            Body::App(_) | Body::Acp(_) | Body::Rpc(_) | Body::Claude(_) => return none("no-session-url"),
         };
         native::claude_link(home.as_deref(), &session, job.as_deref(), run.remote, seen)
     }
