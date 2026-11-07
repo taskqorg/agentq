@@ -19,6 +19,8 @@ pub use activity::ActivityObservation;
 #[path="lifetime.rs"]
 mod lifetime;
 pub use lifetime::Lifetime;
+#[cfg(test)]
+pub(crate) use lifetime::test_receipts;
 pub use ownership::Orphan;
 
 /// The only runtime metadata a caller reads. `name` is an opaque ID; `label` and `brand` are for people.

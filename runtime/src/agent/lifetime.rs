@@ -6,6 +6,10 @@ use serde::{Deserialize,Serialize};
 #[serde(rename_all="kebab-case")]
 pub enum Lifetime {#[default] Recoverable,StopWithOwner}
 
+#[cfg(test)]
+#[path="lifetime/test_receipts.rs"]
+pub(crate) mod test_receipts;
+
 pub(super) fn validate(scope:&Value,native:&NativeProcess)->Res<()> {
     if scope["native"]!=json!(native) {return Err("orphan-scope-native-changed".into());}Ok(())
 }
@@ -126,7 +130,7 @@ mod platform {
             let pid=u32::from_ne_bytes(bytes);let guard=NativeProcess::read(pid)?.ok_or("lifetime guardian identity unavailable")?;
             Ok(json!({"kind":"posix-group","group":child.id(),"guardian":guard}))
         }
-        pub fn release(&self,_child:&std::process::Child,_empty:Box<dyn FnOnce()->Res<()>+Send>)->Res<()> {Ok(())}
+        pub fn release(&self,_child:&std::process::Child,_empty:Box<dyn FnOnce()->Res<()>+Send>,#[cfg(test)] _root:&Path)->Res<()> {Ok(())}
     }
 
     pub fn verified(scope:&Value,native:&NativeProcess)->Res<()> {
@@ -228,9 +232,10 @@ mod platform {
             }
             Ok(json!({"kind":"windows-job","name":self.name}))
         }
-        pub fn release(&self,child:&std::process::Child,empty:Box<dyn FnOnce()->Res<()>+Send>)->Res<()> {
+        pub fn release(&self,child:&std::process::Child,empty:Box<dyn FnOnce()->Res<()>+Send>,#[cfg(test)] root:&Path)->Res<()> {
             let job=duplicate(self.job.as_raw_handle())?;let native=duplicate(child.as_raw_handle())?;let policy=self.policy;
-            std::thread::Builder::new().name("agentq-lifetime".into()).spawn(move|| {
+            #[cfg(test)] let (result_send,result_receive)=std::sync::mpsc::channel();
+            let writer=std::thread::Builder::new().name("agentq-lifetime".into()).spawn(move|| {
                 let result=(|| {
                     if unsafe {WaitForSingleObject(native.as_raw_handle(),u32::MAX)}!=0 {return Err(std::io::Error::last_os_error().to_string());}
                     if active(&job)?==0 {return empty();}
@@ -238,8 +243,11 @@ mod platform {
                     if policy==Lifetime::StopWithOwner && unsafe {TerminateJobObject(stop.job.as_raw_handle(),1)}==0 {return Err(std::io::Error::last_os_error().to_string());}
                     stop.wait()?;let result=empty();drop(stop);result
                 })();
+                #[cfg(test)] let _=result_send.send(result.clone());
                 if let Err(error)=result {eprintln!("agentq: native scope exit unknown: {error}");}
             }).map_err(|e|e.to_string())?;
+            #[cfg(test)] test_receipts::register(root,writer,result_receive);
+            #[cfg(not(test))] drop(writer);
             let status=unsafe {NtResumeProcess(child.as_raw_handle())};if status<0 {Err(format!("lifetime resume: NTSTATUS {status:#x}"))} else {Ok(())}
         }
     }

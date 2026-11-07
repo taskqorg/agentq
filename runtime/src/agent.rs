@@ -15,6 +15,8 @@ use registry::app;
 mod protected;
 pub mod host;
 mod adapter;
+#[cfg(test)]
+pub(crate) use adapter::test_receipts;
 mod capture;
 mod events;
 mod limits;

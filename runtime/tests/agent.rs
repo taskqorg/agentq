@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 #[path="support/protected.rs"]
 mod protected;
 
-fn main() {
+pub(crate) fn main() {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref()==Some("--receipt-unwind") {return receipt_unwind_fixture(Path::new(&std::env::args_os().nth(2).unwrap()));}
     if std::env::args().nth(1).as_deref()==Some("--lifetime-reexec") {let root=PathBuf::from(std::env::args_os().nth(2).unwrap());std::fs::write(root.join("owner-reexec"),"").unwrap();return wait_for(&root.join("owner-release"));}
     if std::env::args().nth(1).as_deref()==Some("--lifetime-owner") {return lifetime_owner_fixture(Path::new(&std::env::args_os().nth(2).unwrap()),&std::env::args().nth(3).unwrap());}
     if let Some(gate)=std::env::var_os("AGENTQ_FAKE_DESCENDANT") {
@@ -42,6 +44,11 @@ fn main() {
         ("pending_native_scope_stays_fenced_before_session_discovery",pending_native_scope_stays_fenced_before_session_discovery),
         ("completed_native_scope_survives_adoption_and_new_turn",completed_native_scope_survives_adoption_and_new_turn),
         ("recovered_cancel_keeps_original_native_scope",recovered_cancel_keeps_original_native_scope),
+        #[cfg(windows)]
+        ("duplicate_scope_writers_finish_before_teardown",duplicate_scope_writers_finish_before_teardown),
+        #[cfg(windows)]
+        ("failed_fixture_retains_root_without_waiting_a_paused_callback",failed_fixture_retains_root_without_waiting_a_paused_callback),
+        ("aborted_app_startup_finishes_its_scope_writer",aborted_app_startup_finishes_its_scope_writer),
         ("unbound_native_scope_never_proves_cleanup",unbound_native_scope_never_proves_cleanup),
         ("quota_account_read_guards_credentials", quota_account_read_guards_credentials),
         ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
@@ -94,7 +101,7 @@ fn main() {
     let filters:Vec<_>=std::env::args().skip(1).collect();
     let selected:Vec<_>=tests.iter().filter(|(name,_)|filters.is_empty()||filters.iter().any(|f|name.contains(f))).collect();
     for (name, test) in &selected {
-        test();
+        {let _cleanup=FixtureCleanup;test();}
         println!("test {name} ... ok");
     }
     println!("test result: ok. {} passed", selected.len());
@@ -391,6 +398,7 @@ fn fake_app_server() {
         append(Path::new("app-input.jsonl"), &[value.clone()]);
         let id=&value["id"];
         match value["method"].as_str() {
+            Some("initialize") if std::env::var_os("AGENTQ_FAKE_INIT_REFUSED").is_some()=>println!("{}",json!({"id":id,"error":{"code":-32603,"message":"fixture startup refusal"}})),
             Some("initialize")=>println!("{}",json!({"id":id,"result":{}})),
             Some("initialized")=>{},
             Some("model/list")=>{
@@ -559,11 +567,25 @@ fn app_input_forwards_images_once_and_reads_account_only() {
 
 // ---------- helpers ----------
 
+thread_local! {
+    static FIXTURE_ROOTS:std::cell::RefCell<Vec<PathBuf>>=const {std::cell::RefCell::new(Vec::new())};
+    static TEARDOWNS:std::cell::RefCell<Vec<PathBuf>>=const {std::cell::RefCell::new(Vec::new())};
+}
+struct FixtureCleanup;
+impl Drop for FixtureCleanup {
+    fn drop(&mut self) {
+        let roots=FIXTURE_ROOTS.take();let paths=TEARDOWNS.take();let unwinding=std::thread::panicking();
+        let result=crate::agent::test_receipts::finish(&roots,unwinding);
+        if unwinding {if let Err(error)=result {eprintln!("fixture receipt cleanup failed: {error}");}return;}
+        result.unwrap();
+        for path in paths {std::fs::remove_dir_all(&path).unwrap_or_else(|e|panic!("fixture teardown {}: {e}",path.display()));}
+    }
+}
+fn teardown(path:impl AsRef<Path>) {TEARDOWNS.with_borrow_mut(|paths|paths.push(path.as_ref().to_path_buf()));}
 fn scratch(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("coreq-agent-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
+    let d=std::env::temp_dir().join(format!("coreq-agent-{tag}-{}",crate::incident::uuid()));
     std::fs::create_dir_all(&d).unwrap();
-    d
+    FIXTURE_ROOTS.with_borrow_mut(|roots|roots.push(d.canonicalize().unwrap()));d
 }
 
 fn record(root: &Path, turn: u64) -> Value { serde_json::from_str(&std::fs::read_to_string(root.join(format!("fake-turn-{turn}.json"))).unwrap()).unwrap() }
@@ -660,7 +682,7 @@ fn session_ownership_and_stall_signal() {
     let first=request.clone();let writer=std::thread::spawn(move||agentq_runtime::cli::turn(&first,None));wait_for(&json_root.join("fake-turn-1.json"));
     assert!(agentq_runtime::cli::turn(&request,None).unwrap_err().starts_with("session-busy"),"a pinned fresh JSON session is fenced before input");
     std::fs::write(&json_gate,"").unwrap();assert_eq!(writer.join().unwrap().unwrap()["outcome"],"ok");assert!(!json_root.join("fake-turn-2.json").exists());
-    drop(json_cleanup);drop(stop_cleanup);drop(cleanup);std::fs::remove_dir_all(root).unwrap();
+    drop(json_cleanup);drop(stop_cleanup);drop(cleanup);teardown(root);
 }
 
 // #296: owner death preserves recoverable work or stops its native scope, including real descendants.
@@ -706,7 +728,7 @@ fn process_lifetime_and_orphan_cleanup() {
             assert_eq!(agent::NativeProcess::read(child.pid).unwrap(),Some(child.clone()));assert_ne!(rt.orphans(&launch).unwrap()[0].scope,"absent");
             std::fs::write(root.join("child-gate"),"").unwrap();wait_for(&root.join("child-gate.done"));gone(&child);
             let until=Instant::now()+Duration::from_secs(30);while rt.orphans(&launch).unwrap()[0].scope!="absent" {assert!(Instant::now()<until,"native descendant completion not observed");std::thread::sleep(Duration::from_millis(20));}
-            std::fs::write(root.join("owner-release"),"").unwrap();assert!(controller.wait().unwrap().success());std::fs::remove_dir_all(root).unwrap();continue;
+            std::fs::write(root.join("owner-release"),"").unwrap();assert!(controller.wait().unwrap().success());teardown(root);continue;
         }
         controller.kill().unwrap();controller.wait().unwrap();
         if policy=="stop" {gone(&native);gone(&child);
@@ -742,19 +764,19 @@ fn process_lifetime_and_orphan_cleanup() {
             rt.adopt(&entry.session,&launch,&[]).unwrap();
         }
         assert!(!root.join("fake-turn-2.json").exists(),"lifetime and cleanup never replay input");
-        std::fs::remove_dir_all(root).unwrap();
+        teardown(root);
     }
     let root=scratch("lifetime-refusal");let mut launch=fake_launch("claude",&root,"never submitted",&[]);launch.lifetime=agent::Lifetime::StopWithOwner;
     launch.process.configure=Some(std::sync::Arc::new(|_|{}));assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));assert!(!root.join("fake-turn-1.json").exists());
     launch.process=agent::Process::default();launch.mode=agent::Mode::Background;assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
     let root=scratch("lifetime-json-native");let bin=root.join("bin");std::fs::create_dir_all(&bin).unwrap();let home=root.join("account");std::fs::create_dir_all(&home).unwrap();
     let native=bin.join(if cfg!(windows) {"claude.exe"} else {"claude"});std::fs::copy(exe(),&native).unwrap();
     let path=std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
     let request=json!({"client":"claude","root":root,"log":root.join("worker.log"),"home":home,"input":"one JSON native turn","lifetime":"stop-with-owner","env":{"COREQ_FAKE_AGENT":"claude","PATH":path.to_string_lossy()},"context":{"product":"fixtureq","version":"1"}});
     assert_eq!(agentq_runtime::cli::turn(&request.to_string(),None).unwrap()["outcome"],"ok");
     let launch=fake_launch("claude",&root,"",&[]);let entry=rt.orphans(&launch).unwrap().remove(0);assert_eq!(entry.lifetime,Some(agent::Lifetime::StopWithOwner));assert!(entry.execution_scope.is_object());
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 // #296: a pending writer's leader exit cannot authorize adoption while its original descendant scope is live.
@@ -777,7 +799,7 @@ fn pending_native_scope_stays_fenced_before_session_discovery() {
     std::fs::write(&gate,"").unwrap();wait_for(&gate.with_extension("done"));
     let until=Instant::now()+Duration::from_secs(30);
     loop {if rt.adopt("imported-session",&launch,&[]).is_ok() {break;}assert!(Instant::now()<until,"original pending scope did not become absent");std::thread::sleep(Duration::from_millis(20));}
-    drop(rt.session_owner(Some("imported-session"),&launch).unwrap());std::fs::remove_dir_all(root).unwrap();
+    drop(rt.session_owner(Some("imported-session"),&launch).unwrap());teardown(root);
 }
 
 // #296: known native completion releases session admission, never the original descendant inventory.
@@ -824,7 +846,7 @@ fn completed_native_scope_survives_adoption_and_new_turn() {
                 assert!(!path.with_extension("json.pending").exists());
             }
         }
-        std::fs::remove_dir_all(root).unwrap();
+        teardown(root);
     }
 }
 
@@ -856,8 +878,69 @@ fn recovered_cancel_keeps_original_native_scope() {
         assert!(rt.adopt(&original.session,&launch,&[]).unwrap_err().contains("unresolved native stop"));
         let until=Instant::now()+Duration::from_secs(30);
         loop {if rt.reconcile_stop(&original,&launch).is_ok() {break;}assert!(Instant::now()<until,"original stop reconciliation failed");std::thread::sleep(Duration::from_millis(20));}
-        assert!(!root.join("fake-turn-2.json").exists());std::fs::remove_dir_all(root).unwrap();
+        assert!(!root.join("fake-turn-2.json").exists());teardown(root);
     }
+}
+
+// #329: one durable receipt cannot join a second callback that has not entered its filesystem work.
+#[cfg(windows)]
+fn duplicate_scope_writers_finish_before_teardown() {
+    let root=scratch("duplicate-scope-writers");let gate=root.join("gate");let child_gate=root.join("child-gate");
+    struct Release(PathBuf);impl Drop for Release {fn drop(&mut self) {for name in ["gate","child-gate"] {let _=std::fs::write(self.0.join(name),"");}}}
+    let _release=Release(root.clone());let rt=agent::runtime("claude").unwrap();
+    let launch=fake_launch("claude",&root,"one owned input",&[("COREQ_FAKE_GATE",gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);
+    let run=rt.launch(&launch).unwrap();wait_for(&root.join("descendant.json"));let saved=rt.checkpoint(&run).unwrap();
+    let original=rt.orphans(&launch).unwrap().remove(0);drop(run);
+    let child:agent::NativeProcess=serde_json::from_slice(&std::fs::read(root.join("descendant.json")).unwrap()).unwrap();
+    let store=launch.session_store.path.canonicalize().unwrap();
+    let (release,entered)=crate::agent::test_receipts::hold_next_stop(&store);
+    let mut recovered=rt.recover(&saved,&launch).unwrap();rt.cancel(&mut recovered).unwrap();entered.recv().unwrap();
+    assert!(store.join("stops").join(format!("{}.json",original.token)).is_file());
+    finish(rt,&mut recovered);drop(recovered);
+    let receipt=store.join("scopes").join(format!("{}.json",original.token));wait_for(&receipt);
+    {let _complete=coreq::file_lock::lock(&receipt.with_extension("lock")).unwrap();
+        let proof:Value=serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();assert_eq!(proof["process_scope"],original.execution_scope);}
+    for native in [original.native_identity.as_ref().unwrap(),&child] {assert_ne!(agent::NativeProcess::read(native.pid).unwrap().as_ref(),Some(native));}
+    assert_eq!(crate::agent::test_receipts::count(&store),2,"both actual callbacks belong to this store despite sharing one token");
+    assert_eq!(rt.orphans(&launch).unwrap()[0].scope,"absent");
+    assert!(!receipt.with_extension("json.pending").exists(),"the old receipt/lock teardown precondition is satisfied while the stop callback is paused");
+    println!("PROOF two callbacks share one token; receipt and writer lock are complete while the second callback is paused before filesystem entry");
+    teardown(&root);assert!(root.is_dir(),"deletion waits until all fixture locals release their work");
+    drop(release);
+    crate::agent::test_receipts::finish(&[root.canonicalize().unwrap()],false).unwrap();assert_eq!(crate::agent::test_receipts::count(&store),0);
+    assert!(!root.join("fake-turn-2.json").exists());
+}
+#[cfg(windows)]
+fn receipt_unwind_fixture(root:&Path) {
+    FIXTURE_ROOTS.with_borrow_mut(|roots|roots.push(root.canonicalize().unwrap()));let _cleanup=FixtureCleanup;
+    let rt=agent::runtime("claude").unwrap();let gate=root.join("gate");
+    let launch=fake_launch("claude",root,"one owned unwind input",&[("COREQ_FAKE_GATE",gate.as_os_str())]);
+    let mut run=rt.launch(&launch).unwrap();wait_for(&root.join("fake-turn-1.json"));
+    let native=rt.orphans(&launch).unwrap().remove(0).native_identity.unwrap();std::fs::write(root.join("unwind-native.json"),serde_json::to_vec(&native).unwrap()).unwrap();
+    let (release,entered)=crate::agent::test_receipts::hold_next_stop(&launch.session_store.path);
+    rt.cancel(&mut run).unwrap();entered.recv().unwrap();finish(rt,&mut run);
+    // The callback stays parked until this deliberately failing process exits; unwinding must retain its root.
+    std::mem::forget(release);teardown(root);panic!("intentional fixture unwind");
+}
+#[cfg(windows)]
+fn failed_fixture_retains_root_without_waiting_a_paused_callback() {
+    let root=scratch("receipt-unwind");let parent=agent::NativeProcess::read(std::process::id()).unwrap();
+    let output=Command::new(exe()).arg("--receipt-unwind").arg(&root).output().unwrap();
+    assert!(!output.status.success());let error=String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("intentional fixture unwind") && error.contains("receipt callback is unfinished"),"{error}");
+    assert!(root.is_dir() && root.join("unwind-native.json").is_file(),"failed fixture retains all evidence without deleting a live writer's store");
+    let native:agent::NativeProcess=serde_json::from_slice(&std::fs::read(root.join("unwind-native.json")).unwrap()).unwrap();
+    assert_ne!(agent::NativeProcess::read(native.pid).unwrap().as_ref(),Some(&native));assert_eq!(agent::NativeProcess::read(std::process::id()).unwrap(),parent);
+    teardown(root);
+}
+
+fn aborted_app_startup_finishes_its_scope_writer() {
+    let root=scratch("aborted-app-startup");let rt=agent::runtime("codex").unwrap();
+    let mut launch=fake_launch("codex",&root,"never submitted",&[("COREQ_FAKE_APP_SERVER","1".as_ref()),("AGENTQ_FAKE_ONE_TURN","1".as_ref()),("AGENTQ_FAKE_INIT_REFUSED","1".as_ref())]);launch.deltas=true;
+    assert!(rt.launch(&launch).is_err());assert!(root.join("app-transport.json").is_file());
+    let requests=std::fs::read_to_string(root.join("app-input.jsonl")).unwrap();assert!(!requests.contains("turn/start"));
+    #[cfg(windows)] assert_eq!(crate::agent::test_receipts::count(&launch.session_store.path.canonicalize().unwrap()),1,"failed startup still owns its actual callback");
+    teardown(root);
 }
 
 // #296: a well-shaped scope unrelated to the original native identity cannot release its stop fence.
@@ -885,7 +968,7 @@ fn unbound_native_scope_never_proves_cleanup() {
     value["native"]=json!(native);value["process_scope"]=original.execution_scope;std::fs::write(&row,value.to_string()).unwrap();
     let mut recovered=rt.recover(&saved,&launch).unwrap();
     std::fs::write(&gate,"").unwrap();std::fs::write(&child_gate,"").unwrap();wait_for(&child_gate.with_extension("done"));
-    finish(rt,&mut recovered);drop(recovered);std::fs::remove_dir_all(root).unwrap();
+    finish(rt,&mut recovered);drop(recovered);teardown(root);
     }
 }
 #[cfg(not(unix))]
@@ -974,7 +1057,7 @@ fn native_control_readiness_and_large_history_stay_owned() {
     assert!(codex.cancel(&mut app).unwrap_err().starts_with("cancel-unsupported"));
     assert!(codex.resume("unsafe & command",&q).is_err());
     assert_eq!(claude.resume("native-thread",&q).err().as_deref(),Some("mode app-queue unsupported by claude"));
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 fn soon() -> Option<Instant> { Some(Instant::now() + Duration::from_secs(30)) }
@@ -1023,7 +1106,7 @@ fn background_commands_preserve_native_mode() {
     let record:Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
     assert_eq!(record["args"],json!(["--bg","--resume","native-session"]));
     assert_eq!(agent::runtime("codex").unwrap().launch(&l).err().as_deref(), Some("mode background unsupported by codex"));
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 // #240 A1: host-configured Codex arguments sit in the Arguments position of start and resume, and only there.
@@ -1051,7 +1134,7 @@ fn host_args_reach_codex_turns_only() {
     queue.mode = agent::Mode::Queue { transcript: root.join("t.jsonl") };
     assert_eq!(codex.resume(&thread, &queue).err().as_deref(), Some("host-args unsupported by codex; next: select a supported policy"));
     assert!(!root.join("native-control.json").exists(), "a refusal starts nothing");
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 fn settings_of(args: &Value) -> Value {
@@ -1110,8 +1193,8 @@ fn settings_env_reaches_the_session() {
     queue.mode = agent::Mode::Queue { transcript: codex_root.join("t.jsonl") };
     assert_eq!(codex.resume(&codex.session_id(&run).unwrap(), &queue).err().as_deref(), Some("settings-env unsupported by codex; next: select a supported policy"));
     assert_eq!(agent::runtime("antigravity").unwrap().launch(&c).err().as_deref(), Some("settings-env unsupported by antigravity; next: select a supported policy"));
-    std::fs::remove_dir_all(root).unwrap();
-    std::fs::remove_dir_all(codex_root).unwrap();
+    teardown(root);
+    teardown(codex_root);
     if let Some(task) = task { unsafe { std::env::set_var("TASKQ_TASK", task); } }
 }
 
@@ -1135,7 +1218,7 @@ fn settings_env_preserves_subscription_policy() {
             assert_eq!(settings["env"][key], "", "subscription policy wins over settings: {mode:?} {key}");
         }
     }
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 // #240 A1 / M12.5-M12.7: settings off must be observed before installed state and reach both native sessions.
@@ -1163,7 +1246,7 @@ fn settings_env_off_precedes_state_read() {
             if name == "claude" { assert_eq!(settings_of(&turn["args"])["env"]["AGENTQ_OPTIMIZATION"], "off"); }
             else { assert!(!turn["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization")))); }
         }
-        std::fs::remove_dir_all(root).unwrap();
+        teardown(root);
     }
 }
 
@@ -1185,7 +1268,7 @@ fn settings_env_keeps_inherited_launch_markers() {
         unsafe { std::env::remove_var(key); }
     }
     for (key, value) in saved { unsafe { match value { Some(v) => std::env::set_var(key, v), None => std::env::remove_var(key) } } }
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 // #240 A1, TaskQ #1555/#1557: the caller reads the launcher's own stdout, stderr and status from a launched run, once.
@@ -1225,8 +1308,8 @@ fn launcher_output_is_handed_over_once() {
     let mut run = codex.launch(&fake_launch("codex", &codex_root, "x", &[("CODEX_HOME", codex_root.join("home").as_os_str())])).unwrap();
     finish(codex, &mut run);
     assert_eq!(codex.launcher_output(&mut run).err(), Some(agent::Cause("no-launcher")));
-    std::fs::remove_dir_all(root).unwrap();
-    std::fs::remove_dir_all(codex_root).unwrap();
+    teardown(root);
+    teardown(codex_root);
 }
 
 // #261 A1/A4: a consumer outside the crate reads job labels and record time through the runtime trait alone.
@@ -1264,7 +1347,7 @@ fn background_job_found_when_cwd_listing_misses_it() {
     assert_eq!(claude.session_id(&run).as_deref(),Some("native-session"),"attached by exact job id and cwd");
     assert!(!claude.cancel(&mut run).unwrap());
     assert_eq!(control(&root)["args"],json!(["stop","c37eb75a"]),"cancel stops the attached job");
-    std::fs::remove_dir_all(base).unwrap();
+    teardown(base);
 }
 
 // #213 A3 / #216 native proof, not CI: launches one real Claude background job with Remote Control through the trait, reads
@@ -1352,7 +1435,7 @@ fn claude_starts_and_resumes_one_session() {
     let last = calls.last().unwrap();
     assert_eq!((last["runtime"].as_str(), last["model"].as_str(), last["session_id"].clone(), last["task"].as_u64()), (Some("claude"), Some("claude-opus-5-5"), o["session_id"].clone(), Some(1)));
     drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // Chain: coreq.md R48, R50, R51: Codex names its thread on start; the resume uses that thread and keeps the account's
@@ -1386,7 +1469,7 @@ fn codex_resumes_its_thread_in_the_account_home() {
     assert_eq!((o["route"].as_str(), o["account"].as_str(), o["input_tokens"].as_u64(), o["cache_read_tokens"].as_u64()), (Some("manager"), Some("work"), Some(10), Some(40)));
     assert_eq!((o["model"].as_str(), o["unknown"]["model"].as_str(), o["unknown"]["task"].as_str()), (None, Some("not-reported"), Some("no-task")));
     drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // Chain: TaskQ CliTurn end detection (unchanged): a turn-end event ends the turn even when the process lingers.
@@ -1405,7 +1488,7 @@ fn lingering_process_is_stopped_after_its_turn_ends() {
     assert_eq!(report.exit, None, "the code of our own stop is not the client's exit");
     assert_eq!(agentq_runtime::cli::report_json(&report)["termination"], json!({"state":"observed"}), "reaped cleanup proves termination without an exit code");
     assert!(codex.stop_event(&mut run,u64::MAX).unwrap().is_none(), "cleanup remains distinct from stopped-turn failure");
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // #210 A1/A3/A4: a caller drives every runtime only through `agent::runtime(name)`: an abstract policy, launch, progress,
@@ -1478,7 +1561,7 @@ fn runtime_trait_runs_every_runtime_by_descriptor() {
         refused.accounts = Some(agent::Accounts { list: vec![agent::Entry { label: "default".into(), enabled: false }], limits: Default::default() });
         assert_eq!(r.launch(&refused).err().as_deref(), Some("quota-exhausted"));
         drop(store);
-        let _ = std::fs::remove_dir_all(root);
+        teardown(root);
     }
 }
 
@@ -1522,7 +1605,7 @@ fn cli_turn_recovers_its_running_child() {
         assert_eq!(observations(&store).len(), 1, "{name}: one observation");
         assert_eq!(r.checkpoint(&cold).unwrap_err(), agent::Cause("turn-ended"));
         drop(store);
-        let _ = std::fs::remove_dir_all(root);
+        teardown(root);
     }
     let root = scratch("turn-recover-cancel");
     let claude = agent::runtime("claude").unwrap();
@@ -1535,7 +1618,7 @@ fn cli_turn_recovers_its_running_child() {
     finish(claude, &mut cold);
     let r = claude.report(&cold).unwrap();
     assert_eq!((r.outcome, r.error), ("cancelled", "interrupted"), "the identity-bound stop ends the recovered child");
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // #212 A2: caller hooks run on the child Command after the adapter's own setup and on the spawned Child before input,
@@ -1567,7 +1650,7 @@ fn process_hooks_shape_the_child() {
     l.process.spawned = Some(Arc::new(|_: &std::process::Child| Err("job object refused".into())));
     assert_eq!(codex.launch(&l).err().as_deref(), Some("job object refused"));
     assert_eq!(codex.running(), before);
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // Chain: coreq.md R49: a turn past its deadline is stopped and observed as cancelled/timeout, never ok; a caller
@@ -1591,7 +1674,7 @@ fn deadline_stops_a_turn_that_never_ends() {
     let r = claude.report(&run).unwrap();
     assert_eq!((r.outcome, r.error), ("cancelled", "interrupted"));
     drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // Chain: agentq.md M12.3-M12.6, task #182 A3/A5/A6: the JSON command runs and resumes both clients without an
@@ -1628,7 +1711,7 @@ fn json_turns_run_plain_without_the_optimizer() {
         assert!(agentq_runtime::cli::turn(&json!({"client": "other"}).to_string(), None).is_err());
     }
     assert!(!install.exists(), "a plain turn never creates the installation");
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 fn agent_rows(store: &coreq::telemetry::Store) -> Vec<Value> {
@@ -1660,7 +1743,7 @@ fn deferred_record_keeps_the_turn_of_its_terminal_poll() {
     assert_eq!(turn["input_tokens"].as_u64(), Some(2), "the first agent.turn stays 2, not 102");
     assert_eq!(rows.iter().filter(|o| o["kind"] == "agent.call").count(), 1, "the later call belongs to no earlier turn");
     drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // Chain: agentq.md M12.13, RUNTIME.md § Observation (#268 A1). Risk: a later shared-log or transcript record, queue delay or
@@ -1691,7 +1774,7 @@ fn snapshot_fixes_every_runtime_at_its_terminal_poll() {
         let again = r.report(&run).unwrap();
         assert_eq!((again.usage.input, again.duration_us, again.outcome), (input, duration, "ok"), "{name}: tokens, duration and outcome stay");
         assert_eq!(r.poll(&mut run).unwrap(), agent::State::Finished, "{name}");
-        let _ = std::fs::remove_dir_all(root);
+        teardown(root);
     }
 
     // A transcript run: the next turn repeats the input, which a repeated native read refuses.
@@ -1719,7 +1802,7 @@ fn snapshot_fixes_every_runtime_at_its_terminal_poll() {
     run.record(&ctx, &store).unwrap().recorded.unwrap();
     assert_eq!(observations(&store)[0]["input_tokens"].as_u64(), Some(7), "the queued turn keeps its own tokens");
     drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // Chain: agentq.md M12.4, M12.13, RUNTIME.md § Observation (#268 A2, A3). Risk: terminal polling waits for the budget lock, a
@@ -1798,7 +1881,7 @@ fn snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart() {
     }
     drop(store);
     drop(capture);
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 fn one_claude_turn(root: &Path, ctx: &Context, store: &coreq::telemetry::Store) -> Value {
@@ -1907,7 +1990,7 @@ fn caller_context_reaches_records_and_children() {
     }
     capture.finish().unwrap();
     drop(capture); drop(dispatch); drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // Chain: M12.13, RUNTIME.md § Observation (#260 A2). Risk: `agentq agent turn` has no collector, so its records lose the
@@ -1946,7 +2029,7 @@ fn agent_turn_command_inherits_its_caller_from_the_environment() {
         }
         drop(store);
     }
-    let _ = std::fs::remove_dir_all(root);
+    teardown(root);
 }
 
 // Chain: agentq.md § 12 and RUNTIME.md § Adoption and rollback: a consumer outside the workspace builds against the
@@ -1988,7 +2071,7 @@ fn off_reaches_codex_queue_and_app_server() {
     let args = serde_json::from_str::<Value>(&std::fs::read_to_string(app_root.join("app-transport.json")).unwrap()).unwrap()["args"].clone();
     assert!(args[0] == "app-server" && !args.as_array().unwrap().iter().any(|s| s.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "app-server lost launch off: {args}");
     agent::runtime("codex").unwrap().cancel(&mut run).unwrap();
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 // M12.1/M12.6: a caller-owned executable wrapper must preserve agentapi prompt/tailing and reject server off.
@@ -2014,7 +2097,7 @@ fn antigravity_wrapped_submission_keeps_prompt_and_tail() {
     assert_eq!(run.optimization().reason, "optimization_retired");
     wait_agentapi_receipt(ag,&mut run,&l.log,"first");
     ag.cancel(&mut run).unwrap();finish(ag,&mut run);
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 // M12.1/M12.3: agentapi acknowledges submission before terminal transcript evidence; resume consumes only new steps.
@@ -2062,7 +2145,7 @@ fn antigravity_native_submission_tails_and_resumes() {
     finish(ag, &mut run);
     let report=ag.report(&run).unwrap();
     assert_eq!((report.outcome,report.error),("cancelled","timeout"));
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 fn wait_agentapi_receipt(ag: &dyn agent::Runtime, run: &mut agent::Run, log: &Path, prompt: &str) {
@@ -2183,7 +2266,7 @@ fn runtime_trait_exposes_native_seams() {
     assert_eq!(server,["app-server","--flag"]);
     assert_eq!(claude.app_queue(Command::new(exe()),&thread,"x",Duration::from_secs(1)).unwrap_err(),"app-queue unsupported by claude");
     assert_eq!(claude.app_server_arguments(&thread).unwrap_err(),"app-server unsupported by claude");
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 // Readiness fake: `fake-ready.json` in the login home maps `--version` and the status command to their output.
@@ -2218,7 +2301,7 @@ fn ready_reads_native_login_and_minimum_version() {
     }
     let r = agent::runtime("codex").unwrap().ready(Some(&home.join("absent")), Some(&home));
     assert_eq!((r.install.state, r.login.state), ("missing", "unknown"));
-    std::fs::remove_dir_all(&home).unwrap();
+    teardown(&home);
 }
 
 
@@ -2297,7 +2380,7 @@ fn preflight_checks_order_and_journals_exact_trust() {
     assert_eq!(seen["inherited_auth"],false);
     assert_eq!(seen["git_prompt"],"0");assert_eq!(seen["askpass"],"caller-helper");
     assert_eq!(seen["git_ssh"],"ssh -oBatchMode=yes -F caller-config");
-    std::fs::remove_dir_all(base).unwrap();
+    teardown(base);
 }
 
 // M12.19: missing native terminals and signalled/recovered processes must never disappear or imply success.
@@ -2326,7 +2409,7 @@ fn stopped_runs_have_typed_activity() {
                 assert_eq!((report.outcome,report.exit),("unknown",None));
                 assert_eq!(agentq_runtime::cli::report_json(&report)["termination"],json!({"state":"unknown","reason":"recovered-process-exit-not-observed"}));
             }
-            let _=std::fs::remove_dir_all(root);
+            teardown(root);
         }
     }
     let root=scratch("stop-linger");let r=agent::runtime("claude").unwrap();
@@ -2334,7 +2417,7 @@ fn stopped_runs_have_typed_activity() {
     let mut run=r.launch(&l).unwrap();wait_for(&root.join("fake-turn-1.json"));
     let stop=loop {if let Some(s)=r.stop_event(&mut run,u64::MAX).unwrap() {break s;}std::thread::yield_now();};
     assert_eq!(stop.cause,StopCause::TurnEndProcessLive);
-    finish(r,&mut run);assert!(r.stop_event(&mut run,u64::MAX).unwrap().is_none(),"our cleanup after native end is not lost ownership");let _=std::fs::remove_dir_all(root);
+    finish(r,&mut run);assert!(r.stop_event(&mut run,u64::MAX).unwrap().is_none(),"our cleanup after native end is not lost ownership");teardown(root);
 }
 
 // M12.19: recovering one run keeps its ID; resuming the same thread starts a distinct run.
@@ -2353,7 +2436,7 @@ fn stopped_app_runs_keep_distinct_recoverable_ids() {
         let mut recovered=rt.recover(&saved,&l).unwrap();assert_eq!(rt.stop_event(&mut recovered,u64::MAX).unwrap().unwrap().id,stop.id);
         assert_ne!(previous.as_ref(),Some(&stop.id));previous=Some(stop.id);
     }
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
 
 // M12.20: raw queue completion and history select the same scoped identified requests before freezing.
@@ -2372,7 +2455,7 @@ fn native_queue_identified_usage_freezes_latest_scoped_requests() {
         finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);assert_eq!(report.calls[0].id.as_deref(),Some("request"));assert_eq!(report.usage.input,Some(12));assert_eq!(report.calls[0].model.as_deref(),Some("fixture-model"));
         let context=Context {product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};let frozen=run.snapshot(&context).unwrap();
         append(&path,&[request("native-thread","turn",999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);assert_eq!(rt.report(&run).unwrap().usage.input,Some(12));
-        std::fs::remove_dir_all(root).unwrap();
+        teardown(root);
     }
 }
 
@@ -2392,10 +2475,10 @@ fn native_queue_untagged_usage_keeps_verified_task_scope() {
  let pure=root.join("scoped.jsonl");let text=std::fs::read_to_string(&path).unwrap();let rows:Vec<serde_json::Value>=text.lines().map(|l|serde_json::from_str(l).unwrap()).filter(|v:&serde_json::Value|v["payload"]["thread_id"]!="foreign").collect();append(&pure,&rows);
  let steps=agent::history::History::new("codex-rollout","source","native-thread").unwrap().steps(&pure,u64::MAX).unwrap().steps;
  let owned=steps.iter().find(|s|s.kind==agent::history::StepKind::Usage && s.turn.native_id.as_deref()==Some("turn") && s.data["input"]==10).unwrap();assert_eq!(owned.data["id"],json!(report.calls[0].id));
- let context=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};let frozen=run.snapshot(&context).unwrap();append(&path,&[usage(999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);std::fs::remove_dir_all(root).unwrap();
+ let context=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};let frozen=run.snapshot(&context).unwrap();append(&path,&[usage(999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);teardown(root);
 }
 
 fn native_queue_reused_response_keeps_distinct_frozen_turns(){
 let root=scratch("queue-reused-response");let path=root.join("native.jsonl");append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);let rt=agent::runtime("codex").unwrap();let mut sum=0;let mut frozen_turns=vec![];
 for turn in ["t1","t2"]{let input=format!("owned {turn}");let mut l=fake_launch("codex",&root,&input,&[("COREQ_FAKE_CONTROL","1".as_ref())]);l.mode=agent::Mode::Queue{transcript:path.clone()};if sum==0 {rt.adopt("native-thread",&l,&[]).unwrap();}let mut run=rt.resume("native-thread",&l).unwrap();append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),json!({"type":"event_msg","payload":{"type":"user_message","message":input,"turn_id":turn}}),json!({"type":"token_usage_record","payload":{"thread_id":"native-thread","turn_id":turn,"response_id":"r","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}}),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn}})]);finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);sum+=report.calls.len();let ctx=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};frozen_turns.push(run.snapshot(&ctx).unwrap());}
-assert_ne!(frozen_turns[0],frozen_turns[1]);let live=rt.history("native-thread",None,Some(&path),None).unwrap().live_data(None).unwrap();println!("NATIVE_REPEATED_RESPONSE frozen_calls={sum} live_calls={}",live.calls.len());assert_eq!(live.calls.len(),sum,"distinct accepted native turns cannot collapse in public history");std::fs::remove_dir_all(root).unwrap();}
+assert_ne!(frozen_turns[0],frozen_turns[1]);let live=rt.history("native-thread",None,Some(&path),None).unwrap().live_data(None).unwrap();println!("NATIVE_REPEATED_RESPONSE frozen_calls={sum} live_calls={}",live.calls.len());assert_eq!(live.calls.len(),sum,"distinct accepted native turns cannot collapse in public history");teardown(root);}
