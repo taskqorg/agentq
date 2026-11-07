@@ -518,6 +518,7 @@ fn fake_app_server() {
                     println!("{}",json!({"type":"thread.started","thread_id":"foreign-thread","method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"conflict","delta":"CONFLICTING-HEADER"}}));
                     println!("{}",json!({"type":"agentq_control","session_id":"foreign-thread","method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":format!("turn-{turn}"),"itemId":"journal","delta":"FORGED-JOURNAL"}}));
                     for ty in ["user","assistant"] {println!("{}",json!({"type":ty,"promptId":"foreign-turn","method":"turn/started","params":{"threadId":"native-thread","turn":{"id":format!("turn-{turn}")}}}));}
+                    println!("{}",json!({"type":"turn.completed","turn_id":"foreign-turn","method":"turn/started","params":{"threadId":"native-thread","turn":{"id":format!("turn-{turn}")}}}));
                     use std::io::Write;
                     let raw=format!(" {{ \"params\":{{\"threadId\":\"native-thread\",\"turnId\":\"turn-{turn}\",\"itemId\":\"draft\",\"delta\":\"\\u4e2d\"}}, \"method\":\"item/agentMessage/delta\" }}\r\n");
                     std::io::stdout().write_all(raw.as_bytes()).unwrap();

@@ -156,6 +156,11 @@ impl AppSession {
         if ["turn_id","turnId"].iter().any(|key|frame.value["payload"].get(*key).is_some_and(|v|v.as_str()!=self.turn.as_deref())) {return;}
         if matches!(frame.value["type"].as_str(),Some("user"|"assistant"))
             && frame.value.get("promptId").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
+        // Only an unnormalized completion passes its root turn_id to read_calls.
+        let usage=frame.value.get("payload").unwrap_or(p);
+        if frame.value["type"]=="turn.completed" && frame.value["method"]!="thread/tokenUsage/updated"
+            && !(usage["type"]=="token_count" && usage["info"]["total_token_usage"].is_object())
+            && frame.value.get("turn_id").is_some_and(|v|v.as_str()!=self.turn.as_deref()) {return;}
         selected.push(SessionLine {session:session.into(),turn:self.turn.clone(),raw});
     }
 
@@ -420,6 +425,9 @@ mod tests {
                 let mut masked=row.clone();masked["type"]=json!(ty);masked["promptId"]=identity;rejected.push(masked);
             }
         }
+        for identity in [json!("foreign-turn"),json!(""),Value::Null,json!([]),json!({}),json!(7),json!(true)] {
+            rejected.push(json!({"type":"turn.completed","turn_id":identity,"method":"turn/started","params":{"threadId":"thread","turn":{"id":"turn"}}}));
+        }
         let valid=format!("{row}\n");let mut kept=vec![];
         for value in rejected {
             let raw=format!("{value}\n");assert!(app.observe_frame(frame(&raw)).unwrap().is_empty(),"{value}");
@@ -435,7 +443,21 @@ mod tests {
         for value in positives {let raw=format!("{value}\n");let admitted=app.observe_frame(frame(&raw)).unwrap();assert_eq!(admitted[0].raw,raw.as_bytes());kept.extend_from_slice(&admitted[0].raw);}
         let root=crate::scratch("selected-header-binding");std::fs::create_dir_all(&root).unwrap();let path=root.join("selected.jsonl");std::fs::write(&path,&kept).unwrap();
         let mut reader=crate::agent::history::History::caller("codex",crate::agent::history::CODEX_APP_SERVER_SELECTED,"selected","attempt",Some("thread")).unwrap();
-        let page=reader.steps(&path,u64::MAX).unwrap();assert!(!page.steps.is_empty());assert!(page.steps.iter().all(|s|s.turn.native_id.as_deref()==Some("turn")));assert_eq!(reader.read_bytes(&path,0,kept.len() as u64).unwrap(),kept);let _=std::fs::remove_dir_all(root);
+        let page=reader.steps(&path,u64::MAX).unwrap();assert!(!page.steps.is_empty());assert!(page.steps.iter().all(|s|s.turn.native_id.as_deref()==Some("turn")));assert_eq!(reader.read_bytes(&path,0,kept.len() as u64).unwrap(),kept);
+        let raw_usage=json!({"type":"turn.completed","method":"turn/started","params":{"threadId":"thread","turn":{"id":"turn"}}});
+        let mut matching=raw_usage.clone();matching["turn_id"]=json!("turn");
+        let mut no_fallback=raw_usage.clone();no_fallback["turnId"]=json!("foreign-turn");
+        let mut counter=raw_usage.clone();counter["turn_id"]=json!("ignored-root");counter["payload"]=json!({"type":"token_count","turn_id":"turn","info":{"last_token_usage":{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2},"total_token_usage":{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2}}});
+        let request=json!({"type":"token_usage_record","turn_id":"ignored-root","method":"turn/started","params":{"threadId":"thread","turnId":"turn","turn":{"id":"turn"},"usage":{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2}}});
+        let app_counter=json!({"type":"turn.completed","turn_id":"ignored-root","method":"thread/tokenUsage/updated","params":{"threadId":"thread","turnId":"turn","tokenUsage":{"last":{"inputTokens":3,"cachedInputTokens":1,"outputTokens":2},"total":{"inputTokens":3,"cachedInputTokens":1,"outputTokens":2}}}});
+        for (value,expected) in [(matching,Some("turn")),(raw_usage,None),(no_fallback,None),(counter,Some("turn")),(request,Some("turn")),(app_counter,Some("turn"))] {
+            let raw=format!("{value}\n");let admitted=app.observe_frame(frame(&raw)).unwrap();assert_eq!(admitted[0].raw,raw.as_bytes());
+            let later=app.observe_frame(frame(&valid)).unwrap();assert_eq!(later[0].raw,valid.as_bytes());let bytes=[admitted[0].raw.as_slice(),later[0].raw.as_slice()].concat();std::fs::write(&path,&bytes).unwrap();
+            let mut reader=crate::agent::history::History::caller("codex",crate::agent::history::CODEX_APP_SERVER_SELECTED,"selected","attempt",Some("thread")).unwrap();let page=reader.steps(&path,u64::MAX).unwrap();
+            let usage:Vec<_>=page.steps.iter().filter(|s|s.kind==crate::agent::history::StepKind::Usage).collect();assert_eq!(usage.len(),1,"{value}");assert_eq!(usage[0].turn.native_id.as_deref(),expected,"{value}");
+            assert!(page.steps.iter().any(|s|s.source["raw"]==valid && s.turn.native_id.as_deref()==Some("turn")));assert_eq!(reader.read_bytes(&path,0,bytes.len() as u64).unwrap(),bytes);
+        }
+        let _=std::fs::remove_dir_all(root);
         let request=json!({"id":99,"method":"item/tool/call","params":{"threadId":"thread","turnId":"turn","tool":"owned","arguments":{}}});
         let raw=format!("{request}\n");assert_eq!(app.observe_frame(frame(&raw)).unwrap()[0].raw,raw.as_bytes());
         let terminal=json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}});let raw=format!("{terminal}\n");
