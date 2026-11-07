@@ -370,7 +370,7 @@ A writer holds an OS advisory lock and journals admission before input. Unknown 
 
 ## Account sign-in
 
-M12.21 applies only to an explicit owner-started native agent account sign-in. It does not authorize GitHub authentication, unattended sign-in, account rotation by a scheduler, or login during launch/preflight/repair. A native sign-in may clear or revoke the selected account's prior credentials before publishing its link; the caller must present that native account operation to its owner. AgentQ never restores, copies or deletes credentials to undo it.
+M12.23 applies only to an explicit owner-started native agent account sign-in. It does not authorize GitHub authentication, unattended sign-in, account rotation by a scheduler, or login during launch/preflight/repair. A native sign-in may clear or revoke the selected account's prior credentials before publishing its link; the caller must present that native account operation to its owner. AgentQ never restores, copies or deletes credentials to undo it.
 
 `Runtime::login_start(&LoginOptions)` returns an opaque `LoginSession`; `login_status`, `login_code` and `login_cancel` operate only on that runtime's session. `LoginOptions` selects the native executable, child environment, optional account home and `LoginFlow` (`Browser` or `Device`). Windows sign-in runs a native executable directly: the known Claude npm shim resolves only to its installed native package entrypoint; other command wrappers refuse and require an explicit native executable. The descriptor names supported sign-in flows. An unsupported flow refuses before spawn. This account operation cannot submit worker input or replace a worker owner, grant, admission, session or home.
 
