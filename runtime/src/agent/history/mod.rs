@@ -1,6 +1,7 @@
 //! Read-only, bounded native history (agentq.md §12; RUNTIME.md history wire contract).
 use super::{Res, native};
 mod steps;
+mod requests;
 pub mod sessions;
 pub mod stop;
 pub mod live;
@@ -191,7 +192,7 @@ impl History {
 
     fn event(&self, v: &Value, raw: &str, offset: u64) -> Res<Value> {
         let protocol=super::registry::history_protocol(&self.format).ok_or("history transport unsupported")?;
-        let native_session=(protocol.history_session)(&self.format,v,raw);
+        let native_session=requests::session(v).or_else(||(protocol.history_session)(&self.format,v,raw));
         let provenance=(protocol.history_provenance)(&self.format,v,offset);
         if !provenance && native_session.as_deref().is_some_and(|s|s!=self.native_session && Some(s)!=self.native_session_alias.as_deref()) {return Err("history native session differs".into());}
         if self.native_parent.as_ref().is_some_and(|parent|(protocol.history_parent)(v).as_ref().is_some_and(|id|id!=parent)) {return Err("history native parent differs".into());}

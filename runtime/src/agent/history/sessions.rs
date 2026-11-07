@@ -52,7 +52,7 @@ fn walk(root:&Path, out:&mut Vec<PathBuf>) -> Res<()> {
 }
 
 fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
-    let format = match runtime {"codex"=>"codex-rollout","claude"=>"claude-native",_=>"antigravity-sidecar"};
+    let mut format = match runtime {"codex"=>"codex-rollout","claude"=>"claude-native",_=>"antigravity-sidecar"};
     let mut reader=BufReader::new(File::open(path).map_err(|e|format!("history discovery: {e}"))?);
     let mut row=String::new();
     loop {
@@ -63,8 +63,10 @@ fn identify(runtime:&str, path:&Path) -> Res<Option<Source>> {
         let v:Value=serde_json::from_str(&row).map_err(|e|format!("history discovery invalid JSON: {e}"))?;
         let acp=v["type"]=="acp";
         let rpc=v["type"]=="response" && v["command"]=="get_state" && v["data"]["sessionFile"].is_string();
-        let format=if acp {"acp"}else if rpc {"jsonl-rpc"}else{format};
-        let id=if acp {v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str())}else if rpc {v["data"]["sessionFile"].as_str()}else{match runtime {
+        if acp {format="acp";}else if rpc {format="jsonl-rpc";}
+        let control=super::requests::session(&v);
+        if control.is_some() && format=="codex-rollout" {format="codex-app-server";}
+        let id=if let Some(id)=control.as_deref() {Some(id)}else if acp {v["message"]["params"]["sessionId"].as_str().or(v["message"]["result"]["sessionId"].as_str())}else if rpc {v["data"]["sessionFile"].as_str()}else{match runtime {
             "codex" if v["type"]=="session_meta"=>v["payload"]["id"].as_str(),
             "claude"=>v["agentId"].as_str().or(v["sessionId"].as_str()).or(v["session_id"].as_str()),
             "antigravity"=>path.parent().and_then(Path::parent).and_then(Path::parent).and_then(Path::file_name).and_then(|s|s.to_str()),

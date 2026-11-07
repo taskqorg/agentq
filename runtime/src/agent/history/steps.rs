@@ -68,7 +68,7 @@ impl History {
         for (index,(value,event)) in rows.iter().zip(&events).enumerate() {
             let p=value.get("payload").or(value.get("params")).unwrap_or(&value);
             let prompt=value["promptId"].as_str().filter(|_|matches!(value["type"].as_str(),Some("user"|"assistant")));
-            let native=p["turn_id"].as_str().or(p["turnId"].as_str()).or(prompt);
+            let native=p["turn_id"].as_str().or(p["turnId"].as_str()).or(prompt).filter(|_|value["type"]!="agentq_control");
             let user=value["type"]=="user" && value["isMeta"]!=true && (value["message"]["content"].is_string()
                 || value["message"]["content"].as_array().is_some_and(|a|a.iter().any(|b|b["type"]=="text") && !a.iter().any(|b|b["type"]=="tool_result")));
             let boundary=user || value["type"]=="turn.started" || value["type"]=="system" && value["subtype"]=="init"
@@ -83,7 +83,7 @@ impl History {
             for mut step in decode(&self.format, event, value).into_iter().filter(|s|s.kind!=StepKind::Usage).chain(usage.remove(&index).unwrap_or_default()) {
                 if step.kind==StepKind::Usage {step.part=value["message"]["content"].as_array().map_or(0,Vec::len)+step.part;}
                 for name in ["model","effort","cli_version"] {if step.presentation[name].is_null() && !presentation[name].is_null() {step.presentation[name]=presentation[name].clone();step.presentation["unknown"].as_object_mut().unwrap().remove(name);}}
-                if step.turn.id.is_none() {if let Some(turn)=&turn {step.turn=turn.clone();}}
+                if step.turn.id.is_none() && step.data["type"]!="agentq_control" {if let Some(turn)=&turn {step.turn=turn.clone();}}
                 if let Some(previous)=derived.get(&step.id) {step=revise(previous,step);}
                 derived.insert(step.id.clone(),step.clone());
                 if step.revision>=self.offset {changed.insert(step.id.clone(),step);}
@@ -121,7 +121,7 @@ fn merge(old:&mut Value,new:&Value) {
 
 fn revise(previous:&Step,mut next:Step)->Step {
     if matches!(next.kind,StepKind::Tool) && !matches!(previous.kind,StepKind::Tool|StepKind::Unknown) {next.kind=previous.kind;}
-    if next.kind!=StepKind::Usage {
+    if next.kind!=StepKind::Usage && next.data["type"]!="agentq_control" {
     let mut data=previous.data.clone();
     if next.state=="delta" {
         let output=format!("{}{}",data["output"].as_str().unwrap_or_default(),next.data["delta"].as_str().unwrap_or_default());
@@ -137,7 +137,7 @@ fn revise(previous:&Step,mut next:Step)->Step {
     }
     next.origins=previous.origins.clone();next.origins.extend(origin(&next.source));
     if next.parent.is_none(){next.parent=previous.parent.clone();}
-    if next.turn.id.is_none(){next.turn=previous.turn.clone();}
+    if next.turn.id.is_none() && next.data["type"]!="agentq_control"{next.turn=previous.turn.clone();}
     next
 }
 
@@ -270,6 +270,13 @@ fn tool_kind(name: &str) -> StepKind {
 }
 
 pub(super) fn decode(format: &str, event: &Value, record: &Value) -> Vec<Step> {
+    if let Some(step)=super::requests::decode(event,record) {return vec![step];}
+    let mut steps=decode_native(format,event,record);
+    for step in &mut steps {super::requests::unscoped(step,event,record);}
+    steps
+}
+
+fn decode_native(format: &str, event: &Value, record: &Value) -> Vec<Step> {
     if format=="jsonl-rpc" {
         let ty=record["type"].as_str().unwrap_or_default();
         if ty=="rpc-replay" {return vec![];}
