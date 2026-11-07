@@ -804,9 +804,26 @@ fn completed_native_scope_survives_adoption_and_new_turn() {
         assert_eq!(retained.execution_scope,original.execution_scope);assert_eq!(retained.controller_identity,original.controller_identity);assert_ne!(retained.scope,"absent");
         assert!(rt.recover(&saved,&launch).is_err(),"retained cleanup evidence never restores superseded submission authority");
         assert_eq!(record(&root,2)["input"],"second input");assert!(!root.join("fake-turn-3.json").exists());
+        #[cfg(windows)]
+        let receipt=launch.session_store.path.join("scopes").join(format!("{}.json",original.token));
+        #[cfg(windows)]
+        let receipt_guard={std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();coreq::file_lock::lock(&receipt.with_extension("lock")).unwrap()};
         std::fs::write(&gate,"").unwrap();wait_for(&gate.with_extension("done"));
         let until=Instant::now()+Duration::from_secs(30);
         loop {if rt.orphans(&launch).unwrap().iter().find(|e|e.token==original.token).unwrap().scope=="absent" {break;}assert!(Instant::now()<until,"retained original scope did not become absent");std::thread::sleep(Duration::from_millis(20));}
+        #[cfg(windows)] {
+            assert!(!receipt.exists(),"OS scope absence does not wait for its receipt writer");drop(receipt_guard);
+            // Both launches have async receipt writers; scope absence alone cannot authorize fixture teardown.
+            let entries=rt.orphans(&launch).unwrap();assert_eq!(entries.len(),2);
+            for entry in entries {
+                let path=launch.session_store.path.join("scopes").join(format!("{}.json",entry.token));
+                wait_for(&path);
+                let _finished=coreq::file_lock::lock(&path.with_extension("lock")).unwrap();
+                let proof:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(proof["token"],entry.token);assert_eq!(proof["process_scope"],entry.execution_scope);
+                assert!(!path.with_extension("json.pending").exists());
+            }
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }
