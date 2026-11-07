@@ -2209,9 +2209,23 @@ fn snapshot_outlives_the_budget_lock_a_failed_append_and_a_restart() {
             (Some("fixture/project"), Some(2428), Some(7), Some("worker"), Some(77)), "the snapshot keeps its caller: {row}");
     }
 
-    for invalid in [json!({}), json!({"schema": "agentq-frozen/1", "records": []}), json!({"schema": "agentq-frozen/1", "records": [{"namespace": "agent.call", "key": "k", "observation": stored[1]}]})] {
-        assert_eq!(agent::Frozen::restore(&invalid).unwrap_err(), "frozen records invalid", "{invalid}");
+    // Hermes persists calls before its terminal turn; a standalone validated call is a valid snapshot.
+    let standalone=json!({"schema":"agentq-frozen/1","records":[{"namespace":"agent.call","key":"k","observation":stored[1]}]});
+    let call=agent::Frozen::restore(&standalone).unwrap();assert_eq!(call.save(),standalone);
+    assert_eq!(call.events().unwrap().len(),1);
+    assert_eq!(call.events().unwrap()[0].id(),agent::Frozen::restore(&call.save()).unwrap().events().unwrap()[0].id());
+    let mut version=standalone.clone();version["schema"]=json!("agentq-frozen/2");
+    let mut extra=standalone.clone();extra["unexpected"]=json!(true);
+    let mut record_extra=standalone.clone();record_extra["records"][0]["unexpected"]=json!(true);
+    let mut namespace=standalone.clone();namespace["records"][0]["namespace"]=json!("foreign");
+    let mut kind=standalone.clone();kind["records"][0]["observation"]["kind"]=json!("agent.turn");
+    for invalid in [json!({}),json!({"schema":"agentq-frozen/1","records":[]}),version,extra,record_extra,namespace,kind] {
+        assert_eq!(agent::Frozen::restore(&invalid).unwrap_err(),"frozen records invalid","{invalid}");
     }
+    let mut identity=standalone.clone();identity["records"][0]["key"]=json!("");
+    assert!(agent::Frozen::restore(&identity).is_err(),"missing immutable key refuses");
+    let mut content=standalone;content["records"][0]["observation"]["prompt"]=json!("invented forbidden content");
+    assert!(agent::Frozen::restore(&content).is_err(),"metadata snapshot never accepts prompt fields");
     drop(store);
     drop(capture);
     teardown(root);
