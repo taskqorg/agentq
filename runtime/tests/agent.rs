@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 mod protected;
 
 fn main() {
+    if std::env::args().nth(1).as_deref()==Some("--lifetime-reexec") {let root=PathBuf::from(std::env::args_os().nth(2).unwrap());std::fs::write(root.join("owner-reexec"),"").unwrap();return wait_for(&root.join("owner-release"));}
+    if std::env::args().nth(1).as_deref()==Some("--lifetime-owner") {return lifetime_owner_fixture(Path::new(&std::env::args_os().nth(2).unwrap()),&std::env::args().nth(3).unwrap());}
     if let Some(gate)=std::env::var_os("AGENTQ_FAKE_DESCENDANT") {
         while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}
         std::fs::write(Path::new(&gate).with_extension("done"),b"exited fixture body").unwrap();return;
@@ -36,6 +38,11 @@ fn main() {
     let tests: &[(&str, fn())] = &[
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("session_ownership_and_stall_signal", session_ownership_and_stall_signal),
+        ("process_lifetime_and_orphan_cleanup",process_lifetime_and_orphan_cleanup),
+        ("pending_native_scope_stays_fenced_before_session_discovery",pending_native_scope_stays_fenced_before_session_discovery),
+        ("completed_native_scope_survives_adoption_and_new_turn",completed_native_scope_survives_adoption_and_new_turn),
+        ("recovered_cancel_keeps_original_native_scope",recovered_cancel_keeps_original_native_scope),
+        ("unbound_native_scope_never_proves_cleanup",unbound_native_scope_never_proves_cleanup),
         ("quota_account_read_guards_credentials", quota_account_read_guards_credentials),
         ("catalogue_and_account_reads_need_no_turn", catalogue_and_account_reads_need_no_turn),
         ("project_identity_read_stays_inside_adapter", project_identity_read_stays_inside_adapter),
@@ -328,6 +335,7 @@ fn fake(client: &str) {
         let child=Command::new(std::env::current_exe().unwrap()).env("AGENTQ_FAKE_DESCENDANT",gate).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
         let identity=agent::NativeProcess::read(child.id()).unwrap().unwrap();std::fs::write("descendant.json",serde_json::to_vec(&identity).unwrap()).unwrap();
     }
+    if std::env::var_os("COREQ_FAKE_PENDING_EXIT").is_some() {return;}
     if let Ok(mode)=std::env::var("COREQ_FAKE_STOP") {
         let row=match client {
             "claude"=>json!({"type":"assistant","sessionId":session,"message":{"id":"last","content":[{"type":"thinking","thinking":"scrubbed"}]}}),
@@ -625,7 +633,7 @@ fn session_ownership_and_stall_signal() {
     drop(rt.session_owner(Some(&session),&terminal).unwrap());
     let stop_root=root.join("stop");std::fs::create_dir_all(&stop_root).unwrap();let stop_gate=stop_root.join("gate");
     let child_gate=stop_root.join("child-gate");let stop_cleanup=Gates(vec![stop_gate.clone(),child_gate.clone()]);
-    let mut stop=fake_launch("claude",&stop_root,"stop explicitly",&[("COREQ_FAKE_GATE",stop_gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);stop.home=l.home.clone();stop.inactivity=Some(Duration::from_millis(20));stop.stop_on_stall=true;
+    let mut stop=fake_launch("claude",&stop_root,"stop explicitly",&[("COREQ_FAKE_GATE",stop_gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);stop.process.configure=Some(std::sync::Arc::new(|_|{}));stop.home=l.home.clone();stop.inactivity=Some(Duration::from_millis(20));stop.stop_on_stall=true;
     let mut stopped=rt.launch(&stop).unwrap();wait_for(&stop_root.join("fake-turn-1.json"));let native=rt.checkpoint(&stopped).unwrap()["owner"]["session"].clone();
     wait_for(&stop_root.join("descendant.json"));let descendant:agent::NativeProcess=serde_json::from_slice(&std::fs::read(stop_root.join("descendant.json")).unwrap()).unwrap();
     append(&stop.log,&[json!({"type":"system","subtype":"init","session_id":native})]);rt.observe(&mut stopped);let before_stop=rt.checkpoint(&stopped).unwrap();
@@ -654,6 +662,217 @@ fn session_ownership_and_stall_signal() {
     std::fs::write(&json_gate,"").unwrap();assert_eq!(writer.join().unwrap().unwrap()["outcome"],"ok");assert!(!json_root.join("fake-turn-2.json").exists());
     drop(json_cleanup);drop(stop_cleanup);drop(cleanup);std::fs::remove_dir_all(root).unwrap();
 }
+
+// #296: owner death preserves recoverable work or stops its native scope, including real descendants.
+fn lifetime_owner_fixture(root:&Path,policy:&str) {
+    let gate=root.join("gate");let child=root.join("child-gate");
+    let mut launch=fake_launch("claude",root,"one native input",&[("COREQ_FAKE_GATE",gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child.as_os_str())]);
+    launch.lifetime=if policy=="stop" {agent::Lifetime::StopWithOwner} else {agent::Lifetime::Recoverable};
+    let rt=agent::runtime("claude").unwrap();let run=rt.launch(&launch).unwrap();
+    wait_for(&root.join("descendant.json"));
+    let saved=rt.checkpoint(&run).unwrap();std::fs::write(root.join("owner-ready.json"),serde_json::to_vec(&saved).unwrap()).unwrap();
+    // Dropping the observation handle cannot become owner death.
+    drop(run);std::fs::write(root.join("handle-dropped"),"").unwrap();
+    if policy=="recoverable-descendant-completion" {let mut recovered=rt.recover(&saved,&launch).unwrap();std::fs::write(root.join("observer-ready"),"").unwrap();finish(rt,&mut recovered);std::fs::write(root.join("parent-reaped"),"").unwrap();}
+    #[cfg(unix)] if policy=="stop" {use std::os::unix::process::CommandExt;panic!("private fixture exec: {}",Command::new(exe()).arg("--lifetime-reexec").arg(root).exec());}
+    wait_for(&root.join("owner-release"));
+}
+fn process_lifetime_and_orphan_cleanup() {
+    fn gone(native:&agent::NativeProcess) {
+        let until=Instant::now()+Duration::from_secs(30);
+        loop {
+            if matches!(agent::NativeProcess::read(native.pid),Ok(None)) {return;}
+            assert!(Instant::now()<until,"private fixture still present: {native:?}");std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let rt=agent::runtime("claude").unwrap();
+    for policy in ["recoverable","stop","recoverable-leader-exit","recoverable-descendant-completion"] {
+        let root=scratch(&format!("lifetime-{policy}"));
+        struct Release(PathBuf);impl Drop for Release {fn drop(&mut self) {for name in ["owner-release","gate","child-gate"] {let _=std::fs::write(self.0.join(name),"");}}}
+        let _release=Release(root.clone());
+        let mut controller=Command::new(exe()).arg("--lifetime-owner").arg(&root).arg(policy).stdin(std::process::Stdio::null()).spawn().unwrap();
+        wait_for(&root.join("owner-ready.json"));wait_for(&root.join("handle-dropped"));
+        if policy=="recoverable-descendant-completion" {wait_for(&root.join("observer-ready"));}
+        #[cfg(unix)] if policy=="stop" {wait_for(&root.join("owner-reexec"));}
+        let saved:Value=serde_json::from_slice(&std::fs::read(root.join("owner-ready.json")).unwrap()).unwrap();
+        let gate=root.join("gate");let child_gate=root.join("child-gate");
+        let mut launch=fake_launch("claude",&root,"one native input",&[("COREQ_FAKE_GATE",gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);launch.lifetime=if policy=="stop" {agent::Lifetime::StopWithOwner} else {agent::Lifetime::Recoverable};
+        let native=agent::NativeProcess::read(saved["turn"]["pid"].as_u64().unwrap() as u32).unwrap().unwrap();
+        let child:agent::NativeProcess=serde_json::from_slice(&std::fs::read(root.join("descendant.json")).unwrap()).unwrap();
+        let entry=rt.orphans(&launch).unwrap().remove(0);assert_eq!((&*entry.state,&*entry.controller,&*entry.scope),("owned","live","verified"));
+        assert!(rt.stop_orphan(&entry,&launch).is_err(),"a live controller or its exclusive admission refuses orphan cleanup");
+        if policy=="recoverable-descendant-completion" {
+            std::fs::write(root.join("gate"),"").unwrap();wait_for(&root.join("parent-reaped"));gone(&native);
+            assert_eq!(agent::NativeProcess::read(child.pid).unwrap(),Some(child.clone()));assert_ne!(rt.orphans(&launch).unwrap()[0].scope,"absent");
+            std::fs::write(root.join("child-gate"),"").unwrap();wait_for(&root.join("child-gate.done"));gone(&child);
+            let until=Instant::now()+Duration::from_secs(30);while rt.orphans(&launch).unwrap()[0].scope!="absent" {assert!(Instant::now()<until,"native descendant completion not observed");std::thread::sleep(Duration::from_millis(20));}
+            std::fs::write(root.join("owner-release"),"").unwrap();assert!(controller.wait().unwrap().success());std::fs::remove_dir_all(root).unwrap();continue;
+        }
+        controller.kill().unwrap();controller.wait().unwrap();
+        if policy=="stop" {gone(&native);gone(&child);
+            #[cfg(unix)] assert_eq!(rt.orphans(&launch).unwrap()[0].scope,"absent");
+            #[cfg(windows)] assert_eq!(rt.orphans(&launch).unwrap()[0].scope,"unknown","Job name disappearance is not scope absence proof");
+        } else if policy=="recoverable-leader-exit" {
+            coreq::process::terminate(&coreq::process::Identity {pid:native.pid,started:native.started.clone()}).unwrap();gone(&native);
+            assert_eq!(agent::NativeProcess::read(child.pid).unwrap(),Some(child.clone()));
+            assert_eq!(rt.orphans(&launch).unwrap()[0].state,"unknown");
+            assert!(rt.adopt(&entry.session,&launch,&[]).is_err(),"leader absence cannot release a scope with live descendants");
+            std::fs::write(root.join("child-gate"),"").unwrap();wait_for(&root.join("child-gate.done"));gone(&child);
+        } else {
+            assert_eq!(agent::NativeProcess::read(native.pid).unwrap(),Some(native.clone()));
+            assert_eq!(agent::NativeProcess::read(child.pid).unwrap(),Some(child.clone()));
+            let entry=rt.orphans(&launch).unwrap().remove(0);assert_eq!(entry.state,"orphan");
+            let mut changed=entry.clone();changed.token="another-token".into();assert!(rt.stop_orphan(&changed,&launch).is_err());
+            let file=std::fs::read_dir(&launch.session_store.path).unwrap().map(|e|e.unwrap().path()).find(|p|p.extension().is_some_and(|e|e=="json")).unwrap();
+            let durable=std::fs::read(&file).unwrap();let mut wrong_identity:Value=serde_json::from_slice(&durable).unwrap();wrong_identity["native"]["started"]=json!("another native incarnation");
+            std::fs::write(&file,wrong_identity.to_string()).unwrap();assert_eq!(rt.orphans(&launch).unwrap()[0].state,"unknown");assert!(rt.stop_orphan(&entry,&launch).is_err());
+            assert_eq!(agent::NativeProcess::read(native.pid).unwrap(),Some(native.clone()),"unproven identity cannot become signal authority");std::fs::write(&file,&durable).unwrap();
+            let mut wrong_scope:Value=serde_json::from_slice(&durable).unwrap();wrong_scope["process_scope"]=json!({"kind":"unknown"});std::fs::write(&file,wrong_scope.to_string()).unwrap();
+            assert_eq!(rt.orphans(&launch).unwrap()[0].scope,"unknown");assert!(rt.stop_orphan(&entry,&launch).is_err());std::fs::write(&file,&durable).unwrap();
+            // Recovery keeps the original lifetime owner; it does not gain another writer or change the policy.
+            let mut wrong=launch.clone();wrong.lifetime=agent::Lifetime::StopWithOwner;assert!(rt.recover(&saved,&wrong).is_err());
+            let recovered=rt.recover(&saved,&launch).unwrap();assert_eq!(recovered.id(),Some(native.pid));drop(recovered);
+            assert_eq!(rt.orphans(&launch).unwrap()[0].controller,"absent");
+            rt.stop_orphan(&entry,&launch).unwrap();
+            assert!(rt.adopt(&entry.session,&launch,&[]).unwrap_err().contains("unresolved native stop"));
+            gone(&native);gone(&child);
+            let until=Instant::now()+Duration::from_secs(30);
+            loop {match rt.reconcile_stop(&entry,&launch) {Ok(())=>break,Err(error)=>{assert!(Instant::now()<until,"scope reconciliation: {error}");std::thread::sleep(Duration::from_millis(20));}}}
+            assert_eq!(rt.orphans(&launch).unwrap()[0].scope,"absent");
+            rt.adopt(&entry.session,&launch,&[]).unwrap();
+        }
+        assert!(!root.join("fake-turn-2.json").exists(),"lifetime and cleanup never replay input");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    let root=scratch("lifetime-refusal");let mut launch=fake_launch("claude",&root,"never submitted",&[]);launch.lifetime=agent::Lifetime::StopWithOwner;
+    launch.process.configure=Some(std::sync::Arc::new(|_|{}));assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));assert!(!root.join("fake-turn-1.json").exists());
+    launch.process=agent::Process::default();launch.mode=agent::Mode::Background;assert!(rt.launch(&launch).err().unwrap().starts_with("lifetime-unsupported"));
+    std::fs::remove_dir_all(root).unwrap();
+    let root=scratch("lifetime-json-native");let bin=root.join("bin");std::fs::create_dir_all(&bin).unwrap();let home=root.join("account");std::fs::create_dir_all(&home).unwrap();
+    let native=bin.join(if cfg!(windows) {"claude.exe"} else {"claude"});std::fs::copy(exe(),&native).unwrap();
+    let path=std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()))).unwrap();
+    let request=json!({"client":"claude","root":root,"log":root.join("worker.log"),"home":home,"input":"one JSON native turn","lifetime":"stop-with-owner","env":{"COREQ_FAKE_AGENT":"claude","PATH":path.to_string_lossy()},"context":{"product":"fixtureq","version":"1"}});
+    assert_eq!(agentq_runtime::cli::turn(&request.to_string(),None).unwrap()["outcome"],"ok");
+    let launch=fake_launch("claude",&root,"",&[]);let entry=rt.orphans(&launch).unwrap().remove(0);assert_eq!(entry.lifetime,Some(agent::Lifetime::StopWithOwner));assert!(entry.execution_scope.is_object());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// #296: a pending writer's leader exit cannot authorize adoption while its original descendant scope is live.
+fn pending_native_scope_stays_fenced_before_session_discovery() {
+    let root=scratch("pending-native-scope");let gate=root.join("child-gate");
+    struct Release(PathBuf);impl Drop for Release {fn drop(&mut self) {let _=std::fs::write(&self.0,"");}}
+    let _release=Release(gate.clone());let rt=agent::runtime("codex").unwrap();
+    let launch=fake_launch("codex",&root,"one original input",&[("COREQ_FAKE_PENDING_EXIT","1".as_ref()),("COREQ_FAKE_TOOL_CHILD_GATE",gate.as_os_str())]);
+    let mut run=rt.launch(&launch).unwrap();let saved=rt.checkpoint(&run).unwrap();assert_eq!(saved["owner"]["session"],"-");
+    wait_for(&root.join("descendant.json"));let child:agent::NativeProcess=serde_json::from_slice(&std::fs::read(root.join("descendant.json")).unwrap()).unwrap();
+    finish(rt,&mut run);assert_eq!(rt.session_id(&run),None);drop(run);
+    for recover in [false,true] {
+        if recover {let observed=rt.recover(&saved,&launch).unwrap();assert_eq!(rt.checkpoint(&observed).unwrap()["owner"]["token"],saved["owner"]["token"]);drop(observed);}
+        assert_eq!(agent::NativeProcess::read(child.pid).unwrap(),Some(child.clone()));
+        assert!(rt.adopt("imported-session",&launch,&[]).is_err(),"pending native scope must refuse adoption before native ID discovery");
+        assert!(rt.session_owner(Some("imported-session"),&launch).is_err());
+        assert!(rt.resume("imported-session",&launch).is_err());
+        assert!(!root.join("fake-turn-2.json").exists(),"unknown native completion never submits input again");
+    }
+    std::fs::write(&gate,"").unwrap();wait_for(&gate.with_extension("done"));
+    let until=Instant::now()+Duration::from_secs(30);
+    loop {if rt.adopt("imported-session",&launch,&[]).is_ok() {break;}assert!(Instant::now()<until,"original pending scope did not become absent");std::thread::sleep(Duration::from_millis(20));}
+    drop(rt.session_owner(Some("imported-session"),&launch).unwrap());std::fs::remove_dir_all(root).unwrap();
+}
+
+// #296: known native completion releases session admission, never the original descendant inventory.
+fn completed_native_scope_survives_adoption_and_new_turn() {
+    for adopt in [false,true] {
+        let root=scratch("completed-native-scope");let gate=root.join("child-gate");
+        struct Release(PathBuf);impl Drop for Release {fn drop(&mut self) {let _=std::fs::write(&self.0,"");}}
+        let _release=Release(gate.clone());let rt=agent::runtime("claude").unwrap();
+        let native_gate=root.join("native-gate");
+        let launch=fake_launch("claude",&root,"first input",&[("COREQ_FAKE_GATE",native_gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",gate.as_os_str())]);
+        let mut run=rt.launch(&launch).unwrap();wait_for(&root.join("descendant.json"));let saved=rt.checkpoint(&run).unwrap();
+        std::fs::write(&native_gate,"").unwrap();finish(rt,&mut run);
+        assert_eq!(rt.report(&run).unwrap().outcome,"ok");drop(run);
+        let mut observed=rt.recover(&saved,&launch).unwrap();finish(rt,&mut observed);drop(observed);
+        let child:agent::NativeProcess=serde_json::from_slice(&std::fs::read(root.join("descendant.json")).unwrap()).unwrap();
+        let original=rt.orphans(&launch).unwrap().remove(0);assert_ne!(original.scope,"absent");
+        let blocked=launch.session_store.path.join("operations");std::fs::write(&blocked,"not a directory").unwrap();
+        if adopt {assert!(rt.adopt(&original.session,&launch,&[]).is_err());} else {assert!(rt.session_owner(Some(&original.session),&launch).is_err());}
+        std::fs::remove_file(blocked).unwrap();assert_eq!(rt.orphans(&launch).unwrap()[0].token,original.token,"failed retention cannot replace the original record");
+        if adopt {rt.adopt(&original.session,&launch,&[]).unwrap();}
+        let next=fake_launch("claude",&root,"second input",&[]);let mut next_run=rt.resume(&original.session,&next).unwrap();finish(rt,&mut next_run);drop(next_run);
+        assert_eq!(agent::NativeProcess::read(child.pid).unwrap(),Some(child));
+        let retained=rt.orphans(&launch).unwrap().into_iter().find(|e|e.token==original.token).expect("original scope survives replacement");
+        assert_eq!(retained.execution_scope,original.execution_scope);assert_eq!(retained.controller_identity,original.controller_identity);assert_ne!(retained.scope,"absent");
+        assert!(rt.recover(&saved,&launch).is_err(),"retained cleanup evidence never restores superseded submission authority");
+        assert_eq!(record(&root,2)["input"],"second input");assert!(!root.join("fake-turn-3.json").exists());
+        std::fs::write(&gate,"").unwrap();wait_for(&gate.with_extension("done"));
+        let until=Instant::now()+Duration::from_secs(30);
+        loop {if rt.orphans(&launch).unwrap().iter().find(|e|e.token==original.token).unwrap().scope=="absent" {break;}assert!(Instant::now()<until,"retained original scope did not become absent");std::thread::sleep(Duration::from_millis(20));}
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// #296: recovered cancellation has the same original scope and write-before-signal boundary.
+fn recovered_cancel_keeps_original_native_scope() {
+    for (deadline,fail_write) in [(false,false),(false,true),(true,false)] {
+        let root=scratch("recovered-scope-cancel");let gate=root.join("gate");let child_gate=root.join("child-gate");
+        struct Release(PathBuf);impl Drop for Release {fn drop(&mut self) {for name in ["gate","child-gate"] {let _=std::fs::write(self.0.join(name),"");}}}
+        let _release=Release(root.clone());let rt=agent::runtime("claude").unwrap();
+        let launch=fake_launch("claude",&root,"original input",&[("COREQ_FAKE_GATE",gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);
+        let run=rt.launch(&launch).unwrap();wait_for(&root.join("descendant.json"));let saved=rt.checkpoint(&run).unwrap();
+        let original=rt.orphans(&launch).unwrap().remove(0);drop(run);
+        let child:agent::NativeProcess=serde_json::from_slice(&std::fs::read(root.join("descendant.json")).unwrap()).unwrap();
+        let marker=launch.session_store.path.join("stops").join(format!("{}.json",original.token));
+        let mut recovery=launch.clone();if deadline {recovery.deadline=Some(Instant::now());}
+        let mut recovered=rt.recover(&saved,&recovery).unwrap();
+        assert_eq!(rt.checkpoint(&recovered).unwrap()["owner"],saved["owner"]);
+        if fail_write {
+            std::fs::write(marker.parent().unwrap(),"not a directory").unwrap();
+            assert!(rt.cancel(&mut recovered).is_err(),"journal failure cannot authorize direct leader termination");
+            for native in [original.native_identity.as_ref().unwrap(),&child] {assert_eq!(agent::NativeProcess::read(native.pid).unwrap().as_ref(),Some(native));}
+            std::fs::remove_file(marker.parent().unwrap()).unwrap();
+        }
+        if !deadline {assert!(!rt.cancel(&mut recovered).unwrap(),"stop request is not exit evidence");assert!(marker.is_file());}
+        finish(rt,&mut recovered);drop(recovered);
+        assert!(marker.is_file());
+        let until=Instant::now()+Duration::from_secs(30);
+        loop {match agent::NativeProcess::read(child.pid).unwrap() {None=>break,Some(now) if now!=child=>break,_=>{assert!(Instant::now()<until,"managed recovered cancel left original descendant alive");std::thread::sleep(Duration::from_millis(20));}}}
+        assert!(rt.adopt(&original.session,&launch,&[]).unwrap_err().contains("unresolved native stop"));
+        let until=Instant::now()+Duration::from_secs(30);
+        loop {if rt.reconcile_stop(&original,&launch).is_ok() {break;}assert!(Instant::now()<until,"original stop reconciliation failed");std::thread::sleep(Duration::from_millis(20));}
+        assert!(!root.join("fake-turn-2.json").exists());std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// #296: a well-shaped scope unrelated to the original native identity cannot release its stop fence.
+#[cfg(unix)]
+fn unbound_native_scope_never_proves_cleanup() {
+    for fault in ["group","reused-native","unreadable-native"] {
+    let root=scratch("unbound-native-scope");let gate=root.join("gate");let child_gate=root.join("child-gate");
+    struct Release(PathBuf);impl Drop for Release {fn drop(&mut self) {for name in ["gate","child-gate"] {let _=std::fs::write(self.0.join(name),"");}}}
+    let _release=Release(root.clone());let rt=agent::runtime("claude").unwrap();
+    let launch=fake_launch("claude",&root,"original input",&[("COREQ_FAKE_GATE",gate.as_os_str()),("COREQ_FAKE_TOOL_CHILD_GATE",child_gate.as_os_str())]);
+    let run=rt.launch(&launch).unwrap();wait_for(&root.join("descendant.json"));let saved=rt.checkpoint(&run).unwrap();
+    let original=rt.orphans(&launch).unwrap().remove(0);drop(run);
+    let row=std::fs::read_dir(&launch.session_store.path).unwrap().map(|e|e.unwrap().path()).find(|p|p.extension().is_some_and(|e|e=="json")).unwrap();
+    let mut value:Value=serde_json::from_slice(&std::fs::read(&row).unwrap()).unwrap();
+    match fault {"group"=>value["process_scope"]["group"]=json!(i32::MAX),"reused-native"=>value["native"]["started"]=json!("different creation identity"),_=>value["native"]=json!("unreadable identity")};
+    std::fs::write(&row,value.to_string()).unwrap();
+    if fault=="unreadable-native" {
+        value["phase"]=json!("idle");std::fs::write(&row,value.to_string()).unwrap();
+    }
+    let mut recovered=rt.recover(&saved,&launch).unwrap();assert!(rt.cancel(&mut recovered).is_err());drop(recovered);
+    let entry=rt.orphans(&launch).unwrap().remove(0);let marker=launch.session_store.path.join("stops").join(format!("{}.json",entry.token));
+    assert!(marker.is_file());assert!(rt.reconcile_stop(&entry,&launch).is_err(),"unbound group absence never proves original cleanup");assert!(marker.is_file());assert_ne!(entry.scope,"absent");
+    let native=original.native_identity.unwrap();assert_eq!(agent::NativeProcess::read(native.pid).unwrap(),Some(native.clone()));
+    let child:agent::NativeProcess=serde_json::from_slice(&std::fs::read(root.join("descendant.json")).unwrap()).unwrap();assert_eq!(agent::NativeProcess::read(child.pid).unwrap(),Some(child));
+    value["native"]=json!(native);value["process_scope"]=original.execution_scope;std::fs::write(&row,value.to_string()).unwrap();
+    let mut recovered=rt.recover(&saved,&launch).unwrap();
+    std::fs::write(&gate,"").unwrap();std::fs::write(&child_gate,"").unwrap();wait_for(&child_gate.with_extension("done"));
+    finish(rt,&mut recovered);drop(recovered);std::fs::remove_dir_all(root).unwrap();
+    }
+}
+#[cfg(not(unix))]
+fn unbound_native_scope_never_proves_cleanup() {}
 
 fn native_owner(name:&str,spec:&agent::NativeSpec)->agent::SessionOwner {
     let rt=agent::runtime(name).unwrap();let mut launch=fake_launch(name,&spec.root,"",&[]);

@@ -57,6 +57,7 @@ fn native_arguments_readiness(readiness: &mut agent::Readiness,v:&Value)->Res<()
 fn preflight_launch(v: &Value) -> Res<agent::Launch> {
     let mut launch=agent::Launch::new(path(v,"root")?.ok_or("root requires an absolute path")?,path(v,"log")?.ok_or("log requires an absolute path")?,v["input"].as_str().unwrap_or(""),"agentq");
     if !v["policy"].is_null() {launch.policy=serde_json::from_value(v["policy"].clone()).map_err(|e|format!("invalid policy: {e}"))?;}
+    if let Some(policy)=v.get("lifetime") {launch.lifetime=serde_json::from_value(policy.clone()).map_err(|_|"invalid lifetime")?;}
     if let Some(store)=path(v,"session_store")? {launch.session_store=agent::SessionStore::new(store);}
     launch.home=path(v,"home")?;launch.store=path(v,"store")?;
     launch.model=v["model"].as_str().map(String::from);
@@ -104,11 +105,13 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     native_arguments_readiness(&mut readiness,&v)?;
     readiness.permit(launch.readiness)?;
     let runtime=agent::runtime(client.code()).ok_or("unknown runtime")?;
+    if launch.lifetime==agent::Lifetime::StopWithOwner && !runtime.descriptor().has("process-lifetime") {return Err("lifetime-unsupported: native submission scope".into());}
+    let managed=strings(&v,"command")?.is_empty() && runtime.descriptor().has("process-lifetime");
     let owner=runtime.session_owner(resume.then_some(spec.session.as_str()),&launch)?;
     if !resume && runtime.descriptor().has("caller-session-id") {owner.bind(&spec.session)?;}
     let report = agent::with_environment_caller(|| match &store {
-        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?, readiness.clone(),owner.clone()),
-        None => { let mut t = agent::Turn::start(base, &spec, &log, input, &owner.process_hooks(&agent::Process::default()))?.owned(owner.clone()).prepared(readiness.clone()); t.wait(deadline)?; Ok(t.report()) }
+        Some(p) => agent::run(base, &spec, &log, input, deadline, &ctx, &crate::telemetry::Store::open(p)?, readiness.clone(),owner.clone(),managed),
+        None => { let mut t = agent::Turn::start(base, &spec, &log, input, &owner.process_hooks(&agent::Process::default(),managed)?)?.owned(owner.clone()).prepared(readiness.clone()); t.wait(deadline)?; Ok(t.report()) }
     })?;
     let mut out = report_json(&report);
     out["readiness"]=json!(readiness);

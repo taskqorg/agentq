@@ -23,7 +23,7 @@ pub use limits::Window;
 pub use capture::{APPEND_CHUNK, Call, Frozen, ProcessUse, SessionTurn, append_records, session_call, session_call_records, session_records};
 pub(crate) use capture::with_environment_caller;
 pub use adapter::registry;
-pub use adapter::{SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
+pub use adapter::{Lifetime,Orphan,SessionStore,SessionOwner,ResumeCommand,NativeProcess,OwnerObservation,ActivityObservation,Account, Approval, Builtin, Cause, Check, Failure, Login, Part, Configure, Descriptor, Launch, Mode, NativeSpec, Network, Observation, Policy, Process, Quota, Ready, Roots, Run, Runtime, Readiness, ReadinessMode, LaunchCheck, Repair, Scope, Spawned, State, runtime, runtimes};
 pub use native::BackgroundJob;
 pub use protected::{ProtectedHost, ProtectedIdentity, ProtectedPreparation, ProtectedAppServer};
 
@@ -436,9 +436,8 @@ impl Turn {
     /// Request termination; `poll` confirms the exit.
     pub fn kill(&mut self) -> Res<()> {
         self.stopping = true;
-        if self.exit.is_some() {
-            return Ok(());
-        }
+        if self.exit.is_some() {return Ok(());}
+        if let Some(owner)=&self.owner {if owner.stop_scope()? {return Ok(());}}
         self.child.kill()
     }
 
@@ -544,8 +543,8 @@ pub struct Context<'a> {
 
 /// Start, wait and report one turn, then append its `agent.turn` observation to `store`. A failed append is kept in
 /// `Report::recorded` and never changes the turn's result (R30).
-pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness,owner:SessionOwner) -> Res<Report> {
-    let mut turn = Turn::start(base, spec, log, text, &owner.process_hooks(&Process::default()))?.owned(owner).prepared(readiness);
+pub(crate) fn run(base: Command, spec: &Spec, log: &Path, text: &str, deadline: Option<Instant>, ctx: &Context, store: &crate::telemetry::Store, readiness: Readiness,owner:SessionOwner,managed:bool) -> Res<Report> {
+    let mut turn = Turn::start(base, spec, log, text, &owner.process_hooks(&Process::default(),managed)?)?.owned(owner).prepared(readiness);
     turn.wait(deadline)?;
     let mut r = turn.report();
     r.recorded = turn.snapshot(ctx).and_then(|f| f.append(store));

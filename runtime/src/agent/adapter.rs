@@ -16,6 +16,10 @@ pub use ownership::{SessionStore,SessionOwner,NativeProcess,OwnerObservation,Res
 #[path="activity.rs"]
 mod activity;
 pub use activity::ActivityObservation;
+#[path="lifetime.rs"]
+mod lifetime;
+pub use lifetime::Lifetime;
+pub use ownership::Orphan;
 
 /// The only runtime metadata a caller reads. `name` is an opaque ID; `label` and `brand` are for people.
 #[derive(Debug, PartialEq, Eq)]
@@ -44,7 +48,7 @@ impl Descriptor {
         let (spec,_)=adapter.spec(launch,session.into(),true)?;
         let mut command=preflight::launch_base(adapter,launch)?;
         command.args(&spec.args).args(&args[1..]);
-        Ok(ResumeCommand {command:super::environment(command,&spec),owner,arguments:args,process:launch.process.clone()})
+        Ok(ResumeCommand {command:super::environment(command,&spec),owner,arguments:args,process:launch.process.clone(),managed:self.has("process-lifetime")})
     }
 }
 
@@ -179,6 +183,7 @@ pub struct Launch {
     pub session_store:SessionStore,
     pub inactivity:Option<Duration>,
     pub stop_on_stall:bool,
+    pub lifetime:Lifetime,
 }
 
 /// How a run reaches the runtime; every mode but `Turn` needs the descriptor capability of the same name.
@@ -207,7 +212,7 @@ impl Launch {
         let log=log.into();let session_store=SessionStore::new(log.parent().unwrap_or(Path::new(".")).join(".agentq-sessions"));
         Launch { root: root.into(), log, input: input.into(), policy: Policy::default(), model: None, effort: None, compact_hook: None,
             env: vec![], command: vec![], optimization: Intent::Inherit, product: product.into(), install: None, accounts: None,
-            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![], readiness: ReadinessMode::default(), store: None, session_store, inactivity:None,stop_on_stall:false }
+            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![], readiness: ReadinessMode::default(), store: None, session_store, inactivity:None,stop_on_stall:false,lifetime:Lifetime::default() }
     }
 }
 
@@ -701,6 +706,9 @@ pub trait Runtime: Send + Sync {
         super::history::sessions::open(self.descriptor().name, session, home, source, checkpoint)
     }
     fn adopt(&self,_session:&str,_launch:&Launch,_native:&[NativeProcess])->Res<OwnerObservation> {Err("adoption unsupported".into())}
+    fn orphans(&self,_launch:&Launch)->Res<Vec<Orphan>> {Err("orphan inventory unsupported".into())}
+    fn stop_orphan(&self,_orphan:&Orphan,_launch:&Launch)->Res<()> {Err("orphan cleanup unsupported".into())}
+    fn reconcile_stop(&self,_orphan:&Orphan,_launch:&Launch)->Res<()> {Err("stop reconciliation unsupported".into())}
     fn session_owner(&self,_session:Option<&str>,_launch:&Launch)->Res<SessionOwner> {Err("session ownership unsupported".into())}
     fn preflight(&self, launch: &Launch, repair: &Repair) -> Readiness {
         let _ = (launch, repair); Readiness::unsupported()
@@ -990,14 +998,15 @@ impl Adapter {
         let name = self.descriptor.name;
         if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability())); }
         if matches!(l.mode, Mode::AppServer { .. }) { return Err("app-server requires explicit protected host; state needs in Launch".into()); }
+        if l.lifetime==Lifetime::StopWithOwner && (!matches!(l.mode,Mode::Turn) || !self.descriptor.has("process-lifetime")) {return Err("lifetime-unsupported: native submission scope".into());}
         let readiness = self.preflight(l, &Repair::default());
         readiness.permit(l.readiness)?;
         if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
         let (spec, optimization) = self.spec(l, session.map_or_else(|| new_session(self.client), String::from), session.is_some())?;
         let mut owner_spec=spec.clone();
         if session.is_none() && matches!(l.mode,Mode::Background) {owner_spec.session="-".into();}
-        let owner=l.session_store.acquire(&owner_spec,session.is_none(),None)?;
-        let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process);let l=&owned_launch;
+        let owner=l.session_store.acquire(&owner_spec,session.is_none(),None,l.lifetime)?;
+        let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process,matches!(l.mode,Mode::Turn) && self.descriptor.has("process-lifetime"))?;let l=&owned_launch;
         let command = preflight::launch_base(self,l)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
             job_id, job: None, attached, fault, report: None, launcher }));
@@ -1058,9 +1067,12 @@ impl Runtime for Adapter {
     fn descriptor(&self) -> &Descriptor { &self.descriptor }
 
     fn adopt(&self,session:&str,launch:&Launch,native:&[NativeProcess])->Res<OwnerObservation> {launch.session_store.adopt(&preflight::spec(self,launch),session,native)}
+    fn orphans(&self,launch:&Launch)->Res<Vec<Orphan>> {launch.session_store.orphans(&preflight::spec(self,launch))}
+    fn stop_orphan(&self,entry:&Orphan,launch:&Launch)->Res<()> {launch.session_store.cleanup(&preflight::spec(self,launch),entry,false)}
+    fn reconcile_stop(&self,entry:&Orphan,launch:&Launch)->Res<()> {launch.session_store.cleanup(&preflight::spec(self,launch),entry,true)}
     fn session_owner(&self,session:Option<&str>,launch:&Launch)->Res<SessionOwner> {
         let mut spec=preflight::spec(self,launch);spec.session=session.unwrap_or("-").into();spec.resume=session.is_some();
-        launch.session_store.acquire(&spec,session.is_none(),None)
+        launch.session_store.acquire(&spec,session.is_none(),None,launch.lifetime)
     }
     fn preflight(&self, launch: &Launch, repair: &Repair) -> Readiness { preflight::check(self, launch, repair) }
 
@@ -1109,6 +1121,7 @@ impl Runtime for Adapter {
     fn account_identity(&self, home: Option<&Path>) -> Option<String> { super::limits::identity(self.client,home) }
 
     fn cancel(&self, run: &mut Run) -> Res<bool> {
+        let owner=self.own(run)?.owner.clone().ok_or("session-owner-required")?;
         match &mut self.own_mut(run)?.body {
             Body::Turn(t) => {
                 if !t.timed_out { t.cancelled = true; }
@@ -1123,7 +1136,7 @@ impl Runtime for Adapter {
                     return Ok(false);
                 }
                 match a.transport.as_mut().ok_or("app-server transport ended")? {
-                    Transport::Plain(s) => { s.kill()?; Ok(s.poll()?.is_some()) }
+                    Transport::Plain(s) => {if !owner.stop_scope()? {s.kill()?;} Ok(s.poll()?.is_some()) }
                     Transport::Protected(s) => { s.cancel(until)?; Ok(false) }
                 }
             }
@@ -1285,7 +1298,7 @@ impl Runtime for Adapter {
         saved["stop_id"].as_str().filter(|s|native::plain_id(s)).ok_or("run stop identity invalid")?;
         let me = table(self.client);
         let mut owner_spec=preflight::spec(self,l);owner_spec.session=saved["owner"]["session"].as_str().ok_or("session-owner-unknown: checkpoint has no owner")?.into();
-        let acquire=||l.session_store.acquire(&owner_spec,false,Some(&saved["owner"]));
+        let acquire=||l.session_store.acquire(&owner_spec,false,Some(&saved["owner"]),l.lifetime);
         let queue = matches!(l.mode, Mode::Queue { .. });
         let kind = match l.mode { Mode::Turn if self.descriptor.has("app-server") && automatic(l) => "app", Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
         if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["kind"] != kind {
@@ -1297,7 +1310,8 @@ impl Runtime for Adapter {
             let (spec, optimization) = me.spec(l, resumed.map_or_else(|| new_session(self.client), String::from), resumed.is_some())?;
             let turn = Turn::recover(&spec, &l.log, &saved["turn"])?;
             let start = turn.start;
-            let mut run=me.run(Body::Turn(turn),start,optimization,l);run.owner=Some(acquire()?);return run.restored(saved);
+            let owner=acquire()?;
+            let mut run=me.run(Body::Turn(turn.owned(owner.clone())),start,optimization,l);run.owner=Some(owner);return run.restored(saved);
         }
         if kind == "app" {
             // Observation only: the transport ended with its process, so the run reports and records but takes no input.
@@ -1350,13 +1364,13 @@ impl Runtime for Adapter {
         let readiness=self.seam_readiness(&base,spec,Some(log),input)?;
         let owner=spec.owner.as_ref().ok_or("session-owner-required")?;owner.verify(&self.native(spec))?;
         if !spec.resume && self.descriptor.has("caller-session-id") {owner.bind(&spec.session)?;}
-        Turn::start(base, &self.native(spec), log, input, &owner.process_hooks(process)).map(|turn|turn.owned(owner.clone()).prepared(readiness))
+        Turn::start(base, &self.native(spec), log, input, &owner.process_hooks(process,false)?).map(|turn|turn.owned(owner.clone()).prepared(readiness))
     }
 
     fn background_launch(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Result<Output, crate::process::Failure>> {
         self.needs("background")?;
         self.seam_readiness(&base,spec,None,reference)?;
-        let owner=spec.owner.as_ref().ok_or("session-owner-required")?;owner.verify(&self.native(spec))?;owner.submit()?;
+        let owner=spec.owner.as_ref().ok_or("session-owner-required")?;owner.verify(&self.native(spec))?;owner.unscoped_submission()?;owner.submit()?;
         (self.ops.background_launch)(base, &self.native(spec), reference, budget)
     }
 
@@ -1384,7 +1398,7 @@ impl Runtime for Adapter {
     fn app_queue(&self, base: Command, spec: &NativeSpec, reference: &str, budget: Duration) -> Res<Output> {
         self.needs("app-queue")?;
         self.seam_readiness(&base,spec,None,reference)?;
-        let owner=spec.owner.as_ref().ok_or("session-owner-required")?;owner.verify(&self.native(spec))?;owner.submit()?;
+        let owner=spec.owner.as_ref().ok_or("session-owner-required")?;owner.verify(&self.native(spec))?;owner.unscoped_submission()?;owner.submit()?;
         (self.ops.app_queue)(base, &self.native(spec), reference, budget)
     }
 
@@ -1396,11 +1410,12 @@ impl Runtime for Adapter {
 
 /// A protected host frontend opened as a Codex app-server run (`ProtectedAppServer::open`).
 pub(crate) fn open_protected(server: ProtectedAppServer, session: Option<&str>, l: &Launch) -> Res<Run> {
+    if l.lifetime==Lifetime::StopWithOwner {return Err("lifetime-unsupported: protected scope".into());}
     let adapter = registry::app_adapter();
     let Mode::AppServer { initialize, thread } = &l.mode else { return Err("protected open requires mode app-server".into()) };
     if session.is_some_and(|s| !native::plain_id(s) || s == "-") { return Err("session requires a native session ID".into()); }
     let (spec, _) = adapter.spec(l, session.unwrap_or("-").into(), session.is_some())?;
-    let owner=l.session_store.acquire(&spec,session.is_none(),None)?;
+    let owner=l.session_store.acquire(&spec,session.is_none(),None,l.lifetime)?;
     owner.spawned(server.id())?;
     if !l.input.is_empty() || !l.parts.is_empty() {owner.submit()?;}
     let optimization = server.optimization();
@@ -1466,6 +1481,8 @@ mod tests {
             }
             // A missing caller-owned executable reaches spawn failure without ever starting a native agent.
             probes.insert("turn",supported(runtime.launch(&launch()).map(|_|())));
+            let mut scoped=launch();scoped.lifetime=Lifetime::StopWithOwner;
+            probes.insert("process-lifetime",supported(runtime.launch(&scoped).map(|_|())));
             probes.insert("resume",supported(runtime.resume("session-1",&launch()).map(|_|())));
             for (capability,mode) in [("background",Mode::Background),("app-queue",Mode::Queue {transcript:root.join("transcript")}),("app-server",Mode::AppServer {initialize:json!({}),thread:json!({})})] {
                 let mut l=launch(); l.mode=mode;
