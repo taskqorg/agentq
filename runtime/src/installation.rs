@@ -52,4 +52,3 @@ pub fn state(data: &Path) -> Result<Value, String> {
     }
     Ok(s)
 }
-
