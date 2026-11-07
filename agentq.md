@@ -198,6 +198,7 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
   Unknown continues by default and stays visible, except the mandatory ACP safe-version check (M12.10), because a failed optional probe alone must not stop work; a caller may choose strict. A failure of AgentQ's optional parts (hooks, telemetry, archive) degrades evidence, never blocks work (P1). Target: #284. [Detail](docs/spec/RUNTIME.md#worker-preflight).
 - **M12.16** Preparation fixes only what it owns, on explicit request, outside `launch`: exact-path client trust and AgentQ's own hook trust, under the client's lock and journaled. M12.6 holds for `launch` itself. It never changes login, account, model, permissions, provider, foreign hooks, or trust for a home or root folder.
 - **M12.17** A worker never silently waits for a person: the child has no interactive prompt path, and a run reads started only on native proof of a session; until then it reads starting, visibly. A native refusal ends it with a named cause. Input already written is never resubmitted.
+- **M12.21** Explicit account sign-in uses native CLI authority through the runtime: start, relay the native link/code, submit a pasted code, status and guarded cancel. Credentials stay native; selected homes never fall back or roll back. No login runs during launch or repair. [Detail](docs/spec/RUNTIME.md#account-sign-in).
 - Binding [runtime operation, observation, native lookup, benchmarks and adoption](docs/spec/RUNTIME.md#runtime-operation-and-adoption).
 
 ## Linked detail
