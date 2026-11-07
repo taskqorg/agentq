@@ -305,7 +305,7 @@ pub struct Binding {pub session:String,pub provider:String,pub account:Account}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State { Running, Finished, Failed, Unknown }
 
-/// A read-only locator, never a process identity or a stop/adoption capability.
+/// A read-only job/process observation, never a stop/adoption capability.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackgroundLocator {
     pub runtime: &'static str,
@@ -315,6 +315,8 @@ pub struct BackgroundLocator {
     pub cwd: PathBuf,
     pub home: Option<PathBuf>,
     pub pid: Option<u32>,
+    /// Original observed process incarnation; absent is never process/control proof.
+    pub process: Option<NativeProcess>,
 }
 
 /// One runtime-neutral observation of a run (RUNTIME.md Session observation).
@@ -427,6 +429,9 @@ struct Native {
     /// The launcher's job ID (background).
     job_id: Option<String>,
     job: Option<BackgroundJob>,
+    job_process: Option<NativeProcess>,
+    /// Only this fresh owned successful exchange supplies a verification token; never recovered labels.
+    launch_token: Option<String>,
     /// The native transcript is bound: always for queue, after job discovery for a new background job.
     attached: bool,
     /// An uncertain launcher or queue response; the run never resubmits.
@@ -535,6 +540,21 @@ fn discover(n: &Native) -> Res<Option<BackgroundJob>> {
     if row.is_none() { row = find(&(table(n.spec.client).ops.background_jobs)(base(&n.command, n.spec.client)?, &n.spec, false, Duration::from_secs(5))?); }
     let Some(row) = row else { return Ok(None) };
     (table(n.spec.client).ops.background_job)(&row, &n.spec, row["id"].as_str().unwrap_or_default()).map(Some)
+}
+
+/// Resolve only the original owned returned token, never a guessed same-session job.
+fn discover_launched(n:&Native)->Res<Option<(BackgroundJob,NativeProcess)>> {
+    let Some(id)=n.launch_token.as_deref() else {return Ok(None)};
+    let table=table(n.spec.client);
+    let mut rows=(table.ops.background_jobs)(base(&n.command,n.spec.client)?,&n.spec,true,Duration::from_secs(5))?;
+    if !rows.iter().any(|row|row["id"]==id) {rows=(table.ops.background_jobs)(base(&n.command,n.spec.client)?,&n.spec,false,Duration::from_secs(5))?;}
+    let mut matches=rows.iter().filter(|row|row["id"]==id);
+    let Some(row)=matches.next() else {return Ok(None)};
+    if matches.next().is_some() {return Err("background returned job ambiguous; original input retained".into());}
+    let job=(table.ops.background_job)(row,&n.spec,id)?;
+    if job.session!=n.turn.session() {return Err("background resumed source session differs".into());}
+    let Some(pid)=job.pid else {return Ok(None)};
+    Ok(NativeProcess::read(pid)?.map(|process|(job,process)))
 }
 
 fn state(r: &Report) -> State { match r.outcome { "ok" => State::Finished, "unknown" => State::Unknown, _ => State::Failed } }
@@ -883,7 +903,7 @@ impl App {
 impl Native {
     fn poll(&mut self) -> Res<(State, Option<crate::archive::NativeSource>)> {
         if let Some(r) = &self.report { return Ok((state(r), None)); }
-        let waiting = if self.fault.is_some() { State::Unknown } else { State::Running };
+        let mut waiting = if self.fault.is_some() { State::Unknown } else { State::Running };
         if !self.attached {
             let Some(job) = discover(self)? else { return Ok((if self.job_id.is_none() && !self.spec.resume { State::Unknown } else { waiting }, None)) };
             if !self.spec.resume {
@@ -891,11 +911,34 @@ impl Native {
                 self.turn.attach_background(&job, &path)?;
                 self.spec.session = job.session.clone();
             }
+            self.job_process=match discover_launched(self) {
+                Ok(Some((verified,process))) if verified.id==job.id && verified.pid==job.pid => Some(process),
+                Ok(_)=>None,
+                Err(error)=>{self.fault=Some(error);self.launch_token=None;None},
+            };
             self.job = Some(job);
             self.attached = true;
         }
+        let resumed_job=if !self.queue && self.spec.resume && self.job.is_none() {
+            match discover_launched(self) {
+                Ok(job)=>job,
+                Err(error)=>{self.fault=Some(error);self.launch_token=None;None},
+            }
+        } else {None};
+        let resumed_job=resumed_job.filter(|(_,process)| {
+            if self.job_process.as_ref().is_some_and(|original|original!=process) {
+                self.fault=Some("background process incarnation changed; original input retained".into());self.launch_token=None;false
+            } else {self.job_process.get_or_insert_with(||process.clone());true}
+        });
+        if self.fault.is_some() {waiting=State::Unknown;}
         if !self.turn.path().exists() { return Ok((waiting, None)); }
         let report = self.turn.poll()?;
+        if let Some((job,process))=resumed_job {
+            // Source validation above did not reset start/cursor or require accepted input.
+            if NativeProcess::read(process.pid)?.as_ref()==Some(&process) {
+                self.job_process=Some(process);self.job=Some(job);
+            }
+        }
         let proof = self.turn.identity.as_ref().filter(|_| self.turn.accepted && self.turn.protected_until > self.turn.start)
             .map(|identity| crate::archive::NativeSource {
                 runtime: self.spec.client.code().into(), root: self.spec.root.clone(), home: spec_home(&self.spec),
@@ -1365,8 +1408,8 @@ impl Adapter {
             let mut run=self.checked_run(&readiness,Body::Rpc(Box::new(session)),boundary,l);run.owner=Some(owner);return Ok(run);
         }
         let command = preflight::launch_base(self,l)?;
-        let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
-            job_id, job: None, attached, fault, report: None, launcher }));
+        let native = |turn: NativeTurn, queue:bool, job_id:Option<String>, attached, fault:Option<String>, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
+            launch_token:if !queue && fault.is_none() {job_id.clone()} else {None}, job_id, job: None, job_process:None, attached, fault, report: None, launcher }));
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
         let result=match &l.mode {
             Mode::Turn => {
@@ -1805,7 +1848,7 @@ impl Runtime for Adapter {
         let text = |k: &str| saved[k].as_str().map(String::from);
         if !saved["job"].is_null() && text("job").is_none_or(|j| !native::plain_id(&j)) { return Err("run recovery job invalid".into()); }
         let start = turn.start();
-        let body = Body::Native(Box::new(Native { queue, turn, spec, command: l.command.clone(), job_id: text("job"), job: None,
+        let body = Body::Native(Box::new(Native { queue, turn, spec, command: l.command.clone(), job_id: text("job"), job: None, job_process:None, launch_token:None,
             attached: saved["attached"].as_bool().ok_or("run recovery state invalid")?, fault: text("fault"), report: None, launcher: None }));
         let mut run=me.run(body,start,l);run.owner=Some(acquire()?);run.restored(saved)
     }
@@ -1894,8 +1937,13 @@ impl Runtime for Adapter {
         let run=self.own(run).map_err(|_|Cause("foreign-run"))?;
         let Body::Native(native)=&run.body else {return Err(Cause("no-background-job"));};
         if native.queue {return Err(Cause("no-background-job"));}
+        if native.fault.is_some() {return Err(Cause("background-job-unverified"));}
         let job=native.job.as_ref().ok_or(Cause("background-job-unverified"))?;
-        Ok(BackgroundLocator {runtime:run.runtime,source:"native-background-jobs",id:job.id.clone(),session:job.session.clone(),cwd:job.root.clone(),home:job.home.clone(),pid:job.pid})
+        if let Some(process)=native.job_process.as_ref() {
+            if job.pid!=Some(process.pid) || NativeProcess::read(process.pid).ok().flatten().as_ref()!=Some(process)
+                || native.turn.identity.is_none() || native.turn.protected_until==0 || native.turn.bound_file().is_err() {return Err(Cause("background-job-unverified"));}
+        } else if native.spec.resume {return Err(Cause("background-job-unverified"));}
+        Ok(BackgroundLocator {runtime:run.runtime,source:"native-background-jobs",id:job.id.clone(),session:job.session.clone(),cwd:job.root.clone(),home:job.home.clone(),pid:job.pid,process:native.job_process.clone()})
     }
 
     fn background_launch_exchange(&self, stdout:&str, stderr:&str)->BackgroundLaunchExchange {

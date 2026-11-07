@@ -135,7 +135,8 @@ impl NativeTurn {
         Ok(report)
     }
 
-    fn poll_inner(&mut self) -> Res<Option<Report>> {
+    /// Revalidate the existing source witness without consuming records or moving its baseline.
+    pub(crate) fn bound_file(&self)->Res<File> {
         let mut file = File::open(&self.path).map_err(|e| format!("native history unavailable: {e}"))?;
         if !file.metadata().map_err(|e| e.to_string())?.is_file() { return Err("native history not a regular file".into()); }
         let identity = file_id(&file)?;
@@ -143,6 +144,12 @@ impl NativeTurn {
         if digest_prefix(&mut file,self.start)? != self.prefix || digest_prefix(&mut file,self.protected_until)? != self.protected_hash {
             return Err("native history replaced or rewritten".into());
         }
+        Ok(file)
+    }
+
+    fn poll_inner(&mut self) -> Res<Option<Report>> {
+        let mut file=self.bound_file()?;
+        let identity=file_id(&file)?;
         if let Some(verify)=protocol(self.spec.client).native_metadata {
             file.seek(SeekFrom::Start(0)).map_err(|e|e.to_string())?;
             let mut first=String::new();

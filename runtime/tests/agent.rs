@@ -35,6 +35,7 @@ pub(crate) fn main() {
     if std::env::args().nth(1).as_deref()==Some("--lifetime-reexec") {let root=PathBuf::from(std::env::args_os().nth(2).unwrap());std::fs::write(root.join("owner-reexec"),"").unwrap();return wait_for(&root.join("owner-release"));}
     if std::env::args().nth(1).as_deref()==Some("--lifetime-owner") {return lifetime_owner_fixture(Path::new(&std::env::args_os().nth(2).unwrap()),&std::env::args().nth(3).unwrap());}
     if let Some(gate)=std::env::var_os("AGENTQ_FAKE_DESCENDANT") {
+        std::fs::write(Path::new(&gate).with_extension("ready"),b"ready").unwrap();
         while !Path::new(&gate).exists() {std::thread::sleep(Duration::from_millis(20));}
         std::fs::write(Path::new(&gate).with_extension("done"),b"exited fixture body").unwrap();return;
     }
@@ -57,6 +58,7 @@ pub(crate) fn main() {
     }
     if std::env::var_os("AGENTQ_LIVE_CLAUDE_BACKGROUND").is_some() { return live_claude_background_link(); }
     let tests: &[(&str, fn())] = &[
+        ("resumed_background_locator_keeps_token_source_and_original_process",resumed_background_locator_keeps_token_source_and_original_process),
         ("background_launcher_text_never_mints_native_stage_or_verified_job",background_launcher_text_never_mints_native_stage_or_verified_job),
         ("owned_plain_cli_refusal_requires_exact_source_exit_and_native_grammar",owned_plain_cli_refusal_requires_exact_source_exit_and_native_grammar),
         ("native_start_refusal_proof_preserves_stage_cause_and_session",native_start_refusal_proof_preserves_stage_cause_and_session),
@@ -3010,5 +3012,64 @@ fn background_launcher_text_never_mints_native_stage_or_verified_job() {
         let observed=rt.background_launch_exchange(&String::from_utf8_lossy(&output.stdout),&String::from_utf8_lossy(&output.stderr));
         assert_eq!(observed.unverified_job.as_deref(),(mode=="exit-id").then_some("c37eb75a"));assert!(observed.unknown.is_some());
         assert_eq!(rt.background_job(&run).unwrap_err(),agent::Cause("background-job-unverified"));
+    }
+}
+
+// Retained resume: attachment is not job discovery, and neither discovery nor init is accepted input.
+// Risk: a resumed Run loses its locator or a lost/ambiguous reply binds another same-session process.
+fn resumed_background_locator_keeps_token_source_and_original_process() {
+    let rt=agent::runtime("claude").unwrap();
+    for mode in ["resume","fresh","missing-token","failed-token","duplicate","foreign-session","foreign-root","no-pid","dead-pid","dead-after","rewrite","replacement"] {
+        let root=scratch("resumed-background-locator");let account=root.join("account");
+        let gate=root.join("job-release");
+        struct Child(std::process::Child,PathBuf);
+        impl Drop for Child {fn drop(&mut self) {let _=std::fs::write(&self.1,"");let _=self.0.wait();}}
+        let mut child=Child(Command::new(std::env::current_exe().unwrap()).env("AGENTQ_FAKE_DESCENDANT",&gate).spawn().unwrap(),gate.clone());
+        wait_for(&gate.with_extension("ready"));
+        let process=agent::NativeProcess::read(child.0.id()).unwrap().unwrap();
+        let canonical=root.canonicalize().unwrap().to_string_lossy().into_owned();
+        let plain=canonical.strip_prefix(r"\\?\UNC\").map(|p|format!(r"\\{p}")).or_else(||canonical.strip_prefix(r"\\?\").map(String::from)).unwrap_or(canonical);
+        let project:String=plain.chars().map(|c|if c.is_ascii_alphanumeric() {c} else {'-'}).collect();
+        let source=account.join("projects").join(project).join("native-session.jsonl");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        append(&source,&[json!({"type":"system","subtype":"init","sessionId":"native-session"})]);
+        let mut row=json!({"id":"c37eb75a","kind":"background","cwd":root,"sessionId":"native-session","state":"working","pid":process.pid});
+        match mode {
+            "missing-token"=>row["id"]=json!("different-job"),
+            "foreign-session"=>row["sessionId"]=json!("different-session"),
+            "foreign-root"=>row["cwd"]=json!(account),
+            "no-pid"=>{row.as_object_mut().unwrap().remove("pid");},
+            "dead-pid"=>row["pid"]=json!(u32::MAX),
+            _=>{},
+        }
+        let rows=if mode=="duplicate" {json!([row.clone(),row])} else {json!([row])}.to_string();
+        let mut l=fake_launch("claude",&root,"original pending input",&[("COREQ_FAKE_BACKGROUND","1".as_ref()),("COREQ_FAKE_CONTROL","1".as_ref()),("FAKE_JOB_ROWS",rows.as_ref()),("CLAUDE_CONFIG_DIR",account.as_os_str())]);
+        if mode=="failed-token" {l.env.push(("AGENTQ_FAKE_BACKGROUND_EXCHANGE".into(),"exit-id".into()));}
+        l.mode=agent::Mode::Background;
+        let mut run=if mode=="fresh" {rt.launch(&l).unwrap()} else {rt.adopt("native-session",&l,&[]).unwrap();rt.resume("native-session",&l).unwrap()};
+        let before=rt.checkpoint(&run).unwrap();
+        assert!(rt.background_job(&run).is_err());
+        rt.poll(&mut run).unwrap();
+        if matches!(mode,"resume"|"fresh"|"dead-after"|"rewrite"|"replacement") {
+            let locator=rt.background_job(&run).unwrap();assert_eq!(locator.process,Some(process.clone()));
+            assert_eq!((locator.id.as_str(),locator.session.as_str(),locator.pid),("c37eb75a","native-session",Some(process.pid)));
+            let saved=rt.checkpoint(&run).unwrap();
+            if mode!="fresh" {
+                assert_eq!(saved["native"]["start"],before["native"]["start"]);
+                assert_eq!(saved["native"]["prefix"],before["native"]["prefix"]);
+            }
+            assert!(saved["native"]["protected_until"].as_u64().unwrap()>=saved["native"]["start"].as_u64().unwrap());
+            assert!(rt.report(&run).is_err(),"locator does not invent completion/refusal");
+            if mode=="dead-after" {std::fs::write(&gate,"").unwrap();child.0.wait().unwrap();assert!(rt.background_job(&run).is_err(),"exited original process cannot be refreshed into control proof");}
+            if mode=="rewrite" {std::fs::write(&source,b"rewritten source\n").unwrap();assert!(rt.background_job(&run).is_err());}
+            if mode=="replacement" {let replacement=source.with_extension("replacement");std::fs::copy(&source,&replacement).unwrap();std::fs::remove_file(&source).unwrap();std::fs::rename(replacement,&source).unwrap();assert!(rt.background_job(&run).is_err());}
+            drop(run);
+            if mode=="resume" {
+                let mut cold=rt.recover(&saved,&l).unwrap();rt.poll(&mut cold).unwrap();
+                assert!(rt.background_job(&cold).is_err(),"checkpoint labels cannot restore the original token/process witness");
+                drop(cold);
+            }
+        } else {assert!(rt.background_job(&run).is_err(),"{mode} cannot select a guessed job");drop(run);}
+        drop(child);
     }
 }
