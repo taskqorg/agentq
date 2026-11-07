@@ -61,6 +61,7 @@ pub(crate) fn main() {
         ("account_login_cancel_fences_changed_or_unknown_credentials",signin::cancel_guards),
         ("account_login_retains_home_until_native_transport_cleanup",signin::transport_cleanup),
         ("live_claude_controls_keep_occurrence_policy_and_receipt_boundaries",claude_control::controls),
+        ("claude_control_recovery_keeps_delivered_progress_and_unknown_execution",claude_control::progress_recovery),
         ("claude_control_resolution_and_unknown_scope_never_retain_reply_authority",claude_control::boundaries),
         #[cfg(unix)]
         ("claude_control_recovery_observes_without_releasing_or_recreating_writer_authority",claude_control::recovery),

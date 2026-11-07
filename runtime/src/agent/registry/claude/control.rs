@@ -86,7 +86,7 @@ impl Session {
         let log=options.open(&l.log).map_err(|e|e.to_string())?;let boundary=log.metadata().map_err(|e|e.to_string())?.len();
         let server=JsonStdio::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?;let sampler=Some(capture::Sampler::start(server.id()));let native=NativeProcess::read(server.id())?.ok_or("control-native-identity-unknown")?;
         owner.hold_controls()?;
-        let mut session=Self {server:Some(server),native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified:false,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:false,cancelling:false,closed:None,deadline:l.deadline,started:Instant::now(),started_ms:unix_ms(),sampler,cursor:events::Cursor::default()};
+        let mut session=Self {server:Some(server),native,scope:native::scope(spec),resume:spec.resume,read_pos:boundary,path:l.log.clone(),boundary,log,session:spec.session.clone(),identified:false,requests:Requests::new(),owner:owner.clone(),policy:l.policy.clone(),pending:vec![],messages:vec![],report:None,active:false,cancelling:false,closed:None,deadline:l.deadline,started:Instant::now(),started_ms:unix_ms(),sampler,cursor:events::Cursor::new(l.deltas)};
         session.exchange(json!({"subtype":"initialize","hooks":null}))?;
         let parts=if l.parts.is_empty() {vec![Part::Text(l.input.clone())]}else{l.parts.clone()};session.input(&parts)?;Ok(session)
     }
@@ -135,7 +135,7 @@ impl Session {
         message["uuid"]=json!(crate::incident::uuid());message["session_id"]=json!(self.session);message["parent_tool_use_id"]=Value::Null;
         if self.report.is_some() {self.owner.submit()?;}
         self.boundary=self.log.metadata().map_err(|e|e.to_string())?.len();
-        self.active=true;self.cancelling=false;self.report=None;self.messages.clear();self.started=Instant::now();self.started_ms=unix_ms();if let Some(sampler)=&mut self.sampler {sampler.mark();}self.write(&message)
+        self.active=true;self.cancelling=false;self.report=None;self.messages.clear();self.cursor=events::Cursor::new(self.cursor.deltas);self.started=Instant::now();self.started_ms=unix_ms();if let Some(sampler)=&mut self.sampler {sampler.mark();}self.write(&message)
     }
     fn observe(&mut self,v:Value)->Res<()> {
         let result=self.observe_inner(v);
@@ -178,7 +178,7 @@ impl Session {
         self.pump()?;
         if self.requests.uncertain() {return Ok(State::Unknown);}
         if let Some(report)=&self.report {return Ok(state(report));}
-        if self.closed.is_some() {return Ok(State::Unknown);}
+        if self.closed.is_some() || self.recovered() {return Ok(State::Unknown);}
         if self.active && self.deadline.is_some_and(|d|Instant::now()>=d) {if !self.owner.stop_scope()? {self.server.as_mut().ok_or("control-transport-unavailable")?.kill()?;}self.closed=Some("caller deadline; native result unknown".into());return Ok(State::Unknown);}
         Ok(self.report.as_ref().map_or(State::Running,|r|match r.outcome {"ok"=>State::Finished,"unknown"=>State::Unknown,_=>State::Failed}))
     }
@@ -189,7 +189,7 @@ impl Session {
         let key=crate::sha256_hex(format!("claude\0{}\0{}\0{}",self.session,self.path.display(),self.boundary).as_bytes());
         capture::freeze("agent.turn",&key,&value,&report,Client::Claude,ctx)
     }
-    pub fn progress(&mut self)->Res<Vec<Event>> {self.pump()?;Ok(std::mem::take(&mut self.pending))}
+    pub fn progress(&mut self)->Res<(Vec<Event>,Value)> {self.pump()?;Ok((std::mem::take(&mut self.pending),json!(self.cursor)))}
     pub fn respond(&mut self,control:Control)->Res<()> {
         self.writable()?;if !self.active || self.cancelling {return Err("control-turn-unavailable".into());}
         let response=reply(self.requests.native(&control)?,&control)?;let request=self.requests.begin(&mut self.log,&self.session,&control,&response)?;

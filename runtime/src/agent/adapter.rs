@@ -1042,7 +1042,7 @@ impl Adapter {
         let path = match &mut run.body {
             Body::Acp(a)=>return a.progress(),
             Body::Rpc(a)=>return a.progress(),
-            Body::Claude(a) if !a.recovered()=>{let events=a.progress()?;run.progress=std::fs::metadata(&a.path).map_err(|e|e.to_string())?.len();return Ok(events);},
+            Body::Claude(a) if !a.recovered()=>{let (events,cursor)=a.progress()?;run.events=serde_json::from_value(cursor).map_err(|e|e.to_string())?;run.progress=std::fs::metadata(&a.path).map_err(|e|e.to_string())?.len();return Ok(events);},
             Body::Claude(a)=>a.path.clone(),
             Body::Turn(t) => { t.sync_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
@@ -1266,7 +1266,7 @@ impl Runtime for Adapter {
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
             Body::App(a) if !a.owned || a.control.is_some() => { a.pump()?;let owner=run.owner.as_ref().ok_or("session-owner-unknown")?;if a.control.is_some() {a.writable()?;owner.control()?;}owner.submit()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
-            Body::Claude(a)=>{a.pump()?;a.input(parts)?;run.recorded=false;run.frozen=None;if run.live.is_none() {table(self.client).live.fetch_add(1,Ordering::SeqCst);run.live=Some(Live(&table(self.client).live));}Ok(())},
+            Body::Claude(a)=>{a.pump()?;a.input(parts)?;run.progress=a.boundary;run.events=super::events::Cursor::new(run.events.deltas);run.recorded=false;run.frozen=None;if run.live.is_none() {table(self.client).live.fetch_add(1,Ordering::SeqCst);run.live=Some(Live(&table(self.client).live));}Ok(())},
             // A CLI run reads one input; the next turn is a resume.
             _ => Err(Failure::Refused(Cause("input-unsupported"))),
         }
@@ -1320,7 +1320,7 @@ impl Runtime for Adapter {
                 app.writable()?;
                 let request=app.session.compact()?;app.control_exchange(request,run.deadline).map_err(Failure::Failed)
             },
-            Body::Claude(a)=>{a.pump()?;a.compact()?;run.recorded=false;run.frozen=None;if run.live.is_none() {table(self.client).live.fetch_add(1,Ordering::SeqCst);run.live=Some(Live(&table(self.client).live));}Ok(())},
+            Body::Claude(a)=>{a.pump()?;a.compact()?;run.progress=a.boundary;run.events=super::events::Cursor::new(run.events.deltas);run.recorded=false;run.frozen=None;if run.live.is_none() {table(self.client).live.fetch_add(1,Ordering::SeqCst);run.live=Some(Live(&table(self.client).live));}Ok(())},
             _=>Err(Failure::Refused(Cause("compact-transport-unsupported"))),
         }
     }

@@ -49,9 +49,11 @@ pub fn recovery() {
 pub fn controls() {
     let ctx=Context {product:"fixtureq",version:"test",project:"other",task:None,route:None,account:"other"};
     let root=scratch("live-claude-controls");let runtime=agent::runtime("claude").unwrap();
-    let mut l=fake_launch("claude",&root,"first",&[]);l.controls=true;l.env.push(("AGENTQ_CLAUDE_CONTROL_FIXTURE".into(),"1".into()));
+    let mut l=fake_launch("claude",&root,"first",&[]);l.controls=true;l.deltas=true;l.env.push(("AGENTQ_CLAUDE_CONTROL_FIXTURE".into(),"1".into()));
     let mut run=runtime.launch(&l).unwrap();let session=runtime.session_id(&run).unwrap();
-    let Event::Request{id:first,choices,..}=request(runtime,&mut run) else {unreachable!()};
+    let mut initial=vec![];let until=Instant::now()+Duration::from_secs(30);
+    let (first,choices)=loop {initial.extend(runtime.progress(&mut run).unwrap());if let Some(Event::Request{id,choices,..})=initial.iter().find(|e|matches!(e,Event::Request{..})) {break (id.clone(),choices.clone());}assert!(Instant::now()<until);std::thread::yield_now();};
+    assert!(initial.iter().any(|e|matches!(e,Event::Text{delta,..} if delta=="streamed")),"declared deltas must survive the owned control transport");
     assert_ne!(first,json!("native-reused"));assert_eq!(choices.iter().map(|c|c.id.as_str()).collect::<Vec<_>>(),["allow","deny"]);
     assert!(runtime.respond(&mut run,Control::Reply{id:first.clone(),option:Some("invented".into())}).is_err());
     runtime.respond(&mut run,Control::Reply{id:first.clone(),option:Some("allow".into())}).unwrap();
@@ -67,6 +69,7 @@ pub fn controls() {
     assert_eq!(run.snapshot(&ctx).unwrap().save(),original,"model receipt does not rewrite prior result");
     runtime.compact(&mut run).unwrap();finish(runtime,&mut run);let compact=run.snapshot(&ctx).unwrap().save();
     assert_ne!(compact,original,"native compact command has its own physical turn boundary");
+    assert!(runtime.progress(&mut run).unwrap().iter().any(|e|matches!(e,Event::Message{text,..} if text=="repeated answer")),"native message ID reuse in another turn must not suppress its output");
     runtime.input(&mut run,&[Part::Text("next".into())]).unwrap();let Event::Request{id:next,..}=request(runtime,&mut run) else {unreachable!()};assert_ne!(first,next);
     runtime.cancel(&mut run).unwrap();assert!(runtime.respond(&mut run,Control::Reply{id:next,option:Some("allow".into())}).is_err());finish(runtime,&mut run);
     assert_eq!(runtime.report(&run).unwrap().outcome,"failed","generic native error result does not prove native interruption cause");
@@ -114,6 +117,31 @@ pub fn boundaries() {
     }
 }
 
+pub fn progress_recovery() {
+    for delivered in [true,false] {
+        let root=scratch("claude-control-progress-recovery");let runtime=agent::runtime("claude").unwrap();let mut l=fake_launch("claude",&root,"first",&[]);l.controls=true;l.deltas=true;l.env.push(("AGENTQ_CLAUDE_CONTROL_FIXTURE".into(),"1".into()));
+        let mut run=runtime.launch(&l).unwrap();let Event::Request{id,..}=request(runtime,&mut run) else {unreachable!()};
+        if !delivered {
+            runtime.respond(&mut run,Control::Reply{id,option:None}).unwrap();finish(runtime,&mut run);let _=runtime.progress(&mut run).unwrap();
+            runtime.input(&mut run,&[Part::Text("next".into())]).unwrap();
+            let until=Instant::now()+Duration::from_secs(30);
+            loop {
+                assert_eq!(runtime.poll(&mut run).unwrap(),State::Running);
+                let rows=std::fs::read_to_string(&l.log).unwrap();
+                if rows.lines().filter_map(|s|serde_json::from_str::<Value>(s).ok()).filter(|v|v["type"]=="assistant").count()==2 {break;}
+                assert!(Instant::now()<until);std::thread::yield_now();
+            }
+        }
+        let saved=runtime.checkpoint(&run).unwrap();let session=runtime.session_id(&run).unwrap();drop(run);
+        let before=std::fs::read(root.join("claude-input.jsonl")).unwrap();let mut recovered=runtime.recover(&saved,&l).unwrap();
+        assert_eq!(runtime.poll(&mut recovered).unwrap(),State::Unknown,"a recovered transport without a native result does not prove running execution");
+        append(&l.log,&[json!({"type":"result","subtype":"success","is_error":false,"session_id":session,"result":"repeated answer"})]);
+        let events=runtime.progress(&mut recovered).unwrap();assert_eq!(events.iter().filter(|e|matches!(e,Event::Message{text,..} if text=="repeated answer")).count(),usize::from(!delivered),"recovery preserves delivered text deduplication within its original turn only");
+        assert!(events.iter().any(|e|matches!(e,Event::TurnEnd{outcome:"ok"})));assert_eq!(runtime.poll(&mut recovered).unwrap(),State::Finished);
+        assert_eq!(std::fs::read(root.join("claude-input.jsonl")).unwrap(),before);drop(recovered);teardown(root);
+    }
+}
+
 pub fn server() {
     let args:Vec<_>=std::env::args().skip(1).collect();
     if args.first().is_some_and(|s|s=="--version") {println!("2.1.319 (Claude Code)");return;}
@@ -134,6 +162,11 @@ pub fn server() {
             },
             Some("user")=>{
                 assert_eq!(value["session_id"],session);question=false;emit(json!({"type":"system","subtype":"init","session_id":session}));
+                if args.iter().any(|s|s=="--include-partial-messages") {
+                    emit(json!({"type":"stream_event","session_id":session,"event":{"type":"message_start","message":{"id":"native-message"}}}));
+                    emit(json!({"type":"stream_event","session_id":session,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"streamed"}}}));
+                    emit(json!({"type":"assistant","session_id":session,"message":{"id":"native-message","model":"observed-model","content":[{"type":"text","text":"repeated answer"}]}}));
+                }
                 if value["message"]["content"][0]["text"]=="/compact" {emit(json!({"type":"system","subtype":"compact_boundary","session_id":session}));emit(result(false));}
                 else{
                     emit(json!({"type":"control_request","request_id":"native-reused","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool","input":{"command":"owned fixture"}}}));
