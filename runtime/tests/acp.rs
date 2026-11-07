@@ -35,6 +35,8 @@ fn main() {
     l.model=Some("model-1".into());
     l.policy.approval=agent::Approval::Edits;
     assert!(r.resume("untracked",&l).err().unwrap().starts_with("session-owner-unknown"));
+    let mut scoped=l.clone();scoped.lifetime=agent::Lifetime::StopWithOwner;
+    assert_eq!(r.launch(&scoped).err().as_deref(),Some("lifetime-unsupported: native submission scope"));
     let mut bad_store=l.clone();bad_store.session_store=agent::SessionStore::new("relative-owners");
     assert_eq!(r.launch(&bad_store).err().unwrap(),"session-store-requires-absolute-path");
     l.inactivity=Some(Duration::from_secs(20));
