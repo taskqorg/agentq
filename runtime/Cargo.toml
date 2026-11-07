@@ -25,7 +25,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 
 [[test]]
 name = "agent"
-path = "tests/agent.rs"
+path = "src/lib.rs"
 # The binary is also the fake Claude and Codex client (COREQ_FAKE_AGENT), so it owns main.
 harness = false
 

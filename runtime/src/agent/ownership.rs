@@ -221,12 +221,19 @@ fn record_absence(root:&Path,proof:&Value)->Res<()> {
 fn request_stop(root:&Path,row:&Value,native:&NativeProcess)->Res<()> {
     if let Some(stop)=lifetime::stop(&row["process_scope"],native)? {
         let root=root.to_path_buf();let expected=empty_proof(row);
-        std::thread::Builder::new().name("agentq-stop".into()).spawn(move|| {
+        #[cfg(test)] let tracking_root=root.clone();
+        #[cfg(test)] let pause=lifetime::test_receipts::take_stop_pause(&root);
+        #[cfg(test)] let (result_send,result_receive)=std::sync::mpsc::channel();
+        let writer=std::thread::Builder::new().name("agentq-stop".into()).spawn(move|| {
+            #[cfg(test)] if let Some(pause)=pause {pause.wait();}
             let result=stop.wait().and_then(|()|record_absence(&root,&expected));
             // Keep the native Job handle until the durable evidence is written; name disappearance is not absence.
+            #[cfg(test)] let _=result_send.send(result.clone());
             if let Err(error)=result {eprintln!("agentq: native scope cleanup unknown: {error}");}
             drop(stop);
         }).map_err(|e|e.to_string())?;
+        #[cfg(test)] lifetime::test_receipts::register(&tracking_root,writer,result_receive);
+        #[cfg(not(test))] drop(writer);
     }
     Ok(())
 }
@@ -336,7 +343,8 @@ impl SessionOwner {
                 owner.submit()?;
                 if let Some(setup)=&setup {
                     let (root,proof)=owner.with(|o|Ok((o.root.clone(),empty_proof(&o.row))))?;
-                    setup.release(child,Box::new(move||record_absence(&root,&proof)))?;
+                    #[cfg(test)] let tracking_root=root.clone();
+                    setup.release(child,Box::new(move||record_absence(&root,&proof)),#[cfg(test)] &tracking_root)?;
                 }Ok(())
             }))})
     }

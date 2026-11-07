@@ -31,3 +31,12 @@ pub(crate) fn scratch(tag: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&d).unwrap();
     d
 }
+
+// The custom fake-client driver shares this test root to join private receipt callbacks without a runtime API.
+#[cfg(test)]
+extern crate self as agentq_runtime;
+#[cfg(test)]
+#[path="../tests/agent.rs"]
+mod fixtures;
+#[cfg(test)]
+fn main() {fixtures::main();}

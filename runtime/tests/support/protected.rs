@@ -167,7 +167,7 @@ fn frontend_scenario() {
     let deadline=until();while !root.join("intent.json").exists() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     let result=server.verify(until());server.cancel(until()).unwrap();
     let deadline=until();while server.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
-    drop(server);std::fs::remove_dir_all(root).unwrap();
+    drop(server);teardown(root);
     result.expect("exact frontend and separate live scope supervisor must verify");
 }
 
@@ -287,7 +287,7 @@ fn prepared_operation(modern:bool) {
     let mut old=completed.clone();old["state"]=json!("unknown");save(&path,&old);
     assert_eq!(host.reconcile(&recovered,until()).unwrap()["state"],"unknown","reordered unknown cannot authorize release");
     assert_eq!(std::fs::read_to_string(root.join("app-input.jsonl")).unwrap(),native_input,"recovery never replays even the non-generating handshake");
-    assert_eq!(wire_request(read(&root.join("request.json")),modern),*recovered.request());std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(wire_request(read(&root.join("request.json")),modern),*recovered.request());teardown(root);
 }
 
 // Requirement: no input before fresh exact authority, no widening/replay from untrusted task/env/receipt text.
@@ -381,7 +381,7 @@ fn launch_scenario() {
     // Process identity and the transport's exit/EOF observation arrive independently.
     while codex.poll(&mut run).unwrap()==agent::State::Running || matches!(coreq::process::identity(frontend),Ok(Some(_))) {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     assert_eq!(codex.poll(&mut run).unwrap(),agent::State::Unknown,"a fenced input and EOF never prove a turn or release a slot");
-    drop(run);std::fs::remove_dir_all(root).unwrap();
+    drop(run);teardown(root);
 }
 
 fn wire_receipt(mut value:Value,modern:bool)->Value {
@@ -419,5 +419,5 @@ fn retained_scenario() {
     assert_eq!(retained_answer(|until|host.cancel_retained(&checkpoint,receipt,until))["state"],"unknown");
     assert!(!root.join("app-input.jsonl").exists());assert!(!root.join("request.json").exists());
     assert_eq!(std::fs::read_to_string(root.join("retained-receipt")).unwrap(),receipt);
-    std::fs::remove_dir_all(root).unwrap();
+    teardown(root);
 }
