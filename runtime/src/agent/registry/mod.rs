@@ -267,6 +267,8 @@ pub(crate) struct Protocol {
     pub ends:fn(&Value)->bool,
     pub start_limit:fn(&Value)->Option<StartLimit>,
     pub read_calls:fn(&[Value])->(Vec<Call>,Option<u64>,bool),
+    pub history_usage:fn(&[Value])->Vec<super::super::history::live::UsageRevision>,
+    pub history_context:fn(&Value)->Option<(Option<u64>,Option<u64>)>,
     pub final_text:fn(&[Value])->Option<String>,
     pub prepare_command:fn(Command,&Spec,&str)->Res<(Command,Box<dyn TurnExtension>)>,
     pub input_bytes:fn(&str)->Vec<u8>,
@@ -306,7 +308,6 @@ pub(crate) use codex::app;
 
 pub use claude::BackgroundJob;
 pub(crate) use claude::{remote_url,claude_link,Absence};
-pub(crate) use codex::append_codex_usage;
 
 #[cfg(test)]
 pub(crate) use claude::{claude_window,claude_windows};
@@ -323,6 +324,10 @@ pub(crate) use codex::rollout_calls as codex_rollout_calls;
 
 #[cfg(test)]
 pub(crate) use codex::parsing::auth_rejected as codex_auth_rejected;
+
+pub(crate) fn history_runtime(format:&str)->Option<&'static dyn Runtime> {
+    native_entries().filter_map(|e|e.builtin).find(|a|a.ops.protocol.history_formats.contains(&format)).map(|a|a as &dyn Runtime)
+}
 
 pub(crate) fn history_protocol(format:&str)->Option<&'static Protocol> {
     native_entries().filter_map(|e|e.builtin).map(|a|a.ops.protocol).find(|p|p.history_formats.contains(&format))

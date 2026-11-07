@@ -112,6 +112,7 @@ fn block(format: &str, v: Value) -> Value {
 }
 
 pub(super) fn history_session(_format: &str, v: &Value, raw: &str) -> Option<String> {
+    if v["type"]=="agentq_statusline" {return v["payload"]["session_id"].as_str().map(String::from);}
     v["agentId"]
         .as_str()
         .map(String::from)

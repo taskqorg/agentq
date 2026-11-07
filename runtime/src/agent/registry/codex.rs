@@ -257,13 +257,10 @@ fn parse_event(cursor: &mut events::Cursor,v: &Value,out: &mut Vec<Event>,thread
         if cursor.deltas && method == "item/agentMessage/delta" {
             if let Some(delta) = string(&p["delta"]) { out.push(Event::Text { item: string(&p["itemId"]), delta }); }
         }
-        if method == "thread/tokenUsage/updated" && thread.is_some_and(|t|!t.is_empty() && p["threadId"].as_str()==Some(t)) {
-            out.push(Event::Context { used: p["tokenUsage"]["last"]["totalTokens"].as_u64(), window: p["tokenUsage"]["modelContextWindow"].as_u64() });
+        if method!="thread/tokenUsage/updated" || thread.is_some_and(|t|!t.is_empty() && p["threadId"].as_str()==Some(t)) {
+            if let Some((used,window))=usage_context(v) {out.push(Event::Context {used,window});}
         }
         let payload = v.get("payload").or(v.get("msg")).unwrap_or(v);
-        if payload["type"] == "token_count" {
-            out.push(Event::Context { used: payload["info"]["last_token_usage"]["total_tokens"].as_u64(), window: payload["info"]["model_context_window"].as_u64() });
-        }
         // A rollout call exposes only its identity, name and deadline, never its arguments or output.
         match payload["type"].as_str() {
             Some("function_call"|"custom_tool_call") => {
@@ -365,7 +362,7 @@ fn read_snapshot(events:&[Value],rollout:Option<&Path>)->Snapshot {
 
 fn read_report(text:&str,events:&[Value],rollout:Option<&Path>)->Report {let end_index=events.iter().rposition(|v|ends(v) || assistant_failure(v).is_some()); classify_report(text,events,rollout,end_index)}
 
-static PROTOCOL: Protocol=Protocol {stream_history:"codex-exec",native_history:"codex-rollout",history_alias:false,history_provenance:|format,v,offset|format=="codex-rollout" && v["type"]=="session_meta" && offset>0,history_parent:|_|None,rollout_report,history_formats:&["codex-exec","codex-rollout","codex-app-server"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:Some(verify_meta),finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
+static PROTOCOL: Protocol=Protocol {stream_history:"codex-exec",native_history:"codex-rollout",history_alias:false,history_provenance:|format,v,offset|format=="codex-rollout" && v["type"]=="session_meta" && offset>0,history_parent:|_|None,rollout_report,history_formats:&["codex-exec","codex-rollout","codex-app-server"],history_session:history::history_session,history_normalize:history::normalize,history_validity:history::validity,ends,start_limit,read_calls,history_usage,history_context:usage_context,final_text,turn_ended:native_turn_ended,parse_event,terminal,assistant_failure,permission_mode,lifecycle,advances,session,snapshot:read_snapshot,report:read_report,prepare_command:stdio_command,input_bytes:plain_input,native_record,native_metadata:Some(verify_meta),finish_native_report,session_report,reported,update_limits,account_limits,identity:account_identity,credentials,oauth_token,oauth_usage};
 
 pub(crate) fn codex_groups(v: &Value) -> Option<Vec<(&str, &Value)>> {
     if let Some(groups) = v["result"].get("rateLimitsByLimitId").or(v["params"].get("rateLimitsByLimitId")).or(v.get("rateLimitsByLimitId")) {
@@ -515,9 +512,20 @@ pub(crate) fn app_queue(mut base: Command, spec: &Spec, reference: &str, budget:
 fn native_record(turn:&mut native::NativeTurn,v:&Value)->Res<()> {
 
                     if v["type"] == "session_meta" { verify_meta(turn,v)?; }
+                    if v["type"]=="turn_context" {
+                        let p=&v["payload"];
+                        if (p["thread_id"].is_null() || p["thread_id"]==turn.spec.session) && p["turn_id"].as_str().is_some_and(plain_id) {turn.events.push(v.clone());}
+                        return Ok(());
+                    }
+                    if v["type"]=="token_usage_record" {
+                        let p=&v["payload"];
+                        if turn.accepted && p["thread_id"]==turn.spec.session && p["turn_id"].as_str()==turn.turn.as_deref() {turn.events.push(v.clone());}
+                        return Ok(());
+                    }
                     if v["type"] != "event_msg" { return Ok(()); }
                     let p = &v["payload"];
                     if !p.is_object() {return Err("native app record shape invalid".into());}
+                    if p["thread_id"].as_str().is_some_and(|id|id!=turn.spec.session){return Ok(());}
                     match p["type"].as_str() {
                         Some("task_started") => turn.current = p["turn_id"].as_str().filter(|s| plain_id(s)).map(String::from),
                         Some("user_message" | "item_completed") => {
@@ -538,11 +546,10 @@ fn native_record(turn:&mut native::NativeTurn,v:&Value)->Res<()> {
                         }
                         _ => {}
                     }
+                    if turn.accepted && p["type"]=="token_count" && (p["turn_id"].as_str().is_some_and(|id|Some(id)==turn.turn.as_deref()) || p["turn_id"].is_null() && turn.current==turn.turn) {
+                        let mut owned=v.clone();owned["payload"]["turn_id"]=json!(turn.turn);turn.events.push(owned);
+                    }
                     if turn.accepted && !turn.ended && turn.current == turn.turn {
-                        if p["type"] == "token_count" && p["turn_id"].as_str() == turn.turn.as_deref() {
-                            let u = &p["info"]["last_token_usage"];
-                            append_codex_usage(&mut turn.events,u,&p["info"]["total_token_usage"],false);
-                        }
                         if p["type"] == "agent_message" && p["turn_id"].as_str().is_none_or(|t|Some(t)==turn.turn.as_deref()) {
                             turn.events.push(json!({"type":"item.completed","item":{"type":"agent_message","text":p["message"]}}));
                         }
@@ -595,23 +602,9 @@ fn session_report(text:&str,r:&mut Report) {
 /// The model requests of a Codex rollout, each `token_count` once by its cumulative total. `last_turn` keeps only the
 /// requests after the last `task_started`.
 pub(crate) fn rollout_calls(text: &str, last_turn: bool) -> Vec<Call> {
-    let (mut events, mut model) = (Vec::<Value>::new(), None::<String>);
-    for v in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
-        if v["type"] == "turn_context" { model = v["payload"]["model"].as_str().map(String::from); }
-        let p = &v["payload"];
-        if v["type"] != "event_msg" { continue; }
-        if last_turn && p["type"] == "task_started" { events.clear(); }
-        if p["type"] != "token_count" || !p["info"]["total_token_usage"].is_object() { continue; }
-        let before = events.len();
-        append_codex_usage(&mut events, &p["info"]["last_token_usage"], &p["info"]["total_token_usage"], false);
-        if events.len() > before {
-            let last = events.last_mut().expect("appended");
-            last["timestamp"] = v["timestamp"].clone();
-            if let Some(m) = &model { last["model"] = json!(m); }
-        }
-    }
-    read_calls(&events).0
+    let rows:Vec<Value>=text.lines().filter_map(|line|serde_json::from_str(line).ok()).collect();selected_calls(&rows,last_turn)
 }
+
 fn rollout_report(rollout:Option<&Path>,r:&mut Report) {
         // A Codex `exec` turn names each request only in its rollout; `turn.completed` holds the totals.
         if let Some(text) = rollout.and_then(|p| std::fs::read_to_string(p).ok()) {
@@ -891,4 +884,66 @@ mod preparation_tests {
         std::fs::write(&file,format!("{config}\nnot valid TOML")).unwrap();assert_eq!(hook_status(&root,Some(&journal)).state,"degraded");
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// The shared app-server usage normalization; both observation and history use it.
+fn append_app_usage(events:&mut Vec<Value>,row:&Value) {
+    let p=&row["params"];let before=events.len();
+    append_codex_usage(events,&p["tokenUsage"]["last"],&p["tokenUsage"]["total"],true);
+    if events.len()>before {let last=events.last_mut().unwrap();last["timestamp"]=row["timestamp"].clone();last["model"]=p["model"].clone();}
+}
+fn usage_context(row:&Value)->Option<(Option<u64>,Option<u64>)> {
+    if row["method"]=="thread/tokenUsage/updated" {return Some((row["params"]["tokenUsage"]["last"]["totalTokens"].as_u64(),row["params"]["tokenUsage"]["modelContextWindow"].as_u64()));}
+    let p=row.get("payload").or(row.get("msg")).unwrap_or(row);
+    (p["type"]=="token_count").then(||(p["info"]["last_token_usage"]["total_tokens"].as_u64(),p["info"]["model_context_window"].as_u64()))
+}
+fn history_usage(rows:&[Value])->Vec<crate::agent::history::live::UsageRevision> {
+    let mut current=None::<String>;let mut model=Value::Null;let mut models=std::collections::BTreeMap::new();
+    let mut counters=std::collections::BTreeMap::<String,Vec<Value>>::new();
+    let mut explicit=std::collections::BTreeMap::new();let mut legacy=Vec::new();let mut out=Vec::new();let mut forms=Vec::new();
+    for (index,row) in rows.iter().enumerate() {
+        let p=row.get("payload").or(row.get("params")).unwrap_or(row);
+        if row["type"]=="turn_context" {if let Some(turn)=p["turn_id"].as_str(){models.insert(turn.to_string(),p["model"].clone());}else{model=p["model"].clone();}}
+        if p["type"]=="task_started" {current=p["turn_id"].as_str().map(String::from);}
+        let turn=p["turn_id"].as_str().or(p["turnId"].as_str()).map(String::from).or_else(||current.clone());
+        let model=turn.as_ref().and_then(|turn|models.get(turn)).unwrap_or(&model);
+        let normalized=if row["type"]=="token_usage_record" {
+            if let Some(turn)=&turn {explicit.entry(turn.clone()).or_insert(index);}
+            Some(json!({"type":"turn.completed","response_id":p["response_id"],"call":true,"turn_id":turn,"usage":p["usage"],"model":p.get("model").unwrap_or(model),"timestamp":row["timestamp"]}))
+        } else if p["type"]=="token_count" && p["info"]["total_token_usage"].is_object() || row["method"]=="thread/tokenUsage/updated" {
+            let events=counters.entry(turn.clone().unwrap_or_default()).or_default();let before=events.len();
+            if row["method"]=="thread/tokenUsage/updated" {append_app_usage(events,row);}else{append_codex_usage(events,&p["info"]["last_token_usage"],&p["info"]["total_token_usage"],false);}
+            if events.len()==before {None}else{let event=events.last_mut().unwrap();if event["model"].is_null(){event["model"]=model.clone();}event["timestamp"]=row["timestamp"].clone();Some(event.clone())}
+        }else if row["type"]=="turn.completed"{Some(row.clone())}else{None};
+        if let Some(event)=normalized {
+            for mut call in read_calls(std::slice::from_ref(&event)).0 {
+                if p["type"]=="token_count" || row["type"]=="token_usage_record" {
+                    call.native_turn=turn.clone();forms.push((out.len(),row["type"]=="token_usage_record",turn.clone()));
+                    if p["type"]=="token_count" {if let Some(turn)=&turn {legacy.push((out.len(),turn.clone()));}}
+                }
+                out.push(crate::agent::history::live::UsageRevision {row:index,revised_at:index,call,superseded_at:None});
+            }
+        }
+    }
+    for (index,turn) in legacy {out[index].superseded_at=explicit.get(&turn).copied();}
+    let mut any=[None::<usize>;2];let mut unscoped=[None::<usize>;2];
+    for &(index,identified,ref turn) in &forms {
+        if out[index].superseded_at.is_some(){continue;}
+        let slot=usize::from(identified);any[slot].get_or_insert(out[index].row);
+        if turn.is_none(){unscoped[slot].get_or_insert(out[index].row);}
+    }
+    for (index,identified,turn) in forms {
+        if out[index].superseded_at.is_some(){continue;}
+        let opposite=usize::from(!identified);let overlap=if turn.is_none(){any[opposite]}else{unscoped[opposite]};
+        if let Some(row)=overlap {out[index].call.accounting_unknown=Some("unassociated-usage-overlap");out[index].revised_at=out[index].row.max(row);}
+    }
+    out
+}
+fn selected_calls(rows:&[Value],last_turn:bool)->Vec<Call> {
+    let start=if last_turn {rows.iter().rposition(|r|r["payload"]["type"]=="task_started").unwrap_or(0)}else{0};
+    let revisions=history_usage(rows);let mut ids=std::collections::BTreeSet::new();let mut calls=Vec::new();
+    for revision in revisions.into_iter().rev().filter(|r|r.row>=start && r.superseded_at.is_none()) {
+        if revision.call.id.as_ref().is_none_or(|id|ids.insert((revision.call.native_turn.clone(),id.clone()))) {calls.push(revision.call);}
+    }
+    calls.reverse();calls
 }

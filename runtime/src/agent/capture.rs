@@ -14,12 +14,17 @@ const TRACE_CONTEXT: &str = "COREQ_TRACE_CONTEXT";
 pub struct Call {
     /// Native identity of the request, when the client names one.
     pub id: Option<String>,
+    /// Native turn scope of this request, independently of its raw request ID.
+    pub native_turn: Option<String>,
+    /// Independent-request accounting is unresolved; reported buckets may overlap another observation.
+    pub accounting_unknown: Option<&'static str>,
     pub at_ms: Option<u64>,
     pub input: Option<u64>,
     pub cache_read: Option<u64>,
     pub cache_write: Option<u64>,
     pub output: Option<u64>,
     pub reasoning: Option<u64>,
+    pub cost_usd: Option<f64>,
     pub model: Option<String>,
     pub outcome: &'static str,
     pub error: &'static str,
@@ -277,7 +282,7 @@ impl Attribution {
 }
 
 /// The stable key and payload of one model request's `agent.call`.
-fn call_record(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str) -> (String, Value) {
+fn call_record(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str, parent_key: &str) -> (String, Value) {
     let mut unknown = Map::new();
     let mut num = |name: &str, v: Option<u64>, why: &str| -> Value {
         if v.is_none() { unknown.insert(name.into(), json!(why)); }
@@ -305,14 +310,19 @@ fn call_record(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx
     text("session_id", session_code(session), "session-unknown");
     text("host", host().as_deref(), "not-reported");
     if c.aggregate { v["source"] = json!("turn-aggregate"); }
+    if let Some(reason)=c.accounting_unknown {
+        v["counts"]=json!({"usage_overlap_unknown":1});
+        for field in ["input_tokens","cache_read_tokens","cache_write_tokens","output_tokens","reasoning_tokens"] {v[field]=Value::Null;unknown.insert(field.into(),json!(reason));}
+    }
     who.caller_fields(&mut v);
     v["unknown"] = Value::Object(unknown);
-    let key = crate::sha256_hex(format!("{turn_key}\0{}", c.id.clone().unwrap_or_else(|| index.to_string())).as_bytes());
+    super::history::live::call_metadata(&mut v,c,parent_key);
+    let key = crate::sha256_hex(format!("{turn_key}\0{}", json!([c.native_turn,c.id.clone().unwrap_or_else(||index.to_string())])).as_bytes());
     (key, shared(&v))
 }
 
-fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str) -> Res<Event> {
-    let (key, value) = call_record(c, index, session, runtime, ctx, turn_key);
+fn call_event(c: &Call, index: usize, session: Option<&str>, runtime: &str, ctx: &Context, turn_key: &str, parent_key: &str) -> Res<Event> {
+    let (key, value) = call_record(c, index, session, runtime, ctx, turn_key, parent_key);
     Event::identified("agent.call", &key, value)
 }
 
@@ -354,9 +364,10 @@ impl Frozen {
 
 /// Freeze one finished turn under `namespace` and `turn_key`; its calls take immutable IDs under `turn_key`.
 pub(crate) fn freeze(namespace: &str, turn_key: &str, turn: &Value, r: &Report, client: Client, ctx: &Context) -> Res<Frozen> {
-    let mut records = vec![FrozenRecord { namespace: namespace.into(), key: turn_key.into(), observation: shared(turn) }];
+    let mut turn=turn.clone();turn["span"]=json!(crate::sha256_hex(turn_key.as_bytes()));turn["unknown"].as_object_mut().map(|u|u.remove("span"));
+    let mut records = vec![FrozenRecord { namespace: namespace.into(), key: turn_key.into(), observation: shared(&turn) }];
     for (i, c) in r.calls.iter().enumerate() {
-        let (key, observation) = call_record(c, i, r.session.as_deref(), client.code(), ctx, turn_key);
+        let (key, observation) = call_record(c, i, r.session.as_deref(), client.code(), ctx, turn_key, turn_key);
         records.push(FrozenRecord { namespace: "agent.call".into(), key, observation });
     }
     Frozen::new(records)
@@ -414,9 +425,10 @@ fn session_events(turn: &SessionTurn, ctx: &Context, mut r: Report) -> Res<Vec<E
     let mut record = r.observation_as(turn.runtime, ctx);
     record["duration_us"] = Value::Null;
     record["unknown"]["duration_us"] = json!("not-reported");
+    record["span"]=json!(crate::sha256_hex(turn.key.as_bytes()));record["unknown"].as_object_mut().map(|u|u.remove("span"));
     let mut out = vec![Event::identified("agent.turn", turn.key, shared(&record))?];
     let scope = call_scope(turn);
-    for (i, c) in r.calls.iter().enumerate() { out.push(call_event(c, i, r.session.as_deref(), turn.runtime, ctx, &scope)?); }
+    for (i, c) in r.calls.iter().enumerate() { out.push(call_event(c, i, r.session.as_deref(), turn.runtime, ctx, &scope, turn.key)?); }
     Ok(out)
 }
 
@@ -444,7 +456,7 @@ pub fn session_call_records(turn: &SessionTurn, ctx: &Context, mut calls: Vec<Ca
 pub fn session_call(turn: &SessionTurn, ctx: &Context, call: &Call) -> Res<Event> {
     let mut call = call.clone();
     call.model = call.model.filter(|m| model_code(m));
-    call_event(&call, 0, turn.session, turn.runtime, ctx, &call_scope(turn))
+    call_event(&call, 0, turn.session, turn.runtime, ctx, &call_scope(turn), turn.key)
 }
 
 #[cfg(test)]
@@ -624,4 +636,22 @@ mod tests {
         assert_eq!(time_ms("2026-10-19T08:32:09Z"), Some(1_792_398_729_000));
         assert_eq!(time_ms("yesterday"), None);
     }
+    #[test]
+    fn ambiguous_native_usage_freezes_unknown_counters_without_double_counting() {
+        let ctx=Context {product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};
+        let usage=json!({"input_tokens":10,"cached_input_tokens":0,"output_tokens":2,"cost_usd":0.1});
+        let report=read(Client::Codex,&[
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":usage,"total_token_usage":usage}}}),
+            json!({"type":"token_usage_record","payload":{"response_id":"r","usage":usage}}),
+        ]);
+        assert_eq!(report.usage.unknown,Some("unassociated-usage-overlap"));assert!(report.usage.input.is_none() && report.usage.calls.is_none());
+        let frozen=freeze("agent.turn","owned",&report.observation(Client::Codex,&ctx),&report,Client::Codex,&ctx).unwrap();
+        for record in &frozen.records[1..] {
+            assert!(record.observation["input_tokens"].is_null() && record.observation["output_tokens"].is_null());
+            assert_eq!(record.observation["unknown"]["input_tokens"],"unassociated-usage-overlap");assert!(record.observation["context_tokens"].is_null());
+            assert_eq!(record.observation["counts"]["cost_source_unknown"],1);assert!(record.observation["counts"]["cost_native_nanousd"].is_null());
+        }
+        assert_eq!(Frozen::restore(&frozen.save()).unwrap(),frozen);
+    }
+
 }

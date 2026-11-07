@@ -290,7 +290,7 @@ impl AppSession {
                 "thread/tokenUsage/updated" => {
                     let last=&p["tokenUsage"]["last"];
                     self.worked|=["inputTokens","outputTokens"].iter().any(|k|last[k].as_u64().is_some_and(|n|n>0));
-                    native::append_codex_usage(&mut self.usage,last,&p["tokenUsage"]["total"],true);
+                    super::append_app_usage(&mut self.usage,message);
                 }
                 "item/completed" if p["item"]["type"] == "agentMessage" => self.text = p["item"]["text"].as_str().map(String::from),
                 "model/rerouted" => self.model = p["toModel"].as_str().filter(|s| model_code(s)).map(String::from),

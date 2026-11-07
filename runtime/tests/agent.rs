@@ -48,6 +48,9 @@ fn main() {
         ("deadline_stops_a_turn_that_never_ends", deadline_stops_a_turn_that_never_ends),
         ("background_commands_preserve_native_mode", background_commands_preserve_native_mode),
         ("native_control_readiness_and_large_history_stay_owned", native_control_readiness_and_large_history_stay_owned),
+        ("native_queue_reused_response_keeps_distinct_frozen_turns",native_queue_reused_response_keeps_distinct_frozen_turns),
+        ("native_queue_identified_usage_freezes_latest_scoped_requests", native_queue_identified_usage_freezes_latest_scoped_requests),
+        ("native_queue_untagged_usage_keeps_verified_task_scope", native_queue_untagged_usage_keeps_verified_task_scope),
         ("background_job_found_when_cwd_listing_misses_it", background_job_found_when_cwd_listing_misses_it),
         ("typed_log_reads_are_public", typed_log_reads_are_public),
         ("app_transport_preserves_native_tools_drafts_and_catalogue", app_transport_preserves_native_tools_drafts_and_catalogue),
@@ -2116,3 +2119,47 @@ fn stopped_app_runs_keep_distinct_recoverable_ids() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// M12.20: raw queue completion and history select the same scoped identified requests before freezing.
+fn native_queue_identified_usage_freezes_latest_scoped_requests() {
+    for mixed in [false,true] {
+        let root=scratch(if mixed {"queue-mixed-usage"}else{"queue-identified-usage"});let path=root.join("native.jsonl");
+        append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);
+        let rt=agent::runtime("codex").unwrap();let mut launch=fake_launch("codex",&root,"owned reference",&[("COREQ_FAKE_CONTROL","1".as_ref())]);launch.mode=agent::Mode::Queue {transcript:path.clone()};
+        rt.adopt("native-thread",&launch,&[]).unwrap();let mut run=rt.resume("native-thread",&launch).unwrap();
+        append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}),json!({"type":"turn_context","payload":{"turn_id":"turn","model":"fixture-model"}}),json!({"type":"turn_context","payload":{"turn_id":"other","model":"other-model"}}),json!({"type":"event_msg","payload":{"type":"user_message","message":"owned reference","turn_id":"turn"}})]);
+        if mixed {let u=json!({"input_tokens":99,"cached_input_tokens":0,"output_tokens":1});append(&path,&[json!({"type":"event_msg","payload":{"type":"token_count","turn_id":"turn","info":{"last_token_usage":u,"total_token_usage":u}}})]);}
+        let request=|thread:&str,turn:&str,input:u64|json!({"type":"token_usage_record","payload":{"thread_id":thread,"turn_id":turn,"response_id":"request","usage":{"input_tokens":input,"cached_input_tokens":0,"output_tokens":2}}});
+        append(&path,&[request("native-thread","turn",10)]);assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Running);
+        let saved=rt.checkpoint(&run).unwrap();drop(run);let mut run=rt.recover(&saved,&launch).unwrap();
+        append(&path,&[request("foreign","turn",500),request("native-thread","foreign",500),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}),request("native-thread","turn",12)]);
+        finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);assert_eq!(report.calls[0].id.as_deref(),Some("request"));assert_eq!(report.usage.input,Some(12));assert_eq!(report.calls[0].model.as_deref(),Some("fixture-model"));
+        let context=Context {product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};let frozen=run.snapshot(&context).unwrap();
+        append(&path,&[request("native-thread","turn",999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);assert_eq!(rt.report(&run).unwrap().usage.input,Some(12));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// M12.20: untagged legacy usage inherits only a verified accepted native task boundary.
+fn native_queue_untagged_usage_keeps_verified_task_scope() {
+ let root=scratch("queue-untagged-scope");let path=root.join("native.jsonl");
+ append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);
+ let rt=agent::runtime("codex").unwrap();let mut launch=fake_launch("codex",&root,"owned reference",&[("COREQ_FAKE_CONTROL","1".as_ref())]);launch.mode=agent::Mode::Queue{transcript:path.clone()};
+ rt.adopt("native-thread",&launch,&[]).unwrap();let mut run=rt.resume("native-thread",&launch).unwrap();
+ let usage=|input:u64|{let u=json!({"input_tokens":input,"cached_input_tokens":0,"output_tokens":2});json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":u,"total_token_usage":u}}})};
+ append(&path,&[usage(999),json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}),json!({"type":"event_msg","payload":{"type":"user_message","message":"owned reference","turn_id":"turn"}}),usage(10)]);
+ assert_eq!(rt.poll(&mut run).unwrap(),agent::State::Running);let checkpoint=rt.checkpoint(&run).unwrap();drop(run);let mut run=rt.recover(&checkpoint,&launch).unwrap();
+ let mut foreign=usage(500);foreign["payload"]["thread_id"]=json!("foreign");foreign["payload"]["turn_id"]=json!("turn");
+ append(&path,&[foreign,json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"other"}}),usage(600),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}})]);
+ finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);assert_eq!(report.usage.input,Some(10));
+ let history=agent::history::History::new("codex-rollout","source","native-thread").unwrap();let mut history=history;assert!(history.steps(&path,u64::MAX).is_err(),"foreign session records must refuse the whole history read");
+ let pure=root.join("scoped.jsonl");let text=std::fs::read_to_string(&path).unwrap();let rows:Vec<serde_json::Value>=text.lines().map(|l|serde_json::from_str(l).unwrap()).filter(|v:&serde_json::Value|v["payload"]["thread_id"]!="foreign").collect();append(&pure,&rows);
+ let steps=agent::history::History::new("codex-rollout","source","native-thread").unwrap().steps(&pure,u64::MAX).unwrap().steps;
+ let owned=steps.iter().find(|s|s.kind==agent::history::StepKind::Usage && s.turn.native_id.as_deref()==Some("turn") && s.data["input"]==10).unwrap();assert_eq!(owned.data["id"],json!(report.calls[0].id));
+ let context=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};let frozen=run.snapshot(&context).unwrap();append(&path,&[usage(999)]);assert_eq!(run.snapshot(&context).unwrap(),frozen);std::fs::remove_dir_all(root).unwrap();
+}
+
+fn native_queue_reused_response_keeps_distinct_frozen_turns(){
+let root=scratch("queue-reused-response");let path=root.join("native.jsonl");append(&path,&[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);let rt=agent::runtime("codex").unwrap();let mut sum=0;let mut frozen_turns=vec![];
+for turn in ["t1","t2"]{let input=format!("owned {turn}");let mut l=fake_launch("codex",&root,&input,&[("COREQ_FAKE_CONTROL","1".as_ref())]);l.mode=agent::Mode::Queue{transcript:path.clone()};if sum==0 {rt.adopt("native-thread",&l,&[]).unwrap();}let mut run=rt.resume("native-thread",&l).unwrap();append(&path,&[json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),json!({"type":"event_msg","payload":{"type":"user_message","message":input,"turn_id":turn}}),json!({"type":"token_usage_record","payload":{"thread_id":"native-thread","turn_id":turn,"response_id":"r","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}}),json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn}})]);finish(rt,&mut run);let report=rt.report(&run).unwrap();assert_eq!(report.calls.len(),1);sum+=report.calls.len();let ctx=Context{product:"fixtureq",version:"1",project:"other",task:None,route:None,account:"default"};frozen_turns.push(run.snapshot(&ctx).unwrap());}
+assert_ne!(frozen_turns[0],frozen_turns[1]);let live=rt.history("native-thread",None,Some(&path),None).unwrap().live_data(None).unwrap();println!("NATIVE_REPEATED_RESPONSE frozen_calls={sum} live_calls={}",live.calls.len());assert_eq!(live.calls.len(),sum,"distinct accepted native turns cannot collapse in public history");std::fs::remove_dir_all(root).unwrap();}
