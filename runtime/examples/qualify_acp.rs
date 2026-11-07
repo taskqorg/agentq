@@ -35,7 +35,7 @@ fn main() {
             let events=finish(runtime,&mut run);let r=runtime.report(&run).unwrap();
             (runtime.session_id(&run).unwrap(),agentq_runtime::cli::report_json(&r),events)
         } else {
-            let spec=NativeSpec{root:work.clone(),session:"-".into(),resume:false,home:Some(gemini.clone()),args:vec!["--dangerously-skip-permissions".into()],env:launch.env.clone()};
+            let spec=NativeSpec{root:work.clone(),session:"-".into(),resume:false,home:Some(gemini.clone()),args:vec!["--dangerously-skip-permissions".into()],env:launch.env.clone(),owner:Some(runtime.session_owner(None,&launch).unwrap())};
             let mut turn=runtime.turn(Command::new(&exe),&spec,&launch.log,&launch.input,&launch.process).unwrap();
             turn.wait(launch.deadline).unwrap();let r=turn.report();
             let events=runtime.log_events(&std::fs::read_to_string(&launch.log).unwrap());
@@ -51,7 +51,7 @@ fn main() {
             assert!(!events.iter().any(|e|matches!(e,Event::ToolStart{..})),"load replay must not emit old tools");
             agentq_runtime::cli::report_json(&runtime.report(&run).unwrap())
         }else{
-            let spec=NativeSpec{root:work.clone(),session:session.clone(),resume:true,home:Some(gemini.clone()),args:vec!["--dangerously-skip-permissions".into()],env:launch.env.clone()};
+            let spec=NativeSpec{root:work.clone(),session:session.clone(),resume:true,home:Some(gemini.clone()),args:vec!["--dangerously-skip-permissions".into()],env:launch.env.clone(),owner:Some(runtime.session_owner(Some(&session),&launch).unwrap())};
             let mut turn=runtime.turn(Command::new(&exe),&spec,&launch.log,&launch.input,&launch.process).unwrap();turn.wait(launch.deadline).unwrap();agentq_runtime::cli::report_json(&turn.report())
         };
         assert_eq!(second["outcome"],"ok","{second}");assert!(second["text"].as_str().unwrap_or_default().contains("ACP_NATIVE_PROOF"));
@@ -60,7 +60,7 @@ fn main() {
             let mut run=runtime.resume(&session,&launch).unwrap();runtime.cancel(&mut run).unwrap();finish(runtime,&mut run);
             agentq_runtime::cli::report_json(&runtime.report(&run).unwrap())
         }else{
-            let spec=NativeSpec{root:work.clone(),session:session.clone(),resume:true,home:Some(gemini.clone()),args:vec!["--dangerously-skip-permissions".into()],env:launch.env.clone()};
+            let spec=NativeSpec{root:work.clone(),session:session.clone(),resume:true,home:Some(gemini.clone()),args:vec!["--dangerously-skip-permissions".into()],env:launch.env.clone(),owner:Some(runtime.session_owner(Some(&session),&launch).unwrap())};
             let mut turn=runtime.turn(Command::new(&exe),&spec,&launch.log,&launch.input,&launch.process).unwrap();turn.kill().unwrap();turn.wait(launch.deadline).unwrap();agentq_runtime::cli::report_json(&turn.report())
         };
         assert_eq!(files(&work),["marker.txt"],"no stray workspace writes");
