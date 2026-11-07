@@ -1,3 +1,6 @@
+#[path="claude/input.rs"]
+mod input;
+pub(crate) use input::InputWitness;
 #[path="claude/signin.rs"]
 mod signin;
 #[path="claude/control.rs"]
@@ -827,13 +830,14 @@ fn native_record(turn:&mut native::NativeTurn,v:&Value)->Res<()> {
                     if v["type"] == "user" {
                         let content = &v["message"]["content"];
                         let input = content.as_str().or_else(|| content.as_array().filter(|a| a.len() == 1 && a[0]["type"] == "text").and_then(|a| a[0]["text"].as_str()));
-                        if input == Some(turn.input.as_str()) {
+                        let matched=if let Some(expected)=&turn.claude_input {expected.matches(v)?}else{input == Some(turn.input.as_str())};
+                        if matched {
                             if v["sessionId"].as_str().or(v["session_id"].as_str()) != Some(turn.spec.session.as_str()) {
                                 return Err("native Claude input session unproved".into());
                             }
                             if turn.accepted { return Err("native input appears more than once".into()); }
                             turn.accepted = true;
-                        } else if input.is_some() && turn.accepted && !turn.ended { return Err("another input superseded the native turn".into()); }
+                        } else if (input.is_some() || turn.claude_input.is_some() && v["isMeta"]!=true && v["message"]["content"].as_array().is_some_and(|a|a.iter().any(|b|b["type"]!="tool_result"))) && turn.accepted && !turn.ended { return Err("another input superseded the native turn".into()); }
                     }
                     if turn.accepted && !turn.ended {
                         if matches!(v["type"].as_str(),Some("assistant"|"rate_limit_event")) {turn.events.push(v.clone());}

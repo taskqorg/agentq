@@ -482,6 +482,7 @@ pub(crate) use codex::{image as codex_image,catalogue_page as codex_catalogue_pa
 pub(in crate::agent) use codex::image_kind as codex_image_kind;
 pub(in crate::agent) use antigravity::{input_state as antigravity_input_state,retained_source as antigravity_retained_source};
 
+pub(crate) use claude::InputWitness as ClaudeInput;
 pub(super) use claude::control::Session as ClaudeControl;
 pub use claude::{BackgroundJob,BackgroundCandidate,BackgroundKind,BackgroundState,BackgroundActivity,BackgroundPid};
 pub(crate) use claude::{background_candidates,background_home_identity};

@@ -45,6 +45,7 @@ pub(crate) struct NativeTurn {
     pub(crate) spec: Spec,
     pub(crate) path: PathBuf,
     pub(crate) input: String,
+    pub(crate) claude_input:Option<registry::ClaudeInput>,
     pub(crate) start: u64,
     pub(crate) prefix: String,
     pub(crate) started_ms: i64,
@@ -80,7 +81,7 @@ impl NativeTurn {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !spec.resume => (0,crate::sha256_hex(&[]),None),
             Err(e) => return Err(format!("native baseline unavailable: {e}")),
         };
-        Ok(Self { spec: spec.clone(), path: path.into(), input: input.into(), start,
+        Ok(Self { spec: spec.clone(), path: path.into(), input: input.into(), claude_input:None, start,
             prefix: prefix.clone(), started_ms: unix_ms(), events: vec![], accepted: false, turn: None,
             ended: false, aborted: false, remote: None, duration: None,
             identity, protected_until:start, protected_hash:prefix, cursor:start, current:None, scope:scope(spec) })
@@ -89,7 +90,7 @@ impl NativeTurn {
     /// Private recovery data: caller protects and persists it; no submission is performed by recovery.
     pub fn checkpoint(&self) -> Value {
         json!({"schema":"coreq-native-turn/1", "client":self.spec.client.code(), "root":self.spec.root,
-            "session":self.spec.session, "home":self.spec.home, "path":self.path, "input":self.input,
+            "session":self.spec.session, "home":self.spec.home, "path":self.path, "input":self.input, "claude_input":self.claude_input,
             "start":self.start, "prefix":self.prefix, "started_ms":self.started_ms, "scope":self.scope, "identity":self.identity,
             "protected_until":self.protected_until, "protected_hash":self.protected_hash})
     }
@@ -102,7 +103,12 @@ impl NativeTurn {
         let start=saved["start"].as_u64().ok_or("native recovery boundary missing")?;
         let protected_until=saved["protected_until"].as_u64().filter(|n|*n>=start).ok_or("native recovery protected boundary invalid")?;
         let protected_hash=saved["protected_hash"].as_str().filter(|s|s.len()==64 && s.bytes().all(|b|b.is_ascii_hexdigit())).ok_or("native recovery protected prefix invalid")?;
-        Ok(Self { spec: spec.clone(), path, input: saved["input"].as_str().ok_or("native recovery input missing")?.into(),
+        let claude_input=match saved.get("claude_input") {
+            None|Some(Value::Null)=>None,
+            Some(value) if spec.client==Client::Claude=>{let witness:registry::ClaudeInput=serde_json::from_value(value.clone()).map_err(|_|"native Claude input witness invalid")?;witness.validate()?;Some(witness)},
+            _=>return Err("native input witness client differs".into()),
+        };
+        Ok(Self { spec: spec.clone(), path, claude_input, input: saved["input"].as_str().ok_or("native recovery input missing")?.into(),
             start, prefix: prefix.into(),
             started_ms: saved["started_ms"].as_i64().filter(|s| *s >= 0).ok_or("native recovery time invalid")?,
             events: vec![], accepted: false, turn: None, ended: false, aborted: false, remote: None, duration: None,
@@ -197,7 +203,8 @@ impl NativeTurn {
     pub(crate) fn snapshot(&self, report: &Report, ctx: &Context) -> Res<super::Frozen> {
         let mut observation = report.observation(self.spec.client, ctx);
         if self.duration.is_none() { observation["duration_us"] = Value::Null; observation["unknown"]["duration_us"] = json!("not-reported"); }
-        let key = crate::sha256_hex(format!("{}\0{}\0{}\0{}\0{}\0{}", self.spec.client.code(), self.spec.root.display(), self.scope, self.spec.session, self.start, self.input).as_bytes());
+        let input = match &self.claude_input { Some(witness)=>serde_json::to_string(witness).map_err(|e|e.to_string())?, None=>self.input.clone() };
+        let key = crate::sha256_hex(format!("{}\0{}\0{}\0{}\0{}\0{}", self.spec.client.code(), self.spec.root.display(), self.scope, self.spec.session, self.start, input).as_bytes());
         super::capture::freeze("agent.native", &key, &observation, report, self.spec.client, ctx)
     }
 }

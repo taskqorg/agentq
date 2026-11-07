@@ -152,14 +152,13 @@ impl Session {
         if parts.is_empty() || parts.iter().all(|p|matches!(p,Part::Text(t) if t.is_empty())) {return Err("input-empty".into());}
         let mut message:Value=serde_json::from_str(&stream_message(parts)?).map_err(|e|e.to_string())?;
         message["uuid"]=json!(crate::incident::uuid());message["session_id"]=json!(self.session);message["parent_tool_use_id"]=Value::Null;
+        let expected=InputWitness::request(&message)?;
         if self.report.is_some() {self.owner.submit()?;}
         self.boundary=self.log.metadata().map_err(|e|e.to_string())?.len();
         // NativeTurn binds physical identity and pre-input bytes; absence never creates fork authority.
         self.native_generation=None;
-        self.native_turn=match parts {
-            [Part::Text(input)]=>claude_transcript(&self.spec,&self.session).ok().and_then(|path|native::NativeTurn::before(&self.spec,&path,input).ok()),
-            _=>None,
-        };
+        let text=match parts {[Part::Text(text)]=>text.as_str(),_=>""};
+        self.native_turn=claude_transcript(&self.spec,&self.session).ok().and_then(|path|native::NativeTurn::before(&self.spec,&path,text).ok()).map(|mut turn|{turn.claude_input=Some(expected);turn});
         self.active=true;self.cancelling=false;self.report=None;self.messages.clear();self.cursor=events::Cursor::new(self.cursor.deltas);self.started=Instant::now();self.started_ms=unix_ms();if let Some(sampler)=&mut self.sampler {sampler.mark();}self.write(&message)
     }
     fn observe(&mut self,v:Value)->Res<()> {

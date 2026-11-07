@@ -125,7 +125,7 @@ fn signature(b:&[u8])->Option<(MediaKind,&'static str)> {
     else{return None})
 }
 
-fn base64(text:&str)->Res<Vec<u8>> {
+pub(crate) fn base64(text:&str)->Res<Vec<u8>> {
     let text:Vec<_>=text.bytes().filter(|b|!b.is_ascii_whitespace()).collect();
     if text.len()%4!=0 {return Err("invalid native base64 length".into());}
     let mut bytes=Vec::new();

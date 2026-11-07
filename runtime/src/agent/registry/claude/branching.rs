@@ -48,6 +48,31 @@ fn source_unaliased(path:&Path)->Res<()> {
     #[cfg(not(any(unix,windows)))] {Err("fork-source-alias-check-unavailable".into())}
 }
 
+// Shipped 2.1.284 Fp/Rk classifies these as non-prompt furniture, never absorbed queued input.
+fn attachment_furniture(kind:&str)->bool {
+    const KINDS:&[&str]=&[
+        "agent_listing_delta","agent_mention","at_mention_reference","peer_mention","already_read_file","async_hook_response_batch",
+        "attention_budget","audio_transcript","auto_mode","auto_mode_exit","budget_usd","command_permissions",
+        "compact_file_reference","context_efficiency","cowork_memory_context","critical_system_reminder","date_change","thread_state",
+        "prefix_delta","deferred_tools_delta","diagnostics","directory","dynamic_skill","edited_image_file",
+        "edited_text_file","file","goal_status","hook_additional_context","hook_blocking_error","hook_cancelled",
+        "hook_deferred_tool","hook_error_during_execution","hook_non_blocking_error","hook_permission_decision","hook_plugin_listing","hook_stopped_continuation",
+        "hook_success","hook_system_message","invoked_skills","max_turns_reached","mcp_instructions_delta","mcp_dropped_tools_delta",
+        "inlined_image_paths","tool_hosts_notice","tool_hosts_correction","tool_host_result_lines","mcp_resource","memory_update",
+        "nested_memory","opened_file_in_ide","output_style","output_token_usage","pdf_reference","plan_file_reference",
+        "plan_mode","plan_mode_exit","plan_mode_reentry","proactivity","read_truncation_notice","sandbox_instructions",
+        "artifact_opening_prefetch","environment","model","output_style_instructions","language","session_context",
+        "coordinator_context","context_sections","date","instructions","prompt_snapshot","prompt_render_point",
+        "thinking_stripped","advisor_stripped","thinking_drop","credential_org","deferred_tools_record","bash_output_audience_note",
+        "unknown_command_fallback","relevant_memories","selected_lines_in_diff","selected_lines_in_ide","silent_turn_reminder","skill_listing",
+        "structured_output","task_reminder","team_context","teammate_shutdown_batch","todo_reminder","token_usage",
+        "tool_search_usage_reminder","total_tokens_reminder","batching_reminder","batching_reminder_sent","secondary_reminder","secondary_reminder_sent",
+        "ultra_effort_enter","ultra_effort_exit","ultrathink_effort","workflow_keyword_request","workflow_size_guideline_change","remote_session_change",
+        "advisor_tool",
+    ];
+    KINDS.contains(&kind)
+}
+
 fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Boundary> {
     let path=turn.path().to_path_buf();source_unaliased(&path)?;let label=path.to_str().ok_or("fork-source-unknown")?;
     if step.source["format"]!="claude-native" || step.source["source"]!=label || step.turn.session!=turn.session() {return Err("fork-selection-unsupported".into());}
@@ -68,19 +93,19 @@ fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Bound
     let selected_tail=match selected["type"].as_str() {
         Some("assistant")=>step.kind==StepKind::Message && content.is_some_and(|c|step.part+1==c.len() && c[step.part]["type"]=="text"),
         Some("user")=>content.is_some_and(|c|!c.is_empty() && step.part+1==c.len() && c.iter().all(|b|b["type"]=="tool_result")),
-        Some("attachment")=>matches!(selected["attachment"]["type"].as_str(),Some("structured_output"|"inlined_image_paths"|"mcp_resource")),
+        Some("attachment")=>selected["attachment"]["type"].as_str().is_some_and(|kind|matches!(kind,"structured_output"|"inlined_image_paths"|"mcp_resource") || attachment_furniture(kind) && selected["promptId"].is_string()),
         _=>false,
     };
     if !selected_tail {return Err("fork-selection-not-terminal-entry".into());}
     let mut chain=vec![];let mut ids=std::collections::BTreeSet::new();let mut previous:Option<String>=None;
-    let mut tools=std::collections::BTreeSet::new();let mut seen_tools=std::collections::BTreeSet::new();
+    let mut tools=std::collections::BTreeSet::new();let mut seen_tools=std::collections::BTreeSet::new();let mut server_tools=std::collections::BTreeMap::new();
     let mut prompt=None::<String>;let mut group=None::<String>;let mut closed=true;let mut selected_prompt=None;let mut selected_chain=None;let mut retained_end=0u64;let mut offset=0u64;
     for (row,line) in rows.iter().zip(text.split_inclusive('\n')) {
         offset+=line.len() as u64;
         if row["subtype"]=="compact_boundary" || row["isCompactSummary"]==true {return Err("fork-compaction-cursor-unmapped".into());}
         if row["isSidechain"]==true {return Err("fork-sidechain-source-unmapped".into());}
         if row["type"]=="system" && row["subtype"]=="turn_duration" && row.get("uuid").is_none() {
-            if row.get("sessionId").is_some_and(|s|s!=turn.session()) || closed || previous.is_none() || !tools.is_empty() {return Err("fork-turn-marker-unknown".into());}
+            if row.get("sessionId").is_some_and(|s|s!=turn.session()) || closed || previous.is_none() || !tools.is_empty() || !server_tools.is_empty() {return Err("fork-turn-marker-unknown".into());}
             closed=true;continue;
         }
         if !matches!(row["type"].as_str(),Some("user"|"assistant"|"attachment")) || row["isSidechain"]!=false || row["sessionId"]!=turn.session() || row.get("parentSessionId").is_some_and(|v|!v.is_null()) {return Err("fork-chain-entry-unsupported".into());}
@@ -98,7 +123,8 @@ fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Bound
             if !closed || row["isMeta"]==true || row["stackedExpansion"]==true || !(row["message"]["content"].is_string() || blocks.is_some_and(|c|!c.is_empty() && c.iter().all(|b|matches!(b["type"].as_str(),Some("text"|"image"|"document"))))) {return Err("fork-prompt-boundary-unknown".into());}
             prompt=Some(id.to_string());group=Some(uuid(&row["promptId"] )?.to_string());closed=false;seen_tools.clear();
         }else{
-            if prompt.is_none() || row.get("promptId").is_some_and(|p|Some(p.as_str().unwrap_or_default())!=group.as_deref()) {return Err("fork-prompt-association-unknown".into());}
+            let furniture=row["type"]=="attachment" && row["attachment"]["type"].as_str().is_some_and(attachment_furniture);
+            if (prompt.is_none() && !furniture) || row.get("promptId").is_some_and(|p|Some(p.as_str().unwrap_or_default())!=group.as_deref()) {return Err("fork-prompt-association-unknown".into());}
             if carrier {
                 if closed {return Err("fork-tool-carrier-outside-turn".into());}
                 for block in blocks.ok_or("fork-tool-carrier-invalid")? {
@@ -116,19 +142,32 @@ fn resolve(step:&Step,turn:&mut native::NativeTurn,generation:&Value)->Res<Bound
                             let tool=block["id"].as_str().filter(|s|!s.is_empty()).ok_or("fork-tool-id-unknown")?;
                             if !seen_tools.insert(tool.to_string()) || !tools.insert(tool.to_string()) {return Err("fork-tool-id-duplicate".into());}
                         },
+                        Some("server_tool_use"|"mcp_tool_use") if block["name"].as_str().is_some_and(|s|!s.is_empty()) && block["input"].is_object()=>{
+                            let tool=block["id"].as_str().filter(|s|!s.is_empty()).ok_or("fork-server-tool-id-unknown")?;
+                            if block["type"]=="mcp_tool_use" && !block["server_name"].as_str().is_some_and(|s|!s.is_empty()) {return Err("fork-mcp-tool-server-unknown".into());}
+                            let result=if block["type"]=="mcp_tool_use" {"mcp_tool_result"}else{match block["name"].as_str() {
+                                Some("web_search")=>"web_search_tool_result",Some("web_fetch")=>"web_fetch_tool_result",Some("code_execution")=>"code_execution_tool_result",
+                                Some("bash_code_execution")=>"bash_code_execution_tool_result",Some("text_editor_code_execution")=>"text_editor_code_execution_tool_result",
+                                Some("tool_search_regex"|"tool_search_bm25")=>"tool_search_tool_result",_=>return Err("fork-server-tool-kind-unmapped".into()),
+                            }};
+                            if !seen_tools.insert(tool.to_string()) || server_tools.insert(tool.to_string(),result).is_some() {return Err("fork-tool-id-duplicate".into());}
+                        },
+                        Some("web_search_tool_result"|"web_fetch_tool_result"|"code_execution_tool_result"|"bash_code_execution_tool_result"|"text_editor_code_execution_tool_result"|"tool_search_tool_result"|"mcp_tool_result")=>{
+                            let tool=block["tool_use_id"].as_str().filter(|s|!s.is_empty()).ok_or("fork-server-tool-result-unknown")?;
+                            if block.get("content").is_none() || server_tools.remove(tool)!=block["type"].as_str() {return Err("fork-server-tool-result-unassociated".into());}
+                        },
                         _=>return Err("fork-native-block-unmapped".into()),
                     }
                 }
             }else if row["type"]=="attachment" {
-                if !matches!(row["attachment"]["type"].as_str(),Some("structured_output"|"inlined_image_paths"|"mcp_resource")) {return Err("fork-attachment-turn-unmapped".into());}
-                if !tools.is_empty() {return Err("fork-attachment-tool-tail-unknown".into());}
+                if !row["attachment"]["type"].as_str().is_some_and(|kind|matches!(kind,"structured_output"|"inlined_image_paths"|"mcp_resource") || attachment_furniture(kind)) {return Err("fork-attachment-turn-unmapped".into());}
             }
         }
         chain.push(json!({"uuid":id,"parent_uuid":row["parentUuid"]}));previous=Some(id.to_string());
-        if id==target {selected_prompt=prompt.clone();selected_chain=Some(chain.clone());retained_end=offset;}
+        if id==target {if prompt.is_none() {return Err("fork-selection-outside-turn".into());}selected_prompt=prompt.clone();selected_chain=Some(chain.clone());retained_end=offset;}
         else if selected_chain.is_some() && prompt==selected_prompt {return Err("fork-selected-not-last-chain-entry".into());}
     }
-    if !closed || !tools.is_empty() {return Err("fork-whole-turn-unknown".into());}
+    if !closed || !tools.is_empty() || !server_tools.is_empty() {return Err("fork-whole-turn-unknown".into());}
     let chain=selected_chain.ok_or("fork-selected-native-entry-unknown")?;
     let prefix=history.read_bytes(&path,0,retained_end)?;
     let boundary=Boundary {path,generation:page.checkpoint.clone(),descriptor:json!({"parent_session":turn.session(),"prompt_uuid":selected_prompt,"last_chain_uuid":target,"chain":chain,"retained_end":retained_end,"retained_sha256":crate::sha256_hex(&prefix),"generation":page.checkpoint,"selected":{"id":step.id,"revision":step.revision,"part":step.part,"start":step.source["start"],"end":step.source["end"],"sha256":step.source["sha256"]},"whole_turn":true})};
@@ -340,6 +379,35 @@ mod retained_tool_tail_tests {
         let mut carrier_history=History::new("claude-native",carrier_path.to_str().unwrap(),session).unwrap();let carrier_page=carrier_history.steps(&carrier_path,carrier_fixture.len() as u64).unwrap();
         let carrier=carrier_page.steps.iter().find(|s|s.source["raw"].as_str().is_some_and(|r|r.contains("\"type\":\"tool_result\""))).unwrap();assert_eq!(resolve(carrier,&mut carrier_turn,&carrier_generation).unwrap().descriptor["last_chain_uuid"],"00000000-0000-4000-8000-000000000003");
         drop(history);drop(carrier_history);std::fs::remove_dir_all(root).unwrap();
+    }
+    // F300: exact server result association and native furniture must not lose the turn cut.
+    #[cfg(any(unix,windows))]
+    #[test]
+    fn server_results_and_prompt_associated_furniture_keep_exact_chain() {
+        let base=include_str!("../../../../tests/fixtures/history/claude-fork-tool-chain.jsonl");
+        let original=base.lines().map(|line|serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>();
+        for mcp in [false,true] {
+            for bad in ["", "foreign-result", "missing-result", "queued-command", "foreign-prompt"] {
+                let root=crate::scratch("claude-server-tail");let path=root.join("native.jsonl");
+                let mut rows=original.clone();
+                let call=if mcp {json!({"type":"mcp_tool_use","id":"server-one","name":"lookup","server_name":"fixture","input":{}})}else{json!({"type":"server_tool_use","id":"server-one","name":"web_search","input":{}})};
+                let result=json!({"type":if mcp {"mcp_tool_result"}else{"web_search_tool_result"},"tool_use_id":if bad=="foreign-result" {"foreign"}else{"server-one"},"content":[]});
+                rows[1]["message"]["content"]=json!([call]);
+                rows[2]["type"]=json!("assistant");rows[2]["message"]["role"]=json!("assistant");
+                rows[2]["message"]["content"]=if bad=="missing-result" {json!([{"type":"text","text":"done"}])}else{json!([result,{"type":"text","text":"done"}])};
+                rows[3]["attachment"]=json!({"type":if bad=="queued-command" {"queued_command"}else{"hook_success"},"content":"hook completed"});
+                rows[3]["promptId"]=if bad=="foreign-prompt" {json!("00000000-0000-4000-8000-000000000012")}else{rows[0]["promptId"].clone()};
+                let fixture=rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n";
+                let session=rows[0]["sessionId"].as_str().unwrap();
+                let spec=Spec {client:Client::Claude,root:root.clone(),session:session.into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+                let mut turn=native::NativeTurn::before(&spec,&path,"first").unwrap();std::fs::write(&path,&fixture).unwrap();assert!(turn.poll().unwrap().is_some());let generation=turn.checkpoint();
+                let mut history=History::new("claude-native",path.to_str().unwrap(),session).unwrap();let page=history.steps(&path,fixture.len() as u64).unwrap();
+                let selected=page.steps.iter().find(|s|s.source["raw"].as_str().is_some_and(|raw|raw.contains("\"type\":\"attachment\""))).unwrap();
+                let proof=resolve(selected,&mut turn,&generation);
+                if bad.is_empty() {assert_eq!(proof.unwrap().descriptor["chain"].as_array().unwrap().len(),4);}else{assert!(proof.is_err(),"{bad}");}
+                drop(history);std::fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
     #[cfg(windows)]
     #[test]
