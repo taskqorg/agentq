@@ -11,11 +11,22 @@ mod protected;
 #[path="support/signin.rs"]
 mod signin;
 
+#[path="support/control.rs"]
+mod control;
+#[path="support/claude_control.rs"]
+mod claude_control;
+
 pub(crate) fn main() {
     if std::env::args().nth(1).as_deref()==Some("--login-home-controller") {return signin::home_controller();}
     if std::env::args().nth(1).as_deref()==Some("--login-controller") {return signin::controller();}
     if std::env::var_os("AGENTQ_FAKE_LOGIN").is_some() {return signin::fake();}
     if std::env::var_os("AGENTQ_NATIVE_LOGIN_PROOF").is_some() {return signin::native_proof();}
+    if std::env::var_os("AGENTQ_CLAUDE_CONTROL_FIXTURE").is_some() {return claude_control::server();}
+    if std::env::var_os("AGENTQ_CONTROL_FIXTURE").is_some() {return control::server();}
+    #[cfg(unix)]
+    if std::env::args().nth(1).as_deref()==Some("--claude-control-owner") {return claude_control::owner(Path::new(&std::env::args_os().nth(2).unwrap()));}
+    #[cfg(unix)]
+    if std::env::args().nth(1).as_deref()==Some("--control-owner") {return control::owner(Path::new(&std::env::args_os().nth(2).unwrap()));}
     #[cfg(windows)]
     if std::env::args().nth(1).as_deref()==Some("--receipt-unwind") {return receipt_unwind_fixture(Path::new(&std::env::args_os().nth(2).unwrap()));}
     if std::env::args().nth(1).as_deref()==Some("--lifetime-reexec") {let root=PathBuf::from(std::env::args_os().nth(2).unwrap());std::fs::write(root.join("owner-reexec"),"").unwrap();return wait_for(&root.join("owner-release"));}
@@ -49,6 +60,18 @@ pub(crate) fn main() {
         ("account_login_pipes_remain_private_and_owned",signin::pipes),
         ("account_login_cancel_fences_changed_or_unknown_credentials",signin::cancel_guards),
         ("account_login_retains_home_until_native_transport_cleanup",signin::transport_cleanup),
+        ("live_claude_controls_keep_occurrence_policy_and_receipt_boundaries",claude_control::controls),
+        ("claude_control_recovery_keeps_delivered_progress_and_unknown_execution",claude_control::progress_recovery),
+        ("claude_control_resolution_and_unknown_scope_never_retain_reply_authority",claude_control::boundaries),
+        #[cfg(unix)]
+        ("claude_control_recovery_observes_without_releasing_or_recreating_writer_authority",claude_control::recovery),
+        ("live_codex_controls_keep_occurrence_and_owner_scope",control::codex),
+        ("live_codex_controls_preserve_original_denial_policy",control::policy),
+        ("codex_pump_refusals_preserve_owner_and_native_scope",control::pump_authority),
+        ("codex_resolution_retires_only_the_original_request_occurrence",control::resolution),
+        ("codex_owner_transitions_never_restore_lost_authority",control::owner_transitions),
+        #[cfg(unix)]
+        ("controlled_writer_survives_controller_loss_and_recovered_completion",control::controller_loss),
         ("automatic_codex_turns_select_transport", automatic_codex_turns_select_transport),
         ("session_ownership_and_stall_signal", session_ownership_and_stall_signal),
         ("process_lifetime_and_orphan_cleanup",process_lifetime_and_orphan_cleanup),

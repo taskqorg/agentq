@@ -109,7 +109,8 @@ pub(super) struct Session {
     log: File,
     pub session: String,
     pending: Vec<Event>,
-    requests: BTreeMap<String,Value>,
+    requests: super::control::Requests,
+    owner: SessionOwner,
     serial: u64,
     prompt: Option<Value>,
     report: Option<Report>,
@@ -123,7 +124,7 @@ pub(super) struct Session {
     cancelling: bool,
 }
 
-impl Drop for Session {fn drop(&mut self) {let _=self.server.kill();}}
+impl Drop for Session {fn drop(&mut self) {let _=self.requests.retire(&mut self.log,&self.session,"unknown");let _=self.server.kill();}}
 
 impl Session {
     pub fn open(mut command: Command, config: &Config, l: &Launch, resume: Option<&str>,owner:&SessionOwner) -> Res<Self> {
@@ -142,7 +143,7 @@ impl Session {
         let boundary=log.metadata().map_err(|e|format!("ACP log metadata: {e}"))?.len();
         let server=Stdio::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?;
         let sampler=Some(capture::Sampler::start(server.id()));
-        let mut s=Self {server,path:l.log.clone(),boundary,log,session:resume.unwrap_or("").into(),pending:vec![],requests:BTreeMap::new(),serial:0,prompt:None,
+        let mut s=Self {server,path:l.log.clone(),boundary,log,session:resume.unwrap_or("").into(),pending:vec![],requests:super::control::Requests::new(),owner:owner.clone(),serial:0,prompt:None,
             report:None,text:String::new(),started:Instant::now(),started_ms:unix_ms(),closed:None,deadline:l.deadline,sampler,question_prefixes:config.question_prefixes,cancelling:false};
         let init=s.exchange("initialize",json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}),false)?;
         if init["protocolVersion"]!=1 {return Err("ACP protocol version unsupported".into());}
@@ -245,9 +246,10 @@ impl Session {
                         id:o["optionId"].as_str().ok_or("ACP choice ID missing")?.into(),label:o["name"].as_str().ok_or("ACP choice name missing")?.into(),kind:o["kind"].as_str().ok_or("ACP choice kind missing")?.into(),
                     })).collect::<Res<Vec<_>>>()?;
                     let question=params["toolCall"]["toolCallId"].as_str().is_some_and(|id|self.question_prefixes.iter().any(|prefix|id.starts_with(prefix)));
-                    self.requests.insert(v["id"].to_string(),v["params"].clone());
+                    let event=Event::Request{id:v["id"].clone(),kind:if question {RequestKind::Question}else{RequestKind::Approval},prompt:params["toolCall"]["title"].as_str().map(String::from),choices,questions:vec![]};
+                    let event=self.requests.register(&mut self.log,&self.session,event,v.clone(),self.prompt.as_ref().map(Value::to_string))?;
                     if self.cancelling {self.cancel_requests()?;return Ok(());}
-                    self.pending.push(Event::Request{id:v["id"].clone(),kind:if question {RequestKind::Question}else{RequestKind::Approval},prompt:params["toolCall"]["title"].as_str().map(String::from),choices});
+                    self.pending.push(event);
                 } else {self.write(&json!({"jsonrpc":"2.0","id":v["id"],"error":{"code":-32601,"message":"Client method not supported"}}))?;}
                 return Ok(());
             }
@@ -268,7 +270,7 @@ impl Session {
                 r.usage=read_usage(u);
             }
             self.pending.push(Event::Message{item:None,text:self.text.clone()});self.pending.push(Event::TurnEnd{outcome:r.outcome});
-            self.cancel_requests()?;self.prompt=None;self.report=Some(r);
+            self.requests.retire(&mut self.log,&self.session,"cancelled")?;self.prompt=None;self.report=Some(r);
         } else {self.pending.push(Event::Metadata{kind:"response".into(),data:v});}
         Ok(())
     }
@@ -277,8 +279,8 @@ impl Session {
         if self.closed.is_some() {return Ok(());}
         loop {
             match self.server.receive(Instant::now()) {
-                Ok(Some(v))=>self.observe(v,false)?,Ok(None)=>break,
-                Err(e)=>{self.closed=Some(e);break;}
+                Ok(Some(v))=>if let Err(error)=self.observe(v,false) {self.closed=Some(error.clone());let _=self.requests.retire(&mut self.log,&self.session,"unknown");return Err(error);},Ok(None)=>break,
+                Err(e)=>{self.closed=Some(e);self.requests.retire(&mut self.log,&self.session,"unknown")?;break;}
             }
         }
         if self.report.is_some() {
@@ -303,6 +305,7 @@ impl Session {
     }
     pub fn progress(&mut self)->Res<Vec<Event>> {self.pump()?;Ok(std::mem::take(&mut self.pending))}
     pub fn id(&self)->u32 {self.server.id()}
+    pub fn run_id(&self)->&str {&self.requests.run}
     pub fn cancel(&mut self)->Res<bool> {
         if self.report.is_some() {return Ok(true);}
         self.cancelling=true;
@@ -310,21 +313,25 @@ impl Session {
         self.cancel_requests()?;Ok(false)
     }
     fn cancel_requests(&mut self)->Res<()> {
-        for key in self.requests.keys().cloned().collect::<Vec<_>>() {
-            let id:Value=serde_json::from_str(&key).map_err(|_|"ACP stored request ID invalid")?;
+        for id in self.requests.ids() {
             self.control(Control::Reply{id,option:None})?;
         }
         Ok(())
     }
     pub fn control(&mut self,control:Control)->Res<()> {
+        self.owner.control()?;
+        if self.closed.is_some() || self.report.is_some() {return Err("control-run-ended".into());}
         match control {
             Control::Model(model)=>{self.exchange("session/set_model",json!({"sessionId":self.session,"modelId":model}),false)?;},
             Control::Mode(mode)=>{self.exchange("session/set_mode",json!({"sessionId":self.session,"modeId":mode}),false)?;},
+            Control::Answers{..}=>return Err("question-answers-unsupported".into()),
             Control::Reply{id,option}=>{
-                let request=self.requests.get(&id.to_string()).ok_or("request-unknown")?;
-                if option.as_ref().is_some_and(|id|!request["options"].as_array().into_iter().flatten().any(|o|o["optionId"].as_str()==Some(id))) {return Err("request-option-invalid".into());}
+                let control=Control::Reply{id,option:option.clone()};
                 let outcome=option.map_or_else(||json!({"outcome":"cancelled"}),|id|json!({"outcome":"selected","optionId":id}));
-                self.write(&json!({"jsonrpc":"2.0","id":id,"result":{"outcome":outcome}}))?;self.requests.remove(&id.to_string());
+                let response=json!({"jsonrpc":"2.0","id":self.requests.native(&control)?["id"],"result":{"outcome":outcome}});
+                let request=self.requests.begin(&mut self.log,&self.session,&control,&response)?;
+                if let Err(error)=self.write(&response) {self.requests.fail(&mut self.log,&self.session,&request);return Err(error);}
+                self.requests.sent(&mut self.log,&self.session,&request,&response)?;
             }
         }Ok(())
     }

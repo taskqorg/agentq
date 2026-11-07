@@ -289,6 +289,31 @@ A consumer service that re-executes itself reattaches its live CLI turn children
 - `spawned(&Child)` runs after spawn and before any input is written, for example to assign a Windows Job Object through the child handle. An error kills and reaps the child and fails the launch with that error.
 - Background, queue, job list and stop launchers are bounded exchanges owned and reaped by `coreq::process`; they get only `quiet` and no caller hooks, because the native background job they start is not their child.
 
+## Live worker control
+
+`Runtime::respond`, `steer`, `compact` and `set_option` are typed native worker operations. `Launch.controls` declares the need for a live control channel; the adapter selects the transport. It is false by default. Each operation requires its descriptor capability and a compatible owned live transport; unsupported runtime, transport, option or state refuses with a named cause before submission. Unknown capabilities grant no authority. An ordinary launch gains no terminal prompt or implicit approval handler.
+
+| Operation | Native boundary |
+|---|---|
+| `respond` | Answer the original pending approval or question with an offered choice, typed question answers or rejection. It cannot submit a new turn or change a grant. |
+| `steer` | Submit ordered input to the known active native turn, preserving its session and expected turn identity. It never interrupts or creates a replacement turn. A native queue is reported as queued; an unavailable steering path refuses. |
+| `compact` | Request native compaction only when the native session permits it. An acknowledgment is not a completed compaction or a restored context. |
+| `set_option` | Request a supported model or native session option. Native validation, the original account and permission policy remain binding. An acknowledgment is not proof that a later model call used the requested model. |
+
+Codex control uses its owned app-server, including `turn/steer` with the exact active turn and `thread/compact/start`. Claude selects `--input-format stream-json --permission-prompt-tool stdio` before spawn. Its model operation uses `set_model`; permission-mode changes are not an added grant path. Idle compaction submits the native `/compact` command and still requires native result/context evidence. Claude steering remains unsupported until its injection can be qualified against the original active turn; an unfenced user message is not submitted as a steer. Claude control uses its native stream-JSON control channel and user-message injection only where the native protocol supports the requested operation. ACP reuses its existing request, offered-choice and model/mode methods; unproven steering, compaction and provider-specific operations refuse. Background jobs, desktop queue submissions and one-shot CLI transports have no added reply channel. The runtime never silently changes transport or restarts a live worker to make an operation available.
+
+`Event::Request` retains its opaque `id`, typed `kind`, optional `prompt` and offered `choices`, and adds `questions`. Each `Question` has an opaque `id`, display `prompt`, offered `choices`, and explicit `multiple`/`free_text` flags. `Control::Reply` keeps `id` and an offered `option` (none rejects/cancels); `Control::Answers` maps the same opaque request ID to question IDs and ordered typed `Answer::Choice` or `Answer::Text` values. Choice identifiers are returned unchanged; text is accepted only for a question that permits it. The adapter binds native identifiers, or runtime-issued identifiers where the native protocol has none, without asking the product to parse native fields. ACP retains its offered-choice reply; structured answers refuse until its native protocol supplies that shape.
+
+The runtime-authored control journal has `type: agentq_control`, `session_id`, original `run_id`, numeric `generation: u64`, original JSON `native_id`, nullable `turn_id`, a full serialized `Event::Request` in `event`, `state` and original JSON in `native`. Generation identifies one occurrence and stays unchanged across revisions; it is never defaulted from missing or malformed data. States are exactly `pending`, `reply-pending`, `reply-sent`, `cancelled` and `unknown`. They distinguish reply intent from successful pipe receipt; neither claims native application. The journal is private session content in the caller log, returned by `transcript` for controlled sessions. Its physical record is source evidence; an unproven link to a native physical record remains unknown.
+
+Approvals and questions use the shared neutral request and choice data in progress and history. A native request ID is observation data, not reply authority: the live controller binds each occurrence to its original run, generation, session and native turn. Reuse of the same native ID cannot make a stale response valid. Foreign, duplicate, cancelled, late and uncertain-delivery responses refuse. A response is validated against the exact pending request and the original launch policy; no absent reply, unknown choice or unreadable request means approval. Native resolution, cancellation and turn completion retire the associated pending reply authority. A resolution must match the original live registry, native session and request occurrence; malformed or foreign notifications grant no retirement authority. Pending requests remain visible as waiting for their owner or end under the launch policy.
+
+The controller records the request observation before exposing its reply handle and records the exact native reply as intent before a native write. The unchanged journal `native` field retains the original native request on observation and the native response on reply-intent/delivery revisions. It distinguishes intent, successful pipe delivery, native acceptance and observed application. An ambiguous journal or transport write fences the original occurrence; neither automatic retry nor recovery resubmits it. Recovery retains observation only and cannot reconstruct a native permission callback. Controlled Claude recovery reads the original caller log at its saved turn and progress boundaries; it retains the durable writer fence and has no native input, reply, model, compaction or cancellation transport. Without a native result, recovered Claude execution reads unknown. Live progress honors the requested text deltas, resets message deduplication at each new turn, and checkpoints only the cursor of events already delivered; recovery never replays delivered text or suppresses another turn because native message IDs repeat. Native results and process absence remain distinct. Control data and answers are private session content, never telemetry.
+
+A controlled session retains its mandatory SessionStore owner while it can write native input, including between turns. The durable controlled-writer binding is established before the first turn; known turn completion retains a distinct controlled-writer phase; it does not make that live writer idle for adoption. Recovery cannot release it from a prior turn report; explicit adoption still requires original native process/scope absence. Every mutation, including an automatic callback rejection, rechecks the original durable authority and native request scope. The retained owner validates the exact current durable row within its existing mutex/file-lock mutation boundary before binding, writer retention, input admission, native identity/scope updates or terminal/stop saves. Cached state never repairs or replaces a foreign, missing, corrupt or changed owner row. Prepared-owner rollback/removal and partially written binding destinations obey that same authority boundary. Pending-session adoption rereads and validates its selected durable row after acquiring that row's existing lock, before scope, unresolved-stop or native-writer admission decisions; a pre-lock sample grants no admission. A positively associated native interrupted-turn terminal settles that turn while retaining the live controlled writer; an unknown signal or termination does not. Native settlement, process lifetime, retained scope cleanup and stop identity remain distinct. A protected-host session continues to use its existing host verification and no-replay guards; ordinary control methods cannot send through that host's transport or acquire its authority.
+
+No new runtime timeout, cap, retry, queue bound or compaction budget is added. Scripted protocols qualify adapter behavior only. Versioned native approval, steer, model and compaction evidence is separate; missing native or platform evidence remains unqualified.
+
 ## Worker preflight
 
 Binding detail of M12.15–M12.17 and PRODUCT R14. `ready` and `quota` remain available as individual read-only probes. `ready_for`, `catalogue_for` and `account_limits_for` bind reads to the same `Launch` executable, wrapper, home and environment.
@@ -703,6 +728,31 @@ a lost-owner event. Other Runtime implementations may explicitly refuse stop obs
 subagent, image, question, approval, compaction, usage and unknown. Each step keeps
 its raw record, source byte range and digest; normalization happens at read time.
 Nothing writes a native transcript or stores a second canonical history.
+
+Approval and question history projects the same `Event::Request`, `Choice` and
+`Question` data emitted by live control ([shared proposal](https://github.com/taskqorg/specq/issues/132)).
+Runtime-authored `agentq_control` records retain full request snapshots. The source,
+session, original run identity, request generation and opaque request ID bind one
+logical step; later physical records replace that observation authoritatively,
+including null or missing content. Every revision retains its exact physical origin.
+Native request IDs reused by another run or generation remain separate steps.
+`Step.id` is the derived upsert identity. The preserved `data.event.Request.id`
+is the original opaque control ID, validated only by the original live owned run;
+neither `Step.id` nor `native_id` is a replacement reply handle.
+
+Request states are `pending`, `reply-pending`, `reply-sent`, `cancelled` and
+`unknown`, distinguishing an ask, reply intent, reply pipe receipt, cancellation
+and uncertain delivery. A pipe receipt is never provider acceptance or application.
+Unknown states and malformed scope remain visible as unknown. Native-only controls
+without verified run/generation use physical occurrence identity and explicitly
+unknown reply scope. History never creates a reply handle, restores a callback or
+grants respond authority; replies require the original live owned run and its
+pending registry. A historical request alone cannot authorize input. Native raw
+records remain retained separately; a missing physical link to the original native
+record stays unknown rather than creating an invented origin. Native payload fields
+named `unknown` remain native data; they cannot supply runtime unknown annotations.
+The selected runtime validates its registered source formats at both initial open
+and checkpoint recovery; a journal session identity cannot select another parser.
 
 Native item/call IDs determine stable step IDs within a source/session. Revisions
 carry the source offset and are self-contained: command, cwd, kind and completed

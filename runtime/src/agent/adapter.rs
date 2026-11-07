@@ -177,6 +177,8 @@ pub struct Launch {
     pub parts: Vec<Part>,
     /// Partial text records in `progress` (capability `turn-deltas`; app-server runs always stream them).
     pub deltas: bool,
+    /// Keep a live native control channel; ordinary one-shot transports refuse it.
+    pub controls: bool,
     /// Operator-configured native arguments of a turn (capability `host-args`); needs the default `Policy`.
     pub host_args: Vec<OsString>,
     /// Session environment (capability `settings-env`). A Claude launch puts it in argv: never secrets; use `env` for those.
@@ -217,7 +219,7 @@ impl Launch {
         let log=log.into();let session_store=SessionStore::new(log.parent().unwrap_or(Path::new(".")).join(".agentq-sessions"));
         Launch { root: root.into(), log, input: input.into(), policy: Policy::default(), model: None, effort: None, compact_hook: None,
             env: vec![], command: vec![], optimization: Intent::Inherit, product: product.into(), install: None, accounts: None,
-            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, host_args: vec![], settings_env: vec![], readiness: ReadinessMode::default(), store: None, session_store, inactivity:None,stop_on_stall:false,lifetime:Lifetime::default() }
+            mode: Mode::Turn, title: None, deadline: None, process: Process::default(), home: None, mcp: None, instructions: None, parts: vec![], deltas: false, controls:false,host_args: vec![], settings_env: vec![], readiness: ReadinessMode::default(), store: None, session_store, inactivity:None,stop_on_stall:false,lifetime:Lifetime::default() }
     }
 }
 
@@ -252,6 +254,7 @@ pub enum Control {
     Model(String),
     Mode(String),
     Reply { id: Value, option: Option<String> },
+    Answers { id: Value, answers: BTreeMap<String,Vec<Answer>> },
 }
 
 /// How a session's native account is signed in.
@@ -364,7 +367,7 @@ pub struct Run {
     stop_on_stall:bool,
 }
 
-enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>), Acp(Box<super::acp::Session>), Rpc(Box<super::jsonl_rpc::Session>) }
+enum Body { Turn(Turn), Native(Box<Native>), App(Box<App>), Acp(Box<super::acp::Session>), Rpc(Box<super::jsonl_rpc::Session>), Claude(Box<registry::ClaudeControl>) }
 
 /// A background or queue run: an observation cursor over the native transcript, never a process owner.
 struct Native {
@@ -390,11 +393,12 @@ impl Run {
         Ok(match &mut self.body {
             Body::Acp(s) => s.stop_facts(self.stop_id.clone())?,
             Body::Rpc(s) => s.stop_facts(self.stop_id.clone())?,
+            Body::Claude(s) => s.stop_facts(self.stop_id.clone())?,
             Body::Turn(t) => Facts {run:self.stop_id.clone(),format:protocol(t.client).stream_history,path:t.log.clone(),start:t.start,exited:Some(t.has_exited()),native_end:t.ended,exit:if t.exit_unknown {None}else{t.exit},lost_owner:t.exit_unknown && !(t.ended && t.stopping)},
             Body::Native(n) => Facts {run:self.stop_id.clone(),format:protocol(n.spec.client).native_history,path:n.turn.path().into(),start:0,exited:None,native_end:n.report.is_some(),exit:None,lost_owner:false},
             Body::App(a) => {
                 let exit=if a.owned {a.transport.as_mut().map(Transport::exit).transpose()?.flatten()}else{None};
-                Facts {run:self.stop_id.clone(),format:"codex-app-server",path:PathBuf::new(),start:0,exited:if a.owned {Some(exit.is_some())}else{None},native_end:a.session.report().is_some(),exit,lost_owner:a.closed.is_some() && exit.is_none()}
+                Facts {run:self.stop_id.clone(),format:"codex-app-server",path:a.journal.clone().unwrap_or_default(),start:0,exited:if a.owned {Some(exit.is_some())}else{None},native_end:a.session.report().is_some(),exit,lost_owner:a.closed.is_some() && exit.is_none()}
             },
         })
     }
@@ -423,7 +427,7 @@ impl Run {
     pub fn optimization(&self) -> &Optimization { &self.optimization }
     /// The direct child process ID of a CLI turn, or the verified background job's native process.
     pub fn id(&self) -> Option<u32> {
-        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id), Body::Acp(a)=>Some(a.id()),Body::Rpc(a)=>Some(a.id()) }
+        match &self.body { Body::Turn(t) => Some(t.id()), Body::Native(n) => n.job.as_ref().and_then(|j| j.pid), Body::App(a) => a.transport.as_ref().map(Transport::id), Body::Acp(a)=>Some(a.id()),Body::Rpc(a)=>Some(a.id()),Body::Claude(a)=>Some(a.id()) }
     }
     /// The finished run's immutable records for a deferred append, without a store, lock or native call; a repeated call
     /// returns the same value with the first caller context. A run without a terminal observation reads `running`.
@@ -432,6 +436,7 @@ impl Run {
         let frozen = match &self.body {
             Body::Acp(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
             Body::Rpc(a)=> {let report=a.report()?; let key=crate::sha256_hex(format!("{}\0{}\0{}\0{}",self.runtime,a.session,a.path.display(),a.boundary).as_bytes()); super::capture::freeze("agent.turn",&key,&report.observation_as(self.runtime,ctx),&report,Client(self.runtime),ctx)?},
+            Body::Claude(a)=>a.snapshot(ctx)?,
             Body::Turn(t) => t.snapshot(ctx)?,
             Body::Native(n) => n.turn.snapshot(n.report.as_ref().ok_or("running")?, ctx)?,
             // Each app-server turn records once under its native thread and turn identity.
@@ -449,6 +454,7 @@ impl Run {
         let mut r = match &self.body {
             Body::Acp(a)=>a.report().ok(),
             Body::Rpc(a)=>a.report().ok(),
+            Body::Claude(a)=>a.report().ok(),
             Body::Turn(t) => t.terminal_report(),
             Body::Native(n) => n.report.clone(),
             Body::App(a) => a.session.report(),
@@ -486,10 +492,10 @@ fn state(r: &Report) -> State { match r.outcome { "ok" => State::Finished, "unkn
 pub(crate) enum Transport { Plain(AppServer), Protected(Box<ProtectedAppServer>) }
 
 impl Transport {
-    fn send(&mut self, m: &Value, until: Instant) -> Res<()> { match self { Transport::Plain(s) => s.send(m, until), Transport::Protected(s) => s.send(m, until) } }
     fn receive(&mut self, until: Instant) -> Res<Option<Value>> { match self { Transport::Plain(s) => s.receive(until), Transport::Protected(s) => s.receive(until) } }
     fn id(&self) -> u32 { match self { Transport::Plain(s) => s.id(), Transport::Protected(s) => s.id() } }
     fn exit(&mut self) -> Res<Option<i32>> { match self { Transport::Plain(s) => s.poll(), Transport::Protected(s) => s.poll() } }
+    fn send_until(&mut self,m:&Value,until:Option<Instant>)->Res<()> {match self {Self::Plain(s)=>s.send_until(m,until),Self::Protected(s)=>s.send(m,until.ok_or("protected-control-unsupported")?)}}
 }
 
 /// An app-server session: the caller drives turns with `input`, answers server requests with `send`, reads `progress`.
@@ -497,22 +503,30 @@ struct App {
     transport: Option<Transport>,
     session: AppSession,
     /// Native messages received but not yet returned by `progress`.
-    pending: Vec<Value>,
+    pending: Vec<(Value,Option<Event>)>,
     model: Option<String>,
     /// Why the transport ended; the turn outcome stays native evidence only.
     closed: Option<String>,
     owned: bool,
     requests: Vec<Value>,
     effort: Option<String>,
+    control: Option<(super::control::Requests,File)>,
+    journal: Option<PathBuf>,
+    writer: Option<SessionOwner>,
+    cancelling: bool,
+    approval: Approval,
 }
 
 impl Drop for App {
     fn drop(&mut self) {
-        if self.owned { if let Some(Transport::Plain(s)) = &mut self.transport { let _ = s.close(); } }
+        if let Some((requests,log))=&mut self.control {let _=requests.retire(log,self.session.session().unwrap_or(""),"unknown");}
+        if self.owned { if let Some(Transport::Plain(s)) = &mut self.transport {
+            if self.writer.as_ref().is_some_and(|o|o.control().is_ok()) {let _=s.close();}else{s.close_stream();let _=s.poll();}
+        } }
     }
 }
 
-fn automatic(l: &Launch) -> bool { l.mode == Mode::Turn && (l.mcp.is_some() || l.instructions.is_some() || !l.parts.is_empty() || l.deltas) }
+fn automatic(l: &Launch) -> bool { l.mode == Mode::Turn && (l.mcp.is_some() || l.instructions.is_some() || !l.parts.is_empty() || l.deltas || l.controls) }
 
 /// Ordinary turns accept only declared needs; native protocol parameters remain protected-host data.
 fn turn_thread(l: &Launch) -> Res<Value> {
@@ -567,23 +581,61 @@ fn thread_params(l: &Launch, thread: &Value) -> Res<Value> {
 }
 
 impl App {
-    fn observe(&mut self, m: Value, until: Instant) -> Res<()> {
+    fn send(&mut self,message:&Value,until:Option<Instant>)->Res<()> {
+        if self.owned {self.writer.as_ref().ok_or("control-owner-required")?.control()?;}
+        self.transport.as_mut().ok_or("app-server transport ended")?.send_until(message,until)
+    }
+    fn observe(&mut self, m: Value, until: Option<Instant>) -> Res<()> {
+        if let Err(error)=self.observe_inner(m,until) {self.closed=Some(error.clone());return Err(error);}Ok(())
+    }
+    fn observe_inner(&mut self, m: Value, until: Option<Instant>) -> Res<()> {
+        if let Some((_,log))=&mut self.control {writeln!(log,"{m}").map_err(|e|format!("control-log-unknown: {e}"))?;}
         self.session.observe(&m)?;
+        if m["method"]=="serverRequest/resolved" && self.control.is_some() {
+            let id=&m["params"]["requestId"];
+            if m.get("id").is_none() && self.session.session().is_some() && m["params"]["threadId"].as_str()==self.session.session() && m["params"].get("turnId").is_none_or(|t|t.as_str()==self.session.turn_id()) && (id.is_string() || id.is_i64() || id.is_u64()) {
+                let (requests,log)=self.control.as_mut().unwrap();
+                requests.retire_native(log,self.session.session().unwrap(),id,self.session.turn_id(),&m)?;
+                self.requests.retain(|r|r["id"]!=*id || r["params"]["threadId"].as_str()!=self.session.session());
+                self.pending.push((m,None));
+            }else{self.pending.push((m,Some(Event::Unsupported{reason:"request-resolution-scope-unknown"})));}
+            return Ok(());
+        }
         if m.get("id").is_some() && m["method"].is_string() {
-            if self.owned {
+            if self.control.is_some() && self.cancelling {
+                self.session.control_scope(&m)?;
+                self.send(&json!({"id":m["id"],"error":{"code":-32800,"message":"Turn cancellation requested"}}),until)?;
+                self.pending.push((m,None));
+            }else if self.control.is_some() {self.requests.push(m);}
+            else if self.owned {
                 let reply = json!({"id":m["id"],"error":{"code":-32601,"message":"No approval or native tool handler for this turn"}});
-                self.transport.as_mut().ok_or("app-server transport ended")?.send(&reply, until)?;
+                self.send(&reply,until)?;
             } else { self.requests.push(m); }
-        } else { self.pending.push(m); }
+        } else { self.pending.push((m,None)); }
+        if self.session.report().is_some() {
+            if let Some((requests,log))=&mut self.control {requests.retire(log,self.session.session().ok_or("control-session-unknown")?,"cancelled")?;self.requests.clear();}
+        } else if self.control.is_some() && self.session.turn_id().is_some() {
+            for request in std::mem::take(&mut self.requests) {
+                if let Some(mut event)=self.session.control_request(&request)? {
+                    if !matches!(self.approval,Approval::Native|Approval::Bypass) {if let Event::Request{kind:RequestKind::Approval,choices,..}=&mut event {choices.retain(|c|c.kind=="deny");}}
+                    let (requests,log)=self.control.as_mut().expect("controlled session");
+                    let event=requests.register(log,self.session.session().ok_or("control-session-unknown")?,event,request.clone(),self.session.turn_id().map(String::from))?;
+                    self.pending.push((request,Some(event)));
+                }else{
+                    self.send(&json!({"id":request["id"],"error":{"code":-32601,"message":"Native request unsupported"}}),until)?;
+                    self.pending.push((request,None));
+                }
+            }
+        }
         Ok(())
     }
     /// Exchange one client request and read until its reply; every message read stays pending for `progress`.
     fn exchange(&mut self, request: Value, until: Instant) -> Res<()> {
-        self.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)?;
+        self.send(&request,Some(until))?;
         loop {
             let m = self.transport.as_mut().ok_or("app-server transport ended")?.receive(until)?.ok_or("app-server reply deadline; session state unknown")?;
             let reply = m["id"] == request["id"] && m.get("method").is_none();
-            self.observe(m, until)?;
+            self.observe(m, Some(until))?;
             if reply { return Ok(()); }
         }
     }
@@ -597,7 +649,12 @@ impl App {
         };
         if let Transport::Plain(server) = &transport { session.sample(server.id()); }
         let owned = matches!(transport, Transport::Plain(_));
-        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone() };
+        let control=if l.controls && owned {
+            let mut options=File::options();options.create(true).append(true);
+            #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
+            Some((super::control::Requests::new(),options.open(&l.log).map_err(|e|format!("control-log: {e}"))?))
+        }else{None};
+        let mut app = App { transport: Some(transport), session, pending: vec![], model: l.model.clone(), closed: None, owned, requests: vec![], effort: l.effort.clone(),control,journal:l.controls.then(||l.log.clone()),writer:owned.then(||owner.clone()),cancelling:false,approval:l.policy.approval };
         let opened = app.handshake(initialize, thread, l, &table(spec.client).descriptor,owner);
         if opened.is_err() { if let Some(Transport::Plain(s)) = &mut app.transport { let _ = s.kill(); } }
         opened.map(|_| app)
@@ -609,26 +666,33 @@ impl App {
         let request = self.session.initialize(initialize.clone())?;
         self.exchange(request, until)?;
         let initialized = self.session.initialized()?;
-        self.transport.as_mut().ok_or("app-server transport ended")?.send(&initialized, until)?;
+        self.send(&initialized,Some(until))?;
         let request = self.session.open(params)?;
         self.exchange(request, until)?;
         if !self.session.ready() { return Err("app-server thread not ready".into()); }
         owner.bind(self.session.session().ok_or("session-owner-unknown: app thread missing")?)?;
+        if self.control.is_some() {owner.hold_controls()?;}
         if !l.parts.is_empty() { self.start(input_items(descriptor, &l.parts).map_err(|e|e.to_string())?, until)?; }
         else if !l.input.is_empty() { self.input(&l.input, until)?; }
         Ok(())
+    }
+
+    fn writable(&self)->Res<()> {
+        if self.closed.is_some() || self.control.as_ref().is_some_and(|(requests,_)|requests.uncertain()) {return Err("control-state-unknown".into());}Ok(())
     }
 
     fn input(&mut self, text: &str, until: Instant) -> Res<()> { self.start(json!([{"type": "text", "text": text}]), until) }
 
     /// Start the next turn with exactly `items`; a failed write stays uncertain and is never resent.
     fn start(&mut self, items: Value, until: Instant) -> Res<()> {
+        self.writable()?;
         if self.session.report().is_some() { self.session.finish_turn()?; }
+        self.cancelling=false;
         let mut params = json!({"input": items});
         if let Some(m) = &self.model { params["model"] = json!(m); }
         if let Some(e) = &self.effort { params["effort"] = json!(e); }
         let request = self.session.start_turn(params)?;
-        self.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)
+        self.send(&request,Some(until))
     }
 
     /// One read-only `account/read` without token refresh; its reply stays private to the caller of `account`.
@@ -636,18 +700,18 @@ impl App {
         let request = self.session.request("account/read", json!({"refreshToken": false}))?;
         let id = request["id"].clone();
         self.exchange(request, until)?;
-        let at = self.pending.iter().rposition(|m| m["id"] == id && m.get("method").is_none()).ok_or("account/read reply missing")?;
-        account_of(&self.pending.remove(at))
+        let at = self.pending.iter().rposition(|(m,_)| m["id"] == id && m.get("method").is_none()).ok_or("account/read reply missing")?;
+        account_of(&self.pending.remove(at).0)
     }
 
     /// Read every message available now.
     fn pump(&mut self) -> Res<()> {
-        if self.transport.is_none() { return Ok(()); }
+        if self.transport.is_none() || self.closed.is_some() { return Ok(()); }
         loop {
             match self.transport.as_mut().expect("transport").receive(Instant::now()) {
                 Ok(Some(m)) => {
-                    self.observe(m, Instant::now() + Duration::from_secs(5))?;
-                    if self.owned && self.session.report().is_some() {
+                    self.observe(m, Some(Instant::now() + Duration::from_secs(5)))?;
+                    if self.owned && self.control.is_none() && self.session.report().is_some() {
                         if let Some(Transport::Plain(s)) = &mut self.transport { s.close()?; }
                         return Ok(());
                     }
@@ -660,10 +724,32 @@ impl App {
 
     fn poll(&mut self) -> Res<State> {
         self.pump()?;
+        if self.control.as_ref().is_some_and(|(requests,_)|requests.uncertain()) || self.closed.is_some() && self.session.control_pending() {return Ok(State::Unknown);}
         if let Some(r) = self.session.report() { return Ok(state(&r)); }
         // Reap an exited server; an exit without a native report never proves a turn.
         if let Some(code) = self.transport.as_mut().map(Transport::exit).transpose()?.flatten() { self.closed.get_or_insert(format!("app-server exited {code}")); }
         Ok(if self.closed.is_some() || self.transport.is_none() { State::Unknown } else { State::Running })
+    }
+
+    fn respond(&mut self,control:Control,until:Option<Instant>)->Res<()> {
+        if self.closed.is_some() || self.session.report().is_some() {return Err("control-turn-unavailable".into());}
+        let session=self.session.session().ok_or("control-session-unknown")?.to_string();
+        let (requests,log)=self.control.as_mut().ok_or("respond-transport-unsupported")?;
+        let reply=self.session.control_reply(requests.native(&control)?,&control)?;
+        let request=requests.begin(log,&session,&control,&reply)?;
+        if let Err(error)=self.send(&reply,until) {let (requests,log)=self.control.as_mut().unwrap();requests.fail(log,&session,&request);return Err(error);}
+        let (requests,log)=self.control.as_mut().unwrap();requests.sent(log,&session,&request,&reply)
+    }
+
+    fn control_exchange(&mut self,request:Value,until:Option<Instant>)->Res<()> {
+        if let Err(error)=self.send(&request,until) {self.closed=Some(error.clone());return Err(error);}
+        loop {
+            let message=match self.transport.as_mut() {Some(Transport::Plain(server))=>server.wait(until),_=>Err("control-transport-unsupported".into())};
+            let message=match message {Ok(message)=>message,Err(error)=>{self.closed=Some(error.clone());return Err(error);}};
+            let replied=message["id"]==request["id"] && message.get("method").is_none();
+            self.observe(message,until)?;
+            if replied {return Ok(());}
+        }
     }
 }
 
@@ -765,6 +851,10 @@ pub trait Runtime: Send + Sync {
     fn progress(&self, run: &mut Run) -> Res<Vec<Event>>;
     /// Session controls; unsupported runtimes refuse before a native write.
     fn control(&self, _run: &mut Run, _control: Control) -> Result<(), Failure> { Err(Failure::Refused(Cause("control-unsupported"))) }
+    fn respond(&self,_run:&mut Run,_response:Control)->Result<(),Failure> {Err(Failure::Refused(Cause("respond-unsupported")))}
+    fn steer(&self,_run:&mut Run,_parts:&[Part])->Result<(),Failure> {Err(Failure::Refused(Cause("steer-unsupported")))}
+    fn compact(&self,_run:&mut Run)->Result<(),Failure> {Err(Failure::Refused(Cause("compact-unsupported")))}
+    fn set_option(&self,_run:&mut Run,_option:Control)->Result<(),Failure> {Err(Failure::Refused(Cause("set-option-unsupported")))}
     /// Capability `background`: the raw launcher exchange of this run, handed over once.
     fn launcher_output(&self, run: &mut Run) -> Result<Result<Output, crate::process::Failure>, Cause>;
     fn session_id(&self, run: &Run) -> Option<String>;
@@ -952,10 +1042,16 @@ impl Adapter {
         let path = match &mut run.body {
             Body::Acp(a)=>return a.progress(),
             Body::Rpc(a)=>return a.progress(),
+            Body::Claude(a) if !a.recovered()=>{let (events,cursor)=a.progress()?;run.events=serde_json::from_value(cursor).map_err(|e|e.to_string())?;run.progress=std::fs::metadata(&a.path).map_err(|e|e.to_string())?.len();return Ok(events);},
+            Body::Claude(a)=>a.path.clone(),
             Body::Turn(t) => { t.sync_transcript()?; t.log.clone() }
             Body::Native(n) if n.attached && n.turn.path().exists() => n.turn.path().to_path_buf(),
             Body::Native(_) => return Ok(vec![]),
-            Body::App(a) => { a.pump()?;run.activity.pending_seen=0; return Ok(run.events.read_owned(self.client, std::mem::take(&mut a.pending), a.session.session(), a.session.turn_id())); }
+            Body::App(a) => {
+                a.pump()?;run.activity.pending_seen=0;let mut events=vec![];
+                for (raw,event) in std::mem::take(&mut a.pending) {if let Some(event)=event {events.push(event);}else{events.extend(run.events.read_owned(self.client,vec![raw],a.session.session(),a.session.turn_id()));}}
+                return Ok(events);
+            }
         };
         let (mut values, next) = lines_from(&path, run.progress)?;
         if let Body::Turn(t) = &run.body {
@@ -976,7 +1072,8 @@ impl Adapter {
         let events=match &mut run.body {
             Body::Acp(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Rpc(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
-            Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].to_vec();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
+            Body::Claude(a)=>{a.pump()?;let (rows,next)=activity_lines(&a.path,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
+            Body::App(a)=>{a.pump()?;let from=run.activity.pending_seen.min(a.pending.len());let rows=a.pending[from..].iter().map(|(raw,_)|raw.clone()).collect();run.activity.pending_seen=a.pending.len();run.activity.cursor.read_owned(self.client,rows,a.session.session(),a.session.turn_id())},
             Body::Turn(t)=>{t.sync_transcript()?;let (rows,next)=activity_lines(&t.log,run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             Body::Native(n) if n.attached=>{let (rows,next)=activity_lines(n.turn.path(),run.activity.progress)?;run.activity.progress=next;run.activity.read(self.client,rows)},
             _=>vec![],
@@ -1055,6 +1152,7 @@ impl Adapter {
 
     fn start(&'static self, l: &Launch, session: Option<&str>) -> Res<Run> {
         let name = self.descriptor.name;
+        if l.controls && (l.mode!=Mode::Turn || !self.descriptor.has("respond")) {return Err("controls-unsupported".into());}
         if !self.descriptor.has(l.mode.capability()) { return Err(format!("mode {} unsupported by {name}", l.mode.capability())); }
         if matches!(l.mode, Mode::AppServer { .. }) { return Err("app-server requires explicit protected host; state needs in Launch".into()); }
         if l.lifetime==Lifetime::StopWithOwner && (!matches!(l.mode,Mode::Turn) || !self.descriptor.has("process-lifetime")) {return Err("lifetime-unsupported: native submission scope".into());}
@@ -1072,7 +1170,8 @@ impl Adapter {
             let command=preflight::command(self,l)?;
             let session=super::acp::Session::open(command,config,l,session,&owner)?;
             let boundary=session.boundary;
-            let mut run=self.checked_run(&readiness,Body::Acp(Box::new(session)),boundary,optimization,l);run.owner=Some(owner);return Ok(run);
+            let stop_id=session.run_id().to_string();
+            let mut run=self.checked_run(&readiness,Body::Acp(Box::new(session)),boundary,optimization,l);run.stop_id=stop_id;run.owner=Some(owner);return Ok(run);
         }
         if let Some(config)=self.ops.rpc {
             if l.mode!=Mode::Turn {return Err("mode unsupported by JSONL RPC".into());}
@@ -1087,12 +1186,18 @@ impl Adapter {
         let uncertain = |what: &str, e: &dyn std::fmt::Display| Some(format!("{what} response uncertain: {e}; observe, never resubmit"));
         let result=match &l.mode {
             Mode::Turn => {
+                if self.client==Client::Claude && l.controls {
+                    let session=registry::ClaudeControl::open(command,&spec,l,&owner)?;let boundary=session.boundary;let stop_id=session.run_id().to_string();
+                    let mut run=self.checked_run(&readiness,Body::Claude(Box::new(session)),boundary,optimization,l);run.stop_id=stop_id;run.owner=Some(owner);return Ok(run);
+                }
                 if self.descriptor.has("app-server") && automatic(l) {
                     turn_thread(l)?;
                     if !l.parts.is_empty() { input_items(&self.descriptor, &l.parts).map_err(|e| e.to_string())?; }
-                    let server = AppServer::spawn((self.ops.app_command)(command, &spec)?, &l.log, &l.process)?;
+                    let command=(self.ops.app_command)(command,&spec)?;
+                    let server=if l.controls {AppServer::spawn_stream(command,&l.log.with_extension("stderr"),&l.process)?}else{AppServer::spawn(command,&l.log,&l.process)?};
                     let app = App::open(&spec, Transport::Plain(server), &json!({"clientInfo":{"name":"agentq-runtime","version":env!("CARGO_PKG_VERSION")}}), &json!({}), l,&owner)?;
-                    let mut run=self.checked_run(&readiness,Body::App(Box::new(app)),0,optimization,l);run.owner=Some(owner);return Ok(run);
+                    let stop_id=app.control.as_ref().map(|(requests,_)|requests.run.clone());
+                    let mut run=self.checked_run(&readiness,Body::App(Box::new(app)),0,optimization,l);if let Some(id)=stop_id {run.stop_id=id;}run.owner=Some(owner);return Ok(run);
                 }
                 let input = if l.parts.is_empty() { l.input.clone() } else { stream_message(&l.parts)? };
                 let baseline = if spec.resume {
@@ -1160,16 +1265,71 @@ impl Runtime for Adapter {
         let items = input_items(&self.descriptor, parts)?;
         let until = run.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
         match &mut run.body {
-            Body::App(a) if !a.owned => { a.pump()?;run.owner.as_ref().ok_or("session-owner-unknown")?.submit()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
+            Body::App(a) if !a.owned || a.control.is_some() => { a.pump()?;let owner=run.owner.as_ref().ok_or("session-owner-unknown")?;if a.control.is_some() {a.writable()?;owner.control()?;}owner.submit()?; a.start(items, until)?; run.recorded = false; run.frozen = None; if run.live.is_none() { table(self.client).live.fetch_add(1, Ordering::SeqCst); run.live = Some(Live(&table(self.client).live)); } Ok(()) }
+            Body::Claude(a)=>{a.pump()?;a.input(parts)?;run.progress=a.boundary;run.events=super::events::Cursor::new(run.events.deltas);run.recorded=false;run.frozen=None;if run.live.is_none() {table(self.client).live.fetch_add(1,Ordering::SeqCst);run.live=Some(Live(&table(self.client).live));}Ok(())},
             // A CLI run reads one input; the next turn is a resume.
             _ => Err(Failure::Refused(Cause("input-unsupported"))),
         }
     }
 
     fn control(&self,run:&mut Run,control:Control)->Result<(),Failure> {
+        if matches!(&self.own(run)?.body,Body::App(_)|Body::Claude(_)) {
+            return match control {Control::Reply{..}|Control::Answers{..}=>self.respond(run,control),_=>self.set_option(run,control)};
+        }
         match &mut self.own_mut(run)?.body {
-            Body::Acp(a)=>a.control(control).map_err(Failure::Failed),
+            Body::Acp(_) if matches!(control,Control::Answers{..})=>Err(Failure::Refused(Cause("question-answers-unsupported"))),
+            Body::Acp(a)=>{a.pump()?;a.control(control).map_err(Failure::Failed)},
             _=>Err(Failure::Refused(Cause("control-unsupported"))),
+        }
+    }
+
+    fn respond(&self,run:&mut Run,response:Control)->Result<(),Failure> {
+        if !self.descriptor.has("respond") {return Err(Failure::Refused(Cause("respond-unsupported")));}
+        if !matches!(response,Control::Reply{..}|Control::Answers{..}) {return Err(Failure::Refused(Cause("response-invalid")));}
+        let run=self.own_mut(run)?;
+        match &mut run.body {
+            Body::App(app) if app.owned && app.control.is_some()=>{
+                app.pump()?;run.owner.as_ref().ok_or("control-owner-required")?.control()?;
+                app.respond(response,run.deadline).map_err(Failure::Failed)
+            },
+            Body::Claude(a)=>{a.pump()?;a.respond(response).map_err(Failure::Failed)},
+            _=>Err(Failure::Refused(Cause("respond-transport-unsupported"))),
+        }
+    }
+
+    fn steer(&self,run:&mut Run,parts:&[Part])->Result<(),Failure> {
+        if !self.descriptor.has("steer") {return Err(Failure::Refused(Cause("steer-unsupported")));}
+        if parts.is_empty() {return Err(Failure::Refused(Cause("input-empty")));}
+        let items=input_items(&self.descriptor,parts)?;let run=self.own_mut(run)?;
+        match &mut run.body {
+            Body::App(app) if app.owned && app.control.is_some()=>{
+                app.pump()?;run.owner.as_ref().ok_or("control-owner-required")?.control()?;
+                app.writable()?;
+                let request=app.session.steer(items)?;app.control_exchange(request,run.deadline).map_err(Failure::Failed)
+            },
+            _=>Err(Failure::Refused(Cause("steer-transport-unsupported"))),
+        }
+    }
+
+    fn compact(&self,run:&mut Run)->Result<(),Failure> {
+        if !self.descriptor.has("compact") {return Err(Failure::Refused(Cause("compact-unsupported")));}
+        let run=self.own_mut(run)?;
+        match &mut run.body {
+            Body::App(app) if app.owned && app.control.is_some()=>{
+                app.pump()?;run.owner.as_ref().ok_or("control-owner-required")?.control()?;
+                app.writable()?;
+                let request=app.session.compact()?;app.control_exchange(request,run.deadline).map_err(Failure::Failed)
+            },
+            Body::Claude(a)=>{a.pump()?;a.compact()?;run.progress=a.boundary;run.events=super::events::Cursor::new(run.events.deltas);run.recorded=false;run.frozen=None;if run.live.is_none() {table(self.client).live.fetch_add(1,Ordering::SeqCst);run.live=Some(Live(&table(self.client).live));}Ok(())},
+            _=>Err(Failure::Refused(Cause("compact-transport-unsupported"))),
+        }
+    }
+
+    fn set_option(&self,run:&mut Run,option:Control)->Result<(),Failure> {
+        if !self.descriptor.has("set-option") {return Err(Failure::Refused(Cause("set-option-unsupported")));}
+        match &mut self.own_mut(run)?.body {
+            Body::Claude(a)=>{a.pump()?;a.set_option(option).map_err(Failure::Failed)},
+            _=>Err(Failure::Refused(Cause("set-option-transport-unsupported"))),
         }
     }
 
@@ -1207,6 +1367,7 @@ impl Runtime for Adapter {
         match &mut self.own_mut(run)?.body {
             Body::Acp(a)=>a.cancel(),
             Body::Rpc(a)=>a.cancel(),
+            Body::Claude(a)=>{a.pump()?;a.cancel()},
             Body::Turn(t) => {
                 if !t.timed_out { t.cancelled = true; }
                 t.kill()?;
@@ -1215,8 +1376,9 @@ impl Runtime for Adapter {
             Body::Native(n) if n.queue => Err("cancel-unsupported: desktop cancellation is a caller UI operation".into()),
             Body::App(a) => {
                 let until = Instant::now() + Duration::from_secs(5);
+                if let Some((requests,log))=&mut a.control {owner.control()?;a.cancelling=true;requests.retire(log,a.session.session().ok_or("control-session-unknown")?,"cancelled")?;a.requests.clear();}
                 if let Ok(request) = a.session.interrupt() {
-                    a.transport.as_mut().ok_or("app-server transport ended")?.send(&request, until)?;
+                    a.send(&request,Some(until))?;
                     return Ok(false);
                 }
                 match a.transport.as_mut().ok_or("app-server transport ended")? {
@@ -1238,6 +1400,7 @@ impl Runtime for Adapter {
         let s = match &mut run.body {
             Body::Acp(a)=>a.poll()?,
             Body::Rpc(a)=>a.poll()?,
+            Body::Claude(a)=>a.poll()?,
             Body::Turn(t) => {
                 // An agentapi submitter exits after its receipt while the turn continues, so the deadline applies after exit too.
                 if run.deadline.is_some_and(|d| Instant::now() >= d) && !t.timed_out {
@@ -1272,6 +1435,7 @@ impl Runtime for Adapter {
         let mut report = match &self.own(run)?.body {
             Body::Acp(a)=>a.report(),
             Body::Rpc(a)=>a.report(),
+            Body::Claude(a)=>a.report(),
             Body::Turn(t) if t.exit.is_some() => Ok(t.report()),
             Body::Native(n) if n.report.is_some() => Ok(n.report.clone().expect("report")),
             Body::App(a) => a.session.report().ok_or_else(|| String::from("running")),
@@ -1301,6 +1465,7 @@ impl Runtime for Adapter {
         match &self.own(run).ok()?.body {
             Body::Acp(a)=>Some(a.session.clone()),
             Body::Rpc(a)=>Some(a.session.clone()),
+            Body::Claude(a)=>Some(a.session.clone()),
             Body::Turn(t) => session_of(self.client, &read_from(&t.log, t.start).unwrap_or_default())
                 .or_else(|| t.extension.session().map(String::from)).or_else(|| t.resumed.clone()),
             Body::Native(n) => n.attached.then(|| n.turn.session().to_string()),
@@ -1327,7 +1492,7 @@ impl Runtime for Adapter {
                 let text=read_from(&t.log,t.start).unwrap_or_default();
                 session_of(self.client,&text).is_some() || self.log_records(&text).iter().any(|r|r.lifecycle.is_some() || r.events.iter().any(|e|!matches!(e,Event::Activity|Event::Unsupported{..})))
             },
-            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(), Body::Acp(a)=>!a.session.is_empty(), Body::Rpc(a)=>!a.session.is_empty(),
+            Body::Native(n) => n.attached, Body::App(a) => a.session.session().is_some(), Body::Acp(a)=>!a.session.is_empty(), Body::Rpc(a)=>!a.session.is_empty(), Body::Claude(a)=>a.identified,
         };
         Observation { state, phase: if state != State::Running { state.code() } else if proven { "started" } else { "starting" },
             starting_ms: run.starting.elapsed().as_millis().min(u64::MAX as u128) as u64, owner:run.owner.as_ref().map(SessionOwner::observation).unwrap_or_default(),activity,error, session, url, cause, detail }
@@ -1337,10 +1502,12 @@ impl Runtime for Adapter {
         match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
             Body::Acp(a)=>Ok(a.path.clone()),
             Body::Rpc(a)=>Ok(a.path.clone()),
+            Body::Claude(a)=>Ok(a.path.clone()),
             Body::Turn(t) => Ok(t.log.clone()),
             Body::Native(n) if n.attached => Ok(n.turn.path().to_path_buf()),
             Body::Native(_) => Err(Cause("transcript-unknown")),
-            // The private log holds stderr only; `progress` is the session stream.
+            Body::App(a) if a.journal.is_some()=>Ok(a.journal.clone().unwrap()),
+            // An ordinary app log holds stderr only; `progress` is the session stream.
             Body::App(_) => Err(Cause("no-transcript")),
         }
     }
@@ -1373,6 +1540,7 @@ impl Runtime for Adapter {
     fn checkpoint(&self, run: &Run) -> Result<Value, Cause> {
         let mut saved = match &self.own(run).map_err(|_| Cause("foreign-run"))?.body {
             Body::Acp(_) | Body::Rpc(_)=>Err(Cause("no-checkpoint")),
+            Body::Claude(a)=>Ok(json!({"schema":"agentq-run/1","runtime":self.descriptor.name,"kind":"claude-control","claude":a.checkpoint()})),
             Body::Turn(t) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "turn", "turn": t.checkpoint()?})),
             Body::App(a) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": "app", "app": a.session.checkpoint(), "model": a.model})),
             Body::Native(n) => Ok(json!({"schema": "agentq-run/1", "runtime": self.descriptor.name, "kind": if n.queue { "queue" } else { "background" }, "native": n.turn.checkpoint(),
@@ -1393,9 +1561,16 @@ impl Runtime for Adapter {
         let mut owner_spec=preflight::spec(self,l);owner_spec.session=saved["owner"]["session"].as_str().ok_or("session-owner-unknown: checkpoint has no owner")?.into();
         let acquire=||l.session_store.acquire(&owner_spec,false,Some(&saved["owner"]),l.lifetime);
         let queue = matches!(l.mode, Mode::Queue { .. });
-        let kind = match l.mode { Mode::Turn if self.descriptor.has("app-server") && automatic(l) => "app", Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
+        let kind = match l.mode { Mode::Turn if self.client==Client::Claude && l.controls=>"claude-control", Mode::Turn if self.descriptor.has("app-server") && automatic(l) => "app", Mode::Turn => "turn", Mode::Background => "background", Mode::Queue { .. } => "queue", Mode::AppServer { .. } => "app" };
         if saved["schema"] != "agentq-run/1" || saved["runtime"] != self.descriptor.name || saved["kind"] != kind {
             return Err("run recovery scope differs".into());
+        }
+        if kind=="claude-control" {
+            let saved_session=saved["claude"]["session"].as_str().filter(|s|native::cli_id(s)).ok_or("Claude control recovery session invalid")?;
+            let resumed=saved["claude"]["resume"].as_bool().ok_or("Claude control recovery resume invalid")?;
+            let (spec,optimization)=me.spec(l,saved_session.into(),resumed)?;let owner=acquire()?;
+            let session=registry::ClaudeControl::recover(&spec,l,&saved["claude"],&owner)?;let boundary=session.boundary;
+            let mut run=me.run(Body::Claude(Box::new(session)),boundary,optimization,l);run.owner=Some(owner);return run.restored(saved);
         }
         if kind == "turn" {
             // Observation only: the saved child keeps running; a resumed turn's session is the saved one.
@@ -1411,7 +1586,7 @@ impl Runtime for Adapter {
             let app = &saved["app"];
             let (spec, optimization) = me.spec(l, app["session"].as_str().ok_or("run recovery session invalid")?.into(), app["session"] != "-")?;
             let session = AppSession::recover(&spec, app)?;
-            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone() };
+            let a = App { transport: None, session, pending: vec![], model: saved["model"].as_str().map(String::from), closed: Some("recovered".into()), owned: automatic(l), requests: vec![], effort: l.effort.clone(),control:None,journal:l.controls.then(||l.log.clone()),writer:None,cancelling:false,approval:l.policy.approval };
             let mut run=me.run(Body::App(Box::new(a)),0,optimization,l);run.owner=Some(acquire()?);return run.restored(saved);
         }
         let session = saved["session"].as_str().filter(|s| native::plain_id(s)).ok_or("run recovery session invalid")?;
@@ -1573,6 +1748,23 @@ mod tests {
         mapped(Client::parse(name).unwrap(), name, l).map(|v| v.iter().map(|a| a.to_string_lossy().into_owned()).collect())
     }
 
+    // M12.24: a failed durable reply intent cannot become permission to start another turn.
+    #[test]
+    fn uncertain_reply_intent_refuses_new_input_without_changing_native_state() {
+        let root=crate::scratch("control-uncertain-input");std::fs::create_dir_all(&root).unwrap();let path=root.join("journal");
+        let mut log=File::options().create(true).append(true).open(&path).unwrap();let mut requests=super::super::control::Requests::new();
+        let event=Event::Request{id:json!("native"),kind:RequestKind::Approval,prompt:None,choices:vec![],questions:vec![]};
+        let Event::Request{id,..}=requests.register(&mut log,"session",event,Value::Null,None).unwrap() else {panic!()};
+        let mut readonly=File::open(&path).unwrap();assert!(requests.begin(&mut readonly,"session",&Control::Reply{id,option:None},&Value::Null).is_err());
+        let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
+        let mut session=AppSession::new(&spec).unwrap();let initialize=session.initialize(json!({})).unwrap();session.observe(&json!({"id":initialize["id"],"result":{}})).unwrap();
+        let open=session.open(json!({})).unwrap();session.observe(&json!({"id":open["id"],"result":{"thread":{"id":"session"}}})).unwrap();
+        let before=session.checkpoint();
+        let mut app=App {transport:None,session,pending:vec![],model:None,closed:None,owned:true,requests:vec![],effort:None,control:Some((requests,log)),journal:None,writer:None,cancelling:false,approval:Approval::Native};
+        assert_eq!(app.start(json!([]),Instant::now()).unwrap_err(),"control-state-unknown");assert_eq!(app.session.checkpoint(),before);
+        drop((app,readonly));std::fs::remove_dir_all(root).unwrap();
+    }
+
     // Registry declarations must agree with actual operations in both directions, not a second name whitelist.
     #[test]
     fn declared_and_undeclared_capabilities_match_operations() {
@@ -1626,9 +1818,13 @@ mod tests {
             }
             probes.insert("image-input",input_items(runtime.descriptor(),&[Part::Image(std::env::current_exe().unwrap())]).is_ok());
             let app_spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],home:Some(root.clone()),env:vec![]};
-            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None}));
+            let body=Body::App(Box::new(App {transport:None,session:AppSession::new(&app_spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native}));
             let mut run=adapter.run(body,0,Optimization {intent:Intent::Off,effective:"off",reason:"optimization_retired"},&launch());
             probes.insert("account",!matches!(runtime.account(&mut run),Err(Failure::Refused(Cause("account-unsupported")))));
+            probes.insert("respond",matches!(runtime.respond(&mut run,Control::Reply{id:json!("missing"),option:None}),Err(Failure::Refused(Cause("respond-transport-unsupported")))));
+            probes.insert("steer",matches!(runtime.steer(&mut run,&[Part::Text("probe".into())]),Err(Failure::Refused(Cause("steer-transport-unsupported")))));
+            probes.insert("compact",matches!(runtime.compact(&mut run),Err(Failure::Refused(Cause("compact-transport-unsupported")))));
+            probes.insert("set-option",!matches!(runtime.set_option(&mut run,Control::Model("probe".into())),Err(Failure::Refused(Cause("set-option-unsupported")))));
             let quotas=concat!(r#"{"type":"rate_limit_event","rate_limit_info":{"rateLimitType":"five_hour","utilization":0.5,"resetsAt":9999999999}}"#,"\n",
                 r#"{"type":"event_msg","payload":{"rate_limits":{"primary":{"used_percent":50,"window_minutes":300,"resets_at":9999999999}}}}"#);
             probes.insert("quota-snapshot",runtime.log_limits(quotas,None,Some(&root)).iter().any(|w|w.used.is_some()));

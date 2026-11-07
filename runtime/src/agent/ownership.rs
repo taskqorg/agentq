@@ -41,9 +41,10 @@ impl SessionStore {
             if let Some(row)=read(&pending)? {
                 if row["schema"]!="agentq-owner/2" || !row["runtime"].is_string() || !row["root"].is_string() || !(row["home"].is_null() || row["home"].is_string()) {return Err("session-owner-unknown: pending binding unreadable".into());}
                 if ["runtime","root","home"].iter().any(|k|row[*k]!=expected[*k]) {continue;}
+                let _pending=lock(&pending.with_extension("lock")).map_err(|e|format!("session-owner-unknown: pending admission: {e}"))?;
+                let row=read(&pending)?.ok_or("session-owner-unknown: pending record disappeared")?;
                 scope(&row,spec)?;
                 if stopped(&root,&row)? {return Err("session-owner-unknown: unresolved native stop".into());}
-                let _pending=lock(&pending.with_extension("lock")).map_err(|e|format!("session-owner-unknown: pending admission: {e}"))?;
                 require_scope_absent(&root,&row)?;
                 if process(&row["native"])?.map(|n|n.live()).transpose()?.unwrap_or(false) {
                     return Err("session-owner-unknown: pending native session must be bound before adoption".into());
@@ -97,6 +98,7 @@ impl SessionStore {
         let alias_guard=if saved.is_some() && session!="-" {
             if let Some(alias_row)=read(&alias)? {
                 let guard=lock(&alias.with_extension("lock"))?;scope(&alias_row,spec)?;
+                if read(&alias)?.as_ref()!=Some(&alias_row) {return Err("session-owner-unknown: binding alias changed".into());}
                 if alias_row["token"]!=token || alias_row["session"]!="-" || alias_row["binding"]!=session {return Err("session-owner-unknown: binding alias differs".into());}
                 Some(guard)
             } else {None}
@@ -108,6 +110,7 @@ impl SessionStore {
         row["process_scope"]=if saved.is_some() {old.as_ref().unwrap()["process_scope"].clone()} else {Value::Null};
         row["token"]=json!(token);
         row["phase"]=saved.map(|_|old.as_ref().unwrap()["phase"].clone()).unwrap_or(json!("prepared"));
+        row["control_writer"]=saved.map(|_|old.as_ref().unwrap()["control_writer"].clone()).unwrap_or(Value::Null);
         row["native"]=saved.map(|_|old.as_ref().unwrap()["native"].clone()).unwrap_or(Value::Null);
         row["native_reason"]=old.as_ref().map(|r|r["native_reason"].clone()).unwrap_or(Value::Null);
         row["binding"]=old.as_ref().map(|r|r["binding"].clone()).unwrap_or(Value::Null);
@@ -167,6 +170,7 @@ impl SessionStore {
         let rows=self.entries(&root,spec)?.into_iter().filter(|(_,r)|r["token"]==entry.token).collect::<Vec<_>>();
         let (_,row)=rows.iter().find(|(_,r)|r["session"]==entry.session).ok_or("orphan-token-changed")?;
         let mut guards=vec![];for (path,_) in &rows {guards.push(lock(&path.with_extension("lock"))?);}
+        for (path,row) in &rows {if read(path)?.as_ref()!=Some(row) {return Err("orphan-owner-changed".into());}}
         let marker=stop_path(&root,row)?.ok_or("orphan-stop-token-unknown")?;
         if reconcile {
             let original=read(&marker)?.ok_or("orphan-stop-not-requested")?;scope(&original,spec)?;
@@ -239,8 +243,14 @@ fn request_stop(root:&Path,row:&Value,native:&NativeProcess)->Res<()> {
 }
 
 struct Owned {root:PathBuf,path:PathBuf,row:Value,previous:Option<Value>,guard:Option<coreq::file_lock::Lock>,binding:Option<(PathBuf,coreq::file_lock::Lock)>}
+impl Owned {
+    fn current(&self)->Res<()> {
+        let row=read(&self.path)?.ok_or("session-owner-unknown: ownership record missing")?;
+        if row!=self.row {return Err("control-owner-changed".into());}Ok(())
+    }
+}
 impl Drop for Owned {fn drop(&mut self) {
-    if self.row["phase"]=="prepared" && self.row["native"].is_null() {
+    if self.guard.is_some() && self.row["phase"]=="prepared" && self.row["native"].is_null() && self.current().is_ok() {
         if let Some(previous)=&self.previous {let _=save(&self.path,previous);} else {let _=std::fs::remove_file(&self.path);}
     }
 }}
@@ -248,9 +258,15 @@ impl Drop for Owned {fn drop(&mut self) {
 pub struct SessionOwner(Arc<Mutex<Owned>>);
 impl std::fmt::Debug for SessionOwner {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.debug_struct("SessionOwner").finish_non_exhaustive()}}
 impl SessionOwner {
-    fn with<T>(&self,f:impl FnOnce(&mut Owned)->Res<T>)->Res<T> {{let mut owned=self.0.lock().map_err(|_|"session-owner-unknown: poisoned owner")?;f(&mut owned)}}
-    pub fn observation(&self)->OwnerObservation {self.with(|o| {if stopped(&o.root,&o.row)? {return Ok(OwnerObservation {state:"unknown".into(),reason:Some("native-subtree-stop-unverified".into())});}Ok(OwnerObservation {state:if o.row["phase"]=="idle" {"idle"} else if o.row["native"].is_null() || o.row["phase"]=="unconfirmed" {"unknown"} else {"owned"}.into(),reason:o.row["native_reason"].as_str().map(String::from).or_else(||o.row["native"].is_null().then(||"native-writer-unidentified".into()))})}).unwrap_or_default()}
+    fn with<T>(&self,f:impl FnOnce(&mut Owned)->Res<T>)->Res<T> {{let mut owned=self.0.lock().map_err(|_|"session-owner-unknown: poisoned owner")?;if owned.guard.is_some() {owned.current()?;}f(&mut owned)}}
+    pub fn observation(&self)->OwnerObservation {self.with(|o| {if o.guard.is_none() {o.current()?;}if stopped(&o.root,&o.row)? {return Ok(OwnerObservation {state:"unknown".into(),reason:Some("native-subtree-stop-unverified".into())});}Ok(OwnerObservation {state:if o.row["phase"]=="idle" {"idle"} else if o.row["native"].is_null() || o.row["phase"]=="unconfirmed" {"unknown"} else {"owned"}.into(),reason:o.row["native_reason"].as_str().map(String::from).or_else(||o.row["native"].is_null().then(||"native-writer-unidentified".into()))})}).unwrap_or_default()}
     pub fn checkpoint(&self)->Res<Value> {self.with(|o|Ok(json!({"session":o.row["session"],"token":o.row["token"],"lifetime":o.row["lifetime"]})))}
+    pub(crate) fn control(&self)->Res<()> {self.with(|o| {
+        if o.guard.is_none() || o.binding.is_some() || stopped(&o.root,&o.row)? || matches!(o.row["phase"].as_str(),Some("unconfirmed"|"stop-unresolved")) {return Err("control-owner-unavailable".into());}
+        let native=process(&o.row["native"])?.ok_or("control-native-identity-unknown")?;
+        if NativeProcess::read(native.pid)?.as_ref()!=Some(&native) {return Err("control-native-identity-changed".into());}
+        Ok(())
+    })}
     pub(super) fn verify(&self,spec:&Spec)->Res<()> {self.with(|o| {scope(&o.row,spec)?;if stopped(&o.root,&o.row)? {return Err("session-owner-unknown: unresolved native stop".into());}if spec.resume && o.row["session"]!=spec.session {return Err("session-owner-unknown: session differs".into());}Ok(())})}
     pub(super) fn spawned(&self,pid:u32)->Res<()> {self.with(|o| {
         if o.guard.is_none() {return Err("session-owner-unknown: admission released".into());}
@@ -275,24 +291,26 @@ impl SessionOwner {
         if o.guard.is_none() {
             let guard=lock(&o.path.with_extension("lock"))?;
             let row=read(&o.path)?.ok_or("session-owner-unknown: ownership record missing")?;
-            if row["token"]!=o.row["token"] {return Err("session-busy: ownership transferred".into());}
+            if row!=o.row {return Err("session-busy: ownership transferred".into());}
             idle(&row)?;o.guard=Some(guard);
         }
-        if o.row["phase"]!="prepared" && o.row["phase"]!="idle" {return Err("session-input-in-flight".into());}
+        if o.row["phase"]!="prepared" && o.row["phase"]!="idle" && o.row["phase"]!="controlled" {return Err("session-input-in-flight".into());}
         o.row["phase"]=json!("submitted");save(&o.path,&o.row)
     })}
     pub(crate) fn bind(&self,session:&str)->Res<()> {self.with(|o| {
         valid_session(o.row["runtime"].as_str().ok_or("ownership runtime missing")?,session)?;
         if o.row["session"]==session {return Ok(());}
+        if o.guard.is_none() {return Err("session-owner-unknown: admission released".into());}
         if o.row["session"]!="-" {return Err("session-owner-unknown: native session differs".into());}
         let _admission=lock(&o.root.join("admission.lock"))?;
         let file=path(&o.root,o.row["runtime"].as_str().ok_or("ownership runtime missing")?,session);
         if let Some((target,_))=&o.binding {if *target!=file {return Err("session-owner-unknown: binding transition differs".into());}}
         else {
             let guard=lock(&file.with_extension("lock"))?;
-            if let Some(existing)=read(&file)? {if existing["token"]!=o.row["token"] {return Err("session-busy: native session already registered".into());}}
             o.binding=Some((file.clone(),guard));
         }
+        let mut destination=o.row.clone();destination["session"]=json!(session);destination["binding"]=Value::Null;
+        if read(&file)?.is_some_and(|row|row!=destination) {return Err("session-busy: native session already registered".into());}
         // Journal the destination before writing it, so an early checkpoint cannot revive an obsolete alias.
         let mut source=o.row.clone();source["binding"]=json!(session);save(&o.path,&source)?;o.row=source;
         let mut row=o.row.clone();row["session"]=json!(session);row["binding"]=Value::Null;
@@ -300,15 +318,21 @@ impl SessionOwner {
         match std::fs::remove_file(&o.path) {Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string())}
         let (target,guard)=o.binding.take().unwrap();o.path=target;o.row=row;o.guard=Some(guard);Ok(())
     })}
-    /// Release after this session's known terminal native report; never use a launcher exit as proof.
+    pub(super) fn hold_controls(&self)->Res<()> {self.with(|o| {
+        if o.guard.is_none() {return Err("control-owner-unavailable".into());}
+        let mut row=o.row.clone();row["control_writer"]=json!(true);save(&o.path,&row)?;o.row=row;Ok(())
+    })}
+    /// Known native turn completion does not release a controlled native writer.
     pub fn finish(&self,report:&Report)->Res<()> {self.with(|o| {
+        let retain=o.row["control_writer"]==true;
         if report.session.as_deref().zip(o.row["session"].as_str()).is_some_and(|(seen,owned)|seen!=owned) {return Err("session-owner-unknown: native session differs".into());}
         if o.guard.is_none() {return Ok(());}
         if stopped(&o.root,&o.row)? {o.row["phase"]=json!("stop-unresolved");o.row["native_reason"]=json!("native-subtree-stop-unverified");return save(&o.path,&o.row);}
-        if report.session.is_none() || report.outcome=="unknown" || report.background_job || matches!(report.error,"interrupted"|"timeout"|"exit"|"no-end") {
+        let interrupted=retain && report.outcome=="cancelled" && report.error=="interrupted";
+        if report.session.is_none() || report.outcome=="unknown" || report.background_job || matches!(report.error,"timeout"|"exit"|"no-end") || report.error=="interrupted" && !interrupted {
             o.row["phase"]=json!("unconfirmed");o.row["native_reason"]=json!("native-completion-unverified");return save(&o.path,&o.row);
         }
-        o.row["phase"]=json!("idle");save(&o.path,&o.row)?;o.guard=None;Ok(())
+        o.row["phase"]=json!(if retain {"controlled"}else{"idle"});save(&o.path,&o.row)?;if !retain {o.guard=None;}Ok(())
     })}
     pub(super) fn unscoped_submission(&self)->Res<()> {self.with(|o| {if o.row["lifetime"]==json!(Lifetime::StopWithOwner) {Err("lifetime-unsupported: external native submission".into())} else {Ok(())}})}
     pub(super) fn stop_uncertain(&self)->Res<()> {self.with(|o| {
@@ -339,7 +363,7 @@ impl SessionOwner {
                 owner.spawned(child.id())?;
                 if let Some(setup)=&setup {
                     let mut scope=setup.started(child)?;
-                    owner.with(|o| {scope["native"]=o.row["native"].clone();let mut row=o.row.clone();row["process_scope"]=scope;save(&o.path,&row)?;o.row=row;Ok(())})?;
+                    owner.with(|o| {if o.guard.is_none() {return Err("session-owner-unknown: admission released".into());}scope["native"]=o.row["native"].clone();let mut row=o.row.clone();row["process_scope"]=scope;save(&o.path,&row)?;o.row=row;Ok(())})?;
                 }
                 owner.submit()?;
                 if let Some(setup)=&setup {
@@ -380,6 +404,81 @@ fn idle(row:&Value)->Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn adoption_uses_the_locked_pending_row_and_preserves_current_writer_evidence() {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        let root=crate::scratch("adopt-locked-pending");let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));let owner=store.acquire(&spec,true,None,Lifetime::Recoverable).unwrap();
+        let file=owner.0.lock().unwrap().path.clone();let prepared=std::fs::read(&file).unwrap();drop(owner);assert!(!file.exists());
+        let mut current:Value=serde_json::from_slice(&prepared).unwrap();current["phase"]=json!("submitted");current["native"]=json!(NativeProcess::read(std::process::id()).unwrap().unwrap());
+        let expected=serde_json::to_vec(&current).unwrap();let name=std::ffi::CString::new(file.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe {libc::mkfifo(name.as_ptr(),0o600)},0);
+        let writer_file=file.clone();let bytes=expected.clone();
+        let writer=std::thread::spawn(move|| {
+            let guard=lock(&writer_file.with_extension("lock")).unwrap();let mut fifo=File::options().write(true).open(&writer_file).unwrap();
+            fifo.write_all(&prepared).unwrap();fifo.flush().unwrap();std::fs::remove_file(&writer_file).unwrap();std::fs::write(&writer_file,bytes).unwrap();drop(guard);drop(fifo);
+        });
+        let result=store.adopt(&spec,"target",&[]);writer.join().unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(),expected);assert!(!path(&store.path,"codex","target").exists(),"pre-lock sample must not write target authority");
+        assert!(result.unwrap_err().contains("pending native session must be bound"));std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adoption_accepts_prepared_non_native_rows_but_refuses_submitted_live_rows() {
+        let root=crate::scratch("adopt-pending-states");let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));let owner=store.acquire(&spec,true,None,Lifetime::Recoverable).unwrap();
+        let file=owner.0.lock().unwrap().path.clone();let mut row=owner.0.lock().unwrap().row.clone();drop(owner);
+        save(&file,&row).unwrap();assert_eq!(store.adopt(&spec,"prepared-target",&[]).unwrap().state,"adopted");
+        row["phase"]=json!("submitted");row["native"]=json!(NativeProcess::read(std::process::id()).unwrap().unwrap());save(&file,&row).unwrap();
+        assert!(store.adopt(&spec,"live-target",&[]).unwrap_err().contains("pending native session must be bound"));
+        assert_eq!(read(&file).unwrap(),Some(row));assert!(!path(&store.path,"codex","live-target").exists());std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A retained lock is not evidence that the durable authority was not replaced or damaged.
+    #[test]
+    fn cached_owner_transitions_never_restore_changed_missing_or_corrupt_rows() {
+        for change in ["token","same-token","missing","corrupt"] {
+            for operation in ["spawned","observe","submit","released-submit","bind","hold","finish","stop","drop","rollback"] {
+                let root=crate::scratch("owner-current-row");let spec=Spec {client:Client::Codex,root:root.clone(),session:if operation=="bind" {"-"}else{"native"}.into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+                let store=SessionStore::new(root.join("owners"));
+                if operation=="rollback" {store.adopt(&spec,"native",&[]).unwrap();}
+                let owner=store.acquire(&spec,operation!="rollback",None,Lifetime::Recoverable).unwrap();
+                let file=owner.0.lock().unwrap().path.clone();
+                let mut report=Report::empty();report.session=Some("native".into());report.outcome="ok";report.error="none";
+                if operation=="released-submit" {owner.finish(&report).unwrap();}
+                match change {
+                    "missing"=>std::fs::remove_file(&file).unwrap(),
+                    "corrupt"=>std::fs::write(&file,b"not ownership JSON").unwrap(),
+                    _=>{let mut row=read(&file).unwrap().unwrap();if change=="token" {row["token"]=json!("foreign");}else{row["native_reason"]=json!("foreign same-token edit");}save(&file,&row).unwrap();},
+                }
+                let before=std::fs::read(&file).ok();
+                if matches!(operation,"drop"|"rollback") {drop(owner);}else{
+                    let result=match operation {
+                        "spawned"=>owner.spawned(std::process::id()),"observe"=>owner.observe_process(std::process::id()),
+                        "submit"|"released-submit"=>owner.submit(),"bind"=>owner.bind("native"),"hold"=>owner.hold_controls(),
+                        "finish"=>owner.finish(&report),"stop"=>owner.stop_uncertain(),_=>unreachable!(),
+                    };
+                    assert!(result.is_err(),"{operation}/{change}: stale authority performed a transition");drop(owner);
+                }
+                assert_eq!(std::fs::read(&file).ok(),before,"{operation}/{change}: cached state repaired foreign/unknown authority");
+                assert!(!store.path.join("stops").exists(),"invalid authority created a stop marker");std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn binding_never_overwrites_a_changed_same_token_destination() {
+        let root=crate::scratch("owner-binding-current-target");let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));let owner=store.acquire(&spec,true,None,Lifetime::Recoverable).unwrap();
+        owner.spawned(std::process::id()).unwrap();owner.submit().unwrap();
+        let directory=store.directory().unwrap();let target=path(&directory,"codex","native");
+        let mut changed=owner.0.lock().unwrap().row.clone();changed["session"]=json!("native");changed["binding"]=Value::Null;changed["native_reason"]=json!("foreign same-token destination");
+        save(&target,&changed).unwrap();let before=std::fs::read(&target).unwrap();
+        assert!(owner.bind("native").is_err());assert_eq!(std::fs::read(target).unwrap(),before);drop(owner);std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn pending_runs_are_independent_and_early_checkpoints_follow_native_binding() {
         let root=crate::scratch("pending-owners");let home=root.join("home");std::fs::create_dir_all(&home).unwrap();

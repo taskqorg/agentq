@@ -479,6 +479,7 @@ pub(crate) use antigravity::{code_assist,project_identity};
 
 pub(crate) use codex::app;
 
+pub(super) use claude::control::Session as ClaudeControl;
 pub use claude::BackgroundJob;
 pub(crate) use claude::{remote_url,claude_link,Absence};
 
