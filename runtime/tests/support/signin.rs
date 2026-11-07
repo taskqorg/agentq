@@ -13,7 +13,7 @@ fn options(root:&Path,client:&str,mode:&str,flow:LoginFlow)->LoginOptions {
 fn provision_home(path:&Path) {
     #[cfg(windows)] {
         // Elevated Windows defaults new directories to Administrators; that is not a proven account owner.
-        let output=Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command", "$ErrorActionPreference='Stop'; Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; $p=$env:AGENTQ_LOGIN_TEST_HOME; $acl=Get-Acl -LiteralPath $p; if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){$acl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User); Set-Acl -LiteralPath $p -AclObject $acl}"]).env("AGENTQ_LOGIN_TEST_HOME",path).output().unwrap();
+        let output=Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command", "$ErrorActionPreference='Stop'; $env:PSModulePath=Join-Path $PSHOME 'Modules'; Import-Module Microsoft.PowerShell.Security -ErrorAction Stop; $p=$env:AGENTQ_LOGIN_TEST_HOME; $acl=Get-Acl -LiteralPath $p; if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){$acl.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User); Set-Acl -LiteralPath $p -AclObject $acl}"]).env("AGENTQ_LOGIN_TEST_HOME",path).output().unwrap();
         assert!(output.status.success(),"temporary home owner preparation failed ({:?}): {}",output.status.code(),String::from_utf8_lossy(&output.stderr));
     }
     #[cfg(not(windows))] let _=path;
@@ -208,7 +208,17 @@ pub fn home_controller() {
     }
 }
 pub fn home_processes() {
-    let root=scratch("login-home-owner-loss");let spawn=|name:&str|Command::new(std::env::current_exe().unwrap()).args(["--login-home-controller",root.to_str().unwrap(),name]).spawn().unwrap();
+    let root=scratch("login-home-owner-loss");
+    #[cfg(windows)] {
+        let module=root.join("modules/Microsoft.PowerShell.Security/99.0.0");std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(module.join("Microsoft.PowerShell.Security.psd1"),"@{ModuleVersion='99.0.0';PowerShellVersion='99.0';GUID='d2620193-2aab-4efe-af89-a54415a2e735';CmdletsToExport=@('Get-Acl','Set-Acl')}").unwrap();
+    }
+    let spawn=|name:&str| {
+        let mut command=Command::new(std::env::current_exe().unwrap());
+        // Fixture preparation must use its engine's module, even with an incompatible inherited module.
+        #[cfg(windows)] command.env("PSModulePath",root.join("modules"));
+        command.args(["--login-home-controller",root.to_str().unwrap(),name]).spawn().unwrap()
+    };
     let status=|name:&str|->Value {let path=root.join(format!("{name}.json"));wait_for(&path);serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()};
     let mut original=spawn("original");let started=status("original");assert_eq!(started["phase"],"Waiting");let pid=started["pid"].as_u64().unwrap() as u32;
     let identity=coreq::process::identity(pid).unwrap().unwrap();original.kill().unwrap();original.wait().unwrap();
