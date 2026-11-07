@@ -982,6 +982,22 @@ ACP and JSONL RPC candidates use the same unlimited stream transport and canonic
 
 ## History media
 
+Caller-owned physical logs use `History::caller(runtime, format, source, binding,
+native_session)` with an explicit caller binding and optional expected native ID.
+Missing native identity stays null across steps, media origins and recovery; a
+native ID appearing without that binding, or contradicting it, refuses. Registered
+runtime/format binding is checked before reading and at recovery. This reader
+never creates a resolved native Session, resume/adopt/reply authority or a native
+session identity from its caller label.
+
+`History::media(path)` reads only positively typed media references in that explicit
+physical source through the shared catalog and byte/hash/range checks. It never
+scans session-wide generated-artifact directories, even when the caller label
+resembles a native ID or an expected native ID is supplied. `Session::media()`
+delegates to the same implementation with its separately validated native scope;
+only that scope retains existing native generated-artifact discovery. Arbitrary
+paths and quoted prose confer no additional file authority.
+
 `Session::media()` derives a `MediaCatalog` from the same complete native records as
 steps. Each descriptor has kind, MIME, name, size, SHA-256 and a source (inline,
 local path, generated asset or URL), native step/origin links and explicit unknown

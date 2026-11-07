@@ -195,6 +195,20 @@ fn visit(catalog:&mut MediaCatalog,value:&Value,step:&Step,cwd:Option<&Path>,poi
 }
 
 fn visit_step(catalog:&mut MediaCatalog,record:&Value,step:&Step,cwd:Option<&Path>) {
+    if step.source["format"]=="acp" {
+        if record["type"]!="acp" || record["message"]["method"]!="session/update" {return;}
+        let update=&record["message"]["params"]["update"];
+        if step.kind==StepKind::Image {
+            visit(catalog,&step.data["content"],step,cwd,"/message/params/update/content",false);
+        }else if matches!(update["sessionUpdate"].as_str(),Some("tool_call"|"tool_call_update")) {
+            for (i,block) in update["content"].as_array().into_iter().flatten().enumerate() {
+                if block["type"]=="content" && matches!(block["content"]["type"].as_str(),Some("image"|"audio")) {
+                    visit(catalog,&block["content"],step,cwd,&format!("/message/params/update/content/{i}/content"),false);
+                }
+            }
+        }
+        return;
+    }
     let p=record.get("payload").or(record.get("params")).unwrap_or(record);let item=p.get("item").unwrap_or(p);
     let content=record["message"]["content"].as_array().or_else(||item["content"].as_array());
     if let Some(blocks)=content {
@@ -205,18 +219,22 @@ fn visit_step(catalog:&mut MediaCatalog,record:&Value,step:&Step,cwd:Option<&Pat
     }else{visit(catalog,record,step,cwd,"",false);}
 }
 
-impl super::sessions::Session {
-    pub fn media(&self)->Res<MediaCatalog> {
-        let mut history=self.history.clone();history.offset=0;history.prefix=crate::sha256_hex(b"");
+impl History {
+    /// Caller-only references; a caller label never authorizes native artifact discovery.
+    pub fn media(&self,path:&Path)->Res<MediaCatalog> {self.media_catalog(path,false)}
+
+    fn media_catalog(&self,path:&Path,native_artifacts:bool)->Res<MediaCatalog> {
+        self.open(path)?;
+        let mut history=self.clone();history.offset=0;history.prefix=crate::sha256_hex(b"");
         if super::sources::external(&history.format) {
             let mut catalog=MediaCatalog {items:Vec::new(),backing:BTreeMap::new()};let mut cwd=None::<PathBuf>;
-            for (step,normalized) in super::sources::media_steps(&history,&self.path)? {
+            for (step,normalized) in super::sources::media_steps(&history,path)? {
                 if let Some(path)=step.source["record"]["cwd"].as_str().filter(|s|Path::new(s).is_absolute()){cwd=Some(path.into());}
                 if step.kind!=StepKind::Metadata{visit_step(&mut catalog,&normalized,&step,cwd.as_deref());}
             }
             return Ok(catalog);
         }
-        let steps=history.steps(&self.path,u64::MAX)?.steps;
+        let steps=history.steps(path,u64::MAX)?.steps;
         let mut catalog=MediaCatalog {items:Vec::new(),backing:BTreeMap::new()};let mut physical=BTreeMap::new();let mut cwd=None::<PathBuf>;
         for step in &steps {
             for origin in &step.origins {
@@ -224,7 +242,7 @@ impl super::sessions::Session {
             }
         }
         // Validate once, then verify each contributing physical record on the same stream.
-        let (mut native_file,_)=history.open(&self.path)?;
+        let (mut native_file,_)=history.open(path)?;
         for ((start,end),(_,origin)) in physical {
             let length=end.checked_sub(start).ok_or("media source range invalid")?;
             native_file.seek(SeekFrom::Start(start)).map_err(|e|e.to_string())?;
@@ -236,19 +254,19 @@ impl super::sessions::Session {
             let p=v.get("payload").or(v.get("params")).unwrap_or(&v);
             if let Some(path)=v["cwd"].as_str().or(p["cwd"].as_str()).filter(|s|Path::new(s).is_absolute()){cwd=Some(path.into());}
             let event=history.event(&v,raw,start)?;
-            for step in super::steps::decode(&self.history.format,&event,&v) {
+            for step in super::steps::decode(&self.format,&event,&v) {
                 if step.kind!=StepKind::Metadata {visit_step(&mut catalog,&v,&step,cwd.as_deref());}
             }
         }
-        if self.history.format.starts_with("codex-") && super::super::native::plain_id(&self.history.native_session) {
-            if let (Some(home),Some(step))=(self.path.ancestors().find(|p|p.file_name().is_some_and(|n|n=="sessions")).and_then(Path::parent),steps.last()) {
+        if native_artifacts && self.format.starts_with("codex-") && super::super::native::plain_id(&self.native_session) {
+            if let (Some(home),Some(step))=(path.ancestors().find(|p|p.file_name().is_some_and(|n|n=="sessions")).and_then(Path::parent),steps.last()) {
                 let anchor=home.canonicalize().map_err(|e|e.to_string())?;
-                let root=anchor.join("generated_images").join(&self.history.native_session);
+                let root=anchor.join("generated_images").join(&self.native_session);
                 if anchored(&root,&anchor).is_ok() && root.is_dir(){artifacts(&mut catalog,&root,&anchor,step)?;}
             }
         }
-        if self.history.format=="antigravity-sidecar" {
-            if let (Some(root),Some(step))=(self.path.ancestors().nth(3),steps.last()) {
+        if native_artifacts && self.format=="antigravity-sidecar" {
+            if let (Some(root),Some(step))=(path.ancestors().nth(3),steps.last()) {
                 let anchor=root.parent().ok_or("media artifact parent unavailable")?.canonicalize().map_err(|e|e.to_string())?;
                 let root=anchor.join(root.file_name().ok_or("media artifact directory invalid")?);
                 if anchored(&root,&anchor).is_ok(){artifacts(&mut catalog,&root,&anchor,step)?;}
@@ -256,6 +274,10 @@ impl super::sessions::Session {
         }
         Ok(catalog)
     }
+}
+
+impl super::sessions::Session {
+    pub fn media(&self)->Res<MediaCatalog> {self.history.media_catalog(&self.path,true)}
 }
 
 fn file_uri(url:&str)->Res<PathBuf> {

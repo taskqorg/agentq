@@ -52,7 +52,7 @@ fn walk(root:&Path, out:&mut Vec<PathBuf>) -> Res<()> {
     Ok(())
 }
 
-fn source_format(runtime:&str,format:&str)->Res<()> {
+pub(super) fn source_format(runtime:&str,format:&str)->Res<()> {
     let allowed=if let Some(spec)=super::sources::get(runtime).filter(|s|super::sources::external(s.format)) {
         spec.format==format
     }else{super::super::registry::protocol(client(runtime)?).history_formats.contains(&format)};
