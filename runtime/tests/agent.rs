@@ -117,7 +117,7 @@ pub(crate) fn main() {
         ("protected_frontend_is_not_scope_supervisor", protected::protected_frontend_is_not_scope_supervisor),
         ("protected_preparation_and_completion_recover_original_operation", protected::protected_preparation_and_completion_recover_original_operation),
         ("json_turns_run_plain_without_the_optimizer", json_turns_run_plain_without_the_optimizer),
-        ("off_reaches_codex_queue_and_app_server", off_reaches_codex_queue_and_app_server),
+        ("native_codex_queue_and_app_server_need_no_optimizer", native_codex_queue_and_app_server_need_no_optimizer),
         ("external_consumer_builds_and_plans_turns", external_consumer_builds_and_plans_turns),
         ("runtime_trait_runs_every_runtime_by_descriptor", runtime_trait_runs_every_runtime_by_descriptor),
         ("cli_turn_recovers_its_running_child", cli_turn_recovers_its_running_child),
@@ -130,7 +130,7 @@ pub(crate) fn main() {
         ("host_args_reach_codex_turns_only", host_args_reach_codex_turns_only),
         ("settings_env_reaches_the_session", settings_env_reaches_the_session),
         ("settings_env_preserves_subscription_policy", settings_env_preserves_subscription_policy),
-        ("settings_env_off_precedes_state_read", settings_env_off_precedes_state_read),
+        ("caller_environment_does_not_read_optimizer_state", caller_environment_does_not_read_optimizer_state),
         ("settings_env_keeps_inherited_launch_markers", settings_env_keeps_inherited_launch_markers),
         ("launcher_output_is_handed_over_once", launcher_output_is_handed_over_once),
         ("caller_context_reaches_records_and_children", caller_context_reaches_records_and_children),
@@ -784,7 +784,7 @@ fn session_ownership_and_stall_signal() {
     let saved=rt.checkpoint(&unreadable).unwrap();drop(unreadable);let mut unreadable=rt.recover(&saved,&bad).unwrap();assert_eq!(rt.observe(&mut unreadable).activity.state,"unknown");
     std::fs::write(&bad_gate,"").unwrap();finish(rt,&mut unreadable);assert_eq!(rt.report(&unreadable).unwrap().outcome,"ok");drop(bad_cleanup);
     let json_root=root.join("json");std::fs::create_dir_all(&json_root).unwrap();let json_gate=json_root.join("gate");let json_cleanup=Gates(vec![json_gate.clone()]);
-    let request=json!({"client":"claude","root":json_root,"log":json_root.join("turn.log"),"home":l.home,"session":"12345678-0000-4000-8000-000000000001","input":"json exactly once","command":[exe().to_string_lossy()],"env":{"COREQ_FAKE_AGENT":"claude","COREQ_FAKE_GATE":json_gate},"optimization":"off","context":{"product":"fixtureq","version":"1"}}).to_string();
+    let request=json!({"client":"claude","root":json_root,"log":json_root.join("turn.log"),"home":l.home,"session":"12345678-0000-4000-8000-000000000001","input":"json exactly once","command":[exe().to_string_lossy()],"env":{"COREQ_FAKE_AGENT":"claude","COREQ_FAKE_GATE":json_gate},"context":{"product":"fixtureq","version":"1"}}).to_string();
     let first=request.clone();let writer=std::thread::spawn(move||agentq_runtime::cli::turn(&first,None));wait_for(&json_root.join("fake-turn-1.json"));
     assert!(agentq_runtime::cli::turn(&request,None).unwrap_err().starts_with("session-busy"),"a pinned fresh JSON session is fenced before input");
     std::fs::write(&json_gate,"").unwrap();assert_eq!(writer.join().unwrap().unwrap()["outcome"],"ok");assert!(!json_root.join("fake-turn-2.json").exists());
@@ -1263,18 +1263,16 @@ fn settings_of(args: &Value) -> Value {
 // #240 A1: caller settings reach the session: Claude through one `--settings` that survives the daemon, Codex through its child.
 // Risk: a `--bg` session misses TaskQ's variables or `off`, a second `--settings` drops the compact hook, or settings values leak into child env.
 fn settings_env_reaches_the_session() {
-    use agentq_runtime::optimization::Intent;
     // This fixture supplies its own launcher identity; inherited TaskQ identity has a separate regression below.
     let task = std::env::var_os("TASKQ_TASK");
     unsafe { std::env::remove_var("TASKQ_TASK"); }
     let root = scratch("settings-env");
     let account = root.join("account");
     let claude = agent::runtime("claude").unwrap();
-    // An explicit child marker: `prepare` also reads the test process's own environment, which a worker sets.
+    // An explicit child marker: launcher attribution also reads the test process's own environment, which a worker sets.
     let mut l = fake_launch("claude", &root, "x", &[("CLAUDE_CONFIG_DIR", account.as_os_str()), ("AGENTQ_LAUNCHER", "child".as_ref())]);
     l.settings_env = vec![("FAKE_EXTRA".into(), "settings".into()), ("AGENTQ_LAUNCHER".into(), "caller".into())];
     l.compact_hook = Some("rules".into());
-    l.optimization = Intent::Off;
     let mut run = claude.launch(&l).unwrap();
     finish(claude, &mut run);
     let turn = record(&root, 1);
@@ -1285,7 +1283,6 @@ fn settings_env_reaches_the_session() {
 
     let mut bg = fake_launch("claude", &root, "reference", &[("COREQ_FAKE_BACKGROUND", "1".as_ref()), ("COREQ_FAKE_CONTROL", "1".as_ref()), ("FAKE_JOB_ROWS", "[]".as_ref()), ("CLAUDE_CONFIG_DIR", account.as_os_str()), ("AGENTQ_LAUNCHER", "child".as_ref())]);
     bg.mode = agent::Mode::Background;
-    bg.optimization = Intent::Off;
     bg.settings_env = vec![("FAKE_EXTRA".into(), "settings".into())];
     claude.launch(&bg).unwrap();
     let launched: Value = serde_json::from_str(&std::fs::read_to_string(root.join("background-command.json")).unwrap()).unwrap();
@@ -1339,8 +1336,8 @@ fn settings_env_preserves_subscription_policy() {
     teardown(root);
 }
 
-// #240 A1 / M12.5-M12.7: settings off must be observed before installed state and reach both native sessions.
-fn settings_env_off_precedes_state_read() {
+// M12.5-M12.7: caller environment stays native even with malformed retained optimizer state.
+fn caller_environment_does_not_read_optimizer_state() {
     for name in ["claude", "codex"] {
         let root = scratch(&format!("settings-off-{name}"));
         let home = root.join("home");
@@ -1358,7 +1355,6 @@ fn settings_env_off_precedes_state_read() {
             if invalid { std::fs::write(install.join("data/config.json"), "not JSON").unwrap(); }
             let mut run = runtime.launch(&l).unwrap();
             finish(runtime, &mut run);
-            assert_eq!((run.optimization().effective, run.optimization().reason), ("off", "optimization_retired"), "{name} invalid={invalid}");
             let turn = record(&root, 1);
             assert_eq!(turn["optimization"], if name == "claude" { "on" } else { "off" }, "caller environment stays unchanged");
             if name == "claude" { assert_eq!(settings_of(&turn["args"])["env"]["AGENTQ_OPTIMIZATION"], "off"); }
@@ -1797,8 +1793,8 @@ fn deadline_stops_a_turn_that_never_ends() {
 }
 
 // Chain: agentq.md M12.3-M12.6, task #182 A3/A5/A6: the JSON command runs and resumes both clients without an
-// optimizer installation; `off` reaches the child, the launcher marker prevents a second count, one observation per turn.
-// Risk: a plain turn needs the optimizer, writes the installation, or a launch counts twice or loses `off`.
+// optimizer installation; the launcher marker prevents a second count, one observation per turn.
+// Risk: a plain turn needs the optimizer, writes the installation, or a launch counts twice.
 fn json_turns_run_plain_without_the_optimizer() {
     // A worker that runs these tests may itself carry a launcher marker; the child would inherit it.
     // SAFETY: this harness runs its tests one at a time on the main thread.
@@ -1806,18 +1802,21 @@ fn json_turns_run_plain_without_the_optimizer() {
     let root = scratch("json");
     let install = root.join("no-install");
     let exe = std::env::current_exe().unwrap();
-    for (client, intent) in [("claude", "off"), ("codex", "inherit"), ("antigravity", "off")] {
+    for client in ["claude", "codex", "antigravity"] {
         let dir = root.join(client);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(dir.join("home")).unwrap();
         let mut request = json!({"client": client, "root": dir, "log": dir.join("turns.log"), "input": "brief", "timeout_s": 30,
             "command": [exe], "env": {"COREQ_FAKE_AGENT": client, "FAKE_EXTRA": "x"}, "home": dir.join("home"),
-            "optimization": intent, "store": dir.join("telemetry.db"),
+            "store": dir.join("telemetry.db"),
             "context": {"product": "fixtureq", "version": "1.0.0", "project": "other", "task": null, "route": "manager", "account": "default"}});
+        let mut retired = request.clone();
+        retired["optimization"] = json!("off");
+        assert_eq!(agentq_runtime::cli::turn(&retired.to_string(), Some(&install)), Err("optimization is retired; remove this field".into()));
+        assert!(!dir.join("turns.log").exists(), "retired input refuses before dispatch");
         let first = agentq_runtime::cli::turn(&request.to_string(), Some(&install)).unwrap();
         assert_eq!((first["outcome"].as_str(), first["text"].as_str(), first["recorded"].as_str()), (Some("ok"), Some("turn 1"), Some("ok")));
-        let expected = if intent == "off" { json!({"intent": "off", "effective": "off", "reason": "optimization_retired"}) } else { json!({"intent": "inherit", "effective": "off", "reason": "optimization_retired"}) };
-        assert_eq!(first["optimization"], expected);
+        assert!(first.get("optimization").is_none(), "the JSON report has no retired API");
         let seen = record(&dir, 1);
         assert_eq!((seen["optimization"].as_str(), seen["launcher"].as_str()), (None, Some("fixtureq")));
         // Recovery path: the next turn resumes the native session the report named.
@@ -2166,29 +2165,25 @@ fn external_consumer_builds_and_plans_turns() {
     assert!(text.contains("claude: -p --output-format stream-json") && text.contains("codex: exec --json"), "{text}");
 }
 
-// M12.6/A5: off survives Codex queue and app-server adaptation; native mode and caller policy stay intact.
-fn off_reaches_codex_queue_and_app_server() {
-    use agentq_runtime::optimization::Intent;
+// M12.6/A5: Codex queue and app-server adaptation inject no optimizer header; native mode and caller policy stay intact.
+fn native_codex_queue_and_app_server_need_no_optimizer() {
     let root = scratch("off-modes");
     std::fs::write(root.join("config.toml"), "model_provider = \"agentq\"\n").unwrap();
     let path = root.join("app.jsonl");
     append(&path, &[json!({"type":"session_meta","payload":{"id":"native-thread","cwd":root}})]);
     let mut q = fake_launch("codex", &root, "owned input reference", &[("COREQ_FAKE_CONTROL", "1".as_ref()), ("CODEX_HOME", root.as_os_str())]);
     q.mode = agent::Mode::Queue { transcript: path };
-    q.optimization = Intent::Off;
     agent::runtime("codex").unwrap().adopt("native-thread",&q,&[]).unwrap();
-    let run = agent::runtime("codex").unwrap().resume("native-thread", &q).unwrap();
-    assert_eq!(run.optimization().reason, "optimization_retired");
+    let _run = agent::runtime("codex").unwrap().resume("native-thread", &q).unwrap();
     let queue = control(&root);
-    assert!(!queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue lost launch off: {queue}");
+    assert!(!queue["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "queue injected optimizer header: {queue}");
     let app_root=root.join("app-account");std::fs::create_dir_all(&app_root).unwrap();
     let mut l = fake_launch("codex", &app_root, "owned request", &[("COREQ_FAKE_APP_SERVER", "1".as_ref()), ("AGENTQ_FAKE_ONE_TURN", "1".as_ref()), ("CODEX_HOME", app_root.as_os_str())]);
     l.log = app_root.join("private.log");
-    l.optimization = Intent::Off;
     l.deltas = true;
     let mut run = agent::runtime("codex").unwrap().launch(&l).unwrap();
     let args = serde_json::from_str::<Value>(&std::fs::read_to_string(app_root.join("app-transport.json")).unwrap()).unwrap()["args"].clone();
-    assert!(args[0] == "app-server" && !args.as_array().unwrap().iter().any(|s| s.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "app-server lost launch off: {args}");
+    assert!(args[0] == "app-server" && !args.as_array().unwrap().iter().any(|s| s.as_str().is_some_and(|s| s.contains("x-agentq-optimization"))), "app-server injected optimizer header: {args}");
     agent::runtime("codex").unwrap().cancel(&mut run).unwrap();
     teardown(root);
 }
@@ -2197,7 +2192,6 @@ fn off_reaches_codex_queue_and_app_server() {
 // one refuses by capability. Risk: a consumer reimplements a native parser or command because the trait lacks it.
 fn runtime_trait_exposes_native_seams() {
     use agent::{NativeSpec, Process};
-    use agentq_runtime::optimization::Intent;
     let root=scratch("native-seams");
     let (claude,codex)=(agent::runtime("claude").unwrap(),agent::runtime("codex").unwrap());
     let env=|extra:&[(&str,&str)]| std::iter::once(("COREQ_FAKE_AGENT","claude")).chain(extra.iter().copied()).map(|(k,v)|(k.into(),v.into())).collect::<Vec<_>>();
@@ -2250,12 +2244,6 @@ fn runtime_trait_exposes_native_seams() {
     assert_eq!(codex.session_transcript("t-1",Some(&home)),Some(rollout));
     assert_eq!(codex.session_transcript("t-2",Some(&home)),None);
     assert_eq!(claude.session_transcript(session,Some(&home)),None);
-
-    // prepare: retired intent leaves the native child unchanged and keeps launcher attribution.
-    let mut off=spec.clone();
-    assert_eq!(claude.prepare(Intent::Off,"fixtureq",&mut off,None).intent,Intent::Off);
-    assert!(!off.env.iter().any(|(k,_)|k=="AGENTQ_OPTIMIZATION"));
-    assert!(off.env.iter().any(|(k,v)|k=="AGENTQ_LAUNCHER"&&v=="fixtureq"));
 
     // background (Claude only): launch, list, validate and stop one job.
     let row=json!({"id":"c37eb75a","kind":"background","cwd":root,"sessionId":"native-session","state":"working","pid":42});

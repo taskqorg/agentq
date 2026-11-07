@@ -1,6 +1,6 @@
 # Protected owner-route handoff
 
-Historical evidence at the cited revisions; optimization behavior below is retired. Current decision: [optimization retirement](../../spec/OPTIMIZATION-RETIRED.md).
+Historical evidence at the cited revisions; optimization behavior below is retired. The included Rust module is also a maintained compile fixture; its launch call follows the current [runtime API](../../spec/RUNTIME.md#retired-runtime-api), without changing the wire or durable-operation recipe. Current decision: [optimization retirement](../../spec/OPTIMIZATION-RETIRED.md).
 
 This is the bounded source handoff requested by [PM note 6571952645](https://github.com/taskqorg/agentq/issues/199#issuecomment-6571952645). It advances independent review/publication of PR #200 while native A1/A3 remain unknown (M12.8, R12, TaskQ §7). Root performs native qualification after reviewed source publication. The worker does not invoke this route against a real host or remove `TASKQ_ATTEMPT`.
 
@@ -43,7 +43,7 @@ Include the reviewed module in the actual consumer. In the following Rust expres
    let receipt = server.verify(Instant::now() + Duration::from_secs(5))?;
    ```
 
-   Before calling the existing `launch_prepared`, the module rereads the checkpoint and exact request, rejects changed slot/key/request fields, and creates/syncs `launch-intent.json` containing that exact request. It passes only `Intent::Off`; it never forwards arbitrary environment. The exact adapter launch argv is `service app-server --action launch --request <contents of launch-request.json>`. Keep native stdin/stdout/stderr in the returned protected transport. Every send still requires fresh effective authority. The host independently enforces one dispatch per original slot.
+   Before calling the existing `launch_prepared`, the module rereads the checkpoint and exact request, rejects changed slot/key/request fields, and creates/syncs `launch-intent.json` containing that exact request. It passes only the recovered preparation and private log path; it never forwards arbitrary environment. The exact adapter launch argv is `service app-server --action launch --request <contents of launch-request.json>`. Keep native stdin/stdout/stderr in the returned protected transport. Every send still requires fresh effective authority. The host independently enforces one dispatch per original slot.
 
    Any launch error is uncertain. The intent file remains, so another call cannot retry dispatch, even if no native identity was observed. Do not remove or replace any checkpoint/intent, alter PID/boot/key, resume by launching again, or derive expected authority from that launch's receipt.
 

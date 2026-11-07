@@ -996,3 +996,9 @@ mod start_failure_tests {
         for secret in ["private-session","private-diagnostic","private-token","start_failure"] {assert!(!metadata.contains(secret));}
     }
 }
+
+/// Attribute runtime launches independently of installation or retired optimization.
+pub(crate) fn attribute(product: &str, spec: &mut Spec) {
+    let set = |k: &str| child_env(spec, k).is_some_and(|v| !v.is_empty());
+    if !set("TASKQ_TASK") && !set("AGENTQ_LAUNCHER") { spec.env.push(("AGENTQ_LAUNCHER".into(), product.into())); }
+}

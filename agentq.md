@@ -167,8 +167,8 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - **M12.3** A plain turn needs no service, engine, MCP server or installation. The library and `agentq agent turn` never change installation or native configuration; an explicit archive grant permits asynchronous private capture only.
   Callers keep grants, permissions, model, effort, input files, storage, process ownership, stop authority and UI.
 - **M12.4** Each finished turn appends exactly one attributable `agent.turn` observation to the caller's CoreQ store; recovery and repeated observation never count it twice. The child gets `AGENTQ_LAUNCHER` unless `TASKQ_TASK` or `AGENTQ_LAUNCHER` is set, so § 6 M6.9 holds.
-- **M12.5** Compatibility API `Intent::{Inherit,Off,On}` and optimization reports remain until TaskQ, PilotQ and Pipe adopt the retired feature. Every intent is a no-op reporting `off`, reason `optimization_retired`; no installation or native configuration is read.
-- **M12.6** A launch never edits global or client configuration, previously transmitted replay bytes, provider or model. Optimization intent adds no environment or provider-header override.
+- **M12.5** The runtime has no optimization intent, report, preparation method, environment constant or provider-header API. Launcher attribution remains independent; installation and integration lifecycle helpers remain available.
+- **M12.6** A launch never edits global or client configuration, previously transmitted replay bytes, provider or model. No optimizer environment or provider-header override is injected.
 - **M12.7** Native output is unchanged; a runtime failure stays a runtime failure.
 - **M12.8** Protected app-server launches optionally use a caller-trusted signed host adapter, existing grants and authenticated caller-owned permits; no TaskQ binary, command, slot service or certificate authority is required. Non-launching preparation binds the actual caller and existing authority.
   Launch revalidates preparation. Fresh readback binds project/profile, runtime/account/image, approver/revision, operation and native incarnation before any input. Unknown or changed authority refuses; uncertain work is observed, never replayed.
@@ -225,4 +225,4 @@ It follows the [specq release contract](https://github.com/taskqorg/specq/blob/m
 - [docs/spec/SERVICE.md](docs/spec/SERVICE.md): install layout, release artifacts, command registration, service processes, update, status, host tools and release observation.
 - [docs/spec/TELEMETRY.md](docs/spec/TELEMETRY.md): heartbeat attributes, model call mapping, resource probes and profiling.
 - [docs/spec/ARCHIVE.md](docs/spec/ARCHIVE.md): separate grants, native capture, scrubbed byte identity, checkpoints, exclusions and archive status.
-- [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md): agent runtime arguments, end detection, usage, limits, accounts, compatibility modes, the `agentq agent` JSON contract, optimization intent, consumer inventory and adoption boundaries.
+- [docs/spec/RUNTIME.md](docs/spec/RUNTIME.md): agent runtime arguments, end detection, usage, limits, accounts, compatibility modes, the `agentq agent` JSON contract, consumer inventory and adoption boundaries.

@@ -454,8 +454,7 @@ mod mac {
         }
         let mut spec=super::super::Spec{client:super::super::Client::Codex,root:p.root.clone(),session:"-".into(),resume:false,
             args:p.args.iter().map(Into::into).collect(),home:Some(PathBuf::from(p.authority["account_home"].as_str().ok_or("account home unknown")?)),env:vec![]};
-        let intent=crate::optimization::Intent::parse(&std::env::var("AGENTQ_OPTIMIZATION").unwrap_or_else(|_|"inherit".into())).ok_or("optimization intent unknown")?;
-        crate::optimization::prepare(intent,"protected-host",&mut spec,None);
+        crate::agent::attribute("protected-host",&mut spec);
         let mut cmd=super::super::app::app_server_command(cmd,&spec)?;
         cmd.stdin(Stdio::piped()).stdout(stdout).stderr(stderr);
         resources::within(install,resources::WAIT,|s|{external_permits::reserved(install,s,&r.permit,"codex")?;input_gate(s,key,r)})?;

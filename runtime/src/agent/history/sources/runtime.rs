@@ -1,7 +1,6 @@
 //! Explicit refusals preserve the single runtime trait for agents we only read.
 use super::*;
 use crate::agent::{self,Runtime,Descriptor,Run,Launch,Part,Failure,Cause,Account,Model,Window,Event,Accounts,State,Report,Observation,Check,Ready,Quota,NativeSpec,Process,BackgroundJob};
-use crate::optimization::{Intent,Optimization};
 use std::{ffi::{OsStr,OsString},process::{Command,Output},time::Duration};
 struct Reader {spec:&'static SourceSpec,descriptor:Descriptor}
 impl Reader {
@@ -44,7 +43,6 @@ impl Runtime for Reader {
     fn home(&self)->Option<PathBuf>{source_home(self.spec,None).ok()}
     fn session_transcript(&self,id:&str,home:Option<&Path>)->Option<PathBuf>{list(self.spec.name,home).ok()?.into_iter().find(|s|s.session==id || s.id==id).map(|s|s.path)}
     fn session_link(&self,_:&NativeSpec,_:Option<&str>)->Result<String,(Cause,Option<String>)>{Err((CAUSE,None))}
-    fn prepare(&self,intent:Intent,_:&str,_:&mut NativeSpec,_:Option<&Path>)->Optimization{Optimization{intent,effective:"off",reason:"history-only"}}
     fn native_arguments(&self,_:&NativeSpec)->Res<Vec<OsString>>{unavailable()}
     fn turn(&self,_:Command,_:&NativeSpec,_:&Path,_:&str,_:&Process)->Res<agent::Turn>{unavailable()}
     fn background_launch(&self,_:Command,_:&NativeSpec,_:&str,_:Duration)->Res<Result<Output,crate::process::Failure>>{unavailable()}

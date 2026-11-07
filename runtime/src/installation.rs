@@ -1,31 +1,6 @@
-//! Retired optimization compatibility API and installation lifecycle state (agentq.md M12.5).
-use crate::agent::{Client, Spec, child_env};
+//! Installation location and retained integration lifecycle state.
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-
-/// The caller's request for this launch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Intent { Inherit, Off, On }
-
-impl Intent {
-    pub fn parse(code: &str) -> Option<Intent> {
-        match code { "inherit" => Some(Intent::Inherit), "off" => Some(Intent::Off), "on" => Some(Intent::On), _ => None }
-    }
-    pub fn code(self) -> &'static str { match self { Intent::Inherit => "inherit", Intent::Off => "off", Intent::On => "on" } }
-}
-
-/// Intent plus the effective state (`on`, `off`, `unknown`) and its reason code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Optimization { pub intent: Intent, pub effective: &'static str, pub reason: &'static str }
-
-impl Optimization {
-    pub fn json(&self) -> Value { json!({"intent": self.intent.code(), "effective": self.effective, "reason": self.reason}) }
-}
-
-/// The child variable every compression adapter reads; `off` disables compression for that session (M12.7).
-pub const ENV: &str = "AGENTQ_OPTIMIZATION";
-/// The Codex provider header the loopback provider reads (agentq.md § 3 Codex adapter).
-pub const HEADER: &str = "x-agentq-optimization";
 
 /// The default installation (agentq.md § 5): `~/.local/share/agentq`, Windows `%LOCALAPPDATA%\agentq`.
 pub fn install_root() -> Option<PathBuf> {
@@ -78,33 +53,3 @@ pub fn state(data: &Path) -> Result<Value, String> {
     Ok(s)
 }
 
-/// Retired optimization intent remains source-compatible for pinned consumers.
-pub(crate) fn observe(intent: Intent, _client: Client, _install: Option<&Path>, _home: Option<&Path>) -> Optimization {
-    Optimization { intent, effective: "off", reason: "optimization_retired" }
-}
-
-/// Launcher attribution is independent of retired optimization.
-pub(crate) fn prepare(intent: Intent, product: &str, spec: &mut Spec, install: Option<&Path>) -> Optimization {
-    let set = |k: &str| child_env(spec, k).is_some_and(|v| !v.is_empty());
-    if !set("TASKQ_TASK") && !set("AGENTQ_LAUNCHER") { spec.env.push(("AGENTQ_LAUNCHER".into(), product.into())); }
-    observe(intent, spec.client, install, None)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    // M12.5-M12.7: old consumers retain their API without altering native launch arguments or configuration.
-    #[test]
-    fn retired_intents_do_not_change_native_launch() {
-        for intent in [Intent::Inherit, Intent::Off, Intent::On] {
-            let mut spec = Spec { client: Client::Codex, root: PathBuf::from("."), session: "-".into(), resume: false,
-                args: vec!["native".into()], home: None, env: vec![("TASKQ_TASK".into(), "7".into())] };
-            let before = spec.clone();
-            let state = prepare(intent, "fixture", &mut spec, Some(Path::new("/unreadable")));
-            assert_eq!((state.intent, state.effective, state.reason), (intent, "off", "optimization_retired"));
-            assert_eq!(spec.args, before.args);
-            assert_eq!(spec.env, before.env);
-            assert_eq!(Intent::parse(intent.code()), Some(intent));
-        }
-    }
-}

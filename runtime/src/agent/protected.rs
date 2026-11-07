@@ -1,6 +1,5 @@
 //! M12.8: optional host adapter; requests and receipts are match requirements, never authority.
 use super::*;
-use crate::optimization::{self, Intent, Optimization};
 use coreq::process::Identity;
 use super::app::AppServer;
 
@@ -147,9 +146,9 @@ impl ProtectedHost {
     }
 
     /// Persist checkpoint first. Errors retain the original operation; never retry native launch.
-    pub fn launch_prepared(&self, preparation: &ProtectedPreparation, intent: Intent, private_log: &Path) -> Res<ProtectedAppServer> {
+    pub fn launch_prepared(&self, preparation: &ProtectedPreparation, private_log: &Path) -> Res<ProtectedAppServer> {
         let preparation = self.recover_preparation(&preparation.checkpoint())?;
-        let mut server = self.launch(preparation.request.clone(), preparation.expected.clone(), intent, private_log)?;
+        let mut server = self.launch(preparation.request.clone(), preparation.expected.clone(), private_log)?;
         server.prepared = Some(preparation.prepared);
         Ok(server)
     }
@@ -163,16 +162,13 @@ impl ProtectedHost {
     }
 
     /// Persist the original operation before calling. Even an error is uncertain; never retry launch.
-    pub fn launch(&self, request: Value, expected: ProtectedIdentity, intent: Intent, private_log: &Path) -> Res<ProtectedAppServer> {
+    pub fn launch(&self, request: Value, expected: ProtectedIdentity, private_log: &Path) -> Res<ProtectedAppServer> {
         validate_expected(&expected)?;
-        let mut command = self.command("launch", &request)?;
+        let command = self.command("launch", &request)?;
         let owner = identity(std::process::id())?;
         if native(&permit(&request)["binding"])? != owner { return Err("protected slot belongs to another consumer incarnation".into()); }
-        // Inherited off wins, exactly as in ordinary runtime launches; only validated CoreQ metadata crosses the host.
-        let intent = if std::env::var_os(optimization::ENV).is_some_and(|v| v == "off") { Intent::Off } else { intent };
-        command.env(optimization::ENV, intent.code());
         let server = AppServer::spawn(command, private_log, &super::Process::default())?;
-        Ok(ProtectedAppServer { host: self.clone(), request, expected, server, binding: None, fault: None, intent, prepared: None })
+        Ok(ProtectedAppServer { host: self.clone(), request, expected, server, binding: None, fault: None, prepared: None })
     }
 }
 
@@ -184,17 +180,12 @@ pub struct ProtectedAppServer {
     server: AppServer,
     binding: Option<Value>,
     fault: Option<String>,
-    intent: Intent,
     prepared: Option<Value>,
 }
 
 impl ProtectedAppServer {
     /// Adapter frontend PID; legacy adapters also supervise. Scope/native identities come from readback.
     pub fn id(&self) -> u32 { self.server.id() }
-
-    pub fn optimization(&self) -> Optimization {
-        optimization::observe(self.intent, Client::Codex, optimization::install_root().as_deref(), Some(&self.expected.account_home))
-    }
 
     /// No generating request is needed to verify authority. Failed readback never clears an earlier binding.
     pub fn verify(&mut self, until: Instant) -> Res<Value> {

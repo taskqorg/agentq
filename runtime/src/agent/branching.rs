@@ -113,7 +113,7 @@ pub(super) fn fork(adapter:&Adapter,run:&mut Run,through:Option<&Step>,launch:&L
     if launch.mcp.is_some() || launch.instructions.is_some() || launch.effort.is_some() {return Err(refuse("fork-condition-unsupported"));}
     let parent=app.session.session().ok_or("branch-session-unknown")?.to_string();
     let me=table(adapter.client);
-    let (spec,_)=me.spec(launch,parent.clone(),true)?;
+    let spec=me.spec(launch,parent.clone(),true)?;
     let owner=app.writer.as_ref().ok_or("control-owner-required")?.clone();
     owner.branch_scope(&launch.session_store,&spec)?;
     app.session.branch_scope(&spec)?;
@@ -201,7 +201,7 @@ mod tests {
             let adapter=registry::builtin(Client(descriptor.name));
             let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
             let app=App {transport:None,session:AppSession::new(&spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,capture:None};
-            let mut run=adapter.run(Body::App(Box::new(app)),0,Optimization {intent:Intent::Off,effective:"off",reason:"optimization_retired"},&launch);
+            let mut run=adapter.run(Body::App(Box::new(app)),0,&launch);
             let supported=adapter.client==Client::Codex;
             assert_eq!(adapter.descriptor.has("fork"),supported);assert_eq!(adapter.descriptor.has("rewind"),supported);
             assert!(matches!(adapter.fork(&mut run,None,&launch),Err(Failure::Refused(Cause(reason))) if reason==if supported {"branch-transport-unsupported"}else{"fork-unsupported"}));

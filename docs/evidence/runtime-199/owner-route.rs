@@ -1,6 +1,6 @@
 //! M12.8: include in the actual slot owner's Mac consumer after reviewed publication.
 //! No slot admission/release, input, resolver, retry loop or worker-environment override.
-use agentq_runtime::{agent::{ProtectedAppServer, ProtectedHost, ProtectedPreparation}, optimization::Intent};
+use agentq_runtime::agent::{ProtectedAppServer, ProtectedHost, ProtectedPreparation};
 use serde_json::Value;
 use std::{fs::{self, OpenOptions}, io::Write, path::Path, time::{Duration, Instant}};
 
@@ -50,5 +50,5 @@ pub fn recover(host: &ProtectedHost, directory: &Path) -> Result<ProtectedPrepar
 pub fn launch(host: &ProtectedHost, directory: &Path, private_log: &Path) -> Result<ProtectedAppServer> {
     let preparation = recover(host, directory)?;
     save_once(&directory.join("launch-intent.json"), preparation.request())?;
-    host.launch_prepared(&preparation, Intent::Off, private_log)
+    host.launch_prepared(&preparation, private_log)
 }

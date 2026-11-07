@@ -1,7 +1,6 @@
 //! `agentq agent turn` (agentq.md § 12, docs/spec/RUNTIME.md § JSON command): one turn from a JSON request, for
 //! callers that are not Rust. Same `Spec`, `run` and `Report` as the library.
 use crate::agent::{self, Client, Context, Report, Spec};
-use crate::optimization::{self, Intent};
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -69,10 +68,11 @@ fn preflight_launch(v: &Value) -> Res<agent::Launch> {
 }
 
 /// Run one turn from `request` and return its JSON report. A request error is `Err`; a failed turn is a report.
-/// `install` is the AgentQ installation the optimization state is read from (None: the default one).
+/// `install` selects the archive installation (None: the default one).
 pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let v: Value = serde_json::from_str(request).map_err(|e| format!("invalid request: {e}"))?;
     if !v.is_object() { return Err("request requires a JSON object".into()); }
+    if v.get("optimization").is_some() { return Err("optimization is retired; remove this field".into()); }
     let client = Client::parse(text(&v, "client")?).ok_or("client requires claude, codex or antigravity")?;
     let root = path(&v, "root")?.ok_or("root requires an absolute path")?;
     let log = path(&v, "log")?.ok_or("log requires an absolute path")?;
@@ -83,7 +83,6 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
         Value::Object(m) => m.iter().map(|(k, s)| s.as_str().map(|s| (OsString::from(k), OsString::from(s))).ok_or("env values require strings")).collect::<Result<_, _>>()?,
         _ => return Err("env requires an object of strings".into()),
     };
-    let intent = match &v["optimization"] { Value::Null => Intent::Inherit, Value::String(s) => Intent::parse(s).ok_or("optimization requires inherit, off or on")?, _ => return Err("optimization requires inherit, off or on".into()) };
     let input = v["input"].as_str().ok_or("input requires a string")?;
     let deadline = match &v["timeout_s"] { Value::Null => None, t => Some(Instant::now() + Duration::from_secs(t.as_u64().filter(|s| (1..=86_400).contains(s)).ok_or("timeout_s requires 1-86400")?)) };
     let c = &v["context"];
@@ -98,7 +97,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     };
     let mut spec = Spec { client, root, session, resume, args: strings(&v, "args")?.into_iter().map(OsString::from).collect(), home: path(&v, "home")?, env };
     agent::registry::validate_native_args(client,&spec.args)?;
-    let optimization = optimization::prepare(intent, ctx.product, &mut spec, install.map(Path::to_path_buf).or_else(optimization::install_root).as_deref());
+    agent::attribute(ctx.product, &mut spec);
     let mut archive=crate::archive::Handle::legacy(&spec,&log,install,&ctx);
     let launch=preflight_launch(&v)?;
     if launch.policy!=agent::Policy::default() {return Err("native JSON turn arguments require the default policy; use Runtime::launch for abstract policies".into());}
@@ -118,7 +117,6 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     let mut out = report_json(&report);
     out["readiness"]=json!(readiness);
     out["recorded"] = match (&store, &report.recorded) { (None, _) => json!("not-requested"), (Some(_), Ok(())) => json!("ok"), (Some(_), Err(e)) => json!(e) };
-    out["optimization"] = optimization.json();
     Ok(out)
 }
 

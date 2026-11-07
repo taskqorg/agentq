@@ -1,6 +1,6 @@
 # Runtime changelog
 
-Entries describe behavior at their released revisions. Current AgentQ identity and support: [the worker-layer contract](../agentq.md); historical optimization intent remains a compatible no-op under [the retirement decision](../docs/spec/OPTIMIZATION-RETIRED.md).
+Entries describe behavior at their released revisions. Current AgentQ identity and support: [the worker-layer contract](../agentq.md); retired optimization APIs are removed under [the retirement decision](../docs/spec/OPTIMIZATION-RETIRED.md).
 
 ## 0.15.0
 

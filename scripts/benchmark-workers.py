@@ -217,38 +217,7 @@ def evaluate(task, reports, root, before=None, snapshots=None):
 
 
 def run_turn(binary, client, opt, prompt, root, args, mode, task, session=None):
-    if mode == "live" and client == "antigravity" and "--dangerously-skip-permissions" not in args:
-        args = [*args, "--dangerously-skip-permissions"]
-    request = {"client": client, "root": str(root), "log": str(root / "turn.log"), "input": prompt,
-               "session": session, "resume": bool(session), "optimization": opt, "args": args,
-               "timeout_s": 120, "context": {"product": "worker-benchmark", "version": "1"}}
-    if mode == "smoke":
-        request.update(command=[sys.executable, str(Path(__file__).resolve()), "--fake-client", client],
-                       home=str(root.parent / "home"), env={"BENCH_TASK": task, "BENCH_MEMORY": str(root.parent / "home/memory"), "COREQ_FAKE_AGENT": client, "HOME": str(root / "home"), "USERPROFILE": str(root / "home")})
-        # The synthetic client home is empty; offline Cargo still needs the caller's installed toolchain.
-        for key, folder in (("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")):
-            request["env"][key] = os.environ.get(key, str(Path.home() / folder))
-    environment = os.environ.copy()
-    if mode == "live":
-        environment["PATH"] = environment.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")
-    if mode == "smoke":
-        environment.update(HOME=str(root / "home"), USERPROFILE=str(root / "home"), LOCALAPPDATA=str(root / "home"), APPDATA=str(root / "home"))
-    start = time.monotonic()
-    try:
-        proc = subprocess.run([str(binary), "agent", "turn"], input=json.dumps(request), text=True, capture_output=True, timeout=135, cwd=ROOT, env=environment)
-        if proc.returncode:
-            report = {"outcome": "unavailable", "error": "runtime-command-failed", "detail": proc.stderr[-1000:].replace(str(root), "<fixture>")}
-        else:
-            report = json.loads(proc.stdout)
-            if not isinstance(report, dict) or report.get("schema") != 1:
-                raise ValueError("invalid runtime report")
-    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
-        report = {"outcome": "unknown", "error": type(error).__name__, "detail": "No resubmission; native execution may still be active."}
-    # Do not persist fake usage as observed native data.
-    if mode == "smoke":
-        report["usage"] = {**dict.fromkeys((*COUNTERS, "calls", "model")), "unknown": "synthetic-protocol-double"}
-    report["wall_ms"] = round((time.monotonic() - start) * 1000)
-    return report
+    raise RuntimeError("Optimization benchmarking is retired; retained results remain readable")
 
 
 def correlate_compression(payload, client, sessions):
@@ -393,22 +362,15 @@ def selftest():
             pass
         else:
             raise AssertionError("a substituted linter was accepted")
-    # #192 / owner steer: only live agy fixtures receive the headless permission flag.
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        for client, mode, args, expected in (
-            ("antigravity", "live", [], ["--dangerously-skip-permissions"]),
-            ("antigravity", "live", ["--model=pro", "--dangerously-skip-permissions"], ["--model=pro", "--dangerously-skip-permissions"]),
-            ("antigravity", "smoke", [], []),
-            ("codex", "live", [], []),
-        ):
-            with mock_patch.object(subprocess, "run") as capture:
-                capture.return_value.returncode = 0
-                capture.return_value.stdout = '{"schema":1}'
-                run_turn(Path("invented-binary"), client, "off", "invented prompt", root, args, mode, "T1-context-navigation")
-                assert json.loads(capture.call_args.kwargs["input"])["args"] == expected
-                if mode == "live":
-                    assert Path(capture.call_args.kwargs["env"]["PATH"].split(os.pathsep)[-1]) == Path.home() / ".local/bin"
+    # Retired runtime API: no legacy benchmark request may dispatch a native or synthetic turn.
+    with mock_patch.object(subprocess, "run") as capture:
+        try:
+            run_turn(None, None, None, None, None, None, None, None)
+        except RuntimeError as error:
+            assert "Optimization benchmarking is retired" in str(error)
+        else:
+            raise AssertionError("retired benchmark dispatched")
+        capture.assert_not_called()
     # R13/P2: absent usage, model failures, and smoke must never become successful savings.
     assert total([1, None]) is None and total([]) is None and total([0, 2]) == 2
     cell = {"source": "smoke"}

@@ -3,7 +3,7 @@ use crate::{executor, onboard, profiles};
 use serde_json::{Value, json};
 use std::path::Path;
 
-pub use agentq_runtime::optimization::{AGENTS, config, state};
+pub use agentq_runtime::installation::{AGENTS, config, state};
 
 /// Private state may carry managed values. The enclosing directory is private before the atomic write.
 pub fn save(data: &Path, name: &str, value: &Value) -> Result<(), String> {

@@ -116,7 +116,7 @@ impl Handle {
         let install = l
             .install
             .clone()
-            .or_else(crate::optimization::install_root)
+            .or_else(crate::installation::install_root)
             .unwrap_or_default();
         let mut manifest = json!({"project":"other","task":null,"attempt":null,"actor":"worker","entry":l.product,
             "runtime":runtime,"cli_version":null,"model":l.model,"effort":l.effort,
@@ -290,7 +290,7 @@ pub(crate) fn stream(path: &Path, bytes: &[u8]) {
 pub(crate) fn stream_path(install: Option<&Path>, log: &Path) -> PathBuf {
     install
         .map(Path::to_path_buf)
-        .or_else(crate::optimization::install_root)
+        .or_else(crate::installation::install_root)
         .unwrap_or_default()
         .join("data/archive/streams")
         .join(format!(

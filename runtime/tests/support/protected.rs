@@ -1,7 +1,6 @@
 //! M12.8 / #186 A3-A7: portable adapter doubles test the input gate, never Mac containment.
 use super::*;
 use agent::{ProtectedHost, ProtectedIdentity};
-use agentq_runtime::optimization::Intent;
 #[path="../../../docs/evidence/runtime-199/owner-route.rs"]
 mod owner_route;
 
@@ -147,7 +146,7 @@ fn native_scope(r:&Value,root:&Path,receipt:&Path) {
                 seen["launch"]["scope"]=json!({"binding":{"boot":r["slot"]["binding"]["boot"],"coalition":123},"dispatch_ack":true});
                 save(receipt,&seen);
             }
-            save(&root.join("intent.json"),&json!(std::env::var("AGENTQ_OPTIMIZATION").unwrap()));
+            save(&root.join("intent.json"),&json!(std::env::var("AGENTQ_OPTIMIZATION").ok()));
             let _=child.wait();
 }
 
@@ -163,7 +162,7 @@ fn frontend_scenario() {
     let r=json!({"schema":"taskq.app-server/1","slot":{"binding":{"schema":"taskq.slots/1","caller":"invented-consumer","op_id":"job-scope",
         "root":root,"runtime":"codex","pid":owner.pid,"started":owner.started,"boot":1,"expires_at":9999999999u64},"key":"a".repeat(64)},"policy_revision":29,"account":"default"});
     let e=ProtectedIdentity{profile_sha256:"b".repeat(64),executable:exe.clone(),executable_sha256:digest(&exe),account_home:home,approver:"invented-operator".into()};
-    let mut server=host.launch(r,e,Intent::Off,&root.join("private.log")).unwrap();
+    let mut server=host.launch(r,e,&root.join("private.log")).unwrap();
     let deadline=until();while !root.join("intent.json").exists() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     let result=server.verify(until());server.cancel(until()).unwrap();
     let deadline=until();while server.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
@@ -223,13 +222,13 @@ fn prepared_operation(modern:bool) {
     // The host, not a second AgentQ resolver, refuses drift between prepare and actual dispatch.
     let mut drift=expected.clone();drift["profile_sha256"]=json!("c".repeat(64));save(&root.join("expected.json"),&drift);
     assert!(refused(host.prepare(&slot,until())),"never replace stale preparation");
-    let mut drifted=host.launch_prepared(&recovered,Intent::Off,&root.join("refused.log")).unwrap();
+    let mut drifted=host.launch_prepared(&recovered,&root.join("refused.log")).unwrap();
     let deadline=until();while drifted.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     assert!(!root.join("request.json").exists(),"drift refusal precedes intent/native launch");drop(drifted);
     save(&root.join("expected.json"),&expected);
     let mut server=if modern {
         save(&handoff.join("launch-intent.json"),recovered.request());
-        host.launch_prepared(&recovered,Intent::Off,&root.join("private.log")).unwrap()
+        host.launch_prepared(&recovered,&root.join("private.log")).unwrap()
     }else{owner_route::launch(&host,&handoff,&root.join("private.log")).unwrap()};
     if !modern {assert!(owner_route::launch(&host,&handoff,&root.join("duplicate.log")).is_err(),"intent consumes dispatch before any retry");}
     let deadline=until();while !root.join("intent.json").exists() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
@@ -307,15 +306,15 @@ fn launch_scenario() {
     for pointer in ["/grant","/env","/executable","/slot/grant","/slot/binding/profile"] {
         let mut changed=r.clone();let (parent,key)=pointer.rsplit_once('/').unwrap();
         changed.pointer_mut(parent).unwrap()[key]=json!("forged-full");
-        assert!(host.launch(changed,e.clone(),Intent::Off,&root.join("private.log")).is_err(),"{pointer}");
+        assert!(host.launch(changed,e.clone(),&root.join("private.log")).is_err(),"{pointer}");
     }
     let mut stale=r.clone();stale["slot"]["binding"]["started"]=json!("stale-incarnation");
-    assert!(host.launch(stale,e.clone(),Intent::Off,&root.join("private.log")).is_err());
+    assert!(host.launch(stale,e.clone(),&root.join("private.log")).is_err());
     assert!(!root.join("request.json").exists(),"refusal has no native effects");
-    let mut server=host.launch(r.clone(),e,Intent::Off,&root.join("private.log")).unwrap();
+    let mut server=host.launch(r.clone(),e,&root.join("private.log")).unwrap();
     let deadline=until();
     while !root.join("intent.json").exists() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
-    assert_eq!(read(&root.join("intent.json")),"off");assert_eq!(server.optimization().effective,"off");
+    assert_eq!(read(&root.join("intent.json")),json!(std::env::var("AGENTQ_OPTIMIZATION").ok()),"the protected transport injects no optimizer variable");
     let path=root.join("receipt.json");let good=read(&path);
     let message=json!({"id":1,"method":"initialize","params":{}});
     // Each path is a distinct trust/identity/refusal failure; none may reach native stdin.
@@ -370,7 +369,7 @@ fn launch_scenario() {
     let checkpoint=codex.checkpoint(&run).unwrap();codex.recover(&checkpoint,&l).unwrap().record(&context,&store).unwrap().recorded.unwrap();
     assert_eq!(observations(&store).len(),1,"one usage observation across recovery");drop(store);
     let mut duplicate=host.launch(r.clone(),ProtectedIdentity{profile_sha256:"b".repeat(64),executable:exe.clone(),executable_sha256:digest(&exe),
-        account_home:root.join("account"),approver:"invented-operator".into()},Intent::Off,&root.join("duplicate.log")).unwrap();
+        account_home:root.join("account"),approver:"invented-operator".into()},&root.join("duplicate.log")).unwrap();
     let deadline=until();while duplicate.poll().unwrap().is_none() {assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
     assert!(refused(duplicate.send(&message,until())),"consumed operation cannot launch again even with a copied receipt");drop(duplicate);
     // A valid-looking new generation must fence the already-bound transport permanently.
