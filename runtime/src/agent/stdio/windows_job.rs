@@ -46,6 +46,8 @@ fn check_parent(pid:u32,created:u64,parent:&Frozen,basic:&ProcessBasic,returned:
         let query_valid=status>=0 && size_ok;
         let observed_pid=if query_valid {basic.pid.to_string()}else{"null".into()};
         let observed_parent=if query_valid {basic.parent.to_string()}else{"null".into()};
+        let pid_ok=if query_valid {pid_ok.to_string()}else{"null".into()};
+        let parent_ok=if query_valid {parent_ok.to_string()}else{"null".into()};
         return Err(format!("native job {operation}; phase=attach requested_rights={DESCENDANT_ACCESS} candidate_pid={pid} candidate_creation={created} expected_parent_pid={} expected_parent_creation={} observed_pid={observed_pid} observed_parent_pid={observed_parent} query_valid={query_valid} query_status={status} query_returned={returned} query_expected={} parent_wait={parent_wait} size_ok={size_ok} pid_ok={pid_ok} parent_ok={parent_ok} creation_ok={creation_ok} parent_live={parent_live}",parent.pid,parent.created,std::mem::size_of::<ProcessBasic>()));
     }
     Ok(())
@@ -144,14 +146,16 @@ impl Job {
             (parent.pid,parent.created,size,0,u32::MAX,"parent_live=false"),
         ];
         let errors:Vec<_>=failures.iter().map(|&(pid,created,size,status,wait,_)|check_parent(pid,created,&parent,&basic,size,status,wait).unwrap_err()).collect();
-        basic.parent=0;
+        basic.pid=0;basic.parent=0;
+        let invalid_buffers:Vec<_>=[(-1,size),(0,0)].iter().map(|&(status,returned)|check_parent(parent.pid,parent.created,&parent,&basic,returned,status,258).unwrap_err()).collect();
+        basic.pid=parent.pid as usize;basic.parent=0;
         let wrong_parent=check_parent(parent.pid,parent.created,&parent,&basic,size,0,258).unwrap_err();
         let denied=open_error(Some(5),parent.pid,&parent);let unknown=open_error(None,parent.pid,&parent);
         drop(parent);child.wait().unwrap();
         assert!(wrong_parent.contains("parent_ok=false"));
         for field in ["phase=attach","os_code=5","requested_rights=1051905","candidate_pid=","expected_parent_creation=","parent_wait=258"] {assert!(denied.contains(field),"{denied}");}
         assert!(unknown.contains("os_code=null"));
-        for error in &errors[..2] {assert!(error.contains("query_valid=false") && error.contains("observed_pid=null observed_parent_pid=null"),"{error}");}
+        for error in errors[..2].iter().chain(&invalid_buffers) {assert!(error.contains("query_valid=false") && error.contains("observed_pid=null observed_parent_pid=null") && error.contains("pid_ok=null parent_ok=null"),"{error}");}
         for (error,case) in errors.iter().zip(failures) {assert!(error.contains(case.5),"{error}");}
     }
     // A stale snapshot names an owned parent, but its PID now resolves to our unrelated child.
