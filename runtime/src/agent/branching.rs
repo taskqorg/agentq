@@ -44,9 +44,10 @@ impl App {
         let result:Res<Value>=(|| {
             self.transport.as_mut().ok_or("branch-transport-ended")?.send_until(&request,until)?;
             loop {
-                let message=match self.transport.as_mut() {Some(Transport::Plain(s))=>s.wait(until)?,_=>return Err("branch-transport-unsupported".into())};
+                let frame=match self.transport.as_mut() {Some(Transport::Plain(s))=>s.wait_frame(until)?,_=>return Err("branch-transport-unsupported".into())};
+                let message=frame.value.clone();
                 let replied=message["id"]==request["id"] && message.get("method").is_none();
-                self.observe(message.clone(),until)?;
+                self.observe(frame,until)?;
                 if replied {return message.get("result").filter(|r|r.is_object()).cloned().ok_or("branch-reply-unknown".into());}
             }
         })();
@@ -199,7 +200,7 @@ mod tests {
             let Some(descriptor)=entry.descriptor() else {continue;};
             let adapter=registry::builtin(Client(descriptor.name));
             let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
-            let app=App {transport:None,session:AppSession::new(&spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native};
+            let app=App {transport:None,session:AppSession::new(&spec).unwrap(),pending:vec![],model:None,closed:None,owned:false,requests:vec![],effort:None,control:None,journal:None,writer:None,cancelling:false,approval:Approval::Native,capture:None};
             let mut run=adapter.run(Body::App(Box::new(app)),0,Optimization {intent:Intent::Off,effective:"off",reason:"optimization_retired"},&launch);
             let supported=adapter.client==Client::Codex;
             assert_eq!(adapter.descriptor.has("fork"),supported);assert_eq!(adapter.descriptor.has("rewind"),supported);
