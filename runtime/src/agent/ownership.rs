@@ -41,9 +41,10 @@ impl SessionStore {
             if let Some(row)=read(&pending)? {
                 if row["schema"]!="agentq-owner/2" || !row["runtime"].is_string() || !row["root"].is_string() || !(row["home"].is_null() || row["home"].is_string()) {return Err("session-owner-unknown: pending binding unreadable".into());}
                 if ["runtime","root","home"].iter().any(|k|row[*k]!=expected[*k]) {continue;}
+                let _pending=lock(&pending.with_extension("lock")).map_err(|e|format!("session-owner-unknown: pending admission: {e}"))?;
+                let row=read(&pending)?.ok_or("session-owner-unknown: pending record disappeared")?;
                 scope(&row,spec)?;
                 if stopped(&root,&row)? {return Err("session-owner-unknown: unresolved native stop".into());}
-                let _pending=lock(&pending.with_extension("lock")).map_err(|e|format!("session-owner-unknown: pending admission: {e}"))?;
                 require_scope_absent(&root,&row)?;
                 if process(&row["native"])?.map(|n|n.live()).transpose()?.unwrap_or(false) {
                     return Err("session-owner-unknown: pending native session must be bound before adoption".into());
@@ -403,6 +404,38 @@ fn idle(row:&Value)->Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn adoption_uses_the_locked_pending_row_and_preserves_current_writer_evidence() {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        let root=crate::scratch("adopt-locked-pending");let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));let owner=store.acquire(&spec,true,None,Lifetime::Recoverable).unwrap();
+        let file=owner.0.lock().unwrap().path.clone();let prepared=std::fs::read(&file).unwrap();drop(owner);assert!(!file.exists());
+        let mut current:Value=serde_json::from_slice(&prepared).unwrap();current["phase"]=json!("submitted");current["native"]=json!(NativeProcess::read(std::process::id()).unwrap().unwrap());
+        let expected=serde_json::to_vec(&current).unwrap();let name=std::ffi::CString::new(file.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe {libc::mkfifo(name.as_ptr(),0o600)},0);
+        let writer_file=file.clone();let bytes=expected.clone();
+        let writer=std::thread::spawn(move|| {
+            let guard=lock(&writer_file.with_extension("lock")).unwrap();let mut fifo=File::options().write(true).open(&writer_file).unwrap();
+            fifo.write_all(&prepared).unwrap();fifo.flush().unwrap();std::fs::remove_file(&writer_file).unwrap();std::fs::write(&writer_file,bytes).unwrap();drop(guard);drop(fifo);
+        });
+        let result=store.adopt(&spec,"target",&[]);writer.join().unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(),expected);assert!(!path(&store.path,"codex","target").exists(),"pre-lock sample must not write target authority");
+        assert!(result.unwrap_err().contains("pending native session must be bound"));std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adoption_accepts_prepared_non_native_rows_but_refuses_submitted_live_rows() {
+        let root=crate::scratch("adopt-pending-states");let spec=Spec {client:Client::Codex,root:root.clone(),session:"-".into(),resume:false,args:vec![],env:vec![],home:Some(root.clone())};
+        let store=SessionStore::new(root.join("owners"));let owner=store.acquire(&spec,true,None,Lifetime::Recoverable).unwrap();
+        let file=owner.0.lock().unwrap().path.clone();let mut row=owner.0.lock().unwrap().row.clone();drop(owner);
+        save(&file,&row).unwrap();assert_eq!(store.adopt(&spec,"prepared-target",&[]).unwrap().state,"adopted");
+        row["phase"]=json!("submitted");row["native"]=json!(NativeProcess::read(std::process::id()).unwrap().unwrap());save(&file,&row).unwrap();
+        assert!(store.adopt(&spec,"live-target",&[]).unwrap_err().contains("pending native session must be bound"));
+        assert_eq!(read(&file).unwrap(),Some(row));assert!(!path(&store.path,"codex","live-target").exists());std::fs::remove_dir_all(root).unwrap();
+    }
+
     // A retained lock is not evidence that the durable authority was not replaced or damaged.
     #[test]
     fn cached_owner_transitions_never_restore_changed_missing_or_corrupt_rows() {
