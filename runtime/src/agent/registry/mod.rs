@@ -283,7 +283,7 @@ mod tests {
             let readiness=runtime.preflight(&blocked,&Repair::default());
             assert!(readiness.checks.iter().any(|c|c.check=="account" && c.state=="blocked"));
             assert!(runtime.launch(&blocked).err().unwrap().contains("account-home-missing"));
-            let mut run=runtime.launch(&l).unwrap();
+            let mut run=runtime.launch(&l).unwrap_or_else(|e|panic!("{name}: launch: {e}"));
             let native=runtime.session_id(&run).unwrap();
             assert_eq!(run.owner().unwrap().checkpoint().unwrap()["session"],native,"{name}: owner binds before prompt");
             assert!(runtime.resume(&native,&l).err().unwrap().starts_with("session-busy"),"{name}: one admitted writer");
@@ -300,7 +300,7 @@ mod tests {
             assert!(events.iter().any(|e|matches!(e,Event::ToolStart{..})),"{name}");
             assert!(events.iter().any(|e|matches!(e,Event::ToolEnd{..})),"{name}");
             let session=runtime.session_id(&run).unwrap();l.input="wait".into();
-            let mut resumed=runtime.resume(&session,&l).unwrap();
+            let mut resumed=runtime.resume(&session,&l).unwrap_or_else(|e|panic!("{name}: resume: {e}"));
             if runtime.ops.rpc.is_some() {
                 while !runtime.progress(&mut resumed).unwrap().iter().any(|e|matches!(e,Event::Metadata{kind,..} if kind=="agent_end")) {assert!(Instant::now()<l.deadline.unwrap());std::thread::yield_now();}
                 assert_eq!(runtime.poll(&mut resumed).unwrap(),State::Running,"agent_end is not settlement");
