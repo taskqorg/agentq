@@ -37,9 +37,10 @@ mod platform {
     extern "C" fn stop_group(_:i32) {unsafe {libc::kill(-libc::getpgrp(),libc::SIGKILL);libc::_exit(1)}}
 
     // Only async-signal-safe calls run between fork and exec; no Rust allocator, locks or inherited report pipes.
-    unsafe fn guardian(owner:i32,native:u32,report:i32,policy:Lifetime,max_fd:i32)->! {unsafe {
+    unsafe fn guardian(owner:OwnerWatch,native:u32,report:i32,policy:Lifetime,max_fd:i32)->! {unsafe {
+        let owner=match owner.open() {Ok(fd)=>fd,Err(_)=>{if policy==Lifetime::StopWithOwner {stop_group(0);}libc::_exit(1)}};
         let monitor=match watch(native) {Ok(fd)=>fd,Err(_)=>{if policy==Lifetime::StopWithOwner {stop_group(0);}libc::_exit(0)}};
-        let a=libc::fcntl(owner,libc::F_DUPFD_CLOEXEC,6);
+        let a=libc::fcntl(owner.as_raw_fd(),libc::F_DUPFD_CLOEXEC,6);
         let b=libc::fcntl(monitor.as_raw_fd(),libc::F_DUPFD_CLOEXEC,6);
         let c=libc::fcntl(report,libc::F_DUPFD_CLOEXEC,6);
         if a<0 || b<0 || c<0 {libc::_exit(1);}
@@ -70,17 +71,42 @@ mod platform {
         }
     }}
 
-    struct Pipes {read:File,write:File,report:File,send:File}
-    pub struct Setup {pipes:Mutex<Option<Pipes>>,policy:Lifetime,max_fd:i32}
+    #[derive(Clone,Copy)]
+    struct OwnerWatch {pid:u32,fd:i32,started:[u64;2]}
+    #[cfg(target_os="macos")]
+    fn creation(pid:u32)->std::io::Result<[u64;2]> {
+        let mut info:libc::proc_bsdinfo=unsafe {std::mem::zeroed()};let size=std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        if unsafe {libc::proc_pidinfo(pid as i32,libc::PROC_PIDTBSDINFO,0,(&mut info as *mut libc::proc_bsdinfo).cast(),size)}!=size {return Err(std::io::Error::last_os_error());}
+        Ok([info.pbi_start_tvsec,info.pbi_start_tvusec])
+    }
+    impl OwnerWatch {
+        fn open(self)->std::io::Result<OwnedFd> {
+            #[cfg(target_os="linux")] {
+                let _=(self.pid,self.started);let fd=unsafe {libc::fcntl(self.fd,libc::F_DUPFD_CLOEXEC,6)};
+                if fd<0 {Err(std::io::Error::last_os_error())} else {Ok(unsafe {OwnedFd::from_raw_fd(fd)})}
+            }
+            #[cfg(target_os="macos")] {
+                let _=self.fd;let monitor=watch(self.pid)?;
+                if creation(self.pid)?!=self.started {return Err(std::io::Error::from_raw_os_error(libc::ESRCH));}Ok(monitor)
+            }
+        }
+    }
+    struct Pipes {report:File,send:File}
+    pub struct Setup {pipes:Mutex<Option<Pipes>>,policy:Lifetime,max_fd:i32,owner:OwnerWatch,_monitor:Option<OwnedFd>}
     impl Setup {
         pub fn new(policy:Lifetime)->Res<Arc<Self>> {
-            let (read,write)=pipe()?;let (report,send)=pipe()?;
+            let (report,send)=pipe()?;let pid=std::process::id();
+            #[cfg(target_os="linux")] let monitor=Some(watch(pid).map_err(|e|e.to_string())?);
+            #[cfg(target_os="macos")] let monitor:Option<OwnedFd>=None;
+            #[cfg(target_os="linux")] let started=[0;2];
+            #[cfg(target_os="macos")] let started=creation(pid).map_err(|e|e.to_string())?;
+            let owner=OwnerWatch {pid,fd:monitor.as_ref().map_or(-1,AsRawFd::as_raw_fd),started};
             let max_fd=unsafe {libc::sysconf(libc::_SC_OPEN_MAX)};if max_fd<0 || max_fd>i32::MAX as _ {return Err("lifetime descriptor range unknown".into());}
-            Ok(Arc::new(Self {pipes:Mutex::new(Some(Pipes {read,write,report,send})),policy,max_fd:max_fd as i32}))
+            Ok(Arc::new(Self {pipes:Mutex::new(Some(Pipes {report,send})),policy,max_fd:max_fd as i32,owner,_monitor:monitor}))
         }
         pub fn configure(&self,command:&mut Command) {
             let pipes=self.pipes.lock().unwrap();let pipes=pipes.as_ref().unwrap();
-            let (owner,report)=(pipes.read.as_raw_fd(),pipes.send.as_raw_fd());let policy=self.policy;let max_fd=self.max_fd;
+            let report=pipes.send.as_raw_fd();let owner=self.owner;let policy=self.policy;let max_fd=self.max_fd;
             unsafe {command.pre_exec(move|| {
                 if libc::setpgid(0,0)<0 {return Err(std::io::Error::last_os_error());}
                 let native=libc::getpid() as u32;
@@ -90,19 +116,13 @@ mod platform {
             });}
         }
         pub fn started(&self,child:&std::process::Child)->Res<Value> {
-            let Pipes {read,write,mut report,send}=self.pipes.lock().map_err(|_|"lifetime setup poisoned")?.take().ok_or("lifetime already started")?;
-            drop(read);drop(send);
+            let Pipes {mut report,send}=self.pipes.lock().map_err(|_|"lifetime setup poisoned")?.take().ok_or("lifetime already started")?;
+            drop(send);
             let mut bytes=[0;4];report.read_exact(&mut bytes).map_err(|e|format!("lifetime guardian report: {e}"))?;
             let pid=u32::from_ne_bytes(bytes);let guard=NativeProcess::read(pid)?.ok_or("lifetime guardian identity unavailable")?;
-            let monitor=watch(pid).map_err(|e|e.to_string())?;
-            std::thread::Builder::new().name("agentq-lifetime".into()).spawn(move|| {
-                let mut poll=libc::pollfd {fd:monitor.as_raw_fd(),events:libc::POLLIN,revents:0};
-                while unsafe {libc::poll(&mut poll,1,-1)}<0 && std::io::Error::last_os_error().kind()==std::io::ErrorKind::Interrupted {}
-                drop(write);
-            }).map_err(|e|e.to_string())?;
             Ok(json!({"kind":"posix-group","group":child.id(),"guardian":guard}))
         }
-        pub fn release(&self,_child:&std::process::Child)->Res<()> {Ok(())}
+        pub fn release(&self,_child:&std::process::Child,_empty:Box<dyn FnOnce()->Res<()>+Send>)->Res<()> {Ok(())}
     }
 
     pub fn verified(scope:&Value,native:&NativeProcess)->Res<()> {
@@ -118,10 +138,12 @@ mod platform {
         if unsafe {libc::kill(-group,0)}==0 {return Ok(false);}
         let error=std::io::Error::last_os_error();if error.raw_os_error()==Some(libc::ESRCH) {Ok(true)} else {Err(format!("orphan-scope-unknown: {error}"))}
     }
-    pub fn stop(scope:&Value,native:&NativeProcess)->Res<()> {
+    pub struct Stop;
+    impl Stop {pub fn wait(&self)->Res<()> {Ok(())}}
+    pub fn stop(scope:&Value,native:&NativeProcess)->Res<Option<Stop>> {
         verified(scope,native)?;
         let guard:NativeProcess=serde_json::from_value(scope["guardian"].clone()).map_err(|_|"orphan-scope-unknown")?;
-        signal(&guard).map_err(|e|format!("orphan-scope-unknown: {e}"))
+        signal(&guard).map_err(|e|format!("orphan-scope-unknown: {e}"))?;Ok(None)
     }
 
     #[cfg(target_os="linux")]
@@ -165,6 +187,8 @@ mod platform {
         fn OpenProcess(access:u32,inherit:i32,pid:u32)->Handle;
         fn WaitForSingleObject(handle:Handle,millis:u32)->u32;
         fn GetLastError()->u32;
+        fn CreateIoCompletionPort(file:Handle,existing:Handle,key:usize,threads:u32)->Handle;
+        fn GetQueuedCompletionStatus(port:Handle,code:*mut u32,key:*mut usize,overlapped:*mut Handle,millis:u32)->i32;
     }
     #[link(name="ntdll")]
     unsafe extern "system" {fn NtResumeProcess(process:Handle)->i32;}
@@ -196,11 +220,20 @@ mod platform {
                 // Non-inheritable remote handle preserves this named Job across original controller death.
                 if unsafe {DuplicateHandle(GetCurrentProcess(),self.job.as_raw_handle(),child.as_raw_handle(),&mut remote,0,0,2)}==0 {return Err(std::io::Error::last_os_error().to_string());}
             }
-            let job=duplicate(self.job.as_raw_handle())?;let native=duplicate(child.as_raw_handle())?;
-            std::thread::Builder::new().name("agentq-lifetime".into()).spawn(move|| {unsafe {WaitForSingleObject(native.as_raw_handle(),u32::MAX);}drop(job);}).map_err(|e|e.to_string())?;
             Ok(json!({"kind":"windows-job","name":self.name}))
         }
-        pub fn release(&self,child:&std::process::Child)->Res<()> {
+        pub fn release(&self,child:&std::process::Child,empty:Box<dyn FnOnce()->Res<()>+Send>)->Res<()> {
+            let job=duplicate(self.job.as_raw_handle())?;let native=duplicate(child.as_raw_handle())?;let policy=self.policy;
+            std::thread::Builder::new().name("agentq-lifetime".into()).spawn(move|| {
+                let result=(|| {
+                    if unsafe {WaitForSingleObject(native.as_raw_handle(),u32::MAX)}!=0 {return Err(std::io::Error::last_os_error().to_string());}
+                    if active(&job)?==0 {return empty();}
+                    let stop=notification(job)?;
+                    if policy==Lifetime::StopWithOwner && unsafe {TerminateJobObject(stop.job.as_raw_handle(),1)}==0 {return Err(std::io::Error::last_os_error().to_string());}
+                    stop.wait()?;let result=empty();drop(stop);result
+                })();
+                if let Err(error)=result {eprintln!("agentq: native scope exit unknown: {error}");}
+            }).map_err(|e|e.to_string())?;
             let status=unsafe {NtResumeProcess(child.as_raw_handle())};if status<0 {Err(format!("lifetime resume: NTSTATUS {status:#x}"))} else {Ok(())}
         }
     }
@@ -218,13 +251,34 @@ mod platform {
         let mut inside=0;if unsafe {IsProcessInJob(process.as_raw_handle(),job.as_raw_handle(),&mut inside)}==0 || inside==0 {return Err("orphan-scope-unknown".into());}Ok(())
     }
     pub fn verified(scope:&Value,native:&NativeProcess)->Res<()> {let job=open(scope,4)?.ok_or("orphan-scope-absent")?;member(&job,native)}
-    pub fn stop(scope:&Value,native:&NativeProcess)->Res<()> {
-        let job=open(scope,4|8)?.ok_or("orphan-scope-absent")?;member(&job,native)?;
-        if unsafe {TerminateJobObject(job.as_raw_handle(),1)}==0 {return Err(std::io::Error::last_os_error().to_string());}Ok(())
+    fn active(job:&OwnedHandle)->Res<u32> {
+        let mut accounting=Accounting::default();
+        if unsafe {QueryInformationJobObject(job.as_raw_handle(),1,(&mut accounting as *mut Accounting).cast(),std::mem::size_of::<Accounting>() as u32,std::ptr::null_mut())}==0 {return Err(std::io::Error::last_os_error().to_string());}Ok(accounting.active)
+    }
+    pub struct Stop {job:OwnedHandle,port:OwnedHandle}
+    impl Stop {
+        pub fn wait(&self)->Res<()> {
+            while active(&self.job)?!=0 {
+                let (mut code,mut key,mut pointer)=(0,0,std::ptr::null_mut());
+                if unsafe {GetQueuedCompletionStatus(self.port.as_raw_handle(),&mut code,&mut key,&mut pointer,u32::MAX)}==0 {return Err(std::io::Error::last_os_error().to_string());}
+            }
+            Ok(())
+        }
+    }
+    fn notification(job:OwnedHandle)->Res<Stop> {
+        let port=owned(unsafe {CreateIoCompletionPort(-1isize as Handle,std::ptr::null_mut(),0,1)})?;
+        #[repr(C)] struct Association {key:Handle,port:Handle}
+        let association=Association {key:std::ptr::null_mut(),port:port.as_raw_handle()};
+        if unsafe {SetInformationJobObject(job.as_raw_handle(),7,(&association as *const Association).cast(),std::mem::size_of::<Association>() as u32)}==0 {return Err(std::io::Error::last_os_error().to_string());}
+        Ok(Stop {job,port})
+    }
+    pub fn stop(scope:&Value,native:&NativeProcess)->Res<Option<Stop>> {
+        let job=open(scope,2|4|8)?.ok_or("orphan-scope-unavailable")?;member(&job,native)?;
+        let stop=notification(job)?;
+        if unsafe {TerminateJobObject(stop.job.as_raw_handle(),1)}==0 {return Err(std::io::Error::last_os_error().to_string());}Ok(Some(stop))
     }
     pub fn absent(scope:&Value)->Res<bool> {
-        let Some(job)=open(scope,4)? else {return Ok(true)};let mut accounting=Accounting::default();
-        if unsafe {QueryInformationJobObject(job.as_raw_handle(),1,(&mut accounting as *mut Accounting).cast(),std::mem::size_of::<Accounting>() as u32,std::ptr::null_mut())}==0 {return Err(std::io::Error::last_os_error().to_string());}Ok(accounting.active==0)
+        let job=open(scope,4)?.ok_or("orphan-scope-unavailable")?;active(&job).map(|n|n==0)
     }
 }
 
@@ -239,7 +293,9 @@ mod platform {
         pub fn release(&self,_:&std::process::Child)->Res<()> {Ok(())}
     }
     pub fn verified(_:&Value,_:&NativeProcess)->Res<()> {Err("orphan-scope-unknown".into())}
-    pub fn stop(_:&Value,_:&NativeProcess)->Res<()> {Err("orphan-scope-unknown".into())}
+    pub struct Stop;
+    impl Stop {pub fn wait(&self)->Res<()> {Err("orphan-scope-unknown".into())}}
+    pub fn stop(_:&Value,_:&NativeProcess)->Res<Option<Stop>> {Err("orphan-scope-unknown".into())}
     pub fn absent(_:&Value)->Res<bool> {Err("orphan-scope-unknown".into())}
 }
 

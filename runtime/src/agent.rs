@@ -435,9 +435,9 @@ impl Turn {
 
     /// Request termination; `poll` confirms the exit.
     pub fn kill(&mut self) -> Res<()> {
-        if self.exit.is_some() {return Ok(());}
-        if let Some(owner)=&self.owner {if owner.stop_scope()? {self.stopping=true;return Ok(());}}
         self.stopping = true;
+        if self.exit.is_some() {return Ok(());}
+        if let Some(owner)=&self.owner {if owner.stop_scope()? {return Ok(());}}
         self.child.kill()
     }
 

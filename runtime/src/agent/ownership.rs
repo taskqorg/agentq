@@ -14,11 +14,11 @@ pub struct OwnerObservation {pub state:String,pub reason:Option<String>}
 impl Default for OwnerObservation {fn default()->Self {Self {state:"unknown".into(),reason:Some("no-owner-evidence".into())}}}
 
 /// A terminal resume owns admission before it can spawn; it never submits a worker turn.
-pub struct ResumeCommand {pub(super) command:Command,pub(super) owner:SessionOwner,pub(super) arguments:Vec<String>,pub(super) process:Process}
+pub struct ResumeCommand {pub(super) command:Command,pub(super) owner:SessionOwner,pub(super) arguments:Vec<String>,pub(super) process:Process,pub(super) managed:bool}
 impl ResumeCommand {
     pub fn arguments(&self)->&[String] {&self.arguments}
     pub fn owner(&self)->&SessionOwner {&self.owner}
-    pub fn spawn(self)->Res<std::process::Child> {self.owner.process_hooks(&self.process,true)?.spawn(self.command,"terminal resume")}
+    pub fn spawn(self)->Res<std::process::Child> {self.owner.process_hooks(&self.process,self.managed)?.spawn(self.command,"terminal resume")}
 }
 
 #[derive(Clone,Debug)]
@@ -54,7 +54,7 @@ impl SessionStore {
             scope(&row,spec)?;
             if stopped(&root,&row)? {return Err("session-owner-unknown: unresolved native stop".into());}
             if row["phase"]!="idle" {
-                if !row["process_scope"].is_null() && !lifetime::absent(&row["process_scope"])? {return Err("session-owner-unknown: native scope still occupied".into());}
+                if !row["process_scope"].is_null() && !scope_absent(&root,&row)? {return Err("session-owner-unknown: native scope still occupied".into());}
                 if let Some(native)=process(&row["native"])? {if native.live()? {return Err("session-busy: live native writer".into());}}
             }
         }
@@ -123,12 +123,14 @@ fn identity(value:&Value)->Res<&'static str> {
     let expected=process(value)?.ok_or("orphan-identity-unknown")?;
     Ok(match NativeProcess::read(expected.pid)? {None=>"absent",Some(current) if current==expected=>"live",Some(_)=>"changed"})
 }
-fn inventory(row:&Value)->Orphan {
+fn inventory(root:&Path,row:&Value)->Orphan {
     let controller=identity(&row["lifetime_owner"]);let native=identity(&row["native"]);
     let scope=process(&row["native"]).and_then(|n|lifetime::verified(&row["process_scope"],&n.ok_or("orphan-native-unknown")?));
+    let absent=scope_absent(root,row);
+    let scope_state=if absent==Ok(true) {"absent"} else if scope.is_ok() {"verified"} else {"unknown"};
     let state=match (&controller,&native,&scope) {(Ok("live"),_,_)=>"owned",(Ok("absent"),Ok("live"),Ok(()))=>"orphan",_=>"unknown"};
     let reason=controller.as_ref().err().or(native.as_ref().err()).or(scope.as_ref().err()).cloned().or_else(||(state=="unknown").then(||"orphan-identity-unverified".into()));
-    Orphan {session:row["session"].as_str().unwrap_or("-").into(),token:row["token"].as_str().unwrap_or("").into(),state:state.into(),controller:controller.unwrap_or("unknown").into(),native:native.unwrap_or("unknown").into(),scope:if scope.is_ok() {"verified"} else {"unknown"}.into(),reason,lifetime:serde_json::from_value(row["lifetime"].clone()).ok(),controller_identity:process(&row["lifetime_owner"]).ok().flatten(),native_identity:process(&row["native"]).ok().flatten(),execution_scope:row["process_scope"].clone()}
+    Orphan {session:row["session"].as_str().unwrap_or("-").into(),token:row["token"].as_str().unwrap_or("").into(),state:state.into(),controller:controller.unwrap_or("unknown").into(),native:native.unwrap_or("unknown").into(),scope:scope_state.into(),reason,lifetime:serde_json::from_value(row["lifetime"].clone()).ok(),controller_identity:process(&row["lifetime_owner"]).ok().flatten(),native_identity:process(&row["native"]).ok().flatten(),execution_scope:row["process_scope"].clone()}
 }
 impl SessionStore {
     fn entries(&self,root:&Path,spec:&Spec)->Res<Vec<(PathBuf,Value)>> {
@@ -146,11 +148,11 @@ impl SessionStore {
         let root=self.directory()?;let _admission=lock(&root.join("admission.lock"))?;
         let mut rows=std::collections::BTreeMap::<String,Value>::new();
         for (_,row) in self.entries(&root,spec)? {
-            let token=row["token"].as_str().ok_or("orphan-token-unknown")?.to_string();
+            let Some(token)=row["token"].as_str() else {if row["phase"]=="idle" && row["native"].is_null() {continue;}return Err("orphan-token-unknown".into());};let token=token.to_string();
             // Binding aliases share a token; the native destination is authoritative.
             if rows.get(&token).is_none_or(|prior|prior["session"]=="-") {rows.insert(token,row);}
         }
-        Ok(rows.values().map(inventory).collect())
+        Ok(rows.values().map(|row|inventory(&root,row)).collect())
     }
     pub(super) fn cleanup(&self,spec:&Spec,entry:&Orphan,reconcile:bool)->Res<()> {
         if !native::plain_id(&entry.token) || entry.token.starts_with('-') {return Err("orphan-token-unknown".into());}
@@ -162,7 +164,7 @@ impl SessionStore {
         if reconcile {
             let original=read(&marker)?.ok_or("orphan-stop-not-requested")?;scope(&original,spec)?;
             if original["token"]!=row["token"] || original["lifetime_owner"]!=row["lifetime_owner"] || original["process_scope"]!=row["process_scope"] || original["native"]!=row["native"] {return Err("orphan-stop-scope-changed".into());}
-            if !lifetime::absent(&original["process_scope"])? {return Err("orphan-scope-still-occupied".into());}
+            if !scope_absent(&root,&original)? {return Err("orphan-scope-still-occupied".into());}
             for (path,row) in &rows {
                 if row["process_scope"]!=original["process_scope"] || row["lifetime_owner"]!=original["lifetime_owner"] || row["native"]!=original["native"] {return Err("orphan-alias-scope-changed".into());}
                 let mut row=row.clone();row["phase"]=json!("unconfirmed");row["native_reason"]=json!("native-completion-unverified");save(path,&row)?;
@@ -175,8 +177,38 @@ impl SessionStore {
         std::fs::create_dir_all(marker.parent().unwrap()).map_err(|e|e.to_string())?;
         if let Some(original)=read(&marker)? {if ["token","native","process_scope","lifetime_owner"].iter().any(|k|original[*k]!=row[*k]) {return Err("orphan-stop-scope-changed".into());}} else {save(&marker,row)?;}
         for (path,row) in &rows {let mut row=row.clone();row["phase"]=json!("stop-unresolved");row["native_reason"]=json!("native-subtree-stop-unverified");save(path,&row)?;}
-        lifetime::stop(&row["process_scope"],&native)
+        request_stop(&root,row,&native)
     }
+}
+
+fn empty_proof(row:&Value)->Value {json!({"token":row["token"],"runtime":row["runtime"],"root":row["root"],"home":row["home"],"native":row["native"],"process_scope":row["process_scope"],"lifetime_owner":row["lifetime_owner"]})}
+fn scope_absent(root:&Path,row:&Value)->Res<bool> {
+    let proof=empty_proof(row);
+    let path=absence_path(root,&proof)?;
+    if let Some(receipt)=read(&path)? {if receipt==proof {return Ok(true);}return Err("orphan-absence-scope-changed".into());}
+    lifetime::absent(&row["process_scope"])
+}
+fn absence_path(root:&Path,proof:&Value)->Res<PathBuf> {
+    let token=proof["token"].as_str().filter(|s|native::plain_id(s) && !s.starts_with('-')).ok_or("orphan-token-unknown")?;
+    Ok(root.join("scopes").join(format!("{token}.json")))
+}
+fn record_absence(root:&Path,proof:&Value)->Res<()> {
+    let path=absence_path(root,proof)?;std::fs::create_dir_all(path.parent().unwrap()).map_err(|e|e.to_string())?;
+    let _guard=coreq::file_lock::lock(&path.with_extension("lock")).map_err(|e|e.to_string())?;
+    if let Some(existing)=read(&path)? {return if existing==*proof {Ok(())} else {Err("orphan-absence-scope-changed".into())};}save(&path,proof)
+}
+
+fn request_stop(root:&Path,row:&Value,native:&NativeProcess)->Res<()> {
+    if let Some(stop)=lifetime::stop(&row["process_scope"],native)? {
+        let root=root.to_path_buf();let expected=empty_proof(row);
+        std::thread::Builder::new().name("agentq-stop".into()).spawn(move|| {
+            let result=stop.wait().and_then(|()|record_absence(&root,&expected));
+            // Keep the native Job handle until the durable evidence is written; name disappearance is not absence.
+            if let Err(error)=result {eprintln!("agentq: native scope cleanup unknown: {error}");}
+            drop(stop);
+        }).map_err(|e|e.to_string())?;
+    }
+    Ok(())
 }
 
 struct Owned {root:PathBuf,path:PathBuf,row:Value,previous:Option<Value>,guard:Option<coreq::file_lock::Lock>,binding:Option<(PathBuf,coreq::file_lock::Lock)>}
@@ -263,7 +295,7 @@ impl SessionOwner {
         self.with(|o| {
             if o.row["process_scope"].is_null() {return Ok(false);}
             let native=process(&o.row["native"])?.ok_or("orphan-native-unknown")?;
-            lifetime::stop(&o.row["process_scope"],&native)?;Ok(true)
+            request_stop(&o.root,&o.row,&native)?;Ok(true)
         })
     }
     pub(crate) fn process_hooks(&self,process:&Process,managed:bool)->Res<Process> {
@@ -282,7 +314,10 @@ impl SessionOwner {
                     owner.with(|o| {let mut row=o.row.clone();row["process_scope"]=scope;save(&o.path,&row)?;o.row=row;Ok(())})?;
                 }
                 owner.submit()?;
-                if let Some(setup)=&setup {setup.release(child)?;}Ok(())
+                if let Some(setup)=&setup {
+                    let (root,proof)=owner.with(|o|Ok((o.root.clone(),empty_proof(&o.row))))?;
+                    setup.release(child,Box::new(move||record_absence(&root,&proof)))?;
+                }Ok(())
             }))})
     }
 }

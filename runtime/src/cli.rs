@@ -106,7 +106,7 @@ pub fn turn(request: &str, install: Option<&Path>) -> Res<Value> {
     readiness.permit(launch.readiness)?;
     let runtime=agent::runtime(client.code()).ok_or("unknown runtime")?;
     if launch.lifetime==agent::Lifetime::StopWithOwner && !runtime.descriptor().has("process-lifetime") {return Err("lifetime-unsupported: native submission scope".into());}
-    let managed=strings(&v,"command")?.is_empty();
+    let managed=strings(&v,"command")?.is_empty() && runtime.descriptor().has("process-lifetime");
     let owner=runtime.session_owner(resume.then_some(spec.session.as_str()),&launch)?;
     if !resume && runtime.descriptor().has("caller-session-id") {owner.bind(&spec.session)?;}
     let report = agent::with_environment_caller(|| match &store {

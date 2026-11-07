@@ -36,5 +36,6 @@ fn main() {
     while rt.poll(&mut recovered).unwrap()==State::Running {std::thread::sleep(Duration::from_millis(20));}
     assert_eq!(rt.report(&recovered).unwrap().outcome,"ok");
     assert_eq!(std::fs::read_to_string(root.join("request")).unwrap(),"1","recovery submits no additional request");
-    println!("PASS native ownership, live-writer adoption refusal, same-child recovery, stall without cancellation, exactly one model request");
+    while rt.orphans(&launch).unwrap().iter().any(|scope|scope.scope!="absent") {std::thread::sleep(Duration::from_millis(20));}
+    println!("PASS native scope absence, ownership, live-writer adoption refusal, same-child recovery, stall without cancellation, exactly one model request");
 }

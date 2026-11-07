@@ -48,7 +48,7 @@ impl Descriptor {
         let (spec,_)=adapter.spec(launch,session.into(),true)?;
         let mut command=preflight::launch_base(adapter,launch)?;
         command.args(&spec.args).args(&args[1..]);
-        Ok(ResumeCommand {command:super::environment(command,&spec),owner,arguments:args,process:launch.process.clone()})
+        Ok(ResumeCommand {command:super::environment(command,&spec),owner,arguments:args,process:launch.process.clone(),managed:self.has("process-lifetime")})
     }
 }
 
@@ -1006,7 +1006,7 @@ impl Adapter {
         let mut owner_spec=spec.clone();
         if session.is_none() && matches!(l.mode,Mode::Background) {owner_spec.session="-".into();}
         let owner=l.session_store.acquire(&owner_spec,session.is_none(),None,l.lifetime)?;
-        let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process,matches!(l.mode,Mode::Turn))?;let l=&owned_launch;
+        let mut owned_launch=l.clone();owned_launch.process=owner.process_hooks(&l.process,matches!(l.mode,Mode::Turn) && self.descriptor.has("process-lifetime"))?;let l=&owned_launch;
         let command = preflight::launch_base(self,l)?;
         let native = |turn: NativeTurn, queue, job_id, attached, fault, launcher| Body::Native(Box::new(Native { queue, turn, spec: spec.clone(), command: l.command.clone(),
             job_id, job: None, attached, fault, report: None, launcher }));
