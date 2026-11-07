@@ -57,6 +57,6 @@ pub(super) fn unscoped(step:&mut Step,event:&Value,record:&Value) {
     if !matches!(step.kind,StepKind::Approval|StepKind::Question) && !server_request {return;}
     step.id=format!("{}:{}:request",event["id"].as_str().unwrap_or_default(),step.part);
     if !step.data.is_object(){step.data=json!({});}
-    step.data["native"]=record.clone();step.data["unknown"]["request_scope"]=json!("native-only request has no verified run/generation scope");
+    step.data["native"]=record.clone();step.data["unknown"]=json!({"request_scope":"native-only request has no verified run/generation scope"});
     step.state="unknown".into();step.unknown=Some("native-only request scope not recorded; observation only".into());
 }

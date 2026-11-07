@@ -80,3 +80,44 @@ fn public_runtime_opens_owned_control_logs_and_recovers_the_resolved_source() {
         let mut recovered=rt.history("s",None,None,Some(&page.checkpoint)).unwrap();assert!(recovered.steps(1).unwrap().steps.is_empty());fs::remove_file(p).unwrap();
     }
 }
+
+#[test]
+fn native_unknown_fields_never_become_runtime_annotations_or_panic() {
+    use std::panic::{catch_unwind,AssertUnwindSafe};
+    let mut panics=Vec::new();
+    for (name,unknown) in [("string",json!("future native extension")),("number",json!(7)),("bool",json!(true)),("null",Value::Null),("array",json!(["extension"])),("object",json!({"request_scope":{"allow":true},"native-only":"retained"}))] {
+        for format in ["acp","codex-app-server"] {
+            let p=path(&format!("unknown-{format}-{name}"));
+            let row=if format=="acp" {json!({"type":"acp","message":{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"s","options":[],"unknown":unknown}}})}
+                else{json!({"id":1,"method":"future/request","params":{"threadId":"s","unknown":unknown}})};
+            let raw=format!("{row}\n");fs::write(&p,&raw).unwrap();let mut h=History::new(format,"source","s").unwrap();
+            let projected=catch_unwind(AssertUnwindSafe(||h.steps(&p,u64::MAX)));
+            match projected {
+                Err(_)=>panics.push(format!("{format}/{name}")),
+                Ok(result)=>{let page=result.unwrap();let step=&page.steps[0];assert_eq!(step.state,"unknown");assert_eq!(step.data["native"],row);assert_eq!(step.data["unknown"].as_object().map(|m|m.len()),Some(1));assert!(step.data["unknown"]["request_scope"].is_string());assert_eq!(step.source["raw"],raw);assert_eq!(step.origins.len(),1);assert_eq!(h.read_bytes(&p,0,raw.len() as u64).unwrap(),raw.as_bytes());}
+            }
+            fs::remove_file(p).unwrap();
+        }
+    }
+    assert!(panics.is_empty(),"native unknown panics: {panics:?}");
+}
+#[test]
+fn selected_runtime_refuses_foreign_formats_on_open_and_recovery() {
+    let acp=json!({"type":"acp","message":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}});
+    let rpc=json!({"type":"response","command":"get_state","data":{"sessionFile":"s"}});
+    let mut admitted=Vec::new();
+    for runtime in ["codex","claude","antigravity"] {
+        for (format,prefix) in [("acp",acp.clone()),("jsonl-rpc",rpc.clone())] {
+            if runtime=="antigravity" && format=="acp" {continue;}
+            let p=path(&format!("foreign-{runtime}-{format}"));fs::write(&p,format!("{prefix}\n{}\n",request("r",1,"pending"))).unwrap();
+            let rt=agentq_runtime::agent::runtime(runtime).unwrap();if rt.history("s",None,Some(&p),None).is_ok(){admitted.push(format!("{runtime}/{format}"));}
+            fs::remove_file(p).unwrap();
+        }
+    }
+    // This is the resolved checkpoint an earlier Codex open incorrectly admitted.
+    let p=path("foreign-recovered");fs::write(&p,format!("{acp}\n{}\n",request("r",1,"pending"))).unwrap();
+    let native=agentq_runtime::agent::runtime("antigravity").unwrap();let mut allowed=native.history("s",None,Some(&p),None).unwrap();let page=allowed.steps(u64::MAX).unwrap();assert_eq!(page.checkpoint["format"],"acp");
+    let mut old=page.checkpoint.clone();old["resolved"]["runtime"]=json!("codex");let codex=agentq_runtime::agent::runtime("codex").unwrap();if codex.history("s",None,None,Some(&old)).is_ok(){admitted.push("codex/recovery-acp".into());}
+    assert!(native.history("s",None,None,Some(&page.checkpoint)).unwrap().steps(1).unwrap().steps.is_empty());fs::remove_file(p).unwrap();
+    assert!(admitted.is_empty(),"foreign formats admitted: {admitted:?}");
+}
