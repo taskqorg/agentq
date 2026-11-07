@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub mod history;
 mod stdio;
 mod acp;
+mod control;
 mod jsonl_rpc;
 mod native;
 use registry::app;

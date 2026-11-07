@@ -1073,7 +1073,8 @@ impl Adapter {
             let command=preflight::command(self,l)?;
             let session=super::acp::Session::open(command,config,l,session,&owner)?;
             let boundary=session.boundary;
-            let mut run=self.checked_run(&readiness,Body::Acp(Box::new(session)),boundary,optimization,l);run.owner=Some(owner);return Ok(run);
+            let stop_id=session.run_id().to_string();
+            let mut run=self.checked_run(&readiness,Body::Acp(Box::new(session)),boundary,optimization,l);run.stop_id=stop_id;run.owner=Some(owner);return Ok(run);
         }
         if let Some(config)=self.ops.rpc {
             if l.mode!=Mode::Turn {return Err("mode unsupported by JSONL RPC".into());}
@@ -1170,7 +1171,7 @@ impl Runtime for Adapter {
     fn control(&self,run:&mut Run,control:Control)->Result<(),Failure> {
         match &mut self.own_mut(run)?.body {
             Body::Acp(_) if matches!(control,Control::Answers{..})=>Err(Failure::Refused(Cause("question-answers-unsupported"))),
-            Body::Acp(a)=>a.control(control).map_err(Failure::Failed),
+            Body::Acp(a)=>{a.pump()?;a.control(control).map_err(Failure::Failed)},
             _=>Err(Failure::Refused(Cause("control-unsupported"))),
         }
     }

@@ -251,6 +251,14 @@ impl SessionOwner {
     fn with<T>(&self,f:impl FnOnce(&mut Owned)->Res<T>)->Res<T> {{let mut owned=self.0.lock().map_err(|_|"session-owner-unknown: poisoned owner")?;f(&mut owned)}}
     pub fn observation(&self)->OwnerObservation {self.with(|o| {if stopped(&o.root,&o.row)? {return Ok(OwnerObservation {state:"unknown".into(),reason:Some("native-subtree-stop-unverified".into())});}Ok(OwnerObservation {state:if o.row["phase"]=="idle" {"idle"} else if o.row["native"].is_null() || o.row["phase"]=="unconfirmed" {"unknown"} else {"owned"}.into(),reason:o.row["native_reason"].as_str().map(String::from).or_else(||o.row["native"].is_null().then(||"native-writer-unidentified".into()))})}).unwrap_or_default()}
     pub fn checkpoint(&self)->Res<Value> {self.with(|o|Ok(json!({"session":o.row["session"],"token":o.row["token"],"lifetime":o.row["lifetime"]})))}
+    pub(crate) fn control(&self)->Res<()> {self.with(|o| {
+        if o.guard.is_none() || o.binding.is_some() || stopped(&o.root,&o.row)? || matches!(o.row["phase"].as_str(),Some("idle"|"unconfirmed"|"stop-unresolved")) {return Err("control-owner-unavailable".into());}
+        let row=read(&o.path)?.ok_or("control-owner-unavailable")?;
+        if row["token"]!=o.row["token"] || row["session"]!=o.row["session"] || row["native"]!=o.row["native"] {return Err("control-owner-changed".into());}
+        let native=process(&o.row["native"])?.ok_or("control-native-identity-unknown")?;
+        if NativeProcess::read(native.pid)?.as_ref()!=Some(&native) {return Err("control-native-identity-changed".into());}
+        Ok(())
+    })}
     pub(super) fn verify(&self,spec:&Spec)->Res<()> {self.with(|o| {scope(&o.row,spec)?;if stopped(&o.root,&o.row)? {return Err("session-owner-unknown: unresolved native stop".into());}if spec.resume && o.row["session"]!=spec.session {return Err("session-owner-unknown: session differs".into());}Ok(())})}
     pub(super) fn spawned(&self,pid:u32)->Res<()> {self.with(|o| {
         if o.guard.is_none() {return Err("session-owner-unknown: admission released".into());}

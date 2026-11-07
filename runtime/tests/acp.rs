@@ -57,6 +57,7 @@ fn main() {
     loop {
         let events=r.progress(&mut run).unwrap();
         for event in &events {if let Event::Request{id,..}=event {
+            assert_ne!(*id,json!("permission-1"),"native request IDs are observation, not live reply authority");
             assert!(matches!(r.control(&mut run,Control::Answers{id:id.clone(),answers:Default::default()}),Err(agent::Failure::Refused(agent::Cause("question-answers-unsupported")))));
             assert!(r.control(&mut run,Control::Reply{id:id.clone(),option:Some("invented".into())}).is_err());
             r.control(&mut run,Control::Reply{id:id.clone(),option:Some("once".into())}).unwrap();
@@ -75,6 +76,10 @@ fn main() {
     assert_eq!(seen.iter().filter(|e|matches!(e,Event::Metadata{kind,..} if kind=="protocol-error")).count(),2);
     assert!(r.progress(&mut run).unwrap().is_empty());
     assert!(r.control(&mut run,Control::Reply{id:json!("permission-1"),option:Some("once".into())}).is_err());
+    let journal:Vec<Value>=std::fs::read_to_string(&l.log).unwrap().lines().filter_map(|s|serde_json::from_str::<Value>(s).ok()).filter(|r|r["type"]=="agentq_control").collect();
+    assert_eq!(journal.iter().map(|r|r["state"].as_str().unwrap()).collect::<Vec<_>>(),["pending","reply-pending","reply-sent"]);
+    assert!(journal.iter().all(|row|row["session_id"]==session && row["run_id"]==journal[0]["run_id"] && row["generation"]==1 && row["native_id"]=="permission-1" && row["event"]==journal[0]["event"]));
+    assert_eq!(journal[0]["native"]["method"],"session/request_permission");
     let classified=r.classify(&std::fs::read_to_string(&l.log).unwrap());
     assert_eq!((classified.outcome,classified.text.as_deref(),classified.usage.input),("ok",Some("answer"),Some(17)));
     let mut history=r.history(&session,None,Some(&l.log),None).unwrap();
@@ -105,6 +110,8 @@ fn main() {
     let mut pending=l.clone();pending.input="approval".into();pending.deadline=None;
     let mut waiting=r.launch(&pending).unwrap();
     while !r.progress(&mut waiting).unwrap().iter().any(|e|matches!(e,Event::Request{..})) {std::thread::yield_now();}
+    let Event::Request{id:stale,..}=seen.iter().find(|e|matches!(e,Event::Request{..})).unwrap() else {unreachable!()};
+    assert!(r.control(&mut waiting,Control::Reply{id:stale.clone(),option:Some("once".into())}).is_err(),"a reused native ID in another Run cannot revive authority");
     r.cancel(&mut waiting).unwrap();
     while r.poll(&mut waiting).unwrap()==State::Running {std::thread::yield_now();}
     assert_eq!(r.report(&waiting).unwrap().outcome,"cancelled");
