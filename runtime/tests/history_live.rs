@@ -97,3 +97,32 @@ fn native_claude_statusline_fixture_has_known_weekly_and_unknown_short_window() 
     assert_eq!(context.used,Some(19668));assert_eq!(context.window,Some(1000000));
     assert!(windows[0].used.is_none() && windows[0].unknown.is_some());assert_eq!(windows[1].used,Some(0.88));
 }
+
+#[test]
+fn latest_native_result_cost_never_borrows_an_earlier_turn() {
+    let mut failures=Vec::new();
+    for (name,cost,expected) in [
+        ("missing",None,None),("null",Some(Value::Null),None),
+        ("malformed",Some(json!("invalid")),None),("negative",Some(json!(-0.1)),None),
+        ("zero",Some(json!(0)),Some(0.0)),("reported",Some(json!(0.3)),Some(0.3)),
+    ] {
+        let root=root(&format!("latest-cost-{name}"));let dir=root.join("projects/project");fs::create_dir_all(&dir).unwrap();
+        let mut latest=json!({"type":"result","session_id":"session","is_error":false});
+        if let Some(cost)=cost {latest["total_cost_usd"]=cost;}
+        let rows=[json!({"type":"user","sessionId":"session","promptId":"t1","message":{"content":"first"}}),
+            json!({"type":"result","session_id":"session","total_cost_usd":0.2,"is_error":false}),
+            json!({"type":"user","sessionId":"session","promptId":"t2","message":{"content":"second"}}),latest,
+            json!({"type":"system","sessionId":"session","subtype":"stop_hook_summary","total_cost_usd":99})];
+        fs::write(dir.join("session.jsonl"),rows.iter().map(|r|format!("{r}\n")).collect::<String>()).unwrap();
+        let rt=agent::runtime("claude").unwrap();let mut session=rt.history("session",Some(&root),None,None).unwrap();
+        let fresh=session.live_data(None).unwrap();let checkpoint=session.steps(u64::MAX).unwrap().checkpoint;
+        let recovered=rt.history("session",Some(&root),None,Some(&checkpoint)).unwrap().live_data(None).unwrap();
+        for (mode,data) in [("fresh",fresh),("recovered",recovered)] {
+            if data.cost_usd!=expected || data.cost_source.as_deref()!=expected.map(|_|"native-reported") || data.unknown.contains_key("cost_usd")!=expected.is_none() {
+                failures.push(format!("{name}/{mode}: cost={:?} source={:?} unknown={:?}",data.cost_usd,data.cost_source,data.unknown.get("cost_usd")));
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    assert!(failures.is_empty(),"{}",failures.join("\n"));
+}

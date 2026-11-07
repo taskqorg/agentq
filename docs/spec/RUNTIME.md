@@ -570,8 +570,10 @@ fields authoritatively, including nulls and unknown reasons; it never inherits a
 missing old counter, cost, time or model. App-server notifications and native queue
 freeze use the same per-native usage normalization and request revision selection.
 Reasoning tokens are a reported subset of output. Cost is explicitly native-reported
-or unknown; no pricing table is guessed. File rollups retain the native changes and
-source revisions; repeated delivery replaces a change instead of counting it again.
+or unknown; no pricing table is guessed. Live result cost uses the latest native
+result only: missing, null, malformed or negative cost stays unknown instead of
+borrowing an earlier result. Explicit native zero remains measured zero.
+File rollups retain the native changes and source revisions; repeated delivery replaces a change instead of counting it again.
 Claude uses native promptId when emitted. Without a native turn ID, an explicit
 user/turn-start record supplies a deterministic derived grouping key, while
 `Turn.native_id` remains null with its reason. File rollups never merge edits across

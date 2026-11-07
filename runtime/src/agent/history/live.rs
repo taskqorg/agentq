@@ -211,7 +211,7 @@ impl super::sessions::Session {
             rollup.origins=steps.iter().filter(|s|s.kind==StepKind::FileChange && s.turn.id==turn).flat_map(|s|s.origins.clone()).collect();
             file_steps.push(rollup);files.push(data);
         }
-        let cost=rows.iter().rev().find_map(|v|if v["type"]=="result" {native_cost(v)}else{None});
+        let cost=rows.iter().rev().find(|v|v["type"]=="result").and_then(native_cost);
         let mut unknown=BTreeMap::new();
         if let Some(reason)=calls.iter().find_map(|c|c.accounting_unknown){unknown.insert("usage".into(),reason.into());}
         if cost.is_none(){unknown.insert("cost_usd".into(),"native turn cost not reported".into());}

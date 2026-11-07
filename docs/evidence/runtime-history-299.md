@@ -136,3 +136,15 @@ pass, plus offline selftest, pinned lint and diff check. These include raw reuse
 response IDs across separately accepted turns, both recovered-page overlap orders,
 authoritative missing fields and frozen restore. Full local suites, speculative
 app-server equal-total behavior and new native/paid turns were not run.
+
+The latest-cost review regression first reproduced stale cost for missing, null,
+malformed and negative latest results, both fresh and after checkpoint recovery.
+LiveData now selects the latest native result before projecting its cost. Those
+cases stay unknown; valid native zero/positive cost remains measured, and trailing
+non-result records cannot lend cost. Native terminal parsers already select the
+terminal result before reading cost; their behavior is unchanged. No cross-turn
+fallback, estimate or new accounting policy was added.
+Focused verification after the one-line correction: 28 accounting/scope/live/steps
+tests passed, including all six latest-cost cases fresh and recovered. Offline
+selftest, workflow-pinned lint and diff check passed. No full local suite, new
+native/paid turn, Windows qualification or downstream adoption was performed.
