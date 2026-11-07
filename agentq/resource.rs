@@ -81,10 +81,7 @@ impl Sampler {
         let mut a = self.sample(read(), Instant::now(), ns);
         a.insert("agentq.event_id".into(), json!(event_id(&crate::telemetry::installation(data), bucket)));
         a.insert("agentq.ids_unknown".into(), json!("a resource sample has no session"));
-        let id = crate::telemetry::emit_at(data, "agentq.resource", "sample", Value::Object(a), ns)?;
-        // the newest sample outlives its queue file for the enrollment snapshot (`connect.rs`)
-        let _ = std::fs::copy(crate::telemetry::queue(data).join(format!("{}-{id}.json", ns / 1_000_000_000)), data.join("resource.json"));
-        Some(id)
+        save(data,Value::Object(a),ns)
     }
 
     /// The `agentq.resource.*` attributes of one reading; it becomes the next CPU baseline.
@@ -135,6 +132,13 @@ impl Sampler {
             Err(e) => json!({"id": id, "role": role, "fstype": d.fstype, "used_bytes": null, "free_bytes": null, "total_bytes": null, "unknown": e}),
         }
     }
+}
+
+/// D11's latest sample is independent of optional legacy queue delivery, with the same immutable sample identity.
+fn save(data:&Path,attrs:Value,ns:u128)->Option<String> {
+    let sample=crate::telemetry::span("agentq.resource","sample",attrs.clone(),ns,&crate::telemetry::installation(data),&crate::host());
+    if let Err(error)=coreq::write_durable(&data.join("resource.json"),sample.to_string()) {eprintln!("agentq: resource snapshot unavailable: {error}");}
+    crate::telemetry::emit_at(data,"agentq.resource","sample",attrs,ns)
 }
 
 /// `/proc/stat` first line: busy = user nice system irq softirq steal; total adds idle and iowait.
@@ -451,6 +455,24 @@ pub(crate) mod tests {
         let d = std::env::temp_dir().join(format!("agentq-res-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    // #301/D28: an unavailable legacy queue must not remove the existing enrolled resource source.
+    #[test]
+    fn snapshot_resource_survives_legacy_queue_failure() {
+        let d=dir("snapshot-without-queue");std::fs::create_dir_all(&d).unwrap();std::fs::write(d.join("queue"),"blocked").unwrap();
+        let attrs=json!({"agentq.event_id":"1".repeat(32),"agentq.resource.cpu_percent":12.5,"agentq.resource.memory_total_bytes":100,
+            "agentq.resource.memory_used_bytes":60,"agentq.resource.memory_available_bytes":40,"agentq.resource.disk_unknown":"private-error-path"});
+        assert!(save(&d,attrs,1_000_000_000_000).is_none(),"legacy queue is unavailable");
+        let sample:Value=serde_json::from_str(&std::fs::read_to_string(d.join("resource.json")).unwrap()).unwrap();
+        let snapshot=crate::snapshot::project("fixture","macos",None,Some(&sample),1000);
+        assert_eq!(snapshot["resource"]["event_id"],"1".repeat(32));assert_eq!(snapshot["resource"]["cpu_percent"],12.5);
+        assert_eq!(snapshot["resource"]["memory_used_bytes"],60);assert_eq!(snapshot["resource"]["disk_unknown"],"probe failed");
+        assert!(!snapshot.to_string().contains("private-error-path"));
+        std::fs::remove_file(d.join("queue")).unwrap();std::fs::remove_file(d.join("resource.json")).unwrap();std::fs::create_dir(d.join("resource.json")).unwrap();
+        assert!(save(&d,json!({"agentq.event_id":"2".repeat(32),"agentq.resource.cpu_percent":13.0}),1_001_000_000_000).is_some(),"snapshot failure cannot stop legacy persistence");
+        assert!(!crate::telemetry::entries(&crate::telemetry::queue(&d)).is_empty());
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     fn disk(mount: &str, stat: Result<(u64, u64, u64), String>) -> Disk {

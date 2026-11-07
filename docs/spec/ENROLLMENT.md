@@ -28,3 +28,5 @@ Activation handoff: no working installation or profile was changed. After normal
 Archive content uses a separate connection and explicit `agent-history/1` grant; these observation schemas never imply capture. [Archive approval and recovery](ARCHIVE.md).
 
 Explicit enrollment requests `coreq-observation/1` beside the snapshot schema for canonical metadata delivery. Existing grants do not gain it automatically. The existing connection pass uses CoreQ Store::ship under the current grant and reports canonical cursor/backlog/error separately; host disable suspends canonical observations while retaining snapshot delivery. This does not retire Langfuse or satisfy the D28 parity evidence gate.
+
+The existing D11 resource projection reads the latest durable sampler snapshot independently of legacy queue success. Installation/resource/TaskQ fleet meanings remain separate from canonical model calls; no extra schema, grant or collector is introduced. Missing hook-health/incident/retirement equivalence is not supplied by a call count, and its existing legacy source remains retained.
