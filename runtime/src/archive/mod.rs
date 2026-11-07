@@ -18,10 +18,21 @@ pub const MANUAL: &str = "agent-history.manual";
 pub struct Source {
     pub path: PathBuf,
     pub format: String,
-    /// Native byte position at which this capture starts.
+    /// Physical source byte position at which this capture starts.
     pub start: u64,
     /// None while the source is live.
     pub end: Option<u64>,
+}
+
+impl Source {
+    pub(crate) fn selected(source: crate::agent::SelectedSource) -> Self {
+        Self {
+            path: source.path,
+            format: source.format.into(),
+            start: 0,
+            end: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
